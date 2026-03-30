@@ -72,11 +72,17 @@ static WebKitWebView* vibez_find_webview(GtkWidget* w) {
 
 // vibez_allow_autoplay disables WebKit's "user gesture required for media
 // playback" restriction so MusicKit JS can call play() programmatically.
+// It also disables hardware acceleration — vibez is a hidden audio-only
+// player and has no need for GPU rendering. Without this, WebKit's GPU
+// subprocess competes with the system compositor, causing brief system-wide
+// stalls when the GPU command buffer is flushed.
 static void vibez_allow_autoplay(void* win_ptr) {
     WebKitWebView* wv = vibez_find_webview(GTK_WIDGET(win_ptr));
     if (!wv) return;
     WebKitSettings* s = webkit_web_view_get_settings(wv);
     webkit_settings_set_media_playback_requires_user_gesture(s, FALSE);
+    webkit_settings_set_hardware_acceleration_policy(
+        s, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
 }
 */
 import "C"

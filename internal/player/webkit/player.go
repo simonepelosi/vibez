@@ -197,8 +197,6 @@ func (p *Player) Close() error {
 func (p *Player) dispatch(js string) {
 	p.w.Dispatch(func() {
 		p.w.Eval(js)
-		// Re-apply hide in case GTK re-showed the window (e.g. focus events).
-		hideGTKWindow(p.w.Window())
 	})
 }
 

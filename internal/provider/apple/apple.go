@@ -80,6 +80,13 @@ func (a artworkAttrs) formatted(size int) string {
 	return u
 }
 
+type playParams struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	IsLibrary bool   `json:"isLibrary"`
+	CatalogID string `json:"catalogId"` // catalog ID for library songs — use this for playback
+}
+
 type songAttributes struct {
 	Name       string       `json:"name"`
 	ArtistName string       `json:"artistName"`
@@ -89,7 +96,8 @@ type songAttributes struct {
 	Previews   []struct {
 		URL string `json:"url"`
 	} `json:"previews"`
-	GenreNames []string `json:"genreNames"`
+	GenreNames []string    `json:"genreNames"`
+	PlayParams *playParams `json:"playParams"`
 }
 
 type songResource struct {
@@ -151,8 +159,16 @@ func toTrack(s songResource) provider.Track {
 	if len(s.Attributes.Previews) > 0 {
 		preview = s.Attributes.Previews[0].URL
 	}
+	// Library songs have a library-scoped ID (e.g. "i.AbCdEfGh") which MusicKit
+	// JS cannot use for FairPlay DRM. The playParams.catalogId field carries the
+	// real catalog ID — use it when present so SetQueue always receives a catalog
+	// ID that MusicKit can authorise.
+	id := s.ID
+	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
+		id = s.Attributes.PlayParams.CatalogID
+	}
 	return provider.Track{
-		ID:         s.ID,
+		ID:         id,
 		Title:      s.Attributes.Name,
 		Artist:     s.Attributes.ArtistName,
 		Album:      s.Attributes.AlbumName,
