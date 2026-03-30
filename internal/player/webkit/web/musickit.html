@@ -28,16 +28,17 @@
       }
 
       // Notify state on every relevant event.
+      // MusicKit JS v3: playback properties live directly on the instance,
+      // not on the removed music.player sub-object.
       function notifyState() {
         const m    = MusicKit.getInstance();
-        const pl   = m.player;
-        const item = pl.nowPlayingItem;
+        const item = m.nowPlayingItem;
         const state = {
           isPlaying:     m.isPlaying,
-          playbackState: pl.playbackState,
-          currentTime:   pl.currentPlaybackTime,
-          duration:      pl.currentPlaybackDuration,
-          volume:        pl.volume,
+          playbackState: m.playbackState,
+          currentTime:   m.currentPlaybackTime,
+          duration:      m.currentPlaybackDuration,
+          volume:        m.volume,
           nowPlaying: item ? {
             id:         item.id,
             title:      item.attributes.name,
@@ -75,7 +76,7 @@
       window.vibezNext       = () => _m().skipToNextItem();
       window.vibezPrev       = () => _m().skipToPreviousItem();
       window.vibezSeek       = (t) => _m().seekToTime(t);
-      window.vibezSetVolume  = (v) => { _m().player.volume = v; };
+      window.vibezSetVolume  = (v) => { _m().volume = v; };
 
       // Queue a list of song IDs and start playback immediately.
       // Uses MusicKit.getInstance() (always current) rather than the closure
