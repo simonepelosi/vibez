@@ -82,6 +82,13 @@ func New(devToken, userToken string) (*Player, error) {
 	// webview.New() calls gtk_widget_show_all() internally, so we counter it
 	// immediately — before Run() iterates the event loop.
 	hideGTKWindow(w.Window())
+	// Connect a "map" signal callback that re-hides the window whenever GTK
+	// tries to show it while opacity is 0. This eliminates the startup flash.
+	connectHideOnMap(w.Window())
+	// Disable WebKit's "user gesture required" autoplay policy so MusicKit JS
+	// can call music.play() programmatically after setting the queue.
+	// Scheduled via Dispatch so it runs once the GTK loop is up.
+	w.Dispatch(func() { allowAutoplay(w.Window()) })
 
 	if err := bindAll(w, p); err != nil {
 		w.Destroy()
@@ -257,9 +264,21 @@ func bindAll(w webview.WebView, p *Player) error {
 			}
 		},
 		"goError": func(msg string) {
+			// Send to errCh for WaitReady (e.g. auth failure).
 			select {
 			case p.errCh <- fmt.Errorf("musickit: %s", msg):
 			default:
+			}
+			// Also broadcast to state subscribers so the TUI displays the error.
+			p.mu.Lock()
+			s := p.state
+			s.Error = msg
+			p.mu.Unlock()
+			for _, ch := range p.subs {
+				select {
+				case ch <- s:
+				default:
+				}
 			}
 		},
 	}

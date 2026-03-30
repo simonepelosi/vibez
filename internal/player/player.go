@@ -11,6 +11,7 @@ type State struct {
 	Playing  bool
 	Position time.Duration
 	Volume   float64 // 0.0–1.0
+	Error    string  // non-empty when JS reports a playback error
 }
 
 type Player interface {

@@ -154,7 +154,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, glowTick())
 
 	case playerStateMsg:
-		m.playerState = player.State(msg)
+		s := player.State(msg)
+		if s.Error != "" {
+			m.errMsg = s.Error
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			s.Error = ""
+		}
+		m.playerState = s
 		m.nowPlaying.SetState(&m.playerState)
 		cmds = append(cmds, waitForState(m.stateCh))
 
