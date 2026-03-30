@@ -107,3 +107,18 @@ var (
 		Foreground(ColorPrimary).
 		Bold(true)
 )
+
+// GlowPalette is the sequence of colours used for the "now playing" breathing
+// animation. It runs from deep purple (dim) to bright lavender (peak) and is
+// driven in a ping-pong loop so the title appears to pulse like the Copilot
+// "thinking" glow.
+var GlowPalette = []lipgloss.Color{
+	"#3B0764", // 0 — deepest dim
+	"#581C87", // 1
+	"#7E22CE", // 2
+	"#9333EA", // 3
+	"#A855F7", // 4
+	"#C084FC", // 5
+	"#D8B4FE", // 6
+	"#EDE9FE", // 7 — peak brightness
+}

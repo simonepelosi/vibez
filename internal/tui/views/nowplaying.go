@@ -6,14 +6,16 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
 type NowPlayingModel struct {
-	state  *player.State
-	width  int
-	height int
+	state    *player.State
+	width    int
+	height   int
+	glowStep int
 }
 
 func NewNowPlaying(state *player.State) *NowPlayingModel {
@@ -21,6 +23,7 @@ func NewNowPlaying(state *player.State) *NowPlayingModel {
 }
 
 func (m *NowPlayingModel) SetState(s *player.State) { m.state = s }
+func (m *NowPlayingModel) SetGlowStep(step int)     { m.glowStep = step }
 
 func (m *NowPlayingModel) SetSize(w, h int) {
 	m.width = w
@@ -41,8 +44,14 @@ func (m *NowPlayingModel) View() string {
 	topPad := max(0, (m.height-8)/2)
 	sb.WriteString(strings.Repeat("\n", topPad))
 
-	// Track info.
-	sb.WriteString(centerLine(styles.NowPlayingTitle.Render(t.Title), m.width))
+	// Track info — title glows when playing.
+	titleStyle := styles.NowPlayingTitle
+	if m.state.Playing {
+		titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(styles.GlowPalette[m.glowStep])
+	}
+	sb.WriteString(centerLine(titleStyle.Render(t.Title), m.width))
 	sb.WriteString("\n")
 	sb.WriteString(centerLine(styles.NowPlayingArtist.Render(t.Artist), m.width))
 	sb.WriteString("\n")
