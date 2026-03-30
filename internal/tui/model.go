@@ -90,7 +90,6 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
-		glowTick(),
 		m.library.Init(),
 		m.search.Init(),
 	}
@@ -137,13 +136,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tick())
 
 	case glowTickMsg:
+		// Only advance and reschedule while playing — stops automatically on pause.
 		if m.playerState.Playing {
 			m.glowStep++
+			m.nowPlaying.SetGlowStep(m.glowStep)
+			cmds = append(cmds, glowTick())
 		}
-		m.nowPlaying.SetGlowStep(m.glowStep)
-		cmds = append(cmds, glowTick())
 
 	case playerStateMsg:
+		wasPlaying := m.playerState.Playing
 		s := player.State(msg)
 		if s.Error != "" {
 			m.errMsg = s.Error
@@ -157,6 +158,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.queue.Tracks()) == 0 || m.queue.Tracks()[0].ID != m.playerState.Track.ID {
 				m.queue.SetTracks([]provider.Track{*m.playerState.Track})
 			}
+		}
+		// Restart the glow animation when playback begins.
+		if !wasPlaying && m.playerState.Playing {
+			cmds = append(cmds, glowTick())
 		}
 		cmds = append(cmds, waitForState(m.stateCh))
 
@@ -315,19 +320,24 @@ func (m *Model) updateActiveView(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// forwardMsgToActive delivers any non-KeyMsg message to both library and search
-// views regardless of which view is active. Library and search have async commands
-// (libraryLoadedMsg, searchResultMsg, spinner ticks) that fire at any time, so
-// messages must never be dropped mid-load just because the user switched views.
+// forwardMsgToActive delivers async result messages to the views that need them.
+// Internal timer ticks (glowTickMsg, tickMsg) are filtered out — no child view
+// needs them and forwarding them caused unnecessary redraws on every frame.
+// Library receives messages regardless of active view (for background loading).
+// Search only receives messages when it is the active view.
 func (m *Model) forwardMsgToActive(msg tea.Msg) tea.Cmd {
-	var cmds []tea.Cmd
+	switch msg.(type) {
+	case glowTickMsg, tickMsg:
+		return nil
+	}
 	var libCmd tea.Cmd
 	m.library, libCmd = m.library.Update(msg)
-	cmds = append(cmds, libCmd)
+	if m.activeView != viewSearch {
+		return libCmd
+	}
 	var searchCmd tea.Cmd
 	m.search, searchCmd = m.search.Update(msg)
-	cmds = append(cmds, searchCmd)
-	return tea.Batch(cmds...)
+	return tea.Batch(libCmd, searchCmd)
 }
 
 func (m *Model) View() string {
@@ -359,8 +369,9 @@ func (m *Model) renderHeader() string {
 		total := views.FormatDuration(t.Duration)
 		raw := fmt.Sprintf("%s %s — %s  %s/%s", icon, t.Title, t.Artist, elapsed, total)
 		if m.playerState.Playing {
+			idx := m.glowStep % len(styles.GlowPalette)
 			trackInfo = lipgloss.NewStyle().
-				Foreground(styles.GlowPalette[m.glowStep]).
+				Foreground(styles.GlowPalette[idx]).
 				Render(raw)
 		} else {
 			trackInfo = styles.QueueItemMuted.Render(raw)
