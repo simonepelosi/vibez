@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <!--
+    This page runs inside a hidden WebKit2GTK window.
+    MusicKit JS handles FairPlay DRM and Apple Music streaming.
+    Go communicates bidirectionally:
+      Go → JS: w.Eval("window.vibez*(...)") for playback commands
+      JS → Go: bound functions (goNeedsAuth, goAuthComplete, goPlayerStateChange, goUserTokenChanged, goError)
+  -->
+  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"></script>
+</head>
+<body>
+<script>
+  document.addEventListener('musickitloaded', async function() {
+    try {
+      const music = await MusicKit.configure({
+        developerToken: '{{.DeveloperToken}}',
+        app: { name: 'vibez', build: '{{.Version}}' }
+      });
+
+      // Inject an existing user token if the Go side already has one.
+      // MusicKit v3 exposes a setter for musicUserToken on the instance.
+      const savedToken = '{{.UserToken}}';
+      if (savedToken !== '') {
+        music.musicUserToken = savedToken;
+      }
+
+      // Notify state on every relevant event.
+      function notifyState() {
+        const player = music.player;
+        const item   = player.nowPlayingItem;
+        const state  = {
+          isPlaying:     music.isPlaying,
+          playbackState: player.playbackState,
+          currentTime:   player.currentPlaybackTime,
+          duration:      player.currentPlaybackDuration,
+          volume:        player.volume,
+          nowPlaying: item ? {
+            id:         item.id,
+            title:      item.attributes.name,
+            artist:     item.attributes.artistName,
+            album:      item.attributes.albumName,
+            artworkURL: MusicKit.formatArtworkURL(item.attributes.artwork, 300, 300),
+            durationMs: item.attributes.durationInMillis
+          } : null
+        };
+        goPlayerStateChange(JSON.stringify(state)).catch(console.error);
+      }
+
+      music.addEventListener('playbackStateDidChange',  notifyState);
+      music.addEventListener('nowPlayingItemDidChange', notifyState);
+      music.addEventListener('playbackTimeDidChange',   notifyState);
+
+      // Forward user token changes so Go can persist them.
+      music.addEventListener('userTokenDidChange', function() {
+        const tok = music.musicUserToken || '';
+        goUserTokenChanged(tok).catch(console.error);
+      });
+
+      // Playback controls — called via w.Eval() from Go.
+      window.vibezPlay = async () => {
+        try {
+          await music.play();
+        } catch (e) {
+          await goError('play failed: ' + (e.message || String(e))).catch(() => {});
+        }
+      };
+      window.vibezPause      = () => music.pause();
+      window.vibezToggle     = () => music.isPlaying ? music.pause() : music.play();
+      window.vibezNext       = () => music.skipToNextItem();
+      window.vibezPrev       = () => music.skipToPreviousItem();
+      window.vibezSeek       = (t) => music.seekToTime(t);
+      window.vibezSetVolume  = (v) => { music.player.volume = v; };
+
+      // Queue a list of song IDs and start playback immediately.
+      window.vibezSetQueue = async function(idsJSON) {
+        try {
+          await music.setQueue({ songs: JSON.parse(idsJSON) });
+          await music.play();
+        } catch (e) {
+          await goError('setQueue failed: ' + (e.message || String(e))).catch(() => {});
+        }
+      };
+
+      // Authorize — signal Go to show the window if needed, then run the
+      // MusicKit auth flow, then hide the window and unblock WaitReady.
+      try {
+        await goNeedsAuth('pending').catch(() => {});
+        const token = await music.authorize();
+        await goUserTokenChanged(token || '').catch(() => {});
+        await goAuthComplete('done').catch(() => {});
+      } catch (e) {
+        await goError('auth failed: ' + (e.message || String(e))).catch(() => {});
+        return;
+      }
+
+    } catch (e) {
+      goError(e.message || String(e)).catch(console.error);
+    }
+  });
+</script>
+</body>
+</html>

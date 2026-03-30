@@ -1,0 +1,56 @@
+repos:
+  # ── Go: build & vet ────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: go-build
+        name: go build
+        language: golang
+        entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go build ./...'
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet
+        language: golang
+        entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go vet ./...'
+        types: [go]
+        pass_filenames: false
+
+      - id: go-test
+        name: go test
+        language: golang
+        entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go test ./...'
+        types: [go]
+        pass_filenames: false
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        language: golang
+        entry: bash -c 'go mod tidy && git diff --exit-code go.sum go.mod'
+        types: [go]
+        pass_filenames: false
+
+  # ── golangci-lint (includes gosec + all security linters) ─────────────────
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.11.4
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint
+        entry: golangci-lint run
+        args: [--config=.golangci.yml, --fix=false]
+        types: [go]
+        pass_filenames: false
+
+  # ── General file hygiene ───────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: "\\.(md)$"
+      - id: end-of-file-fixer
+        exclude: "\\.(md)$"
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: mixed-line-ending
+        args: [--fix=lf]
