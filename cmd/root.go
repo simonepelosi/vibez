@@ -65,6 +65,12 @@ func runTUI(_ *cobra.Command, _ []string) error {
 
 	// BubbleTea runs in a goroutine — GTK must own the main OS thread.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				tuiErr <- fmt.Errorf("panic: %v", r)
+				wkPlayer.Terminate()
+			}
+		}()
 		// Wait for MusicKit JS to finish initialising before showing the TUI.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

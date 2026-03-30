@@ -44,14 +44,14 @@ func (m *NowPlayingModel) View() string {
 	topPad := max(0, (m.height-8)/2)
 	sb.WriteString(strings.Repeat("\n", topPad))
 
-	// Track info — title glows when playing.
-	titleStyle := styles.NowPlayingTitle
+	// Track info — title sweeps a bright spot left→right when playing.
+	var renderedTitle string
 	if m.state.Playing {
-		titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(styles.GlowPalette[m.glowStep])
+		renderedTitle = renderGlowTitle(t.Title, m.glowStep)
+	} else {
+		renderedTitle = styles.NowPlayingTitle.Render(t.Title)
 	}
-	sb.WriteString(centerLine(titleStyle.Render(t.Title), m.width))
+	sb.WriteString(centerLine(renderedTitle, m.width))
 	sb.WriteString("\n")
 	sb.WriteString(centerLine(styles.NowPlayingArtist.Render(t.Artist), m.width))
 	sb.WriteString("\n")
@@ -70,6 +70,33 @@ func (m *NowPlayingModel) View() string {
 	status := statusStyle.Render(fmt.Sprintf("%s  %s / %s", icon, elapsed, total))
 	sb.WriteString(centerLine(status, m.width))
 
+	return sb.String()
+}
+
+// renderGlowTitle renders each rune with a colour based on how far the
+// "bright spot" has swept past it. The spot starts before the first char,
+// sweeps right, exits after the last char, then the cycle restarts.
+func renderGlowTitle(title string, glowStep int) string {
+	palette := styles.GlowPalette
+	pLen := len(palette)
+	runes := []rune(title)
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	// Sweep position within cycle [0, n+pLen)
+	pos := glowStep % (n + pLen)
+	var sb strings.Builder
+	for i, r := range runes {
+		dist := pos - i // positive = spot has passed char i
+		var color lipgloss.Color
+		if dist >= 0 && dist < pLen {
+			color = palette[pLen-1-dist] // brightest when dist==0
+		} else {
+			color = palette[0] // dim outside the sweep window
+		}
+		sb.WriteString(lipgloss.NewStyle().Foreground(color).Bold(true).Render(string(r)))
+	}
 	return sb.String()
 }
 

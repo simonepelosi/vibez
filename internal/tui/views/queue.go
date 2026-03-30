@@ -52,6 +52,8 @@ func (m *QueueModel) SetTracks(tracks []provider.Track) {
 	m.list.SetItems(items)
 }
 
+func (m *QueueModel) Tracks() []provider.Track { return m.tracks }
+
 func (m *QueueModel) SetSize(w, h int) {
 	m.list.SetSize(w, h)
 }
