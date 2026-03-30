@@ -3,6 +3,7 @@ package views
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -20,11 +21,25 @@ const (
 	tabTracks
 )
 
+// libraryPane controls which level of the drill-down is visible.
+type libraryPane int
+
+const (
+	paneList   libraryPane = iota // top-level tab list
+	paneTracks                    // tracks inside a selected playlist
+)
+
 type libraryLoadedMsg struct {
 	tab       libraryTab
 	tracks    []provider.Track
 	playlists []provider.Playlist
 	err       error
+}
+
+type playlistTracksMsg struct {
+	playlist provider.Playlist
+	tracks   []provider.Track
+	err      error
 }
 
 type LibraryModel struct {
@@ -36,6 +51,13 @@ type LibraryModel struct {
 
 	playlists []provider.Playlist
 	tracks    []provider.Track
+
+	// Drill-down into a playlist's tracks.
+	pane          libraryPane
+	drillPlaylist provider.Playlist
+	drillTracks   []provider.Track
+	drillLoading  bool
+	drillList     list.Model
 
 	width  int
 	height int
@@ -50,14 +72,19 @@ func NewLibrary(prov provider.Provider) *LibraryModel {
 	l.SetShowTitle(false)
 	l.SetFilteringEnabled(true)
 
+	drill := list.New(nil, delegate, 0, 0)
+	drill.SetShowTitle(false)
+	drill.SetFilteringEnabled(true)
+
 	sp := spinner.New()
 	sp.Style = styles.Spinner
 	sp.Spinner = spinner.Dot
 
 	return &LibraryModel{
-		provider: prov,
-		list:     l,
-		spinner:  sp,
+		provider:  prov,
+		list:      l,
+		drillList: drill,
+		spinner:   sp,
 	}
 }
 
@@ -68,7 +95,9 @@ func (m *LibraryModel) Init() tea.Cmd {
 func (m *LibraryModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.list.SetSize(w, h-3) // reserve space for tabs
+	listH := max(0, h-3)
+	m.list.SetSize(w, listH)
+	m.drillList.SetSize(w, listH)
 }
 
 func (m *LibraryModel) loadPlaylists() tea.Cmd {
@@ -89,6 +118,15 @@ func (m *LibraryModel) loadTracks() tea.Cmd {
 	}
 }
 
+func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
+	m.drillLoading = true
+	prov := m.provider
+	return func() tea.Msg {
+		tracks, err := prov.GetPlaylistTracks(context.Background(), pl.ID)
+		return playlistTracksMsg{playlist: pl, tracks: tracks, err: err}
+	}
+}
+
 func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case libraryLoadedMsg:
@@ -104,14 +142,53 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		}
 		return m, nil
 
+	case playlistTracksMsg:
+		m.drillLoading = false
+		if msg.err == nil {
+			m.drillTracks = msg.tracks
+			items := make([]list.Item, len(msg.tracks))
+			for i, t := range msg.tracks {
+				items[i] = trackListItem{t}
+			}
+			m.drillList.SetItems(items)
+		}
+		return m, nil
+
 	case spinner.TickMsg:
-		if m.loading {
+		if m.loading || m.drillLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
 		}
 
 	case tea.KeyMsg:
+		// Drill-down pane handles its own keys.
+		if m.pane == paneTracks {
+			switch msg.String() {
+			case "esc", "backspace":
+				m.pane = paneList
+				return m, nil
+			case "enter":
+				if selected := m.drillList.SelectedItem(); selected != nil {
+					if _, ok := selected.(trackListItem); ok {
+						// Play from the selected track to end of playlist.
+						idx := m.drillList.Index()
+						ids := make([]string, 0, len(m.drillTracks)-idx)
+						for i := idx; i < len(m.drillTracks); i++ {
+							ids = append(ids, m.drillTracks[i].ID)
+						}
+						return m, func() tea.Msg { return PlayTracksMsg{IDs: ids} }
+					}
+				}
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.drillList, cmd = m.drillList.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// Top-level pane.
 		switch msg.String() {
 		case "tab":
 			m.activeTab = (m.activeTab + 1) % 3
@@ -131,19 +208,12 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 					}
 				case tabPlaylists:
 					if item, ok := selected.(playlistItem); ok {
-						prov := m.provider
-						id := item.ID
-						return m, func() tea.Msg {
-							tracks, err := prov.GetPlaylistTracks(context.Background(), id)
-							if err != nil || len(tracks) == 0 {
-								return nil
-							}
-							ids := make([]string, len(tracks))
-							for i, t := range tracks {
-								ids[i] = t.ID
-							}
-							return PlayTracksMsg{IDs: ids}
-						}
+						pl := provider.Playlist(item)
+						m.drillPlaylist = pl
+						m.pane = paneTracks
+						m.drillTracks = nil
+						m.drillList.SetItems(nil)
+						return m, tea.Batch(m.spinner.Tick, m.loadPlaylistTracks(pl))
 					}
 				}
 			}
@@ -155,6 +225,11 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		}
 	}
 
+	if m.pane == paneTracks {
+		var cmd tea.Cmd
+		m.drillList, cmd = m.drillList.Update(msg)
+		return m, cmd
+	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
 	return m, cmd
@@ -176,11 +251,28 @@ func (m *LibraryModel) refreshList() {
 }
 
 func (m *LibraryModel) View() string {
+	if m.pane == paneTracks {
+		return m.renderDrillView()
+	}
 	tabs := m.renderTabs()
 	if m.loading {
 		return tabs + "\n\n  " + m.spinner.View() + " Loading…"
 	}
 	return tabs + "\n" + m.list.View()
+}
+
+func (m *LibraryModel) renderDrillView() string {
+	name := styles.SidebarActive.Render(m.drillPlaylist.Name)
+	hint := styles.QueueItemMuted.Render("  ← esc · enter play")
+	header := name + hint + "\n" +
+		lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", m.width))
+	if m.drillLoading {
+		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"
+	}
+	if len(m.drillTracks) == 0 {
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("No tracks found"), m.width)
+	}
+	return header + "\n" + m.drillList.View()
 }
 
 func (m *LibraryModel) renderTabs() string {
@@ -201,8 +293,13 @@ func (m *LibraryModel) renderTabs() string {
 
 type playlistItem provider.Playlist
 
-func (p playlistItem) Title() string       { return p.Name }
-func (p playlistItem) Description() string { return fmt.Sprintf("%d tracks", p.TrackCount) }
+func (p playlistItem) Title() string { return p.Name }
+func (p playlistItem) Description() string {
+	if p.TrackCount > 0 {
+		return fmt.Sprintf("%d tracks", p.TrackCount)
+	}
+	return "playlist · enter to browse"
+}
 func (p playlistItem) FilterValue() string { return p.Name }
 
 type trackListItem struct{ t provider.Track }

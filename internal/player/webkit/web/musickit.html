@@ -62,21 +62,18 @@
       });
 
       // Playback controls — called via w.Eval() from Go.
-      window.vibezPlay = async () => {
-        try {
-          await MusicKit.getInstance().play();
-        } catch (e) {
-          const msg = (e instanceof Error) ? e.message : String(e != null ? e : 'unknown');
-          await goError('play failed: ' + msg).catch(() => {});
-        }
-      };
       const _m = () => MusicKit.getInstance();
-      window.vibezPause      = () => _m().pause();
-      window.vibezToggle     = () => _m().isPlaying ? _m().pause() : _m().play();
-      window.vibezNext       = () => _m().skipToNextItem();
-      window.vibezPrev       = () => _m().skipToPreviousItem();
-      window.vibezSeek       = (t) => _m().seekToTime(t);
-      window.vibezSetVolume  = (v) => { _m().volume = v; };
+      const _err = async (prefix, e) => {
+        const msg = (e instanceof Error) ? e.message : String(e ?? 'unknown');
+        await goError(prefix + msg).catch(() => {});
+      };
+      window.vibezPlay   = async () => { try { await _m().play(); } catch(e) { await _err('play: ', e); } };
+      window.vibezPause  = async () => { try { await _m().pause(); } catch(e) { await _err('pause: ', e); } };
+      window.vibezToggle = async () => { try { _m().isPlaying ? await _m().pause() : await _m().play(); } catch(e) { await _err('toggle: ', e); } };
+      window.vibezNext   = async () => { try { await _m().skipToNextItem(); } catch(e) { await _err('next: ', e); } };
+      window.vibezPrev   = async () => { try { await _m().skipToPreviousItem(); } catch(e) { await _err('prev: ', e); } };
+      window.vibezSeek   = (t) => _m().seekToTime(t);
+      window.vibezSetVolume = (v) => { _m().volume = v; };
 
       // Queue a list of song IDs and start playback immediately.
       // Uses MusicKit.getInstance() (always current) rather than the closure
@@ -93,6 +90,8 @@
             await goError('setQueue: MusicKit instance not available').catch(() => {});
             return;
           }
+          // Stop current playback before swapping the queue to avoid DRM conflicts.
+          await m.stop().catch(() => {});
           // MusicKit v3: prefer { song: id } for a single item,
           // { songs: [id…] } for multiple. Both are valid queue descriptors.
           const descriptor = ids.length === 1
