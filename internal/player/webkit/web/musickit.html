@@ -29,14 +29,15 @@
 
       // Notify state on every relevant event.
       function notifyState() {
-        const player = music.player;
-        const item   = player.nowPlayingItem;
-        const state  = {
-          isPlaying:     music.isPlaying,
-          playbackState: player.playbackState,
-          currentTime:   player.currentPlaybackTime,
-          duration:      player.currentPlaybackDuration,
-          volume:        player.volume,
+        const m    = MusicKit.getInstance();
+        const pl   = m.player;
+        const item = pl.nowPlayingItem;
+        const state = {
+          isPlaying:     m.isPlaying,
+          playbackState: pl.playbackState,
+          currentTime:   pl.currentPlaybackTime,
+          duration:      pl.currentPlaybackDuration,
+          volume:        pl.volume,
           nowPlaying: item ? {
             id:         item.id,
             title:      item.attributes.name,
@@ -55,32 +56,53 @@
 
       // Forward user token changes so Go can persist them.
       music.addEventListener('userTokenDidChange', function() {
-        const tok = music.musicUserToken || '';
+        const tok = MusicKit.getInstance().musicUserToken || '';
         goUserTokenChanged(tok).catch(console.error);
       });
 
       // Playback controls — called via w.Eval() from Go.
       window.vibezPlay = async () => {
         try {
-          await music.play();
+          await MusicKit.getInstance().play();
         } catch (e) {
-          await goError('play failed: ' + (e.message || String(e))).catch(() => {});
+          const msg = (e instanceof Error) ? e.message : String(e != null ? e : 'unknown');
+          await goError('play failed: ' + msg).catch(() => {});
         }
       };
-      window.vibezPause      = () => music.pause();
-      window.vibezToggle     = () => music.isPlaying ? music.pause() : music.play();
-      window.vibezNext       = () => music.skipToNextItem();
-      window.vibezPrev       = () => music.skipToPreviousItem();
-      window.vibezSeek       = (t) => music.seekToTime(t);
-      window.vibezSetVolume  = (v) => { music.player.volume = v; };
+      const _m = () => MusicKit.getInstance();
+      window.vibezPause      = () => _m().pause();
+      window.vibezToggle     = () => _m().isPlaying ? _m().pause() : _m().play();
+      window.vibezNext       = () => _m().skipToNextItem();
+      window.vibezPrev       = () => _m().skipToPreviousItem();
+      window.vibezSeek       = (t) => _m().seekToTime(t);
+      window.vibezSetVolume  = (v) => { _m().player.volume = v; };
 
       // Queue a list of song IDs and start playback immediately.
+      // Uses MusicKit.getInstance() (always current) rather than the closure
+      // variable to avoid stale-reference issues after re-auth.
       window.vibezSetQueue = async function(idsJSON) {
         try {
-          await music.setQueue({ songs: JSON.parse(idsJSON) });
-          await music.play();
+          const ids = JSON.parse(idsJSON);
+          if (!ids || ids.length === 0) {
+            await goError('setQueue: empty id list').catch(() => {});
+            return;
+          }
+          const m = MusicKit.getInstance();
+          if (!m) {
+            await goError('setQueue: MusicKit instance not available').catch(() => {});
+            return;
+          }
+          // MusicKit v3: prefer { song: id } for a single item,
+          // { songs: [id…] } for multiple. Both are valid queue descriptors.
+          const descriptor = ids.length === 1
+            ? { song: ids[0] }
+            : { songs: ids };
+          await m.setQueue(descriptor);
+          await m.play();
         } catch (e) {
-          await goError('setQueue failed: ' + (e.message || String(e))).catch(() => {});
+          const msg = (e instanceof Error) ? e.message
+                    : (e != null ? String(e) : 'unknown error');
+          await goError('setQueue failed: ' + msg).catch(() => {});
         }
       };
 
