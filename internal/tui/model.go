@@ -39,6 +39,7 @@ var sidebarNav = []sidebarEntry{
 }
 
 type tickMsg time.Time
+type glowTickMsg time.Time
 type playerStateMsg player.State
 type errMsg struct{ err error }
 
@@ -62,6 +63,9 @@ type Model struct {
 	errMsg    string
 	errExpiry time.Time
 	showHelp  bool
+
+	glowStep int
+	glowDir  int // +1 or -1 for ping-pong
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
@@ -70,6 +74,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 		provider:   prov,
 		player:     plyr,
 		activeView: viewNowPlaying,
+		glowDir:    1,
 	}
 
 	if plyr != nil {
@@ -87,6 +92,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
+		glowTick(),
 		m.library.Init(),
 		m.search.Init(),
 	}
@@ -99,6 +105,12 @@ func (m *Model) Init() tea.Cmd {
 func tick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func glowTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+		return glowTickMsg(t)
 	})
 }
 
@@ -125,6 +137,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 		}
 		cmds = append(cmds, tick())
+
+	case glowTickMsg:
+		if m.playerState.Playing {
+			m.glowStep += m.glowDir
+			last := len(styles.GlowPalette) - 1
+			if m.glowStep >= last {
+				m.glowStep = last
+				m.glowDir = -1
+			} else if m.glowStep <= 0 {
+				m.glowStep = 0
+				m.glowDir = 1
+			}
+			m.nowPlaying.SetGlowStep(m.glowStep)
+		}
+		cmds = append(cmds, glowTick())
 
 	case playerStateMsg:
 		m.playerState = player.State(msg)
@@ -305,7 +332,14 @@ func (m *Model) renderHeader() string {
 		}
 		elapsed := views.FormatDuration(m.playerState.Position)
 		total := views.FormatDuration(t.Duration)
-		trackInfo = fmt.Sprintf("%s %s — %s  %s/%s", icon, t.Title, t.Artist, elapsed, total)
+		raw := fmt.Sprintf("%s %s — %s  %s/%s", icon, t.Title, t.Artist, elapsed, total)
+		if m.playerState.Playing {
+			trackInfo = lipgloss.NewStyle().
+				Foreground(styles.GlowPalette[m.glowStep]).
+				Render(raw)
+		} else {
+			trackInfo = styles.QueueItemMuted.Render(raw)
+		}
 	}
 
 	logoW := lipgloss.Width(logo)
