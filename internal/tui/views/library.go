@@ -120,6 +120,34 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 			}
 			m.refreshList()
 			return m, nil
+		case "enter":
+			if selected := m.list.SelectedItem(); selected != nil {
+				switch m.activeTab {
+				case tabTracks:
+					if item, ok := selected.(trackListItem); ok {
+						return m, func() tea.Msg {
+							return PlayTracksMsg{IDs: []string{item.t.ID}}
+						}
+					}
+				case tabPlaylists:
+					if item, ok := selected.(playlistItem); ok {
+						prov := m.provider
+						id := item.ID
+						return m, func() tea.Msg {
+							tracks, err := prov.GetPlaylistTracks(context.Background(), id)
+							if err != nil || len(tracks) == 0 {
+								return nil
+							}
+							ids := make([]string, len(tracks))
+							for i, t := range tracks {
+								ids[i] = t.ID
+							}
+							return PlayTracksMsg{IDs: ids}
+						}
+					}
+				}
+			}
+			return m, nil
 		default:
 			var cmd tea.Cmd
 			m.list, cmd = m.list.Update(msg)

@@ -65,7 +65,6 @@ type Model struct {
 	showHelp  bool
 
 	glowStep int
-	glowDir  int // +1 or -1 for ping-pong
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
@@ -74,7 +73,6 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 		provider:   prov,
 		player:     plyr,
 		activeView: viewNowPlaying,
-		glowDir:    1,
 	}
 
 	if plyr != nil {
@@ -140,17 +138,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case glowTickMsg:
 		if m.playerState.Playing {
-			m.glowStep += m.glowDir
-			last := len(styles.GlowPalette) - 1
-			if m.glowStep >= last {
-				m.glowStep = last
-				m.glowDir = -1
-			} else if m.glowStep <= 0 {
-				m.glowStep = 0
-				m.glowDir = 1
-			}
-			m.nowPlaying.SetGlowStep(m.glowStep)
+			m.glowStep++
 		}
+		m.nowPlaying.SetGlowStep(m.glowStep)
 		cmds = append(cmds, glowTick())
 
 	case playerStateMsg:
@@ -162,6 +152,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.playerState = s
 		m.nowPlaying.SetState(&m.playerState)
+		// Keep queue model in sync with currently playing track.
+		if m.playerState.Track != nil {
+			if len(m.queue.Tracks()) == 0 || m.queue.Tracks()[0].ID != m.playerState.Track.ID {
+				m.queue.SetTracks([]provider.Track{*m.playerState.Track})
+			}
+		}
 		cmds = append(cmds, waitForState(m.stateCh))
 
 	case views.PlayTracksMsg:
@@ -216,6 +212,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.adjustVolume(0.05))
 		case key.Matches(msg, keys.VolumeDown):
 			cmds = append(cmds, m.adjustVolume(-0.05))
+
+		case key.Matches(msg, keys.Up):
+			if m.activeView == viewNowPlaying {
+				for i, entry := range sidebarNav {
+					if entry.id == m.activeView && i > 0 {
+						m.activeView = sidebarNav[i-1].id
+						break
+					}
+				}
+			} else {
+				cmd := m.updateActiveView(msg)
+				cmds = append(cmds, cmd)
+			}
+		case key.Matches(msg, keys.Down):
+			if m.activeView == viewNowPlaying {
+				for i, entry := range sidebarNav {
+					if entry.id == m.activeView && i < len(sidebarNav)-1 {
+						m.activeView = sidebarNav[i+1].id
+						break
+					}
+				}
+			} else {
+				cmd := m.updateActiveView(msg)
+				cmds = append(cmds, cmd)
+			}
 
 		default:
 			cmd := m.updateActiveView(msg)
@@ -294,21 +315,19 @@ func (m *Model) updateActiveView(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
-// forwardMsgToActive delivers any non-KeyMsg message to the currently active
-// view. This is required for async messages (e.g. searchResultMsg) that are
-// produced by view-level commands but routed through the root model by BubbleTea.
+// forwardMsgToActive delivers any non-KeyMsg message to both library and search
+// views regardless of which view is active. Library and search have async commands
+// (libraryLoadedMsg, searchResultMsg, spinner ticks) that fire at any time, so
+// messages must never be dropped mid-load just because the user switched views.
 func (m *Model) forwardMsgToActive(msg tea.Msg) tea.Cmd {
-	switch m.activeView {
-	case viewSearch:
-		var cmd tea.Cmd
-		m.search, cmd = m.search.Update(msg)
-		return cmd
-	case viewLibrary:
-		var cmd tea.Cmd
-		m.library, cmd = m.library.Update(msg)
-		return cmd
-	}
-	return nil
+	var cmds []tea.Cmd
+	var libCmd tea.Cmd
+	m.library, libCmd = m.library.Update(msg)
+	cmds = append(cmds, libCmd)
+	var searchCmd tea.Cmd
+	m.search, searchCmd = m.search.Update(msg)
+	cmds = append(cmds, searchCmd)
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) View() string {
@@ -428,7 +447,20 @@ func (m *Model) renderContent() string {
 }
 
 func (m *Model) renderFooter() string {
-	return styles.KeyHint.Render("space · n · p · / search · q quit")
+	base := "space · n · p · q quit"
+	var extra string
+	switch m.activeView {
+	case viewNowPlaying:
+		extra = "1-4 switch view · / search"
+	case viewSearch:
+		extra = "/ search · enter play · esc back"
+	case viewLibrary:
+		extra = "tab switch tab · enter play · / search"
+	case viewQueue:
+		extra = "1-4 switch view"
+	}
+	hint := extra + "  " + base
+	return styles.KeyHint.Render(hint)
 }
 
 // contentHeight is the number of rows available for the sidebar+content area.
