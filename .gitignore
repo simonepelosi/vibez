@@ -1,0 +1,22 @@
+# Binaries
+vibez
+dist/
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# Config (personal credentials must not be committed)
+.env
+*.p8
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

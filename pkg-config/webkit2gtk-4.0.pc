@@ -1,0 +1,9 @@
+# Compatibility shim: maps webkit2gtk-4.0 → webkit2gtk-4.1
+# Required because github.com/webview/webview_go hardcodes the 4.0 name.
+# Usage: PKG_CONFIG_PATH=./pkg-config go build ./...
+Name: webkit2gtk-4.0 (compat)
+Description: WebKitGTK 4.1 exposed as 4.0 for webview_go compatibility
+Version: 2.52.0
+Requires: webkit2gtk-4.1
+Libs:
+Cflags:
