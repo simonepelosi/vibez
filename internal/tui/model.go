@@ -682,10 +682,17 @@ func (m *Model) renderContent(h int) string {
 	if m.activePanel >= 0 && m.activePanel < len(m.panels) {
 		raw = m.panels[m.activePanel].View()
 	}
-	// Default idle state
+	// Default idle state — animated bear + search hint, vertically centred.
 	if raw == "" {
-		raw = centerStr(styles.QueueItemMuted.Render("♪"), m.width) + "\n" +
-			centerStr(styles.QueueItemMuted.Render("press / to search"), m.width)
+		const bearContent = views.BearLines + 2 // bear(3) + blank + hint
+		bob := (m.glowStep / 3) % 2
+		topPad := max(0, (h-bearContent)/2-bob)
+		var sb strings.Builder
+		sb.WriteString(strings.Repeat("\n", topPad))
+		sb.WriteString(views.RenderBear(m.glowStep, m.width))
+		sb.WriteString("\n\n")
+		sb.WriteString(centerStr(styles.QueueItemMuted.Render("press / to search"), m.width))
+		raw = sb.String()
 	}
 
 	if m.errMsg != "" {
