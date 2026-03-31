@@ -11,66 +11,44 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/chromedp"
+	playwright "github.com/playwright-community/playwright-go"
 
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/web"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-// Player drives Apple Music playback through a Chrome DevTools Protocol session.
-// Chrome's built-in Widevine CDM handles DRM; audio is output directly by
-// Chrome to PulseAudio/PipeWire — GStreamer is not used.
+// Player drives Apple Music playback through a Playwright-managed Chrome
+// browser. Chrome's built-in Widevine CDM handles DRM; audio is output
+// directly by Chrome to PulseAudio/PipeWire — GStreamer is not used.
 //
-// The absence of the goStreamURL binding signals musickit.html to use
-// MusicKit's native m.play()/m.setQueue() path (Chrome/Widevine mode).
+// Playwright's page.ExposeFunction wraps Go callbacks so they return Promises
+// in JS automatically — no shim is needed. The absence of goStreamURL tells
+// musickit.html to use Chrome's native m.play()/m.setQueue() Widevine path.
 type Player struct {
-	// OnUserToken is called when MusicKit JS reports a new or refreshed user token.
+	// OnUserToken is called when MusicKit JS reports a new or refreshed token.
 	OnUserToken func(token string)
 	// OnStorefront is called when MusicKit JS detects the user's storefront.
 	OnStorefront func(sf string)
 
-	chromeCtx    context.Context
-	cancelChrome context.CancelFunc
-
-	srv *http.Server
+	pw      *playwright.Playwright
+	browser playwright.Browser
+	page    playwright.Page
+	srv     *http.Server
 
 	mu    sync.RWMutex
 	state player.State
 	subs  []chan player.State
 
 	readyCh chan struct{} // closed when goAuthComplete fires
+	errCh   chan error    // receives the first fatal auth error
 	doneCh  chan struct{} // closed by Terminate()
 }
 
-// promiseShim wraps each JS→Go binding to return a resolved Promise.
-// Chrome's Runtime.addBinding creates synchronous functions that return
-// undefined; MusicKit JS calls .catch() on every binding, which would throw
-// TypeError without this shim.
-const promiseShim = `(function(){
-  var names=['goNeedsAuth','goAuthComplete','goPlayerStateChange',
-              'goUserTokenChanged','goStorefrontChanged','goError'];
-  names.forEach(function(n){
-    var orig=window[n];
-    if(typeof orig!=='function')return;
-    window[n]=function(){
-      var r;try{r=orig.apply(this,arguments);}catch(e){return Promise.resolve();}
-      return(r&&typeof r.then==='function')?r:Promise.resolve(r);
-    };
-  });
-})();`
-
-// New creates a CDP Player. It probes for Chrome, renders the MusicKit page,
-// starts a local HTTP server, and launches Chrome. Returns an error if Chrome
-// is not installed.
+// New creates a CDP Player. It starts the Playwright driver, launches Chrome,
+// and navigates to the local MusicKit page. Call EnsureBrowser before New()
+// on first run so the browser download can be shown to the user.
 func New(devToken, userToken, storefront string) (*Player, error) {
-	chromePath, err := findChrome()
-	if err != nil {
-		return nil, err
-	}
-
 	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
 	if err != nil {
 		return nil, fmt.Errorf("cdp: render html: %w", err)
@@ -97,76 +75,111 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	p := &Player{
 		srv:     srv,
 		readyCh: make(chan struct{}),
+		errCh:   make(chan error, 1),
 		doneCh:  make(chan struct{}),
 	}
 
-	// Build Chrome launch options.
-	headless := userToken != "" // headless once we have a saved token
-	opts := append(
-		chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.ExecPath(chromePath),
-		chromedp.Flag("autoplay-policy", "no-user-gesture-required"),
-		chromedp.Flag("enable-features", "MediaCapabilities"),
-		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.NoFirstRun,
-	)
-	if headless {
-		// headless=new (Chrome 112+) retains the full media stack including Widevine.
-		opts = append(opts, chromedp.Flag("headless", "new"))
-	} else {
-		// Visible window for first-run Apple Music auth.
-		opts = append(opts, chromedp.WindowSize(640, 520))
-	}
-
-	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
-	chromeCtx, cancelChrome := chromedp.NewContext(allocCtx)
-	p.chromeCtx = chromeCtx
-	p.cancelChrome = func() {
-		cancelChrome()
-		cancelAlloc()
-	}
-
-	// Register JS→Go bindings. goStreamURL is intentionally omitted — its
-	// absence tells musickit.html to use Chrome's native Widevine playback path.
-	bindNames := []string{
-		"goNeedsAuth", "goAuthComplete", "goPlayerStateChange",
-		"goUserTokenChanged", "goStorefrontChanged", "goError",
-	}
-	var bindActions chromedp.Tasks
-	for _, name := range bindNames {
-		bindActions = append(bindActions, runtime.AddBinding(name))
-	}
-
-	// Inject the Promise shim before the page's own scripts run.
-	bindActions = append(bindActions, chromedp.ActionFunc(func(ctx context.Context) error {
-		_, err := page.AddScriptToEvaluateOnNewDocument(promiseShim).Do(ctx)
-		return err
-	}))
-
-	if err := chromedp.Run(chromeCtx, bindActions); err != nil {
-		p.cancelChrome()
+	pw, err := playwright.Run()
+	if err != nil {
 		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: setup bindings: %w", err)
+		return nil, fmt.Errorf("cdp: start playwright: %w", err)
+	}
+	p.pw = pw
+
+	// headless=new once we have a saved token; visible for first-run auth.
+	headless := userToken != ""
+	channel := "chrome"
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		Channel:  &channel,
+		Headless: &headless,
+		Args: []string{
+			"--autoplay-policy=no-user-gesture-required",
+			"--enable-features=MediaCapabilities",
+			"--disable-blink-features=AutomationControlled",
+		},
+	})
+	if err != nil {
+		_ = pw.Stop()
+		_ = srv.Close()
+		return nil, fmt.Errorf("cdp: launch browser: %w", err)
+	}
+	p.browser = browser
+
+	pg, err := browser.NewPage()
+	if err != nil {
+		_ = browser.Close()
+		_ = pw.Stop()
+		_ = srv.Close()
+		return nil, fmt.Errorf("cdp: new page: %w", err)
+	}
+	p.page = pg
+
+	// ExposeFunction wraps each Go callback so the JS side receives a Promise.
+	// goStreamURL is intentionally absent — musickit.html uses its absence to
+	// detect Chrome mode and call m.play()/m.setQueue() natively via Widevine.
+	bindings := map[string]playwright.ExposedFunction{
+		"goNeedsAuth": func(_ ...any) any { return nil },
+		"goAuthComplete": func(_ ...any) any {
+			select {
+			case <-p.readyCh:
+			default:
+				close(p.readyCh)
+			}
+			return nil
+		},
+		"goPlayerStateChange": func(args ...any) any {
+			if len(args) > 0 {
+				if s, ok := args[0].(string); ok {
+					var js jsState
+					if json.Unmarshal([]byte(s), &js) == nil {
+						p.applyState(js)
+					}
+				}
+			}
+			return nil
+		},
+		"goUserTokenChanged": func(args ...any) any {
+			if len(args) > 0 {
+				if tok, ok := args[0].(string); ok && tok != "" && p.OnUserToken != nil {
+					p.OnUserToken(tok)
+				}
+			}
+			return nil
+		},
+		"goStorefrontChanged": func(args ...any) any {
+			if len(args) > 0 {
+				if sf, ok := args[0].(string); ok && sf != "" && p.OnStorefront != nil {
+					p.OnStorefront(sf)
+				}
+			}
+			return nil
+		},
+		"goError": func(args ...any) any {
+			msg := ""
+			if len(args) > 0 {
+				msg, _ = args[0].(string)
+			}
+			p.sendError(fmt.Errorf("musickit: %s", msg))
+			return nil
+		},
 	}
 
-	// Receive JS→Go binding events on a background goroutine.
-	chromedp.ListenTarget(chromeCtx, func(ev any) {
-		e, ok := ev.(*runtime.EventBindingCalled)
-		if !ok {
-			return
+	for name, fn := range bindings {
+		if err := pg.ExposeFunction(name, fn); err != nil {
+			_ = browser.Close()
+			_ = pw.Stop()
+			_ = srv.Close()
+			return nil, fmt.Errorf("cdp: expose %s: %w", name, err)
 		}
-		p.handleBinding(e.Name, e.Payload)
-	})
+	}
 
-	// Navigate async so New() returns quickly; caller calls WaitReady separately.
 	srvURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	go func() {
-		if err := chromedp.Run(chromeCtx, chromedp.Navigate(srvURL)); err != nil {
+		if _, err := pg.Goto(srvURL); err != nil {
 			select {
-			case <-chromeCtx.Done():
+			case <-p.doneCh:
 			default:
-				p.broadcastError(fmt.Sprintf("cdp navigate: %v", err))
+				p.sendError(fmt.Errorf("cdp navigate: %w", err))
 			}
 		}
 	}()
@@ -174,50 +187,13 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	return p, nil
 }
 
-// handleBinding processes a JS→Go call from the Chrome page.
-func (p *Player) handleBinding(name, payload string) {
-	// Chrome encodes the binding argument as a JSON array: e.g. ["value"]
-	arg := ""
-	var args []json.RawMessage
-	if json.Unmarshal([]byte(payload), &args) == nil && len(args) > 0 {
-		_ = json.Unmarshal(args[0], &arg)
+func (p *Player) sendError(err error) {
+	select {
+	case p.errCh <- err:
+	default:
 	}
-
-	switch name {
-	case "goNeedsAuth":
-	// Nothing extra needed; Chrome shows a visible window for first-run auth.
-
-	case "goAuthComplete":
-		select {
-		case <-p.readyCh:
-		default:
-			close(p.readyCh)
-		}
-
-	case "goPlayerStateChange":
-		var js jsState
-		if json.Unmarshal([]byte(arg), &js) == nil {
-			p.applyState(js)
-		}
-
-	case "goUserTokenChanged":
-		if p.OnUserToken != nil && arg != "" {
-			p.OnUserToken(arg)
-		}
-
-	case "goStorefrontChanged":
-		if p.OnStorefront != nil && arg != "" {
-			p.OnStorefront(arg)
-		}
-
-	case "goError":
-		p.broadcastError(arg)
-	}
-}
-
-func (p *Player) broadcastError(msg string) {
 	p.mu.Lock()
-	p.state.Error = msg
+	p.state.Error = err.Error()
 	s := p.state
 	subs := p.subs
 	p.mu.Unlock()
@@ -275,11 +251,8 @@ func (p *Player) applyState(js jsState) {
 	}
 }
 
-// dispatch evaluates JavaScript in Chrome asynchronously.
 func (p *Player) dispatch(js string) {
-	go func() {
-		_ = chromedp.Run(p.chromeCtx, chromedp.Evaluate(js, nil))
-	}()
+	go func() { _, _ = p.page.Evaluate(js) }()
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -287,7 +260,8 @@ func (p *Player) dispatch(js string) {
 // Run blocks until Terminate() is called, mirroring webkit.Player.Run().
 func (p *Player) Run() {
 	<-p.doneCh
-	p.cancelChrome()
+	_ = p.browser.Close()
+	_ = p.pw.Stop()
 	_ = p.srv.Close()
 }
 
@@ -305,6 +279,8 @@ func (p *Player) WaitReady(ctx context.Context) error {
 	select {
 	case <-p.readyCh:
 		return nil
+	case err := <-p.errCh:
+		return err
 	case <-ctx.Done():
 		return fmt.Errorf("cdp player: %w", ctx.Err())
 	}
@@ -312,49 +288,41 @@ func (p *Player) WaitReady(ctx context.Context) error {
 
 // ── player.Player interface ───────────────────────────────────────────────
 
-// Play resumes playback.
 func (p *Player) Play() error {
 	p.dispatch(`window.vibezPlay && window.vibezPlay()`)
 	return nil
 }
 
-// Pause pauses playback.
 func (p *Player) Pause() error {
 	p.dispatch(`window.vibezPause && window.vibezPause()`)
 	return nil
 }
 
-// Stop halts playback.
 func (p *Player) Stop() error {
 	p.dispatch(`window.vibezPause && window.vibezPause()`)
 	return nil
 }
 
-// Next skips to the next track.
 func (p *Player) Next() error {
 	p.dispatch(`window.vibezNext && window.vibezNext()`)
 	return nil
 }
 
-// Previous skips to the previous track.
 func (p *Player) Previous() error {
 	p.dispatch(`window.vibezPrev && window.vibezPrev()`)
 	return nil
 }
 
-// Seek seeks to position.
 func (p *Player) Seek(position time.Duration) error {
 	p.dispatch(fmt.Sprintf(`window.vibezSeek && window.vibezSeek(%f)`, position.Seconds()))
 	return nil
 }
 
-// SetVolume sets the volume (0.0–1.0).
 func (p *Player) SetVolume(v float64) error {
 	p.dispatch(fmt.Sprintf(`window.vibezSetVolume && window.vibezSetVolume(%f)`, v))
 	return nil
 }
 
-// SetQueue replaces the playback queue with the given song IDs and starts playback.
 func (p *Player) SetQueue(ids []string) error {
 	b, err := json.Marshal(ids)
 	if err != nil {
@@ -365,14 +333,12 @@ func (p *Player) SetQueue(ids []string) error {
 	return nil
 }
 
-// SetPlaylist queues a library playlist by ID and starts from startIdx.
 func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
 	js, _ := json.Marshal(playlistID)
 	p.dispatch(fmt.Sprintf(`window.vibezSetPlaylist && window.vibezSetPlaylist(%s,%d)`, js, startIdx))
 	return nil
 }
 
-// GetState returns a snapshot of the current playback state.
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -380,7 +346,6 @@ func (p *Player) GetState() (*player.State, error) {
 	return &s, nil
 }
 
-// Subscribe returns a channel that receives state updates.
 func (p *Player) Subscribe() <-chan player.State {
 	ch := make(chan player.State, 8)
 	p.mu.Lock()
@@ -389,7 +354,6 @@ func (p *Player) Subscribe() <-chan player.State {
 	return ch
 }
 
-// Close releases all Chrome and HTTP server resources.
 func (p *Player) Close() error {
 	p.Terminate()
 	return nil
