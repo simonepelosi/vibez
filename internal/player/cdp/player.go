@@ -101,6 +101,10 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			"--enable-features=MediaCapabilities,WidevineCdm",
 			"--disable-blink-features=AutomationControlled",
 			"--widevine-path=" + widevinePath,
+			// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
+			// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
+			// visible to the desktop environment.
+			"--disable-features=HardwareMediaKeyHandling,MediaSessionService",
 		},
 	})
 	if err != nil {
