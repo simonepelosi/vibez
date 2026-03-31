@@ -10,6 +10,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
+	"github.com/simone-vibes/vibez/internal/player/mpris"
 	"github.com/simone-vibes/vibez/internal/player/webkit"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 	"github.com/simone-vibes/vibez/internal/tui"
@@ -128,6 +129,22 @@ func runTUI(_ *cobra.Command, _ []string) error {
 			tuiErr <- fmt.Errorf("audio engine init: %w", waitErr)
 			audioEngine.Terminate()
 			return
+		}
+
+		// Register vibez as an MPRIS player on the session bus so the desktop
+		// environment shows "vibez" (not "Chrome") in its media panel.
+		// This is best-effort — if D-Bus is unavailable we just log and continue.
+		if srv, mprisErr := mpris.NewServer(audioEngine); mprisErr != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "debug: MPRIS unavailable: %v\n", mprisErr)
+			}
+		} else {
+			defer func() { _ = srv.Close() }()
+			go func() {
+				for st := range audioEngine.Subscribe() {
+					srv.Update(st)
+				}
+			}()
 		}
 
 		m := tui.New(cfg, prov, audioEngine)

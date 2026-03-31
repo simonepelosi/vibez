@@ -134,6 +134,9 @@
         music.addEventListener('playbackStateDidChange',  notifyState);
         music.addEventListener('nowPlayingItemDidChange', notifyState);
 
+        // Poll position every second so the TUI timer advances while playing.
+        setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
+
         window.vibezPlay  = async () => { try { await _m().play();  } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); } };
         window.vibezPause = async () => { try { await _m().pause(); } catch(e) { goError('pause: '+errName(e)).catch(()=>{}); } };
         window.vibezNext  = async () => { try { await _m().skipToNextItem();     } catch(e) { goError('next: '+errName(e)).catch(()=>{}); } };
