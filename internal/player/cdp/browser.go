@@ -1,20 +1,25 @@
 //go:build linux
 
-// Package cdp provides an Apple Music player backed by a Playwright-managed
-// Chrome browser. On first run, Playwright downloads Chrome (~150 MB) into
-// ~/.cache/vibez/browsers/ — NOT a system package install; it is vibez's own
-// private browser, completely isolated from any system Chrome/Chromium.
-// Subsequent launches reuse the cached binary (instant, no network).
+// Package cdp provides an Apple Music player backed by a private Chrome
+// installation managed entirely by vibez. On first run, vibez downloads the
+// Google Chrome .deb (~130 MB) from Google's public CDN, extracts it with
+// dpkg-deb (no root required), and caches the result in ~/.cache/vibez/chrome/.
+// Subsequent launches use the cached binary instantly — no system packages,
+// no apt-get, no sudo, invisible to the rest of the OS.
+// Widevine CDM is bundled inside Chrome and is available automatically.
 package cdp
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	playwright "github.com/playwright-community/playwright-go"
 )
+
+const chromeDebURL = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"
 
 func baseDir() string {
 	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
@@ -24,59 +29,68 @@ func baseDir() string {
 	return filepath.Join(home, ".cache", "vibez")
 }
 
-func driverDir() string   { return filepath.Join(baseDir(), "driver") }
-func browsersDir() string { return filepath.Join(baseDir(), "browsers") }
+// chromeInstallDir is where the Chrome .deb is extracted.
+func chromeInstallDir() string { return filepath.Join(baseDir(), "chrome") }
 
-// setBrowserEnv makes Playwright use only vibez's private cache, completely
-// ignoring any system Chrome installation.
-func setBrowserEnv() {
-	// PLAYWRIGHT_BROWSERS_PATH tells the playwright CLI where to install and
-	// find browsers. Pointing it to our cache means system Chrome is never
-	// used — even if it is installed.
-	_ = os.Setenv("PLAYWRIGHT_BROWSERS_PATH", browsersDir())
-	// Skip apt-get / polkit host-library validation. Required libs (glib,
-	// nss, etc.) are present on any Ubuntu desktop already.
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+// driverDir is where the Playwright Node.js driver lives.
+func driverDir() string { return filepath.Join(baseDir(), "driver") }
+
+// ChromePath returns the path to the cached Chrome binary.
+func ChromePath() string {
+	return filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "chrome")
 }
 
-// EnsureBrowser downloads Chrome into vibez's private cache if not already
-// present. Never touches system package managers. w receives progress output;
-// pass os.Stderr to show progress on first run, io.Discard to silence it.
+// EnsureBrowser downloads and extracts Google Chrome into vibez's private
+// cache directory if not already present. Never calls apt-get or sudo.
+// Writes progress to w; pass os.Stderr for first-run UX or io.Discard to silence.
 func EnsureBrowser(w io.Writer) error {
-	setBrowserEnv()
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory: driverDir(),
-		Browsers:        []string{"chrome"},
-		Stdout:          w,
-		Stderr:          w,
-	}); err != nil {
-		return fmt.Errorf("browser setup: %w", err)
+	if _, err := os.Stat(ChromePath()); err == nil {
+		return nil // already installed
 	}
+
+	// Also ensure the playwright driver is available (no browser install via playwright).
+	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+	if err := playwright.Install(&playwright.RunOptions{
+		DriverDirectory:     driverDir(),
+		SkipInstallBrowsers: true,
+	}); err != nil {
+		return fmt.Errorf("playwright driver: %w", err)
+	}
+
+	debPath := filepath.Join(baseDir(), "chrome.deb")
+	if err := downloadFile(w, debPath, chromeDebURL); err != nil {
+		return fmt.Errorf("download Chrome: %w", err)
+	}
+	defer os.Remove(debPath) //nolint:errcheck // best-effort cleanup of temp file
+
+	_, _ = fmt.Fprintln(w, "Extracting Chrome...")
+	if err := os.MkdirAll(chromeInstallDir(), 0o750); err != nil {
+		return fmt.Errorf("create chrome dir: %w", err)
+	}
+	// dpkg-deb --extract extracts the .deb payload without root.
+	cmd := exec.Command("dpkg-deb", "--extract", debPath, chromeInstallDir()) //nolint:gosec // paths are constructed internally
+	cmd.Stdout = w
+	cmd.Stderr = w
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("extract chrome: %w", err)
+	}
+
+	if _, err := os.Stat(ChromePath()); err != nil {
+		return fmt.Errorf("chrome binary not found after extraction: %w", err)
+	}
+	_, _ = fmt.Fprintln(w, "Chrome ready.")
 	return nil
 }
 
-// runPlaywright starts the Playwright driver using vibez's private cache.
+// runPlaywright starts the Playwright driver backed by our cached Chrome.
 func runPlaywright() (*playwright.Playwright, error) {
-	setBrowserEnv()
+	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	pw, err := playwright.Run(&playwright.RunOptions{
 		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true, // EnsureBrowser handles the download
+		SkipInstallBrowsers: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("playwright driver: %w", err)
 	}
 	return pw, nil
-}
-
-// findCachedChrome returns the path to the Google Chrome binary that was
-// downloaded into vibez's private browsers cache by EnsureBrowser.
-// Using ExecutablePath instead of Channel avoids touching system Chrome.
-func findCachedChrome() (string, error) {
-	// Playwright stores Chrome as: $PLAYWRIGHT_BROWSERS_PATH/chrome-REVISION/chrome-linux/chrome
-	pattern := filepath.Join(browsersDir(), "chrome-*", "chrome-linux", "chrome")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return "", fmt.Errorf("chrome not found in vibez cache (%s); run vibez once to download it", browsersDir())
-	}
-	return matches[len(matches)-1], nil // use latest if multiple revisions exist
 }

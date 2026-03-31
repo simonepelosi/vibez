@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -78,14 +79,9 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	}
 	p.pw = pw
 
-	// Find our privately cached Chrome binary. Using ExecutablePath instead
-	// of Channel means we NEVER use any system Chrome installation.
-	chromePath, err := findCachedChrome()
-	if err != nil {
-		_ = pw.Stop()
-		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: %w", err)
-	}
+	chromePath := ChromePath()
+	// Widevine CDM is bundled inside Chrome at this well-known relative path.
+	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 
 	// headless once we have a saved token; visible window for first-run auth.
 	headless := userToken != ""
@@ -94,8 +90,9 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		Headless:       &headless,
 		Args: []string{
 			"--autoplay-policy=no-user-gesture-required",
-			"--enable-features=MediaCapabilities",
+			"--enable-features=MediaCapabilities,WidevineCdm",
 			"--disable-blink-features=AutomationControlled",
+			"--widevine-path=" + widevinePath,
 		},
 	})
 	if err != nil {
