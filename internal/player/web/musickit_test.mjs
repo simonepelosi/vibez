@@ -316,5 +316,43 @@ test('_busy guard: auto-advance suppressed while busy', () => {
   eq(advance(9, false, -1, 2), false, 'qi<0 suppresses');
   eq(advance(9, false, 0, 0), false,  'empty queue suppresses');
 });
+
+test('_doPlayAt: try/finally always releases _busy even on unexpected throw', async () => {
+  let _busy = false;
+  let errorLogged = '';
+  const goError = (msg) => { errorLogged = msg; return Promise.resolve(); };
+  const errName = (e) => (e && e.message) || String(e);
+
+  async function _doPlayAt_sim(shouldThrow) {
+    _busy = true;
+    try {
+      if (shouldThrow) throw new Error('unexpected boom');
+    } catch(e) {
+      goError('_doPlayAt unexpected: '+errName(e)).catch(()=>{});
+    } finally {
+      _busy = false;
+    }
+  }
+
+  await _doPlayAt_sim(true);
+  eq(_busy, false, '_busy must be false after unexpected error');
+  eq(errorLogged.includes('unexpected boom'), true, 'unexpected error must be logged');
+
+  _busy = true; // set manually
+  await _doPlayAt_sim(false);
+  eq(_busy, false, '_busy must be false after normal completion');
+});
+
+test('loading state: playbackState 1/7/8 maps to Loading=true', () => {
+  const isLoading = (ps) => ps === 1 || ps === 7 || ps === 8;
+  eq(isLoading(0), false, 'none is not loading');
+  eq(isLoading(1), true,  'loading(1) is loading');
+  eq(isLoading(2), false, 'playing is not loading');
+  eq(isLoading(3), false, 'paused is not loading');
+  eq(isLoading(4), false, 'stopped is not loading');
+  eq(isLoading(7), true,  'waiting(7) is loading');
+  eq(isLoading(8), true,  'stalled(8) is loading');
+  eq(isLoading(9), false, 'completed is not loading');
+});
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

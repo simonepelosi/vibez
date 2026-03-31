@@ -16,6 +16,7 @@ const (
 type State struct {
 	Track       *provider.Track
 	Playing     bool
+	Loading     bool // true when MusicKit playbackState is loading/buffering
 	Position    time.Duration
 	Volume      float64 // 0.0–1.0
 	RepeatMode  int     // RepeatModeOff / RepeatModeOne / RepeatModeAll
