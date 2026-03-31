@@ -37,6 +37,8 @@ func (m *mockPlayer) Next() error                       { m.nextCalled = true; r
 func (m *mockPlayer) Previous() error                   { m.prevCalled = true; return m.err }
 func (m *mockPlayer) Seek(_ time.Duration) error        { return m.err }
 func (m *mockPlayer) SetVolume(_ float64) error         { return m.err }
+func (m *mockPlayer) SetRepeat(_ int) error             { return m.err }
+func (m *mockPlayer) SetShuffle(_ bool) error           { return m.err }
 func (m *mockPlayer) SetQueue(_ []string) error         { return m.err }
 func (m *mockPlayer) SetPlaylist(_ string, _ int) error { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
@@ -182,7 +184,6 @@ func TestModel_View_WithDimensions(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
 	m.height = 24
-	m.nowPlaying.SetSize(80, 22)
 	got := m.View()
 	if got == "" {
 		t.Error("View() with dimensions should return non-empty string")
@@ -231,45 +232,35 @@ func TestModel_Update_ErrMsg(t *testing.T) {
 
 // --- Update: key messages ---
 
-func TestModel_Update_KeyViewNow(t *testing.T) {
+func TestModel_Update_KeySearch(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewQueue
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
-	if m.activeView != viewNowPlaying {
-		t.Errorf("activeView = %d, want viewNowPlaying(%d)", m.activeView, viewNowPlaying)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if m.mode != modeSearch {
+		t.Errorf("mode = %d, want modeSearch(%d)", m.mode, modeSearch)
 	}
 }
 
-func TestModel_Update_KeyViewQueue(t *testing.T) {
+func TestModel_Update_KeyCommand(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
-	if m.activeView != viewQueue {
-		t.Errorf("activeView = %d, want viewQueue(%d)", m.activeView, viewQueue)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	if m.mode != modeCommand {
+		t.Errorf("mode = %d, want modeCommand(%d)", m.mode, modeCommand)
 	}
 }
 
-func TestModel_Update_KeyViewLibrary(t *testing.T) {
+func TestModel_Update_KeyLibrary(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
-	if m.activeView != viewLibrary {
-		t.Errorf("activeView = %d, want viewLibrary(%d)", m.activeView, viewLibrary)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	if m.content != contentLibrary {
+		t.Errorf("content = %d, want contentLibrary(%d)", m.content, contentLibrary)
 	}
 }
 
-func TestModel_Update_KeyViewSearch(t *testing.T) {
+func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
-	if m.activeView != viewSearch {
-		t.Errorf("activeView = %d, want viewSearch(%d)", m.activeView, viewSearch)
-	}
-}
-
-func TestModel_Update_KeyHelp(t *testing.T) {
-	m := newModel(nil)
-	m.showHelp = false
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
-	if !m.showHelp {
-		t.Error("showHelp should be true after '?' key")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if m.content != contentResults {
+		t.Errorf("content = %d, want contentResults(%d)", m.content, contentResults)
 	}
 }
 
@@ -494,9 +485,9 @@ func TestModel_ContentHeight(t *testing.T) {
 	m := newModel(nil)
 	m.height = 26
 	got := m.contentHeight()
-	// header + sep + sep + footer = 4 lines
-	if got != 22 {
-		t.Errorf("contentHeight() = %d, want 22", got)
+	// fixed overhead = 9 lines: logo+blank+nowplaying(3)+blank+sep+sep+status
+	if got != 17 {
+		t.Errorf("contentHeight() = %d, want 17", got)
 	}
 }
 
@@ -509,25 +500,25 @@ func TestModel_ContentHeight_Small(t *testing.T) {
 	}
 }
 
-// --- renderHeader ---
+// --- renderLogoLine ---
 
 func TestModel_RenderHeader_ContainsVibez(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
-	got := m.renderHeader()
+	got := m.renderLogoLine()
 	if !strings.Contains(got, "vibez") {
-		t.Errorf("renderHeader() should contain 'vibez', got %q", got)
+		t.Errorf("renderLogoLine() should contain 'vibez', got %q", got)
 	}
 }
 
-// --- renderFooter ---
+// --- renderStatusBar ---
 
 func TestModel_RenderFooter_ContainsKeyHints(t *testing.T) {
 	m := newModel(nil)
 	m.width = 100
-	got := m.renderFooter()
-	if !strings.Contains(got, "space") {
-		t.Errorf("renderFooter() should contain key hints, got %q", got)
+	got := m.renderStatusBar()
+	if !strings.Contains(got, "NORMAL") {
+		t.Errorf("renderStatusBar() should contain mode indicator, got %q", got)
 	}
 }
 
@@ -538,7 +529,6 @@ func TestModel_View_WithErrMsg(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	m.introStep = introDone // skip startup animation
-	m.nowPlaying.SetSize(m.contentWidth(), m.contentHeight())
 	m.errMsg = "something went wrong"
 	m.errExpiry = time.Now().Add(10 * time.Second)
 	got := m.View()
@@ -547,49 +537,46 @@ func TestModel_View_WithErrMsg(t *testing.T) {
 	}
 }
 
-// --- updateActiveView ---
+// --- library navigation in normal mode ---
 
 func TestModel_UpdateActiveView_Library(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewLibrary
+	m.content = contentLibrary
 	m.width = 80
 	m.height = 24
 	m.library.SetSize(80, 22)
 	// Should not panic
-	m.updateActiveView(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
 }
 
 func TestModel_UpdateActiveView_Search(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewSearch
+	m.content = contentResults
 	m.width = 80
 	m.height = 24
 	m.search.SetSize(80, 22)
 	// Should not panic
-	m.updateActiveView(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
 }
 
 func TestModel_UpdateActiveView_Queue(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewQueue
-	// Should not panic
-	m.updateActiveView(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	// Should not panic with any content mode
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
 }
 
 func TestModel_UpdateActiveView_NowPlaying(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewNowPlaying
 	// Should not panic
-	m.updateActiveView(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
 }
 
-// --- Search focused: keys go to search input ---
+// --- Search mode: keys go to search handling ---
 
 func TestModel_SearchFocused_KeyGoesToSearch(t *testing.T) {
 	m := newModel(nil)
-	m.activeView = viewSearch
-	m.search.Focus()
-	// When search is focused, key messages should go to the search view
+	m.mode = modeSearch
+	// When in search mode, key messages should be handled without panic
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
 	_ = cmd // just verify no panic
 }

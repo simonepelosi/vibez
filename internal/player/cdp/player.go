@@ -234,6 +234,8 @@ type jsState struct {
 	CurrentTime float64  `json:"currentTime"`
 	Duration    float64  `json:"duration"`
 	Volume      float64  `json:"volume"`
+	RepeatMode  int      `json:"repeatMode"`
+	ShuffleMode int      `json:"shuffleMode"`
 	NowPlaying  *jsTrack `json:"nowPlaying"`
 }
 
@@ -248,9 +250,11 @@ type jsTrack struct {
 
 func (p *Player) applyState(js jsState) {
 	s := player.State{
-		Playing:  js.IsPlaying,
-		Position: time.Duration(js.CurrentTime * float64(time.Second)),
-		Volume:   js.Volume,
+		Playing:     js.IsPlaying,
+		Position:    time.Duration(js.CurrentTime * float64(time.Second)),
+		Volume:      js.Volume,
+		RepeatMode:  js.RepeatMode,
+		ShuffleMode: js.ShuffleMode != 0,
 	}
 	if js.NowPlaying != nil {
 		s.Track = &provider.Track{
@@ -356,6 +360,20 @@ func (p *Player) SetQueue(ids []string) error {
 func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
 	js, _ := json.Marshal(playlistID)
 	p.dispatch(fmt.Sprintf(`window.vibezSetPlaylist && window.vibezSetPlaylist(%s,%d)`, js, startIdx))
+	return nil
+}
+
+func (p *Player) SetRepeat(mode int) error {
+	p.dispatch(fmt.Sprintf(`window.vibezSetRepeat && window.vibezSetRepeat(%d)`, mode))
+	return nil
+}
+
+func (p *Player) SetShuffle(on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	p.dispatch(fmt.Sprintf(`window.vibezSetShuffle && window.vibezSetShuffle(%d)`, v))
 	return nil
 }
 

@@ -39,6 +39,8 @@ type Controller interface {
 	Next() error
 	Previous() error
 	Seek(time.Duration) error
+	SetRepeat(mode int) error
+	SetShuffle(on bool) error
 }
 
 // Server is the MPRIS D-Bus server for vibez. Create with NewServer.
@@ -153,20 +155,45 @@ func NewServer(ctrl Controller) (*Server, error) {
 		},
 		mprisPlayerIface: {
 			"PlaybackStatus": {Value: "Stopped", Writable: false, Emit: prop.EmitTrue},
-			"LoopStatus":     {Value: "None", Writable: false, Emit: prop.EmitTrue},
-			"Rate":           {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
-			"Shuffle":        {Value: false, Writable: false, Emit: prop.EmitTrue},
-			"Metadata":       {Value: emptyMeta, Writable: false, Emit: prop.EmitTrue},
-			"Volume":         {Value: float64(1), Writable: false, Emit: prop.EmitTrue},
-			"Position":       {Value: int64(0), Writable: false, Emit: prop.EmitInvalidates},
-			"MinimumRate":    {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
-			"MaximumRate":    {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
-			"CanGoNext":      {Value: true, Writable: false, Emit: prop.EmitTrue},
-			"CanGoPrevious":  {Value: true, Writable: false, Emit: prop.EmitTrue},
-			"CanPlay":        {Value: true, Writable: false, Emit: prop.EmitTrue},
-			"CanPause":       {Value: true, Writable: false, Emit: prop.EmitTrue},
-			"CanSeek":        {Value: true, Writable: false, Emit: prop.EmitTrue},
-			"CanControl":     {Value: true, Writable: false, Emit: prop.EmitFalse},
+			"LoopStatus": {
+				Value:    "None",
+				Writable: true,
+				Emit:     prop.EmitTrue,
+				Callback: func(c *prop.Change) *dbus.Error {
+					ls, _ := c.Value.(string)
+					mode := player.RepeatModeOff
+					switch ls {
+					case "Track":
+						mode = player.RepeatModeOne
+					case "Playlist":
+						mode = player.RepeatModeAll
+					}
+					_ = ctrl.SetRepeat(mode)
+					return nil
+				},
+			},
+			"Rate": {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
+			"Shuffle": {
+				Value:    false,
+				Writable: true,
+				Emit:     prop.EmitTrue,
+				Callback: func(c *prop.Change) *dbus.Error {
+					on, _ := c.Value.(bool)
+					_ = ctrl.SetShuffle(on)
+					return nil
+				},
+			},
+			"Metadata":      {Value: emptyMeta, Writable: false, Emit: prop.EmitTrue},
+			"Volume":        {Value: float64(1), Writable: false, Emit: prop.EmitTrue},
+			"Position":      {Value: int64(0), Writable: false, Emit: prop.EmitInvalidates},
+			"MinimumRate":   {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
+			"MaximumRate":   {Value: float64(1), Writable: false, Emit: prop.EmitFalse},
+			"CanGoNext":     {Value: true, Writable: false, Emit: prop.EmitTrue},
+			"CanGoPrevious": {Value: true, Writable: false, Emit: prop.EmitTrue},
+			"CanPlay":       {Value: true, Writable: false, Emit: prop.EmitTrue},
+			"CanPause":      {Value: true, Writable: false, Emit: prop.EmitTrue},
+			"CanSeek":       {Value: true, Writable: false, Emit: prop.EmitTrue},
+			"CanControl":    {Value: true, Writable: false, Emit: prop.EmitFalse},
 		},
 	}
 	props, err := prop.Export(conn, mprisObjectPath, propsSpec)
@@ -223,6 +250,16 @@ func (s *Server) Update(st player.State) {
 	if st.Volume > 0 {
 		s.props.SetMust(mprisPlayerIface, "Volume", st.Volume)
 	}
+
+	loopStatus := "None"
+	switch st.RepeatMode {
+	case player.RepeatModeOne:
+		loopStatus = "Track"
+	case player.RepeatModeAll:
+		loopStatus = "Playlist"
+	}
+	s.props.SetMust(mprisPlayerIface, "LoopStatus", loopStatus)
+	s.props.SetMust(mprisPlayerIface, "Shuffle", st.ShuffleMode)
 }
 
 // Close releases the session bus connection.

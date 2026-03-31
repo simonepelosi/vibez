@@ -34,6 +34,8 @@ type jsState struct {
 	CurrentTime   float64  `json:"currentTime"`
 	Duration      float64  `json:"duration"`
 	Volume        float64  `json:"volume"`
+	RepeatMode    int      `json:"repeatMode"`
+	ShuffleMode   int      `json:"shuffleMode"`
 	NowPlaying    *jsTrack `json:"nowPlaying"`
 }
 
@@ -238,6 +240,20 @@ func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
 	return nil
 }
 
+func (p *Player) SetRepeat(mode int) error {
+	p.dispatch(fmt.Sprintf(`window.vibezSetRepeat && window.vibezSetRepeat(%d)`, mode))
+	return nil
+}
+
+func (p *Player) SetShuffle(on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	p.dispatch(fmt.Sprintf(`window.vibezSetShuffle && window.vibezSetShuffle(%d)`, v))
+	return nil
+}
+
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -269,9 +285,11 @@ func (p *Player) dispatch(js string) {
 
 func (p *Player) applyState(js jsState) {
 	s := player.State{
-		Playing:  js.IsPlaying,
-		Position: p.gst.Position(), // GStreamer is authoritative for position
-		Volume:   js.Volume,
+		Playing:     js.IsPlaying,
+		Position:    p.gst.Position(), // GStreamer is authoritative for position
+		Volume:      js.Volume,
+		RepeatMode:  js.RepeatMode,
+		ShuffleMode: js.ShuffleMode != 0,
 	}
 	if js.NowPlaying != nil {
 		s.Track = &provider.Track{

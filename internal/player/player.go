@@ -6,12 +6,21 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+// Repeat mode constants matching MusicKit.PlayerRepeatMode values.
+const (
+	RepeatModeOff = 0 // no repeat
+	RepeatModeOne = 1 // repeat current track
+	RepeatModeAll = 2 // repeat entire queue
+)
+
 type State struct {
-	Track    *provider.Track
-	Playing  bool
-	Position time.Duration
-	Volume   float64 // 0.0–1.0
-	Error    string  // non-empty when JS reports a playback error
+	Track       *provider.Track
+	Playing     bool
+	Position    time.Duration
+	Volume      float64 // 0.0–1.0
+	RepeatMode  int     // RepeatModeOff / RepeatModeOne / RepeatModeAll
+	ShuffleMode bool    // true = shuffle on
+	Error       string  // non-empty when JS reports a playback error
 }
 
 type Player interface {
@@ -28,6 +37,10 @@ type Player interface {
 	// SetPlaylist queues a library playlist by its ID (e.g. "p.XXXXX") and starts
 	// playback from startIdx. This avoids per-song catalog ID resolution.
 	SetPlaylist(playlistID string, startIdx int) error
+	// SetRepeat sets the repeat mode: 0=off, 1=one, 2=all.
+	SetRepeat(mode int) error
+	// SetShuffle enables or disables shuffle playback.
+	SetShuffle(on bool) error
 	GetState() (*State, error)
 	Subscribe() <-chan State
 	Close() error
