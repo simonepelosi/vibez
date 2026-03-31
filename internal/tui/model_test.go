@@ -485,9 +485,9 @@ func TestModel_ContentHeight(t *testing.T) {
 	m := newModel(nil)
 	m.height = 26
 	got := m.contentHeight()
-	// fixed overhead = 9 lines: logo+blank+nowplaying(3)+blank+sep+sep+status
-	if got != 17 {
-		t.Errorf("contentHeight() = %d, want 17", got)
+	// fixed overhead = 10 lines: logo+blank+nowplaying(4)+blank+sep+sep+status
+	if got != 16 {
+		t.Errorf("contentHeight() = %d, want 16", got)
 	}
 }
 

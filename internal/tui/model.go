@@ -701,7 +701,8 @@ func (m *Model) renderStatusBar() string {
 			accent.Render("/") + muted.Render(" search"),
 			accent.Render("a") + muted.Render(" add"),
 			accent.Render("n") + muted.Render(" next"),
-			accent.Render("p") + muted.Render(" prev"),
+			accent.Render("r") + muted.Render(" repeat"),
+			accent.Render("s") + muted.Render(" shuffle"),
 			accent.Render(":q") + muted.Render(" quit"),
 		}
 		return " " + styles.ModeNormal.Render("NORMAL") + "  " + strings.Join(parts, dot)
@@ -715,12 +716,12 @@ func (m *Model) renderSeparator() string {
 // contentDimensions returns the width and height for the content area.
 func (m *Model) contentDimensions() (int, int) {
 	w := max(0, m.width)
-	h := max(0, m.height-9)
+	h := max(0, m.height-10)
 	return w, h
 }
 
 // contentHeight returns the number of rows available for the content area.
-// Fixed overhead = 9 lines: logo(1)+blank(1)+nowplaying(3)+blank(1)+sep(1)+sep(1)+status(1).
+// Fixed overhead = 10 lines: logo(1)+blank(1)+nowplaying(4)+blank(1)+sep(1)+sep(1)+status(1).
 func (m *Model) contentHeight() int {
 	_, h := m.contentDimensions()
 	return h
