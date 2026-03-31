@@ -34,12 +34,15 @@ func (m *NowPlayingModel) Update(_ tea.KeyMsg) {}
 
 func (m *NowPlayingModel) View() string {
 	if m.state == nil || m.state.Track == nil {
-		// Empty state: music note + hint, vertically centered.
-		topPad := max(0, (m.height-3)/2)
+		// BearLines + blank + hint = BearLines+2 total content lines.
+		const contentH = BearLines + 2
+		// Bob: shift topPad up by 1 on every other 3-tick window (≈240 ms).
+		bob := (m.glowStep / 3) % 2
+		topPad := max(0, (m.height-contentH)/2-bob)
 		var sb strings.Builder
 		sb.WriteString(strings.Repeat("\n", topPad))
-		sb.WriteString(centerLine(styles.QueueItemMuted.Render("♪"), m.width))
-		sb.WriteString("\n")
+		sb.WriteString(RenderBear(m.glowStep, m.width))
+		sb.WriteString("\n\n")
 		sb.WriteString(centerLine(styles.QueueItemMuted.Render("press / to search"), m.width))
 		return sb.String()
 	}
