@@ -16,14 +16,16 @@ import (
 // --- mock player ---
 
 type mockPlayer struct {
-	state       player.State
-	playCalled  bool
-	pauseCalled bool
-	nextCalled  bool
-	prevCalled  bool
-	closeCalled bool
-	err         error
-	stateCh     chan player.State
+	state          player.State
+	playCalled     bool
+	pauseCalled    bool
+	nextCalled     bool
+	prevCalled     bool
+	closeCalled    bool
+	setQueueIDs    []string   // last IDs passed to SetQueue
+	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
+	err            error
+	stateCh        chan player.State
 }
 
 func newMockPlayer() *mockPlayer {
@@ -39,9 +41,12 @@ func (m *mockPlayer) Seek(_ time.Duration) error        { return m.err }
 func (m *mockPlayer) SetVolume(_ float64) error         { return m.err }
 func (m *mockPlayer) SetRepeat(_ int) error             { return m.err }
 func (m *mockPlayer) SetShuffle(_ bool) error           { return m.err }
-func (m *mockPlayer) SetQueue(_ []string) error         { return m.err }
+func (m *mockPlayer) SetQueue(ids []string) error       { m.setQueueIDs = ids; return m.err }
 func (m *mockPlayer) SetPlaylist(_ string, _ int) error { return m.err }
-func (m *mockPlayer) AppendQueue(_ []string) error      { return m.err }
+func (m *mockPlayer) AppendQueue(ids []string) error {
+	m.appendQueueIDs = append(m.appendQueueIDs, ids)
+	return m.err
+}
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
@@ -605,5 +610,175 @@ func TestWaitForState_ReadsFromChannel(t *testing.T) {
 	}
 	if ps.Volume != 0.9 {
 		t.Errorf("playerStateMsg.Volume = %v, want 0.9", ps.Volume)
+	}
+}
+
+// --- Search popup: Enter calls SetQueue, Tab calls AppendQueue ---
+
+// seedSearchResults plants a track into the model's search view so
+// SelectedTrack() returns a non-nil result.
+func seedSearchResults(m *Model, tracks ...provider.Track) {
+	m.mode = modeSearch
+	m.search.SetSize(80, 20)
+	m.search.SetState(tracks, false, nil)
+}
+
+func TestHandleSearchKey_Enter_CallsSetQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := provider.Track{Title: "Hi", Artist: "There", CatalogID: "99999"}
+	seedSearchResults(m, track)
+
+	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	cmd := m.handleSearchKey("enter", msg)
+	if cmd == nil {
+		t.Fatal("handleSearchKey(enter) returned nil cmd — expected SetQueue call")
+	}
+	cmd() // execute the player call synchronously
+
+	if len(mp.setQueueIDs) == 0 {
+		t.Fatal("SetQueue was not called after Enter")
+	}
+	if mp.setQueueIDs[0] != "99999" {
+		t.Errorf("SetQueue ID = %q, want %q", mp.setQueueIDs[0], "99999")
+	}
+}
+
+func TestHandleSearchKey_Enter_UsesLibraryID_WhenNoCatalogID(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := provider.Track{Title: "Library Song", ID: "i.LibraryAbc123"}
+	seedSearchResults(m, track)
+
+	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		cmd()
+	}
+	if len(mp.setQueueIDs) == 0 || mp.setQueueIDs[0] != "i.LibraryAbc123" {
+		t.Errorf("SetQueue ID = %v, want [i.LibraryAbc123]", mp.setQueueIDs)
+	}
+}
+
+func TestHandleSearchKey_Enter_NoResults_NoCall(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.mode = modeSearch
+	m.search.SetSize(80, 20)
+	// No results set → SelectedTrack() is nil.
+
+	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	// cmd may be nil or return no player call — SetQueue must NOT be called.
+	if cmd != nil {
+		cmd()
+	}
+	if len(mp.setQueueIDs) > 0 {
+		t.Errorf("SetQueue called with no results: %v", mp.setQueueIDs)
+	}
+}
+
+func TestHandleSearchKey_Tab_CallsAppendQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := provider.Track{Title: "Queued", Artist: "Band", CatalogID: "12345"}
+	seedSearchResults(m, track)
+
+	cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+	if cmd == nil {
+		t.Fatal("handleSearchKey(tab) returned nil cmd — expected AppendQueue call")
+	}
+	cmd()
+
+	if len(mp.appendQueueIDs) == 0 {
+		t.Fatal("AppendQueue was not called after Tab")
+	}
+	if mp.appendQueueIDs[0][0] != "12345" {
+		t.Errorf("AppendQueue ID = %q, want %q", mp.appendQueueIDs[0][0], "12345")
+	}
+}
+
+func TestHandleSearchKey_Tab_DoesNotCallSetQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	seedSearchResults(m, provider.Track{Title: "T", CatalogID: "x"})
+
+	cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+	if cmd != nil {
+		cmd()
+	}
+	if len(mp.setQueueIDs) > 0 {
+		t.Errorf("Tab must not call SetQueue (would interrupt playback), but it did: %v", mp.setQueueIDs)
+	}
+}
+
+func TestHandleSearchKey_Tab_MultipleTabsAccumulate(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	tracks := []provider.Track{
+		{Title: "A", CatalogID: "111"},
+		{Title: "B", CatalogID: "222"},
+	}
+	seedSearchResults(m, tracks...)
+
+	for range 2 {
+		cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+		if cmd != nil {
+			cmd()
+		}
+	}
+	if len(mp.appendQueueIDs) != 2 {
+		t.Errorf("expected 2 AppendQueue calls, got %d", len(mp.appendQueueIDs))
+	}
+}
+
+func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "test query"
+
+	m.handleSearchKey("esc", tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.mode != modeNormal {
+		t.Errorf("mode after esc = %v, want modeNormal", m.mode)
+	}
+	if m.searchQuery != "" {
+		t.Errorf("searchQuery after esc = %q, want empty", m.searchQuery)
+	}
+}
+
+func TestHandleSearchKey_Backspace_DeletesLastChar(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "abc"
+
+	m.handleSearchKey("backspace", tea.KeyMsg{Type: tea.KeyBackspace})
+
+	if m.searchQuery != "ab" {
+		t.Errorf("searchQuery after backspace = %q, want %q", m.searchQuery, "ab")
+	}
+}
+
+func TestHandleSearchKey_Typing_AppendsToQuery(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hel"
+
+	m.handleSearchKey("l", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+
+	if m.searchQuery != "hell" {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "hell")
+	}
+}
+
+func TestHandleSearchKey_Enter_SwitchesToNormalMode(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	seedSearchResults(m, provider.Track{Title: "T", CatalogID: "x"})
+
+	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		cmd()
+	}
+	if m.mode != modeNormal {
+		t.Errorf("mode after enter = %v, want modeNormal", m.mode)
 	}
 }

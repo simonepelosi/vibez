@@ -348,28 +348,29 @@ func (p *Player) SetVolume(v float64) error {
 }
 
 func (p *Player) SetQueue(ids []string) error {
-	b, err := json.Marshal(ids)
+	expr, err := buildSetQueueJS(ids)
 	if err != nil {
-		return fmt.Errorf("cdp: marshal queue ids: %w", err)
+		return err
 	}
-	js, _ := json.Marshal(string(b))
-	p.dispatch(fmt.Sprintf(`window.vibezSetQueue && window.vibezSetQueue(%s)`, js))
+	p.dispatch(expr)
 	return nil
 }
 
 func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
-	js, _ := json.Marshal(playlistID)
-	p.dispatch(fmt.Sprintf(`window.vibezSetPlaylist && window.vibezSetPlaylist(%s,%d)`, js, startIdx))
+	expr, err := buildSetPlaylistJS(playlistID, startIdx)
+	if err != nil {
+		return err
+	}
+	p.dispatch(expr)
 	return nil
 }
 
 func (p *Player) AppendQueue(ids []string) error {
-	b, err := json.Marshal(ids)
+	expr, err := buildAppendQueueJS(ids)
 	if err != nil {
-		return fmt.Errorf("cdp: marshal append ids: %w", err)
+		return err
 	}
-	js, _ := json.Marshal(string(b))
-	p.dispatch(fmt.Sprintf(`window.vibezAppendQueue && window.vibezAppendQueue(%s)`, js))
+	p.dispatch(expr)
 	return nil
 }
 
