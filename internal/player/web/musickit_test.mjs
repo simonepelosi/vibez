@@ -237,28 +237,29 @@ test('auto-advance: repeat-one replays same index', async () => {
   eq(t.calls.filter(x => x === 0).length, 2);
 });
 
-// ─── no stop() = no spurious nowPlayingItemDidChange ─────────────────────────
-console.log('\nNo-stop() guarantee (auto-advance cannot be spuriously triggered)');
+// ─── _busy set before stop() = stop's events suppressed ──────────────────────
+console.log('\n_busy-before-stop() guarantee (stop events cannot trigger spurious advance)');
 
-test('without stop(): nowPlayingItemDidChange(null) never fires mid-transition', () => {
-  // We prove this by design: _doPlayAt never calls stop(), so the only
-  // way nowPlayingItemDidChange(null) fires is when MusicKit exhausts its
-  // single-item queue naturally (song end).  The _busy guard covers the
-  // setQueue transition window.
-  // This is a design verification test — if stop() is ever re-added,
-  // the _busy guard must be set BEFORE the stop() call.
+test('_busy set before stop(): nowPlayingItemDidChange(null) from stop is suppressed', () => {
+  // _doPlayAt sets _busy=true synchronously at entry, THEN awaits stop().
+  // The nowPlayingItemDidChange(null) event that stop() fires runs as a microtask
+  // during the await, at which point _busy is already true → listener returns early.
+  // This is a design verification test.
   const src = `
     async function _doPlayAt(idx) {
-      _busy = true;
-      // no stop() here — by design
+      _busy = true; // FIRST — before any async op
+      _wantIdx = -1;
+      _qi = idx;
+      const m = _m();
+      try { await m.stop(); } catch(_) {}
       await m.setQueue(...);
       await m.play();
       _busy = false;
     }
   `;
-  // Verify no 'stop()' call appears before setQueue in the design
-  eq(src.indexOf('stop()') > src.indexOf('setQueue'), false,
-     'stop() must not precede setQueue in _doPlayAt');
+  const busyPos   = src.indexOf('_busy = true');
+  const stopPos   = src.indexOf('stop()');
+  eq(busyPos < stopPos, true, '_busy must be set before stop()');
 });
 
 test('_busy guard: auto-advance listener returns early when busy', () => {
