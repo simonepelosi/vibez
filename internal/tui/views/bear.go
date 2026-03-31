@@ -1,22 +1,33 @@
 package views
 
+// Animated bear mascot.
+// Two animation modes selected by the caller:
+//   playing=false → sleeping bear (z's floating up, slow cycle)
+//   playing=true  → dancing bear (♪ ♫ notes, faster cycle)
+
 import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-// BearLines is the number of lines RenderBear returns (always 3:
-// note-or-blank / bear / note-or-blank).
+// BearLines is the number of lines RenderBear always returns.
 const BearLines = 3
 
 type bearFrame struct {
-	above string // note above the bear (empty → blank line)
+	above string // annotation above the bear (empty → blank line)
 	expr  string // bear kaomoji
-	below string // note below the bear (empty → blank line)
+	below string // annotation below the bear (empty → blank line)
 }
 
-var bearFrames = []bearFrame{
+var sleepFrames = []bearFrame{
+	{above: "z", expr: "ʕ-ᴥ-ʔ"},
+	{expr: "ʕ˘ᴥ˘ʔ"},
+	{above: "zZ", expr: "ʕ-ᴥ-ʔ"},
+	{above: "ZZZ", expr: "ʕ˘ᴥ˘ʔ"},
+}
+
+var danceFrames = []bearFrame{
 	{above: "♪", expr: "ʕ·ᴥ·ʔ"},
 	{expr: "ʕ•̀ω•́ʔ✧", below: "♫"},
 	{above: "♫", expr: "ʕง•ᴥ•ʔง"},
@@ -25,24 +36,33 @@ var bearFrames = []bearFrame{
 }
 
 var (
-	bearStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A265"))
-	noteStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5C07B"))
+	bearStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A265"))
+	noteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5C07B"))
+	sleepStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Faint(true)
 )
 
-// RenderBear returns exactly BearLines lines of centred animated bear art.
-// step is the model's glowStep (ticks at ~80 ms); frame advances every
-// 6 ticks (≈480 ms) for a gentle, not frantic, animation.
-func RenderBear(step, width int) string {
-	f := bearFrames[(step/6)%len(bearFrames)]
+// RenderBear returns exactly BearLines centred lines.
+// playing=false → sleeping bear (slow z-cycle); playing=true → dancing bear.
+func RenderBear(step int, playing bool, width int) string {
+	var f bearFrame
+	var annot lipgloss.Style
+
+	if playing {
+		f = danceFrames[(step/6)%len(danceFrames)]
+		annot = noteStyle
+	} else {
+		f = sleepFrames[(step/12)%len(sleepFrames)] // slower: ≈960 ms/frame
+		annot = sleepStyle
+	}
 
 	above := ""
 	if f.above != "" {
-		above = centerLine(noteStyle.Render(f.above), width)
+		above = centerLine(annot.Render(f.above), width)
 	}
 	bear := centerLine(bearStyle.Render(f.expr), width)
 	below := ""
 	if f.below != "" {
-		below = centerLine(noteStyle.Render(f.below), width)
+		below = centerLine(annot.Render(f.below), width)
 	}
 
 	return strings.Join([]string{above, bear, below}, "\n")

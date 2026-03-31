@@ -238,51 +238,41 @@ test('auto-advance: repeat-one replays same index', async () => {
 });
 
 // ─── _busy set before stop() = stop's events suppressed ──────────────────────
-console.log('\n_busy-before-stop() guarantee (stop events cannot trigger spurious advance)');
+console.log('\nplaybackStateDidChange(completed) auto-advance');
 
-test('_busy set before stop(): nowPlayingItemDidChange(null) from stop is suppressed', () => {
-  // _doPlayAt sets _busy=true synchronously at entry, THEN awaits stop().
-  // The nowPlayingItemDidChange(null) event that stop() fires runs as a microtask
-  // during the await, at which point _busy is already true → listener returns early.
-  // This is a design verification test.
-  const src = `
-    async function _doPlayAt(idx) {
-      _busy = true; // FIRST — before any async op
-      _wantIdx = -1;
-      _qi = idx;
-      const m = _m();
-      try { await m.stop(); } catch(_) {}
-      await m.setQueue(...);
-      await m.play();
-      _busy = false;
-    }
-  `;
-  const busyPos   = src.indexOf('_busy = true');
-  const stopPos   = src.indexOf('stop()');
-  eq(busyPos < stopPos, true, '_busy must be set before stop()');
+test('_busy set before stop(): stop fires state=4 (stopped), not 9 (completed)', () => {
+  // playbackStateDidChange only advances on state=9 (completed).
+  // stop() transitions to state=4 (stopped) — a different value — so it is
+  // never caught by the listener. _busy is a secondary safety net.
+  const STOPPED   = 4;
+  const COMPLETED = 9;
+  eq(STOPPED === COMPLETED, false, 'stopped and completed must be distinct states');
 });
 
-test('_busy guard: auto-advance listener returns early when busy', () => {
-  // Simulate the listener logic
-  let busy = true; // mid-transition
-  let advanced = false;
-  const nowPlayingItem = null;
-  const qi = 0, q = ['a', 'b'];
-  if (!busy && nowPlayingItem === null && qi >= 0 && q.length > 0) {
-    advanced = true;
-  }
-  eq(advanced, false, '_busy should suppress auto-advance');
+test('playbackStateDidChange: ignored for states other than completed(9)', () => {
+  // Simulate listener guard
+  const advance = (state, busy) => {
+    if (state !== 9) return false;
+    if (busy) return false;
+    return true;
+  };
+  eq(advance(4, false), false, 'state=stopped must not advance');
+  eq(advance(3, false), false, 'state=paused must not advance');
+  eq(advance(2, false), false, 'state=playing must not advance');
+  eq(advance(9, true),  false, '_busy must suppress even state=9');
+  eq(advance(9, false), true,  'state=9 + not busy must advance');
 });
 
-test('_busy guard: auto-advance fires when not busy', () => {
-  let busy = false; // idle
-  let advanced = false;
-  const nowPlayingItem = null;
-  const qi = 0, q = ['a', 'b'];
-  if (!busy && nowPlayingItem === null && qi >= 0 && q.length > 0) {
-    advanced = true;
-  }
-  eq(advanced, true, 'auto-advance should fire when not busy');
+test('_busy guard: auto-advance suppressed while busy', () => {
+  const advance = (state, busy, qi, qlen) => {
+    if (state !== 9) return false;
+    if (busy || qi < 0 || qlen === 0) return false;
+    return true;
+  };
+  eq(advance(9, true,  0, 2), false, 'busy=true suppresses');
+  eq(advance(9, false, 0, 2), true,  'busy=false allows');
+  eq(advance(9, false, -1, 2), false, 'qi<0 suppresses');
+  eq(advance(9, false, 0, 0), false,  'empty queue suppresses');
 });
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

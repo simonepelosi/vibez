@@ -214,12 +214,14 @@
         }
 
         // Auto-advance when a track ends naturally.
-        // stop() fires nowPlayingItemDidChange(null), but _busy is true at that point
-        // so the guard below suppresses it.  Only fires for real end-of-track events.
-        music.addEventListener('nowPlayingItemDidChange', () => {
-          if (_busy) return; // mid-transition — ignore
+        // Uses playbackStateDidChange(completed=9) instead of nowPlayingItemDidChange:
+        //   stop() → state=stopped(4)  — NOT caught here → no spurious advance
+        //   track ends naturally → state=ended(5) → state=completed(9) — caught here
+        // _busy covers any edge-case fires during our own transitions.
+        music.addEventListener('playbackStateDidChange', () => {
           const m = _m();
-          if (m.nowPlayingItem !== null || _qi < 0 || _q.length === 0) return;
+          if (m.playbackState !== 9 /* completed */) return;
+          if (_busy || _qi < 0 || _q.length === 0) return;
           if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
           const next = _qi + 1;
           if (next < _q.length)                    { _playAt(next); return; }
