@@ -118,6 +118,8 @@
             currentTime:   m.currentPlaybackTime,
             duration:      m.currentPlaybackDuration,
             volume:        m.volume,
+            repeatMode:    m.repeatMode  || 0,
+            shuffleMode:   m.shuffleMode || 0,
             nowPlaying: item ? {
               id:         item.id,
               title:      item.attributes.name,
@@ -143,6 +145,8 @@
         window.vibezPrev  = async () => { try { await _m().skipToPreviousItem(); } catch(e) { goError('prev: '+errName(e)).catch(()=>{}); } };
         window.vibezSeek      = (t) => _m().seekToTime(t);
         window.vibezSetVolume = (v) => { _m().volume = v; };
+        window.vibezSetRepeat  = (mode) => { _m().repeatMode  = mode; };
+        window.vibezSetShuffle = (on)   => { _m().shuffleMode = on ? 1 : 0; };
 
         // Wire OS media keys / MPRIS actions back to MusicKit.
         navigator.mediaSession.setActionHandler('play',          () => _m().play());

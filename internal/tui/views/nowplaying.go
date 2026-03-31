@@ -51,7 +51,7 @@ func (m *NowPlayingModel) View() string {
 		// Playing: title + artist + album + blank + status = 5 lines.
 		topPad := max(0, (m.height-5)/2)
 		sb.WriteString(strings.Repeat("\n", topPad))
-		sb.WriteString(centerLine(renderGlowTitle(t.Title, m.glowStep), m.width))
+		sb.WriteString(centerLine(RenderGlowTitle(t.Title, m.glowStep), m.width))
 	} else {
 		// Paused: title + artist + album + blank + status = 5 lines.
 		topPad := max(0, (m.height-5)/2)
@@ -79,10 +79,10 @@ func (m *NowPlayingModel) View() string {
 	return sb.String()
 }
 
-// renderGlowTitle renders each rune with a colour based on how far the
+// RenderGlowTitle renders each rune with a colour based on how far the
 // "bright spot" has swept past it. The spot starts before the first char,
 // sweeps right, exits after the last char, then the cycle restarts.
-func renderGlowTitle(title string, glowStep int) string {
+func RenderGlowTitle(title string, glowStep int) string {
 	palette := styles.GlowPalette
 	pLen := len(palette)
 	runes := []rune(title)

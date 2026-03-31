@@ -70,12 +70,10 @@ func TestNewSearch_NilProvider(t *testing.T) {
 
 func TestSearch_Focus_And_Focused(t *testing.T) {
 	s := NewSearch(&mockProvider{})
-	if s.Focused() {
-		t.Error("should not be focused initially")
-	}
+	// Focus/Focused are no-ops; input is managed by the model
 	s.Focus()
-	if !s.Focused() {
-		t.Error("should be focused after Focus()")
+	if s.Focused() {
+		t.Error("Focused() should always return false (input managed by model)")
 	}
 }
 
@@ -95,9 +93,10 @@ func TestSearch_Init(t *testing.T) {
 func TestSearch_View_NonEmpty(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
+	s.SetState(nil, true, nil) // loading state → non-empty view
 	got := s.View()
 	if got == "" {
-		t.Error("View() should return non-empty string")
+		t.Error("View() should return non-empty string when loading")
 	}
 }
 
@@ -119,13 +118,11 @@ func TestSearch_Update_SearchResultMsg(t *testing.T) {
 func TestSearch_Update_EscBlursInput(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
-	s.Focus()
-	if !s.Focused() {
-		t.Fatal("should be focused before esc")
-	}
+	// Esc is now handled by the model; search model Update ignores key msgs
 	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	// Focused() always returns false in new design
 	if s.Focused() {
-		t.Error("should not be focused after esc")
+		t.Error("Focused() should always return false")
 	}
 }
 
@@ -154,11 +151,9 @@ func TestSearch_ScheduleSearch_Empty(t *testing.T) {
 func TestSearch_Update_TypeWhileFocused(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
-	s.Focus()
-	// Type a character - should trigger scheduleSearch internally
+	// In the new design, typing is handled by the model, not search.
+	// Verify Update handles non-searchResultMsg gracefully (no-op, no panic).
 	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-	if cmd == nil {
-		t.Error("typing while focused should return a cmd")
-	}
+	_ = cmd // cmd may be nil — that is correct in the new design
 	_ = s
 }
