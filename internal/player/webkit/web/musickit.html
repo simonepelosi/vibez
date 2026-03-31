@@ -140,64 +140,20 @@
         // Poll position every second so the TUI timer advances while playing.
         setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
 
-        // ─── Chrome-mode queue tracker + serialized playback ────────────────
-        // We own the queue index (same pattern as GStreamer mode) so MusicKit's
-        // skipToNextItem() unreliability never bites us.
-        //
-        // All MusicKit state changes go through _withLock():
-        //   • promise mutex     → no concurrent stop/setQueue/play calls
-        //   • sequence number   → rapid next/prev: only the last press executes,
-        //                         stale ops self-cancel after acquiring the lock
-        //   • _transitioning    → stop() fires nowPlayingItemDidChange(null) which
-        //                         would otherwise trigger a spurious auto-advance
-        //                         mid-transition; this flag suppresses it
+        // ─── Chrome-mode queue tracker ───────────────────────────────────────
+        // Owns _q[] and _qi like the GStreamer mode.  All track changes go
+        // through _doPlayAt() which calls setQueue+play WITHOUT a prior stop():
+        //   • no stop()  → nowPlayingItemDidChange(null) never fires mid-transition,
+        //                   eliminating the spurious auto-advance that caused the
+        //                   "skips to last track / player freezes" bug
+        //   • _busy flag → no concurrent setQueue/play calls (drops duplicate reqs)
+        //   • _wantIdx   → latest index requested while busy; honoured after current
+        //                   op completes so rapid next/prev lands on the right track
 
-        let _q             = [];               // resolved MediaItem objects
-        let _qi            = -1;               // current index (-1 = nothing loaded)
-        let _playSeq       = 0;                // bumped on every new play intent
-        let _opLock        = Promise.resolve();// one MusicKit op at a time
-        let _transitioning = false;            // true inside _playAt; suppresses auto-advance
-
-        function _withLock(seq, fn) {
-          _opLock = _opLock
-            .then(() => (seq === _playSeq ? fn() : undefined))
-            .catch(e => {
-              _transitioning = false; // always reset on error
-              if (e?.name !== 'CONTENT_EQUIVALENT') goError('player: '+errName(e)).catch(()=>{});
-            });
-          return _opLock;
-        }
-
-        function _playAt(idx) {
-          if (idx < 0 || idx >= _q.length) return;
-          _qi = idx;
-          const seq  = ++_playSeq;
-          const item = _q[idx];
-          return _withLock(seq, async () => {
-            _transitioning = true;
-            const m = _m();
-            try { await m.stop(); }      catch(_) {}
-            if (seq !== _playSeq) { _transitioning = false; return; }
-            try { await m.setQueue({ items: [item] }); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
-            if (seq !== _playSeq) { _transitioning = false; return; }
-            try { await m.play(); }      catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
-            _transitioning = false;
-          });
-        }
-
-        // Auto-advance: when MusicKit runs out of items (item → null after the
-        // track finishes naturally) advance our index per the repeat mode.
-        // Suppressed while _playAt is executing — stop() also fires this event.
-        music.addEventListener('nowPlayingItemDidChange', () => {
-          const m = _m();
-          if (_transitioning) return;
-          if (m.nowPlayingItem !== null || _qi < 0 || _q.length === 0) return;
-          if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
-          const next = _qi + 1;
-          if (next < _q.length)                   { _playAt(next); return; }
-          if (m.repeatMode === 2 /* repeat-all */) { _playAt(0); }
-          // else: end of queue — stay stopped
-        });
+        let _q       = [];   // resolved MediaItem objects
+        let _qi      = -1;   // current index (-1 = nothing loaded)
+        let _busy    = false;// true while setQueue/play is running
+        let _wantIdx = -1;   // last index requested while _busy; -1 = none pending
 
         // Resolve a mixed array of catalog + library IDs → MediaItem objects.
         async function _resolveItems(allIds) {
@@ -220,9 +176,59 @@
           return items;
         }
 
+        // Actually play the item at idx.  Never called recursively by itself;
+        // pending requests are drained via _wantIdx after each op completes.
+        async function _doPlayAt(idx) {
+          _busy    = true;
+          _wantIdx = -1;
+          _qi      = idx;
+          const m  = _m();
+          // No stop() — setQueue() handles the transition internally and avoids
+          // firing nowPlayingItemDidChange(null) which would trigger auto-advance.
+          try {
+            await m.setQueue({ items: [_q[idx]] });
+          } catch(e) {
+            if (e?.name !== 'CONTENT_EQUIVALENT') {
+              goError('setQueue: '+errName(e)).catch(()=>{});
+              _busy = false;
+              return;
+            }
+          }
+          try { await m.play(); } catch(e) {
+            if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
+          }
+          _busy = false;
+          // Drain pending request (latest index requested while we were busy).
+          if (_wantIdx >= 0 && _wantIdx < _q.length) {
+            const pending = _wantIdx;
+            _wantIdx = -1;
+            _doPlayAt(pending);
+          }
+        }
+
+        function _playAt(idx) {
+          if (idx < 0 || idx >= _q.length) return;
+          if (_busy) { _wantIdx = idx; return; } // store; will run after current op
+          _doPlayAt(idx);
+        }
+
+        // Auto-advance when a track ends naturally.
+        // Since we never call stop(), nowPlayingItemDidChange(null) only fires
+        // when MusicKit exhausts its single-item queue after natural playback end.
+        music.addEventListener('nowPlayingItemDidChange', () => {
+          if (_busy) return; // mid-transition — ignore
+          const m = _m();
+          if (m.nowPlayingItem !== null || _qi < 0 || _q.length === 0) return;
+          if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
+          const next = _qi + 1;
+          if (next < _q.length)                    { _playAt(next); return; }
+          if (m.repeatMode === 2 /* repeat-all */)  { _playAt(0); }
+          // else: end of queue — stay stopped cleanly
+        });
+
         window.vibezPlay = async () => {
           const m = _m();
-          // Restart from _qi if nothing is currently loaded (e.g. after queue ended).
+          // Restart from _qi if nothing is loaded (queue ended or fresh start).
           if (!m.nowPlayingItem && _qi >= 0 && _q.length > 0) { _playAt(_qi); return; }
           try { await m.play(); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); }
         };
@@ -278,7 +284,7 @@
             if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
             _q = _q.concat(items);
             if (_qi < 0) _playAt(0); // nothing was playing — start now
-            // else: items are in the queue; auto-advance will play them in order
+            // else: items enqueued; auto-advance (or next/prev) will pick them up
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
         };
 
