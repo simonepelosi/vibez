@@ -285,23 +285,15 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 			}
 		}
 		return nil
-	case "up", "k":
+	case "up":
 		if m.searchCursor > 0 {
 			m.searchCursor--
 		}
 		return nil
-	case "down", "j":
+	case "down":
 		results := m.search.Results()
 		if m.searchCursor < len(results)-1 {
 			m.searchCursor++
-		}
-		return nil
-	case "a":
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results) {
-			t := results[m.searchCursor]
-			m.queueIDs = append(m.queueIDs, views.PlaybackID(t))
-			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 		return nil
 	case "backspace":
