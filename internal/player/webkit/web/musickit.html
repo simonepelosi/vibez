@@ -142,17 +142,20 @@
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls stop→setQueue→play:
-        //   • _busy set BEFORE stop() → nowPlayingItemDidChange(null) that stop()
-        //     fires is suppressed by "if (_busy) return" in the listener, eliminating
-        //     the spurious auto-advance that caused "skips / player freezes"
-        //   • _wantIdx   → latest index requested while busy; honoured after current
-        //                   op completes so rapid next/prev lands on the right track
+        // through _doPlayAt() which calls setQueue→play (NO explicit stop):
+        //   • setQueue() handles the song transition internally — calling stop()
+        //     first disrupts the EME/DRM session and causes play() to hang on
+        //     subsequent tracks ("bear goes to sleep and stays there")
+        //   • On a fresh MusicKit instance (state=none) play() throws "without a
+        //     previous stop/pause" — we catch that error, call stop(), then retry
+        //   • _busy flag  → no concurrent setQueue/play calls
+        //   • _wantIdx    → latest index requested while busy; drained after each
+        //                    op so rapid next/prev always lands on the right track
 
-        let _q       = [];   // resolved MediaItem objects
-        let _qi      = -1;   // current index (-1 = nothing loaded)
-        let _busy    = false;// true while setQueue/play is running
-        let _wantIdx = -1;   // last index requested while _busy; -1 = none pending
+        let _q       = [];    // resolved MediaItem objects
+        let _qi      = -1;    // current index (-1 = nothing loaded)
+        let _busy    = false; // true while setQueue/play is running
+        let _wantIdx = -1;    // last index requested while _busy; -1 = none pending
 
         // Resolve a mixed array of catalog + library IDs → MediaItem objects.
         async function _resolveItems(allIds) {
@@ -178,16 +181,18 @@
         // Actually play the item at idx.  Never called recursively by itself;
         // pending requests are drained via _wantIdx after each op completes.
         async function _doPlayAt(idx) {
-          _busy    = true; // set FIRST — before any async op, including stop()
+          _busy    = true;
           _wantIdx = -1;
           _qi      = idx;
           const m  = _m();
-          // stop() is required: play() hangs without a prior stop/pause call.
-          // _busy is already true, so the nowPlayingItemDidChange(null) that stop()
-          // fires is suppressed by the "if (_busy) return" guard in the listener.
-          try { await m.stop(); } catch(_) {}
+          const item = _q[idx];
+          // Catalog items: use song ID descriptor (more reliable than raw objects).
+          // Library items: keep raw object (no stable ID-only descriptor).
+          const descriptor = item.id.startsWith('i.')
+            ? { items: [item] }
+            : { songs: [item.id] };
           try {
-            await m.setQueue({ items: [_q[idx]] });
+            await m.setQueue(descriptor);
           } catch(e) {
             if (e?.name !== 'CONTENT_EQUIVALENT') {
               goError('setQueue: '+errName(e)).catch(()=>{});
@@ -195,8 +200,22 @@
               return;
             }
           }
-          try { await m.play(); } catch(e) {
-            if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
+          try {
+            await m.play();
+          } catch(e) {
+            if (e?.name === 'CONTENT_EQUIVALENT') {
+              // already queued/playing — nothing to do
+            } else if (e?.message && /without a previous/i.test(e.message)) {
+              // Fresh MusicKit init — needs an explicit stop before play().
+              // Only happens once at cold start; does NOT disrupt DRM for
+              // already-playing sessions.
+              try { await m.stop(); } catch(_) {}
+              try { await m.play(); } catch(e2) {
+                if (e2?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e2)).catch(()=>{});
+              }
+            } else {
+              goError('play: '+errName(e)).catch(()=>{});
+            }
           }
           _busy = false;
           // Drain pending request (latest index requested while we were busy).
