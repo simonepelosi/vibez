@@ -34,31 +34,39 @@ func (m *NowPlayingModel) Update(_ tea.KeyMsg) {}
 
 func (m *NowPlayingModel) View() string {
 	if m.state == nil || m.state.Track == nil {
-		return ""
+		// Empty state: music note + hint, vertically centered.
+		topPad := max(0, (m.height-3)/2)
+		var sb strings.Builder
+		sb.WriteString(strings.Repeat("\n", topPad))
+		sb.WriteString(centerLine(styles.QueueItemMuted.Render("♪"), m.width))
+		sb.WriteString("\n")
+		sb.WriteString(centerLine(styles.QueueItemMuted.Render("press / to search"), m.width))
+		return sb.String()
 	}
 
 	t := m.state.Track
 	var sb strings.Builder
 
-	// Vertical centering — place content roughly in the middle.
-	topPad := max(0, (m.height-8)/2)
-	sb.WriteString(strings.Repeat("\n", topPad))
-
-	// Track info — title sweeps a bright spot left→right when playing.
-	var renderedTitle string
 	if m.state.Playing {
-		renderedTitle = renderGlowTitle(t.Title, m.glowStep)
+		// Playing: glow bar + blank + title + artist + album + blank + status = 7 lines.
+		topPad := max(0, (m.height-7)/2)
+		sb.WriteString(strings.Repeat("\n", topPad))
+		sb.WriteString(centerLine(renderGlowBar(m.glowStep), m.width))
+		sb.WriteString("\n\n")
+		sb.WriteString(centerLine(renderGlowTitle(t.Title, m.glowStep), m.width))
 	} else {
-		renderedTitle = styles.NowPlayingTitle.Render(t.Title)
+		// Paused: title + artist + album + blank + status = 5 lines.
+		topPad := max(0, (m.height-5)/2)
+		sb.WriteString(strings.Repeat("\n", topPad))
+		sb.WriteString(centerLine(styles.NowPlayingTitle.Render(t.Title), m.width))
 	}
-	sb.WriteString(centerLine(renderedTitle, m.width))
+
 	sb.WriteString("\n")
 	sb.WriteString(centerLine(styles.NowPlayingArtist.Render(t.Artist), m.width))
 	sb.WriteString("\n")
 	sb.WriteString(centerLine(styles.NowPlayingAlbum.Render(t.Album), m.width))
 	sb.WriteString("\n\n")
 
-	// Status + time — the only playback indicator.
 	icon := "⏸"
 	statusStyle := styles.Paused
 	if m.state.Playing {
@@ -70,6 +78,22 @@ func (m *NowPlayingModel) View() string {
 	status := statusStyle.Render(fmt.Sprintf("%s  %s / %s", icon, elapsed, total))
 	sb.WriteString(centerLine(status, m.width))
 
+	return sb.String()
+}
+
+// renderGlowBar renders a 12-block gradient bar with the brightest block at
+// the position that cycles with glowStep.
+func renderGlowBar(glowStep int) string {
+	const barLen = 12
+	palette := styles.GlowPalette
+	pLen := len(palette)
+	center := glowStep % barLen
+	var sb strings.Builder
+	for i := range barLen {
+		dist := max(i-center, center-i)
+		idx := max(0, pLen-1-dist)
+		sb.WriteString(lipgloss.NewStyle().Foreground(palette[idx]).Render("█"))
+	}
 	return sb.String()
 }
 
@@ -109,7 +133,7 @@ func FormatDuration(d time.Duration) string {
 }
 
 func centerLine(s string, width int) string {
-	sw := lipglossWidth(s)
+	sw := lipgloss.Width(s)
 	pad := max(0, (width-sw)/2)
 	return strings.Repeat(" ", pad) + s
 }

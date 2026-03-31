@@ -3,9 +3,9 @@ package views
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,7 +27,8 @@ type searchResultMsg struct {
 type SearchModel struct {
 	provider      provider.Provider
 	input         textinput.Model
-	list          list.Model
+	cursor        int
+	results       []provider.Track
 	lastQuery     string
 	debounceTimer *time.Timer
 	loading       bool
@@ -41,21 +42,12 @@ func NewSearch(prov provider.Provider) *SearchModel {
 	ti.Placeholder = "Search tracks, albums, playlists…"
 	ti.CharLimit = 200
 	ti.Prompt = "/ "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(styles.ColorPrimary)
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(styles.ColorAccent)
 	ti.TextStyle = lipgloss.NewStyle().Foreground(styles.ColorFg)
-
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(styles.ColorPrimary)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(styles.ColorSubtle)
-
-	l := list.New(nil, delegate, 0, 0)
-	l.SetShowTitle(false)
-	l.SetFilteringEnabled(false)
 
 	return &SearchModel{
 		provider: prov,
 		input:    ti,
-		list:     l,
 	}
 }
 
@@ -74,8 +66,7 @@ func (m *SearchModel) Focused() bool {
 func (m *SearchModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	m.input.Width = w - 4
-	m.list.SetSize(w, h-3)
+	m.input.Width = max(0, w-4)
 }
 
 func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
@@ -87,7 +78,8 @@ func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
 		} else {
 			m.err = nil
 			if msg.result != nil {
-				m.list.SetItems(searchResultItems(msg.result))
+				m.results = searchResultItems(msg.result)
+				m.cursor = 0
 			}
 		}
 		return m, nil
@@ -98,16 +90,21 @@ func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
 			m.input.Blur()
 			return m, nil
 		case "enter":
-			if !m.input.Focused() {
-				// User pressed Enter on a search result — play it.
-				if item, ok := m.list.SelectedItem().(searchTrackItem); ok {
-					return m, func() tea.Msg {
-						return PlayTracksMsg{IDs: []string{item.t.ID}}
-					}
+			if !m.input.Focused() && len(m.results) > 0 {
+				track := m.results[m.cursor]
+				return m, func() tea.Msg {
+					return PlayTracksMsg{IDs: []string{track.ID}}
 				}
-				var cmd tea.Cmd
-				m.list, cmd = m.list.Update(msg)
-				return m, cmd
+			}
+		case "up", "k":
+			if !m.input.Focused() {
+				m.cursor = max(0, m.cursor-1)
+				return m, nil
+			}
+		case "down", "j":
+			if !m.input.Focused() && len(m.results) > 0 {
+				m.cursor = min(len(m.results)-1, m.cursor+1)
+				return m, nil
 			}
 		}
 
@@ -123,10 +120,6 @@ func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
 			}
 			return m, cmd
 		}
-
-		var cmd tea.Cmd
-		m.list, cmd = m.list.Update(msg)
-		return m, cmd
 	}
 
 	return m, nil
@@ -149,28 +142,45 @@ func (m *SearchModel) scheduleSearch(query string) tea.Cmd {
 }
 
 func (m *SearchModel) View() string {
-	inputBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(styles.ColorPrimary).
-		Padding(0, 1).
-		Width(m.width - 2).
-		Render(m.input.View())
+	var sb strings.Builder
 
-	var body string
+	// Input line with underline separator — no box, just a thin rule.
+	sb.WriteString("  ")
+	sb.WriteString(m.input.View())
+	sb.WriteString("\n")
+	sb.WriteString(styles.Separator.Render(strings.Repeat("─", max(0, m.width))))
+	sb.WriteString("\n\n")
+
 	switch {
 	case m.err != nil:
-		body = styles.ErrorStyle.Render("⚠  " + m.err.Error())
+		sb.WriteString(styles.ErrorStyle.Render("⚠  " + m.err.Error()))
 	case m.loading:
-		body = styles.QueueItemMuted.Render("  searching…")
+		sb.WriteString(styles.QueueItemMuted.Render("  searching…"))
 	default:
-		body = m.list.View()
+		sb.WriteString(m.renderResults())
 	}
 
-	hint := styles.KeyHint.Render("esc · arrows · enter to play")
-	return inputBox + "\n" + hint + "\n" + body
+	return sb.String()
 }
 
-// --- list.Item adapters for search results ---
+func (m *SearchModel) renderResults() string {
+	if len(m.results) == 0 {
+		return ""
+	}
+	selected := lipgloss.NewStyle().Foreground(styles.ColorGlow5).Bold(true)
+	var sb strings.Builder
+	for i, t := range m.results {
+		if i == m.cursor {
+			sb.WriteString(selected.Render("  ● "+t.Title) + "\n")
+		} else {
+			sb.WriteString(styles.QueueItem.Render("    "+t.Title) + "\n")
+		}
+		sb.WriteString(styles.QueueItemMuted.Render("    "+t.Artist+" — "+t.Album) + "\n\n")
+	}
+	return sb.String()
+}
+
+// --- searchTrackItem kept for test compatibility ---
 
 type searchTrackItem struct{ t provider.Track }
 
@@ -182,10 +192,6 @@ func (i searchTrackItem) Description() string {
 }
 func (i searchTrackItem) FilterValue() string { return i.t.Title }
 
-func searchResultItems(r *provider.SearchResult) []list.Item {
-	var items []list.Item
-	for _, t := range r.Tracks {
-		items = append(items, searchTrackItem{t})
-	}
-	return items
+func searchResultItems(r *provider.SearchResult) []provider.Track {
+	return r.Tracks
 }

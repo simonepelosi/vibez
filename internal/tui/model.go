@@ -24,7 +24,7 @@ const (
 	viewSearch
 )
 
-const sidebarWidth = 16
+const sidebarWidth = 14
 
 type sidebarEntry struct {
 	id    viewID
@@ -389,7 +389,7 @@ func (m *Model) renderSeparator() string {
 }
 
 // renderSidebar builds the sidebar lines, one per navigation entry, padded to
-// sidebarWidth. Extra lines (when contentHeight > len(sidebarNav)) are blank.
+// sidebarWidth. Active item shows a ● dot; inactive items have plain indent.
 func (m *Model) renderSidebar(h int) []string {
 	lines := make([]string, h)
 	blank := strings.Repeat(" ", sidebarWidth)
@@ -397,16 +397,16 @@ func (m *Model) renderSidebar(h int) []string {
 	for i := range h {
 		if i < len(sidebarNav) {
 			entry := sidebarNav[i]
-			prefix := "   "
+			var text string
 			if entry.id == m.activeView {
-				prefix = " ▶ "
-			}
-			text := prefix + entry.label
-			pad := max(0, sidebarWidth-lipgloss.Width(text))
-			text += strings.Repeat(" ", pad)
-			if entry.id == m.activeView {
+				text = "  ● " + entry.label
+				pad := max(0, sidebarWidth-lipgloss.Width(text))
+				text += strings.Repeat(" ", pad)
 				lines[i] = styles.SidebarActive.Render(text)
 			} else {
+				text = "    " + entry.label
+				pad := max(0, sidebarWidth-lipgloss.Width(text))
+				text += strings.Repeat(" ", pad)
 				lines[i] = styles.SidebarInactive.Render(text)
 			}
 		} else {
@@ -458,20 +458,17 @@ func (m *Model) renderContent() string {
 }
 
 func (m *Model) renderFooter() string {
-	base := "space · n · p · q quit"
-	var extra string
-	switch m.activeView {
-	case viewNowPlaying:
-		extra = "1-4 switch view · / search"
-	case viewSearch:
-		extra = "/ search · enter play · esc back"
-	case viewLibrary:
-		extra = "tab switch tab · enter play · / search"
-	case viewQueue:
-		extra = "1-4 switch view"
+	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
+	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
+	dot := muted.Render(" · ")
+	parts := []string{
+		accent.Render("space") + muted.Render(" play"),
+		accent.Render("n") + muted.Render(" next"),
+		accent.Render("p") + muted.Render(" prev"),
+		accent.Render("/") + muted.Render(" search"),
+		accent.Render("q") + muted.Render(" quit"),
 	}
-	hint := extra + "  " + base
-	return styles.KeyHint.Render(hint)
+	return "  " + strings.Join(parts, dot)
 }
 
 // contentHeight is the number of rows available for the sidebar+content area.
