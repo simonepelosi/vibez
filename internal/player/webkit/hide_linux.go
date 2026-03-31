@@ -6,23 +6,21 @@ package webkit
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 
-// vibez_hide_window makes the GTK window completely invisible:
-//   - hidden before the first GTK paint
-//   - excluded from taskbar and pager
-//   - zero opacity fallback
-//   - off-screen position
-//   - UTILITY hint so window managers ignore it
+// vibez_hide_window makes the GTK window completely invisible.
+// Under Wayland we MUST NOT use gtk_window_move() — positioning a window
+// off-screen is a Wayland protocol violation that triggers a compositor
+// crash. Instead we rely solely on gtk_widget_hide() + zero opacity +
+// UTILITY window hint, which are all valid Wayland operations.
 static void vibez_hide_window(void* ptr) {
     GtkWidget* w = GTK_WIDGET(ptr);
     GtkWindow* win = GTK_WINDOW(ptr);
 
-    gtk_widget_hide(w);
     gtk_window_set_skip_taskbar_hint(win, TRUE);
     gtk_window_set_skip_pager_hint(win, TRUE);
     gtk_window_set_decorated(win, FALSE);
     gtk_window_set_type_hint(win, GDK_WINDOW_TYPE_HINT_UTILITY);
     gtk_widget_set_opacity(w, 0.0);
-    gtk_window_move(win, -32000, -32000);
+    gtk_widget_hide(w);
 }
 
 // vibez_show_window makes the GTK window visible so the user can interact
@@ -44,12 +42,12 @@ static void vibez_show_window(void* ptr) {
 
 // vibez_on_map_cb is connected to the GtkWindow "map" signal. It immediately
 // re-hides the window if its opacity is 0. This prevents the brief flash that
-// occurs because webview.New() calls gtk_widget_show_all() internally before
-// we get a chance to hide the window.
+// occurs because webview.New() calls gtk_widget_show_all() internally.
+// NOTE: do NOT call gtk_window_move() here — off-screen positioning is a
+// Wayland protocol violation that crashes the compositor.
 static void vibez_on_map_cb(GtkWidget* w, gpointer data) {
     if (gtk_widget_get_opacity(w) < 0.1) {
         gtk_widget_hide(w);
-        gtk_window_move(GTK_WINDOW(w), -32000, -32000);
     }
 }
 
