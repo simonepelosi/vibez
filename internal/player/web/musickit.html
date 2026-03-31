@@ -142,11 +142,11 @@
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls pause→setQueue→play:
-        //   • pause() stops current audio without clearing the EME/DRM session;
-        //     play() after setQueue() then starts the NEW queue's first item
-        //     instead of resuming the old song (which happens if player stays
-        //     in "playing" state when setQueue is called)
+        // through _doPlayAt() which calls [pause]→setQueue→play:
+        //   • pause() ONLY when already playing/paused (state 2/3) — stops audio
+        //     without clearing EME/DRM; play() then starts the NEW queue item
+        //   • pause() SKIPPED on cold start (state=none): calling it there leaves
+        //     MusicKit in a broken idle state where play() silently does nothing
         //   • stop() is used only as a one-time cold-start fallback when play()
         //     throws "without a previous stop/pause" (fresh state=none)
         //   • _busy flag  → no concurrent setQueue/play calls
@@ -187,19 +187,17 @@
           _qi      = idx;
           const m  = _m();
           const item = _q[idx];
-          // pause() before setQueue(): stops the current audio without clearing
-          // the EME/DRM session (unlike stop()).  When the player is paused,
-          // play() after setQueue() starts the NEW queue's first item rather
-          // than resuming the old song.  On a fresh player (state=none) pause()
-          // throws — we swallow it and handle below.
-          try { await m.pause(); } catch(_) {}
-          // Catalog items: use song ID descriptor.
-          // Library items: keep raw object (no stable ID-only descriptor).
-          const descriptor = item.id.startsWith('i.')
-            ? { items: [item] }
-            : { songs: [item.id] };
+          // pause() ONLY when something is already playing/paused (state 2 or 3).
+          // This stops the current audio without clearing the EME/DRM session.
+          // Do NOT call pause() on a fresh player (state=none/0): it leaves the
+          // instance in a broken idle state where play() silently does nothing.
+          const s = m.playbackState;
+          if (s === 2 /* playing */ || s === 3 /* paused */) {
+            try { await m.pause(); } catch(_) {}
+          }
+          // Use raw item for all: already resolved, no extra network hop.
           try {
-            await m.setQueue(descriptor);
+            await m.setQueue({ items: [item] });
           } catch(e) {
             if (e?.name !== 'CONTENT_EQUIVALENT') {
               goError('setQueue: '+errName(e)).catch(()=>{});
@@ -213,8 +211,8 @@
             if (e?.name === 'CONTENT_EQUIVALENT') {
               // already queued/playing — nothing to do
             } else if (e?.message && /without a previous/i.test(e.message)) {
-              // Fresh init: pause() on state=none didn't satisfy the requirement.
-              // stop() does — call it once and retry.
+              // Cold start (state was none/stopped — no prior pause counted).
+              // stop() satisfies the requirement; retry once.
               try { await m.stop(); } catch(_) {}
               try { await m.play(); } catch(e2) {
                 if (e2?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e2)).catch(()=>{});
