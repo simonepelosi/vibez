@@ -142,13 +142,12 @@
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls [pause]→setQueue→play:
-        //   • pause() ONLY when already playing/paused (state 2/3) — stops audio
-        //     without clearing EME/DRM; play() then starts the NEW queue item
-        //   • pause() SKIPPED on cold start (state=none): calling it there leaves
-        //     MusicKit in a broken idle state where play() silently does nothing
-        //   • stop() is used only as a one-time cold-start fallback when play()
-        //     throws "without a previous stop/pause" (fresh state=none)
+        // through _doPlayAt() which calls [pause]→setQueue→[stop]→play:
+        //   • pause() if state=playing/paused — stops audio without clearing DRM
+        //   • setQueue() loads the new item (may reset state to none)
+        //   • stop() with 500 ms timeout if state is not already paused/stopped
+        //     after setQueue() — normalises to stopped(4) so play() works;
+        //     timeout prevents hanging if DRM cleanup takes too long
         //   • _busy flag  → no concurrent setQueue/play calls
         //   • _wantIdx    → latest index requested while busy; drained after each
         //                    op so rapid next/prev always lands on the right track
@@ -187,17 +186,18 @@
           _qi      = idx;
           const m  = _m();
           const item = _q[idx];
-          // pause() ONLY when something is already playing/paused (state 2 or 3).
-          // This stops the current audio without clearing the EME/DRM session.
-          // Do NOT call pause() on a fresh player (state=none/0): it leaves the
-          // instance in a broken idle state where play() silently does nothing.
+          // pause() only when audio is active — stops it cleanly without
+          // clearing the EME/DRM session.  Skipped on cold start (state=none)
+          // because pause() there leaves MusicKit in a broken idle state.
           const s = m.playbackState;
           if (s === 2 /* playing */ || s === 3 /* paused */) {
             try { await m.pause(); } catch(_) {}
           }
-          // Use raw item for all: already resolved, no extra network hop.
+          const descriptor = item.id.startsWith('i.')
+            ? { items: [item] }           // library song — pass full object
+            : { songs: [item.id] };       // catalog song — pass ID only
           try {
-            await m.setQueue({ items: [item] });
+            await m.setQueue(descriptor);
           } catch(e) {
             if (e?.name !== 'CONTENT_EQUIVALENT') {
               goError('setQueue: '+errName(e)).catch(()=>{});
@@ -205,21 +205,20 @@
               return;
             }
           }
+          // setQueue() often resets playbackState to none(0) — play() requires
+          // a prior stop/pause.  Read state NOW and normalise if needed.
+          // Use a timeout on stop() so we can't block indefinitely if DRM
+          // cleanup takes too long (the audio was already paused above anyway).
+          if (m.playbackState !== 3 /* paused */ && m.playbackState !== 4 /* stopped */) {
+            await Promise.race([
+              m.stop().catch(() => {}),
+              new Promise(r => setTimeout(r, 500)),
+            ]);
+          }
           try {
             await m.play();
           } catch(e) {
-            if (e?.name === 'CONTENT_EQUIVALENT') {
-              // already queued/playing — nothing to do
-            } else if (e?.message && /without a previous/i.test(e.message)) {
-              // Cold start (state was none/stopped — no prior pause counted).
-              // stop() satisfies the requirement; retry once.
-              try { await m.stop(); } catch(_) {}
-              try { await m.play(); } catch(e2) {
-                if (e2?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e2)).catch(()=>{});
-              }
-            } else {
-              goError('play: '+errName(e)).catch(()=>{});
-            }
+            if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
           }
           _busy = false;
           // Drain pending request (latest index requested while we were busy).

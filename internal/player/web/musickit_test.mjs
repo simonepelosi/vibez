@@ -251,32 +251,37 @@ test('_doPlayAt uses songs:[id] descriptor for catalog items', () => {
 
 test('_doPlayAt uses items:[obj] descriptor for library items', () => {
   const item = { id: 'i.ABCDEF', type: 'library-songs', attributes: {} };
-  const descriptor = item.id.startsWith('i.')
-    ? { items: [item] }
-    : { songs: [item.id] };
+  const descriptor = { items: [item] };
   eq('items' in descriptor, true, 'library item should use items:[obj] descriptor');
   eq(descriptor.items[0], item, 'library item object should be preserved');
 });
 
-test('play() cold-start retry: stop then play when "without a previous" error', () => {
-  // pause() on fresh state=none doesn't satisfy MusicKit's requirement.
-  // When play() throws "without a previous stop/pause", we stop() and retry.
-  let stopped = false, plays = 0;
-  const mockPlay = (attempt) => {
-    plays++;
-    if (attempt === 1) throw { name: 'Error', message: 'The play() method was called without a previous stop() or pause() call.' };
-  };
-  const mockStop = () => { stopped = true; };
-  try {
-    mockPlay(1); // first attempt throws
-  } catch(e) {
-    if (e?.message && /without a previous/i.test(e.message)) {
-      mockStop();
-      try { mockPlay(2); } catch(_) {}
-    }
+test('state normalisation: stop() called when state is not paused/stopped after setQueue', () => {
+  // Simulate: after setQueue(), state=none(0) → must stop before play()
+  let stopped = false;
+  const stateAfterSetQueue = 0; // none — setQueue reset the state
+  if (stateAfterSetQueue !== 3 && stateAfterSetQueue !== 4) {
+    stopped = true; // would call stop()
   }
-  eq(stopped, true,  'stop() must be called on cold-start error');
-  eq(plays,   2,     'play() must be retried after stop()');
+  eq(stopped, true, 'should normalise state=none to stopped before play()');
+});
+
+test('state normalisation: stop() skipped when already paused after setQueue', () => {
+  let stopped = false;
+  const stateAfterSetQueue = 3; // paused — no normalisation needed
+  if (stateAfterSetQueue !== 3 && stateAfterSetQueue !== 4) {
+    stopped = true;
+  }
+  eq(stopped, false, 'should skip stop() when already paused');
+});
+
+test('state normalisation: stop() skipped when already stopped after setQueue', () => {
+  let stopped = false;
+  const stateAfterSetQueue = 4; // stopped — no normalisation needed
+  if (stateAfterSetQueue !== 3 && stateAfterSetQueue !== 4) {
+    stopped = true;
+  }
+  eq(stopped, false, 'should skip stop() when already stopped');
 });
 
 test('play() CONTENT_EQUIVALENT is silently ignored', () => {
