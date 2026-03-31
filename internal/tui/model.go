@@ -629,18 +629,26 @@ func (m *Model) renderNowPlaying() string {
 		)
 	}
 
-	// Title — glow sweep when playing, static italic when paused.
+	// Title — glow sweep when playing, static italic when paused/loading.
 	var titleStr string
-	if m.playerState.Playing {
+	if m.playerState.Playing || m.playerState.Loading {
 		titleStr = views.RenderGlowTitle(t.Title, m.glowStep)
 	} else {
 		titleStr = styles.NowPlayingTitle.Render(t.Title)
 	}
 
-	// Status line: play icon + elapsed/total + repeat/shuffle mode indicators.
-	icon, statusStyle := "⏸", styles.Paused
-	if m.playerState.Playing {
+	// Status icon: pulsing spinner while loading, ▶/⏸ otherwise.
+	var icon string
+	var statusStyle lipgloss.Style
+	switch {
+	case m.playerState.Loading:
+		spinnerFrames := [10]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		icon = spinnerFrames[m.glowStep%len(spinnerFrames)]
+		statusStyle = styles.Playing
+	case m.playerState.Playing:
 		icon, statusStyle = "▶", styles.Playing
+	default:
+		icon, statusStyle = "⏸", styles.Paused
 	}
 	elapsed := views.FormatDuration(m.playerState.Position)
 	total := views.FormatDuration(t.Duration)

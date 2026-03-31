@@ -180,52 +180,56 @@
 
         // Actually play the item at idx.  Never called recursively by itself;
         // pending requests are drained via _wantIdx after each op completes.
+        // try/finally guarantees _busy is always released even on unexpected errors.
         async function _doPlayAt(idx) {
           _busy    = true;
           _wantIdx = -1;
           _qi      = idx;
-          const m  = _m();
-          const item = _q[idx];
-          // pause() only when audio is active — stops it cleanly without
-          // clearing the EME/DRM session.  Skipped on cold start (state=none)
-          // because pause() there leaves MusicKit in a broken idle state.
-          const s = m.playbackState;
-          if (s === 2 /* playing */ || s === 3 /* paused */) {
-            try { await m.pause(); } catch(_) {}
-          }
-          const descriptor = item.id.startsWith('i.')
-            ? { items: [item] }           // library song — pass full object
-            : { songs: [item.id] };       // catalog song — pass ID only
           try {
-            await m.setQueue(descriptor);
-          } catch(e) {
-            if (e?.name !== 'CONTENT_EQUIVALENT') {
-              goError('setQueue: '+errName(e)).catch(()=>{});
-              _busy = false;
-              return;
+            const m    = _m();
+            const item = _q[idx];
+            // pause() only when audio is active — stops it cleanly without
+            // clearing the EME/DRM session.  Skipped on cold start (state=none)
+            // because pause() there leaves MusicKit in a broken idle state.
+            const s = m.playbackState;
+            if (s === 2 /* playing */ || s === 3 /* paused */) {
+              try { await m.pause(); } catch(_) {}
             }
-          }
-          // setQueue() often resets playbackState to none(0) — play() requires
-          // a prior stop/pause.  Read state NOW and normalise if needed.
-          // Use a timeout on stop() so we can't block indefinitely if DRM
-          // cleanup takes too long (the audio was already paused above anyway).
-          if (m.playbackState !== 3 /* paused */ && m.playbackState !== 4 /* stopped */) {
-            await Promise.race([
-              m.stop().catch(() => {}),
-              new Promise(r => setTimeout(r, 500)),
-            ]);
-          }
-          try {
-            await m.play();
+            const descriptor = item.id.startsWith('i.')
+              ? { items: [item] }           // library song — pass full object
+              : { songs: [item.id] };       // catalog song — pass ID only
+            try {
+              await m.setQueue(descriptor);
+            } catch(e) {
+              if (e?.name !== 'CONTENT_EQUIVALENT') {
+                goError('setQueue: '+errName(e)).catch(()=>{});
+                return; // finally block releases _busy
+              }
+            }
+            // setQueue() often resets playbackState to none(0) — play() requires
+            // a prior stop/pause.  Normalise with a 500 ms-capped stop() so we
+            // can't block indefinitely if DRM cleanup takes too long.
+            if (m.playbackState !== 3 /* paused */ && m.playbackState !== 4 /* stopped */) {
+              await Promise.race([
+                m.stop().catch(() => {}),
+                new Promise(r => setTimeout(r, 500)),
+              ]);
+            }
+            try {
+              await m.play();
+            } catch(e) {
+              if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
+            }
           } catch(e) {
-            if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
-          }
-          _busy = false;
-          // Drain pending request (latest index requested while we were busy).
-          if (_wantIdx >= 0 && _wantIdx < _q.length) {
-            const pending = _wantIdx;
-            _wantIdx = -1;
-            _doPlayAt(pending);
+            goError('_doPlayAt unexpected: '+errName(e)).catch(()=>{});
+          } finally {
+            _busy = false;
+            // Drain pending request (latest index requested while we were busy).
+            if (_wantIdx >= 0 && _wantIdx < _q.length) {
+              const pending = _wantIdx;
+              _wantIdx = -1;
+              _doPlayAt(pending);
+            }
           }
         }
 
