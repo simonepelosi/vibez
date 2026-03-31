@@ -25,7 +25,7 @@ const (
 
 var (
 	TitleBar = lipgloss.NewStyle().
-			Bold(true).
+			Italic(true).
 			Foreground(ColorPrimary).
 			PaddingLeft(1).
 			PaddingRight(1)
@@ -40,7 +40,7 @@ var (
 			PaddingRight(1)
 
 	NowPlayingTitle = lipgloss.NewStyle().
-			Bold(true).
+			Italic(true).
 			Foreground(ColorFg)
 
 	NowPlayingArtist = lipgloss.NewStyle().
@@ -50,15 +50,14 @@ var (
 			Foreground(ColorMuted)
 
 	Playing = lipgloss.NewStyle().
-		Foreground(ColorGlow5).
-		Bold(true)
+		Foreground(ColorGlow5)
 
 	Paused = lipgloss.NewStyle().
 		Foreground(ColorMuted)
 
 	Selected = lipgloss.NewStyle().
 			Foreground(ColorPrimary).
-			Bold(true)
+			Italic(true)
 
 	QueueItem = lipgloss.NewStyle().
 			Foreground(ColorFg)
@@ -75,12 +74,11 @@ var (
 		PaddingLeft(1)
 
 	KeyName = lipgloss.NewStyle().
-		Foreground(ColorPrimary).
-		Bold(true)
+		Foreground(ColorAccent)
 
 	ErrorStyle = lipgloss.NewStyle().
 			Foreground(ColorError).
-			Bold(true).
+			Italic(true).
 			PaddingLeft(1)
 
 	ArtworkFrame = lipgloss.NewStyle().
@@ -91,7 +89,6 @@ var (
 
 	TabActive = lipgloss.NewStyle().
 			Foreground(ColorAccent).
-			Bold(true).
 			Underline(true).
 			PaddingLeft(1).
 			PaddingRight(1)
@@ -102,11 +99,11 @@ var (
 			PaddingRight(1)
 
 	Spinner = lipgloss.NewStyle().
-		Foreground(ColorPrimary)
+		Foreground(ColorGlow4)
 
 	SidebarActive = lipgloss.NewStyle().
 			Foreground(ColorGlow5).
-			Bold(true)
+			Italic(true)
 
 	SidebarInactive = lipgloss.NewStyle().
 			Foreground(ColorMuted)
@@ -115,8 +112,7 @@ var (
 			Foreground(ColorMuted)
 
 	Header = lipgloss.NewStyle().
-		Foreground(ColorAccent).
-		Bold(true)
+		Foreground(ColorAccent)
 )
 
 // GlowPalette drives the "now playing" breathing animation, from dark to bright.
