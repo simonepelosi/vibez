@@ -95,6 +95,158 @@ test('order preserved within each partition', () => {
   eq(r.library, ['i.aaa', 'i.bbb']);
 });
 
-// ─── Summary ─────────────────────────────────────────────────────────────────
+// ─── Queue tracker (_q / _qi / _withLock / _playAt simulation) ───────────────
+// We can't test MusicKit calls (need a real browser), but we CAN test the
+// queue index management and the sequence-number cancellation logic in isolation.
+console.log('\nQueue tracker logic');
+
+// Minimal _withLock simulation (no real MusicKit, just the sequencing).
+function makeTracker() {
+  let q = [], qi = -1, seq = 0;
+  let opLock = Promise.resolve();
+  const calls = [];  // log of which indices were actually executed
+
+  function withLock(s, fn) {
+    opLock = opLock.then(() => s === seq ? fn() : undefined).catch(() => {});
+    return opLock;
+  }
+  function playAt(idx) {
+    if (idx < 0 || idx >= q.length) return Promise.resolve();
+    qi = idx;
+    const s = ++seq;
+    return withLock(s, async () => { calls.push(idx); });
+  }
+  return { get q() { return q; }, set q(v) { q = v; },
+           get qi() { return qi; }, set qi(v) { qi = v; },
+           get seq() { return seq; },
+           get calls() { return calls; },
+           playAt,
+           get opLock() { return opLock; } };
+}
+
+test('playAt: single press executes', async () => {
+  const t = makeTracker();
+  t.q = ['a'];
+  await t.playAt(0);
+  eq(t.calls, [0]);
+  eq(t.qi, 0);
+});
+
+test('playAt: rapid presses — only last executes', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b', 'c', 'd'];
+  // Fire 3 presses in rapid succession without awaiting
+  t.playAt(1);
+  t.playAt(2);
+  await t.playAt(3);  // await the last one
+  await t.opLock;     // drain any remaining
+  // Only the last press should have executed
+  eq(t.calls, [3]);
+  eq(t.qi, 3);
+});
+
+test('playAt: sequential presses all execute', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b', 'c'];
+  await t.playAt(0); await t.playAt(1); await t.playAt(2);
+  eq(t.calls, [0, 1, 2]);
+});
+
+test('playAt: out of bounds is no-op', async () => {
+  const t = makeTracker();
+  t.q = ['a'];
+  await t.playAt(-1);
+  await t.playAt(1);
+  eq(t.calls, []);
+  eq(t.qi, -1);
+});
+
+test('vibezNext simulation: advances qi', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b', 'c'];
+  await t.playAt(0);        // start at 0
+  if (t.qi < t.q.length - 1) await t.playAt(t.qi + 1);
+  eq(t.qi, 1);
+});
+
+test('vibezNext simulation: no-op at last item', async () => {
+  const t = makeTracker();
+  t.q = ['a'];
+  await t.playAt(0);
+  const before = t.seq;
+  if (t.qi < t.q.length - 1) await t.playAt(t.qi + 1); // should not fire
+  eq(t.seq, before); // seq unchanged → no new play triggered
+  eq(t.qi, 0);
+});
+
+test('vibezPrev simulation: goes back', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b', 'c'];
+  await t.playAt(2);
+  await t.playAt(t.qi > 0 ? t.qi - 1 : 0);
+  eq(t.qi, 1);
+});
+
+test('vibezPrev simulation: restarts at index 0', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b'];
+  await t.playAt(0);
+  await t.playAt(t.qi > 0 ? t.qi - 1 : 0); // stays at 0 (restart)
+  eq(t.qi, 0);
+});
+
+test('appendQueue: starts playback when idle', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b'];
+  // Simulate appendQueue: add to _q; if _qi < 0 call playAt(0)
+  if (t.qi < 0) await t.playAt(0);
+  eq(t.qi, 0);
+  eq(t.calls, [0]);
+});
+
+test('appendQueue: does not restart if already playing', async () => {
+  const t = makeTracker();
+  t.q = ['a'];
+  await t.playAt(0); // already playing
+  const callsBefore = t.calls.length;
+  t.q = t.q.concat(['b']); // append
+  // qi >= 0 → do NOT call playAt
+  eq(t.calls.length, callsBefore);
+  eq(t.q.length, 2);
+});
+
+test('auto-advance simulation: repeat-none goes to next', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b', 'c'];
+  await t.playAt(0);
+  // Simulate nowPlayingItemDidChange with item=null, repeatMode=0
+  const repeatMode = 0;
+  if (repeatMode === 1) { await t.playAt(t.qi); }
+  else { const next = t.qi + 1; if (next < t.q.length) await t.playAt(next); }
+  eq(t.qi, 1);
+});
+
+test('auto-advance simulation: repeat-all wraps around', async () => {
+  const t = makeTracker();
+  t.q = ['a', 'b'];
+  await t.playAt(1); // last item
+  const repeatMode = 2;
+  if (repeatMode === 1) { await t.playAt(t.qi); }
+  else { const next = t.qi + 1;
+    if (next < t.q.length) await t.playAt(next);
+    else if (repeatMode === 2 && t.q.length > 0) await t.playAt(0);
+  }
+  eq(t.qi, 0);
+});
+
+test('auto-advance simulation: repeat-one replays same index', async () => {
+  const t = makeTracker();
+  t.q = ['a'];
+  await t.playAt(0);
+  const repeatMode = 1;
+  if (repeatMode === 1) await t.playAt(t.qi);
+  eq(t.qi, 0);
+  eq(t.calls.filter(x => x === 0).length, 2); // played index 0 twice
+});
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
