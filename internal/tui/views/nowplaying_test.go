@@ -129,9 +129,9 @@ func TestNowPlaying_View_NoTrack(t *testing.T) {
 	m := NewNowPlaying(&player.State{Track: nil})
 	m.SetSize(80, 24)
 	got := m.View()
-	// When there is no track, View returns an empty string — no panic.
-	if got != "" {
-		t.Errorf("View with nil track should return empty string, got %q", got)
+	// Shows the music note and a search hint when no track is loaded.
+	if !strings.Contains(got, "♪") {
+		t.Errorf("View with nil track should contain music note, got %q", got)
 	}
 }
 

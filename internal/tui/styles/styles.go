@@ -9,6 +9,18 @@ const (
 	ColorError     = lipgloss.Color("#E06C75")
 	ColorFg        = lipgloss.Color("#ABB2BF")
 	ColorSubtle    = lipgloss.Color("#61AFEF")
+
+	// Copilot-inspired palette.
+	ColorBg     = lipgloss.Color("#1a1b26")
+	ColorAccent = lipgloss.Color("#7aa2f7")
+	ColorGlow0  = lipgloss.Color("#1e1e2e")
+	ColorGlow1  = lipgloss.Color("#2d2b55")
+	ColorGlow2  = lipgloss.Color("#4a3f8a")
+	ColorGlow3  = lipgloss.Color("#6e57c4")
+	ColorGlow4  = lipgloss.Color("#9d7fea")
+	ColorGlow5  = lipgloss.Color("#bb9af7")
+	ColorGlow6  = lipgloss.Color("#cba6f7")
+	ColorGlow7  = lipgloss.Color("#e0d4ff")
 )
 
 var (
@@ -29,17 +41,16 @@ var (
 
 	NowPlayingTitle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(ColorFg).
-			MarginTop(1)
+			Foreground(ColorFg)
 
 	NowPlayingArtist = lipgloss.NewStyle().
-				Foreground(ColorSubtle)
+				Foreground(ColorAccent)
 
 	NowPlayingAlbum = lipgloss.NewStyle().
 			Foreground(ColorMuted)
 
 	Playing = lipgloss.NewStyle().
-		Foreground(ColorSecondary).
+		Foreground(ColorGlow5).
 		Bold(true)
 
 	Paused = lipgloss.NewStyle().
@@ -79,7 +90,7 @@ var (
 			Align(lipgloss.Center)
 
 	TabActive = lipgloss.NewStyle().
-			Foreground(ColorPrimary).
+			Foreground(ColorAccent).
 			Bold(true).
 			Underline(true).
 			PaddingLeft(1).
@@ -94,7 +105,7 @@ var (
 		Foreground(ColorPrimary)
 
 	SidebarActive = lipgloss.NewStyle().
-			Foreground(ColorPrimary).
+			Foreground(ColorGlow5).
 			Bold(true)
 
 	SidebarInactive = lipgloss.NewStyle().
@@ -104,21 +115,18 @@ var (
 			Foreground(ColorMuted)
 
 	Header = lipgloss.NewStyle().
-		Foreground(ColorPrimary).
+		Foreground(ColorAccent).
 		Bold(true)
 )
 
-// GlowPalette is the sequence of colours used for the "now playing" breathing
-// animation. It runs from deep purple (dim) to bright lavender (peak) and is
-// driven in a ping-pong loop so the title appears to pulse like the Copilot
-// "thinking" glow.
+// GlowPalette drives the "now playing" breathing animation, from dark to bright.
 var GlowPalette = []lipgloss.Color{
-	"#3B0764", // 0 — deepest dim
-	"#581C87", // 1
-	"#7E22CE", // 2
-	"#9333EA", // 3
-	"#A855F7", // 4
-	"#C084FC", // 5
-	"#D8B4FE", // 6
-	"#EDE9FE", // 7 — peak brightness
+	ColorGlow0, // 0 — darkest
+	ColorGlow1,
+	ColorGlow2,
+	ColorGlow3,
+	ColorGlow4,
+	ColorGlow5,
+	ColorGlow6,
+	ColorGlow7, // 7 — peak brightness
 }
