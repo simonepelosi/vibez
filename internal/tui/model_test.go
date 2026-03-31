@@ -251,41 +251,45 @@ func TestModel_Update_KeyCommand(t *testing.T) {
 func TestModel_Update_KeyLibrary(t *testing.T) {
 	m := newModel(nil)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
-	if m.content != contentLibrary {
-		t.Errorf("content = %d, want contentLibrary(%d)", m.content, contentLibrary)
+	if m.activePanel < 0 {
+		t.Errorf("activePanel = %d, want >= 0 (library panel active)", m.activePanel)
+	}
+	if m.panels[m.activePanel].NavKey() != "l" {
+		t.Errorf("active panel NavKey = %q, want %q", m.panels[m.activePanel].NavKey(), "l")
 	}
 }
 
 func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 	m := newModel(nil)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
-	if m.content != contentResults {
-		t.Errorf("content = %d, want contentResults(%d)", m.content, contentResults)
+	if m.mode != modeSearch {
+		t.Errorf("mode = %d, want modeSearch(%d)", m.mode, modeSearch)
 	}
 }
 
 func TestModel_Update_KeyQuit_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Error("q key should return non-nil cmd (Quit)")
+	// 'q' now opens the queue panel, not quit
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if m.activePanel < 0 {
+		t.Error("q key should activate the queue panel")
 	}
-	// Execute cmd and verify it returns a quit message.
-	msg := cmd()
-	if msg != tea.Quit() {
-		t.Errorf("q key cmd should return tea.Quit(), got %v", msg)
+	if m.panels[m.activePanel].NavKey() != "q" {
+		t.Errorf("active panel NavKey = %q, want %q", m.panels[m.activePanel].NavKey(), "q")
 	}
 }
 
 func TestModel_Update_KeyQuit_WithPlayer(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if cmd == nil {
-		t.Error("q key should return non-nil cmd")
+	// 'q' now opens the queue panel
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if m.activePanel < 0 {
+		t.Error("q key should activate the queue panel")
 	}
-	if !mp.closeCalled {
-		t.Error("player.Close() should be called on quit")
+	// player.Close() should NOT be called just for toggling the queue panel
+	if mp.closeCalled {
+		t.Error("player.Close() should not be called when opening queue panel")
 	}
 }
 
@@ -541,7 +545,8 @@ func TestModel_View_WithErrMsg(t *testing.T) {
 
 func TestModel_UpdateActiveView_Library(t *testing.T) {
 	m := newModel(nil)
-	m.content = contentLibrary
+	// Activate library panel (index 0)
+	m.activePanel = 0
 	m.width = 80
 	m.height = 24
 	m.library.SetSize(80, 22)
@@ -551,7 +556,6 @@ func TestModel_UpdateActiveView_Library(t *testing.T) {
 
 func TestModel_UpdateActiveView_Search(t *testing.T) {
 	m := newModel(nil)
-	m.content = contentResults
 	m.width = 80
 	m.height = 24
 	m.search.SetSize(80, 22)
@@ -561,7 +565,7 @@ func TestModel_UpdateActiveView_Search(t *testing.T) {
 
 func TestModel_UpdateActiveView_Queue(t *testing.T) {
 	m := newModel(nil)
-	// Should not panic with any content mode
+	// Should not panic with any panel state
 	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
 }
 

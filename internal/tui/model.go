@@ -25,15 +25,45 @@ const (
 	modeCommand          // ':' opens — command accumulates in cmdBuf
 )
 
-// ── Content displayed in the main area ───────────────────────────────────
+// ── ContentView interface ─────────────────────────────────────────────────
 
-type contentArea int
+// ContentView is the interface every content panel must implement.
+// To register a new panel: implement this interface and append to m.panels in New().
+// Nothing else in the model needs to change.
+type ContentView interface {
+	NavKey() string   // normal-mode key to activate this panel
+	NavLabel() string // short label shown in the status bar
+	SetSize(w, h int)
+	Update(msg tea.KeyMsg) tea.Cmd
+	View() string
+}
 
-const (
-	contentEmpty   contentArea = iota
-	contentResults             // search results
-	contentLibrary             // library browser
-)
+// libraryPanel wraps views.LibraryModel to satisfy ContentView.
+type libraryPanel struct{ m *views.LibraryModel }
+
+func (p *libraryPanel) NavKey() string   { return "l" }
+func (p *libraryPanel) NavLabel() string { return "library" }
+func (p *libraryPanel) SetSize(w, h int) { p.m.SetSize(w, h) }
+func (p *libraryPanel) Update(msg tea.KeyMsg) tea.Cmd {
+	updated, cmd := p.m.Update(msg)
+	p.m = updated
+	return cmd
+}
+func (p *libraryPanel) View() string  { return p.m.View() }
+func (p *libraryPanel) Init() tea.Cmd { return p.m.Init() }
+
+// queuePanel wraps views.QueueModel to satisfy ContentView.
+type queuePanel struct{ m *views.QueueModel }
+
+func (p *queuePanel) NavKey() string   { return "q" }
+func (p *queuePanel) NavLabel() string { return "queue" }
+func (p *queuePanel) SetSize(w, h int) { p.m.SetSize(w, h) }
+func (p *queuePanel) Update(msg tea.KeyMsg) tea.Cmd {
+	p.m.Update(msg)
+	return nil
+}
+func (p *queuePanel) View() string                      { return p.m.View() }
+func (p *queuePanel) SetTracks(tracks []provider.Track) { p.m.SetTracks(tracks) }
 
 // ── Messages ──────────────────────────────────────────────────────────────
 
@@ -74,15 +104,20 @@ type Model struct {
 
 	playerState player.State
 	stateCh     <-chan player.State
-	queueIDs    []string // current playback queue (for "add to queue")
+	queueIDs    []string         // current playback queue (for "add to queue")
+	queueTracks []provider.Track // full track objects parallel to queueIDs
 
-	// Views
-	library *views.LibraryModel
-	search  *views.SearchModel // results-only renderer
+	// Panels
+	panels      []ContentView // registered content panels; add new ones in New()
+	activePanel int           // index into panels; -1 = none active
+	library     *libraryPanel
+	queue       *queuePanel
+
+	// Search popup (not a panel)
+	search *views.SearchModel
 
 	// Modal state
-	mode    viewMode
-	content contentArea
+	mode viewMode
 
 	// Search accumulation (mode == modeSearch)
 	searchQuery string
@@ -107,23 +142,26 @@ type Model struct {
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
 	m := &Model{
-		cfg:      cfg,
-		provider: prov,
-		player:   plyr,
-		content:  contentEmpty,
+		cfg:         cfg,
+		provider:    prov,
+		player:      plyr,
+		activePanel: -1,
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
 	}
-	m.library = views.NewLibrary(prov)
+	m.library = &libraryPanel{m: views.NewLibrary(prov)}
+	m.queue = &queuePanel{m: views.NewQueue()}
 	m.search = views.NewSearch(prov)
+	// Register panels — append here to add new views, nothing else changes:
+	m.panels = []ContentView{m.library, m.queue}
 	return m
 }
 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
-		glowTick(), // always run — animates both the logo and the track title
+		glowTick(),
 		introTick(),
 		m.library.Init(),
 	}
@@ -162,7 +200,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		cw, ch := m.contentDimensions()
-		m.library.SetSize(cw, ch)
+		for _, p := range m.panels {
+			p.SetSize(cw, ch)
+		}
 		m.search.SetSize(cw, ch)
 
 	case tickMsg:
@@ -211,13 +251,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.err,
 		)
 		m.searchCursor = 0
-		m.content = contentResults
 
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
+			m.queueTracks = []provider.Track{*msg.Track}
 		}
 		m.queueIDs = msg.IDs
+		m.queue.SetTracks(m.queueTracks)
 		cmds = append(cmds, m.playerCmd(func() error {
 			if msg.PlaylistID != "" {
 				return m.player.SetPlaylist(msg.PlaylistID, msg.StartIdx)
@@ -225,7 +266,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.player.SetQueue(msg.IDs)
 		}))
 		m.mode = modeNormal
-		m.content = contentResults
+		m.activePanel = -1
 
 	case errMsg:
 		m.errMsg = msg.err.Error()
@@ -237,8 +278,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	default:
 		// Forward library background loads
-		var libCmd tea.Cmd
-		m.library, libCmd = m.library.Update(msg)
+		updated, libCmd := m.library.m.Update(msg)
+		m.library.m = updated
 		cmds = append(cmds, libCmd)
 	}
 
@@ -273,16 +314,16 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 		m.searchQuery = ""
 		return nil
 	case "enter":
-		if m.content == contentResults {
-			results := m.search.Results()
-			if len(results) > 0 && m.searchCursor < len(results) {
-				t := results[m.searchCursor]
-				tc := t
-				m.queueIDs = []string{views.PlaybackID(tc)}
-				m.playerState.Track = &tc
-				m.mode = modeNormal
-				return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
-			}
+		results := m.search.Results()
+		if len(results) > 0 && m.searchCursor < len(results) {
+			t := results[m.searchCursor]
+			tc := t
+			m.queueTracks = []provider.Track{tc}
+			m.queueIDs = []string{views.PlaybackID(tc)}
+			m.playerState.Track = &tc
+			m.queue.SetTracks(m.queueTracks)
+			m.mode = modeNormal
+			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 		return nil
 	case "up":
@@ -348,16 +389,27 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
-	// Library mode: forward navigation to library
-	if m.content == contentLibrary {
-		switch k {
-		case "esc", "backspace":
-			m.content = contentResults
+	// Check if key activates a panel (toggle off if already active)
+	for i, p := range m.panels {
+		if k == p.NavKey() {
+			if m.activePanel == i {
+				m.activePanel = -1 // toggle off
+			} else {
+				m.activePanel = i
+			}
+			m.lastKey = ""
 			return nil
 		}
-		var cmd tea.Cmd
-		m.library, cmd = m.library.Update(msg)
-		return cmd
+	}
+
+	// Forward keys to the active panel (e.g. library list navigation)
+	if m.activePanel >= 0 {
+		if k == "esc" {
+			m.activePanel = -1
+			m.lastKey = ""
+			return nil
+		}
+		return m.panels[m.activePanel].Update(msg)
 	}
 
 	switch k {
@@ -365,20 +417,10 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		m.mode = modeSearch
 		m.searchQuery = ""
 		m.search.SetState(nil, false, nil)
-		m.content = contentResults
 
 	case ":":
 		m.mode = modeCommand
 		m.cmdBuf = ""
-
-	case "l":
-		m.content = contentLibrary
-
-	case "q":
-		if m.player != nil {
-			_ = m.player.Close()
-		}
-		return tea.Quit
 
 	case " ":
 		return m.togglePlayPause()
@@ -454,8 +496,10 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		if len(results) > 0 && m.searchCursor < len(results) {
 			t := results[m.searchCursor]
 			tc := t
+			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
+			m.queue.SetTracks(m.queueTracks)
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 
@@ -464,7 +508,9 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		results := m.search.Results()
 		if len(results) > 0 && m.searchCursor < len(results) {
 			t := results[m.searchCursor]
+			m.queueTracks = append(m.queueTracks, t)
 			m.queueIDs = append(m.queueIDs, views.PlaybackID(t))
+			m.queue.SetTracks(m.queueTracks)
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 
@@ -645,18 +691,17 @@ func (m *Model) renderContent(h int) string {
 		return ""
 	}
 
+	// Search popup overlays everything when in search mode
+	if m.mode == modeSearch {
+		return m.renderSearchPopup(h)
+	}
+
 	var raw string
-	switch m.content {
-	case contentLibrary:
-		raw = m.library.View()
-	case contentResults:
-		m.search.SetCursor(m.searchCursor)
-		raw = m.search.View()
-		if raw == "" && !m.search.Loading() {
-			raw = centerStr(styles.QueueItemMuted.Render("♪"), m.width) + "\n" +
-				centerStr(styles.QueueItemMuted.Render("press / to search"), m.width)
-		}
-	default:
+	if m.activePanel >= 0 && m.activePanel < len(m.panels) {
+		raw = m.panels[m.activePanel].View()
+	}
+	// Default idle state
+	if raw == "" {
 		raw = centerStr(styles.QueueItemMuted.Render("♪"), m.width) + "\n" +
 			centerStr(styles.QueueItemMuted.Render("press / to search"), m.width)
 	}
@@ -665,12 +710,69 @@ func (m *Model) renderContent(h int) string {
 		raw = styles.ErrorStyle.Render("⚠  "+m.errMsg) + "\n" + raw
 	}
 
-	// Pad/trim to exactly h lines
 	lines := strings.Split(raw, "\n")
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
 	return strings.Join(lines[:h], "\n")
+}
+
+func (m *Model) renderSearchPopup(h int) string {
+	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
+	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
+	cursor := accent.Render("█")
+
+	// Input line
+	inputLine := accent.Render("/") + "  " +
+		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) +
+		cursor
+
+	// Separator
+	popupW := max(40, m.width-16)
+	sep := muted.Render(strings.Repeat("─", popupW-2))
+
+	// Results — number of rows available inside the popup
+	innerH := max(0, h-6) // borders(2) + input(1) + sep(1) + padding(2)
+	results := m.search.Results()
+	var resultLines []string
+	for i, t := range results {
+		if len(resultLines) >= innerH {
+			break
+		}
+		titleStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
+		metaStyle := muted
+		if i == m.searchCursor {
+			titleStyle = lipgloss.NewStyle().Foreground(styles.ColorAccent).Bold(true)
+			metaStyle = lipgloss.NewStyle().Foreground(styles.ColorSubtle)
+		}
+		resultLines = append(resultLines,
+			"  "+titleStyle.Render(t.Title),
+			"  "+metaStyle.Render(t.Artist+" · "+t.Album),
+		)
+	}
+	if len(results) == 0 && m.search.Loading() {
+		resultLines = []string{"  " + muted.Render("searching…")}
+	} else if len(results) == 0 && m.searchQuery != "" {
+		resultLines = []string{"  " + muted.Render("no results")}
+	}
+
+	// Pad result area to innerH
+	for len(resultLines) < innerH {
+		resultLines = append(resultLines, "")
+	}
+	resultBlock := strings.Join(resultLines[:innerH], "\n")
+
+	inner := inputLine + "\n" + sep + "\n" + resultBlock
+
+	popup := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.ColorAccent).
+		Width(popupW).
+		Padding(0, 1).
+		Render(inner)
+
+	return lipgloss.Place(m.width, h, lipgloss.Center, lipgloss.Center, popup,
+		lipgloss.WithWhitespaceBackground(styles.ColorBg))
 }
 
 func (m *Model) renderStatusBar() string {
@@ -695,8 +797,18 @@ func (m *Model) renderStatusBar() string {
 			accent.Render("n") + muted.Render(" next"),
 			accent.Render("r") + muted.Render(" repeat"),
 			accent.Render("s") + muted.Render(" shuffle"),
-			accent.Render(":q") + muted.Render(" quit"),
 		}
+		// Append one hint per registered panel (auto-generated)
+		for _, p := range m.panels {
+			label := p.NavLabel()
+			if m.activePanel >= 0 && m.panels[m.activePanel] == p {
+				label = lipgloss.NewStyle().Foreground(styles.ColorAccent).Underline(true).Render(label)
+				parts = append(parts, accent.Render(p.NavKey())+" "+label)
+			} else {
+				parts = append(parts, accent.Render(p.NavKey())+muted.Render(" "+label))
+			}
+		}
+		parts = append(parts, accent.Render(":q")+muted.Render(" quit"))
 		return " " + styles.ModeNormal.Render("NORMAL") + "  " + strings.Join(parts, dot)
 	}
 }
