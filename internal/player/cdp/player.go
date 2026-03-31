@@ -84,31 +84,23 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// Widevine CDM is bundled inside Chrome at this well-known relative path.
 	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 
-	// Always run headed — headless Chrome uses a null audio sink and produces
-	// no sound. When we already have a saved token (no auth UI needed), shrink
-	// the window to 1×1 px so it is invisible in practice.
-	headless := false
-	args := []string{
-		// Sandbox requires suid/namespace support unavailable from a non-system path.
-		"--no-sandbox",
-		"--disable-setuid-sandbox",
-		// Avoid GPU init crashes on headless-ish sessions.
-		"--disable-gpu",
-		"--autoplay-policy=no-user-gesture-required",
-		"--enable-features=MediaCapabilities,WidevineCdm",
-		"--disable-blink-features=AutomationControlled",
-		"--widevine-path=" + widevinePath,
-		// Set the window title so MPRIS / OS media notifications say "vibez".
-		"--app=about:blank",
-	}
-	if userToken != "" {
-		// Hide the Chrome window — it is only used for audio output, not UI.
-		args = append(args, "--window-size=1,1", "--window-position=-10000,-10000")
-	}
+	// Playwright 1.33+ maps Headless:true to --headless=new, which in Chrome
+	// 112+ shares the same audio pipeline as headed mode — PulseAudio/PipeWire
+	// work correctly without a visible window. Use headless when we already
+	// have a saved token; show the window only for first-run interactive login.
+	headless := userToken != ""
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath: &chromePath,
 		Headless:       &headless,
-		Args:           args,
+		Args: []string{
+			// Sandbox requires suid/namespace support unavailable from a non-system path.
+			"--no-sandbox",
+			"--disable-setuid-sandbox",
+			"--autoplay-policy=no-user-gesture-required",
+			"--enable-features=MediaCapabilities,WidevineCdm",
+			"--disable-blink-features=AutomationControlled",
+			"--widevine-path=" + widevinePath,
+		},
 	})
 	if err != nil {
 		_ = pw.Stop()
