@@ -2,8 +2,8 @@
 
 // Package cdp provides an Apple Music player backed by a Playwright-managed
 // Chrome browser. On first run, Playwright downloads Chrome (~150 MB) into
-// ~/.cache/ms-playwright/ — this is NOT a system package install; it is
-// vibez's own private browser and has no effect on apt/snap/flatpak.
+// ~/.cache/vibez/browsers/ — NOT a system package install; it is vibez's own
+// private browser, completely isolated from any system Chrome/Chromium.
 // Subsequent launches reuse the cached binary (instant, no network).
 package cdp
 
@@ -16,30 +16,36 @@ import (
 	playwright "github.com/playwright-community/playwright-go"
 )
 
-// cacheDir returns the directory where Playwright stores the Chrome binary.
-// Using XDG_CACHE_HOME keeps it out of ~/.local/share and makes it clearly
-// a cache that can be deleted without losing user data.
-func cacheDir() string {
+func baseDir() string {
 	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
-		return filepath.Join(d, "vibez", "playwright")
+		return filepath.Join(d, "vibez")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "vibez", "playwright")
+	return filepath.Join(home, ".cache", "vibez")
 }
 
-// EnsureBrowser downloads Chrome into vibez's cache if not already present.
-// It sets PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 so that Playwright
-// never calls apt-get or polkit — it only downloads the browser binary.
-// w receives progress lines; pass os.Stderr or io.Discard to silence it.
-func EnsureBrowser(w io.Writer) error {
-	// This env var tells Playwright to skip running apt-get / polkit to
-	// install system library dependencies. Chrome on Ubuntu 22.04+ works
-	// fine without this step because the required libs (glib, nss, etc.)
-	// are already present on any desktop system.
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+func driverDir() string   { return filepath.Join(baseDir(), "driver") }
+func browsersDir() string { return filepath.Join(baseDir(), "browsers") }
 
+// setBrowserEnv makes Playwright use only vibez's private cache, completely
+// ignoring any system Chrome installation.
+func setBrowserEnv() {
+	// PLAYWRIGHT_BROWSERS_PATH tells the playwright CLI where to install and
+	// find browsers. Pointing it to our cache means system Chrome is never
+	// used — even if it is installed.
+	_ = os.Setenv("PLAYWRIGHT_BROWSERS_PATH", browsersDir())
+	// Skip apt-get / polkit host-library validation. Required libs (glib,
+	// nss, etc.) are present on any Ubuntu desktop already.
+	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+}
+
+// EnsureBrowser downloads Chrome into vibez's private cache if not already
+// present. Never touches system package managers. w receives progress output;
+// pass os.Stderr to show progress on first run, io.Discard to silence it.
+func EnsureBrowser(w io.Writer) error {
+	setBrowserEnv()
 	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory: cacheDir(),
+		DriverDirectory: driverDir(),
 		Browsers:        []string{"chrome"},
 		Stdout:          w,
 		Stderr:          w,
@@ -49,12 +55,12 @@ func EnsureBrowser(w io.Writer) error {
 	return nil
 }
 
-// runPlaywright starts the Playwright driver using vibez's private cache dir.
+// runPlaywright starts the Playwright driver using vibez's private cache.
 func runPlaywright() (*playwright.Playwright, error) {
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+	setBrowserEnv()
 	pw, err := playwright.Run(&playwright.RunOptions{
-		DriverDirectory:     cacheDir(),
-		SkipInstallBrowsers: true, // already handled by EnsureBrowser
+		DriverDirectory:     driverDir(),
+		SkipInstallBrowsers: true, // EnsureBrowser handles the download
 	})
 	if err != nil {
 		return nil, fmt.Errorf("playwright driver: %w", err)
