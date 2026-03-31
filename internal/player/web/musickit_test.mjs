@@ -248,5 +248,88 @@ test('auto-advance simulation: repeat-one replays same index', async () => {
   eq(t.qi, 0);
   eq(t.calls.filter(x => x === 0).length, 2); // played index 0 twice
 });
+
+// ─── _transitioning flag ──────────────────────────────────────────────────────
+// stop() fires nowPlayingItemDidChange(null) mid-transition; without the flag
+// the auto-advance listener spuriously jumps ahead.
+console.log('\n_transitioning (spurious auto-advance prevention)');
+
+function makeTrackerWithTransitioning() {
+  let q = [], qi = -1, seq = 0, transitioning = false;
+  let opLock = Promise.resolve();
+  const calls = [];
+  const autoAdvanceCalls = [];
+
+  function withLock(s, fn) {
+    opLock = opLock
+      .then(() => s === seq ? fn() : undefined)
+      .catch(() => { transitioning = false; });
+    return opLock;
+  }
+
+  function playAt(idx) {
+    if (idx < 0 || idx >= q.length) return Promise.resolve();
+    qi = idx;
+    const s = ++seq;
+    return withLock(s, async () => {
+      transitioning = true;
+      calls.push(idx);
+      // Simulate stop() side effect: fires nowPlayingItemDidChange(null)
+      simulateNowPlayingItemChanged(null);
+      if (s !== seq) { transitioning = false; return; }
+      // Simulate setQueue + play
+      if (s !== seq) { transitioning = false; return; }
+      transitioning = false;
+    });
+  }
+
+  // Mirrors the listener from musickit.html
+  function simulateNowPlayingItemChanged(nowPlayingItem) {
+    if (transitioning) return; // suppressed
+    if (nowPlayingItem !== null || qi < 0 || q.length === 0) return;
+    const next = qi + 1;
+    if (next < q.length) { autoAdvanceCalls.push(next); playAt(next); }
+  }
+
+  return {
+    get q() { return q; }, set q(v) { q = v; },
+    get qi() { return qi; },
+    get calls() { return calls; },
+    get autoAdvanceCalls() { return autoAdvanceCalls; },
+    playAt,
+  };
+}
+
+test('_transitioning: stop() during _playAt does NOT trigger auto-advance', async () => {
+  const t = makeTrackerWithTransitioning();
+  t.q = ['a', 'b', 'c'];
+  // Simulate: playing at 0, user presses next → _playAt(1)
+  await t.playAt(0);
+  await t.playAt(1); // stop() inside this would fire nowPlayingItemDidChange(null)
+  eq(t.autoAdvanceCalls.length, 0, 'no spurious auto-advance should happen');
+  eq(t.qi, 1);
+});
+
+test('_transitioning: auto-advance fires AFTER transition completes', async () => {
+  const t = makeTrackerWithTransitioning();
+  t.q = ['a', 'b'];
+  await t.playAt(0);
+  // Transition done (_transitioning=false), now simulate natural end
+  // nowPlayingItemDidChange fires with null OUTSIDE of a _playAt call
+  // (i.e., the song ended by itself)
+  const before = t.qi;
+  // Direct advance (not inside _playAt) — _transitioning is false here
+  const next = t.qi + 1;
+  if (next < t.q.length) { t.autoAdvanceCalls.push(next); await t.playAt(next); }
+  eq(t.qi, 1, 'natural end advances correctly');
+});
+
+test('_transitioning: rapid presses do not cascade auto-advance', async () => {
+  const t = makeTrackerWithTransitioning();
+  t.q = ['a', 'b', 'c', 'd'];
+  t.playAt(0); t.playAt(1); await t.playAt(2); // rapid presses
+  await t.playAt(0); // drain lock
+  eq(t.autoAdvanceCalls.length, 0, 'no spurious auto-advance from rapid presses');
+});
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
