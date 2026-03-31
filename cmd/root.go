@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -73,21 +74,26 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Try Chrome (CDP) first — full Widevine DRM, direct audio output.
-	// Fall back to WebKit + GStreamer (30 s preview) if Chrome is not found.
+	// Try Chrome via Playwright — full Widevine DRM, direct audio output.
+	// EnsureBrowser downloads Chrome once (~300 MB) and caches it; subsequent
+	// starts are instant. Fall back to WebKit + GStreamer (30 s preview) if
+	// the download or launch fails.
 	var audioEngine vibezPlayer
 
+	fmt.Fprint(os.Stderr, "Checking browser (Chrome)... ")
+	if browserErr := cdp.EnsureBrowser(io.Discard); browserErr != nil {
+		fmt.Fprintf(os.Stderr, "unavailable (%v) — using 30 s preview mode\n", browserErr)
+	} else {
+		fmt.Fprintln(os.Stderr, "ready")
+	}
+
 	if cdpPlayer, cdpErr := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront); cdpErr == nil {
-		if debug {
-			fmt.Fprintln(os.Stderr, "debug: using Chrome (CDP) audio engine")
-		}
+		fmt.Fprintln(os.Stderr, "Engine: Chrome + Widevine (full tracks)")
 		cdpPlayer.OnUserToken = onUserToken
 		cdpPlayer.OnStorefront = onStorefront
 		audioEngine = cdpPlayer
 	} else {
-		if debug {
-			fmt.Fprintf(os.Stderr, "debug: Chrome not found (%v); using WebKit+GStreamer fallback\n", cdpErr)
-		}
+		fmt.Fprintf(os.Stderr, "Engine: WebKit + GStreamer (30 s preview) — Chrome unavailable: %v\n", cdpErr)
 		wkPlayer, wkErr := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 		if wkErr != nil {
 			return fmt.Errorf("creating audio engine: %w", wkErr)
