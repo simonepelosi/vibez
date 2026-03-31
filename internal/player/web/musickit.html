@@ -142,12 +142,13 @@
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls setQueue→play (NO explicit stop):
-        //   • setQueue() handles the song transition internally — calling stop()
-        //     first disrupts the EME/DRM session and causes play() to hang on
-        //     subsequent tracks ("bear goes to sleep and stays there")
-        //   • On a fresh MusicKit instance (state=none) play() throws "without a
-        //     previous stop/pause" — we catch that error, call stop(), then retry
+        // through _doPlayAt() which calls pause→setQueue→play:
+        //   • pause() stops current audio without clearing the EME/DRM session;
+        //     play() after setQueue() then starts the NEW queue's first item
+        //     instead of resuming the old song (which happens if player stays
+        //     in "playing" state when setQueue is called)
+        //   • stop() is used only as a one-time cold-start fallback when play()
+        //     throws "without a previous stop/pause" (fresh state=none)
         //   • _busy flag  → no concurrent setQueue/play calls
         //   • _wantIdx    → latest index requested while busy; drained after each
         //                    op so rapid next/prev always lands on the right track
@@ -186,7 +187,13 @@
           _qi      = idx;
           const m  = _m();
           const item = _q[idx];
-          // Catalog items: use song ID descriptor (more reliable than raw objects).
+          // pause() before setQueue(): stops the current audio without clearing
+          // the EME/DRM session (unlike stop()).  When the player is paused,
+          // play() after setQueue() starts the NEW queue's first item rather
+          // than resuming the old song.  On a fresh player (state=none) pause()
+          // throws — we swallow it and handle below.
+          try { await m.pause(); } catch(_) {}
+          // Catalog items: use song ID descriptor.
           // Library items: keep raw object (no stable ID-only descriptor).
           const descriptor = item.id.startsWith('i.')
             ? { items: [item] }
@@ -206,9 +213,8 @@
             if (e?.name === 'CONTENT_EQUIVALENT') {
               // already queued/playing — nothing to do
             } else if (e?.message && /without a previous/i.test(e.message)) {
-              // Fresh MusicKit init — needs an explicit stop before play().
-              // Only happens once at cold start; does NOT disrupt DRM for
-              // already-playing sessions.
+              // Fresh init: pause() on state=none didn't satisfy the requirement.
+              // stop() does — call it once and retry.
               try { await m.stop(); } catch(_) {}
               try { await m.play(); } catch(e2) {
                 if (e2?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e2)).catch(()=>{});
