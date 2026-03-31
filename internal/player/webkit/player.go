@@ -80,8 +80,13 @@ func New(devToken, userToken string) (*Player, error) {
 	if os.Getenv("GDK_BACKEND") == "" {
 		_ = os.Setenv("GDK_BACKEND", "x11")
 	}
-	// Disable WebKit compositing mode — vibez is audio-only, GPU is not needed.
 	_ = os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
+	// JSC uses SIGUSR1 (10) for its GC by default, which conflicts with Go's
+	// signal handling. Redirect it to SIGRTMIN+4 (38), a real-time signal
+	// unused by Go's runtime and not reserved by the OS on Linux.
+	if os.Getenv("JSC_SIGNAL_FOR_GC") == "" {
+		_ = os.Setenv("JSC_SIGNAL_FOR_GC", "38")
+	}
 
 	p := &Player{
 		readyCh: make(chan struct{}),

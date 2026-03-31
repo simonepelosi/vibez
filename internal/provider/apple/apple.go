@@ -159,16 +159,14 @@ func toTrack(s songResource) provider.Track {
 	if len(s.Attributes.Previews) > 0 {
 		preview = s.Attributes.Previews[0].URL
 	}
-	// Library songs have a library-scoped ID (e.g. "i.AbCdEfGh") which MusicKit
-	// JS cannot use for FairPlay DRM. The playParams.catalogId field carries the
-	// real catalog ID — use it when present so SetQueue always receives a catalog
-	// ID that MusicKit can authorise.
-	id := s.ID
-	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
-		id = s.Attributes.PlayParams.CatalogID
-	}
+	// Keep the original resource ID. Library songs have IDs like "i.AbCdEfGh";
+	// catalog songs (search results) have numeric IDs like "1234567890".
+	// The JS layer detects library IDs by the "i." prefix and uses the
+	// /v1/me/library/songs/ URL queue format, which plays the full owned track.
+	// Catalog IDs use { song: id } which triggers the preview limit if the
+	// user doesn't own the track — so we never map library IDs to catalog IDs.
 	return provider.Track{
-		ID:         id,
+		ID:         s.ID,
 		Title:      s.Attributes.Name,
 		Artist:     s.Attributes.ArtistName,
 		Album:      s.Attributes.AlbumName,
