@@ -140,19 +140,19 @@
         // Poll position every second so the TUI timer advances while playing.
         setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
 
-        window.vibezPlay  = async () => { try { await _m().play();  } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); } };
+        window.vibezPlay  = async () => { try { await _m().play();  } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); } };
         window.vibezPause = async () => { try { await _m().pause(); } catch(e) { goError('pause: '+errName(e)).catch(()=>{}); } };
         window.vibezNext  = async () => {
           try {
             await _m().skipToNextItem();
-            try { await _m().play(); } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') throw e; }
-          } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('next: '+errName(e)).catch(()=>{}); }
+            try { await _m().play(); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
+          } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') goError('next: '+errName(e)).catch(()=>{}); }
         };
         window.vibezPrev  = async () => {
           try {
             await _m().skipToPreviousItem();
-            try { await _m().play(); } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') throw e; }
-          } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('prev: '+errName(e)).catch(()=>{}); }
+            try { await _m().play(); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
+          } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') goError('prev: '+errName(e)).catch(()=>{}); }
         };
         window.vibezSeek      = (t) => _m().seekToTime(t);
         window.vibezSetVolume = (v) => { _m().volume = v; };
@@ -194,10 +194,10 @@
 
             try { await m.stop(); } catch(_) {}
             try { await m.setQueue({ items }); } catch(e) {
-              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+              if (e?.name !== 'CONTENT_EQUIVALENT') throw e;
             }
             try { await m.play(); } catch(e) {
-              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+              if (e?.name !== 'CONTENT_EQUIVALENT') throw e;
             }
           } catch(e) { goError('setQueue failed: '+errName(e)).catch(()=>{}); }
         };
@@ -218,10 +218,10 @@
 
             try { await m.stop(); } catch(_) {}
             try { await m.setQueue({ items, startPosition: startIdx || 0 }); } catch(e) {
-              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+              if (e?.name !== 'CONTENT_EQUIVALENT') throw e;
             }
             try { await m.play(); } catch(e) {
-              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+              if (e?.name !== 'CONTENT_EQUIVALENT') throw e;
             }
           } catch(e) { goError('setPlaylist failed: '+errName(e)).catch(()=>{}); }
         };
