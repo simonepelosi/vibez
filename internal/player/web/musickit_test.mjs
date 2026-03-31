@@ -259,8 +259,8 @@ test('_doPlayAt uses items:[obj] descriptor for library items', () => {
 });
 
 test('play() cold-start retry: stop then play when "without a previous" error', () => {
-  // Simulate: play() throws "without a previous stop/pause", we catch it,
-  // stop(), then retry play(). This only happens once on fresh MusicKit init.
+  // pause() on fresh state=none doesn't satisfy MusicKit's requirement.
+  // When play() throws "without a previous stop/pause", we stop() and retry.
   let stopped = false, plays = 0;
   const mockPlay = (attempt) => {
     plays++;
