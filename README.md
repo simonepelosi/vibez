@@ -2,31 +2,35 @@
 
 > **vibe-driven music player for your terminal**
 
-vibez is an open-source TUI (terminal user interface) music player and controller for Linux. It connects to your Apple Music library, lets you search, browse, and control playback — all from the terminal — and is designed to be extended to other providers (Spotify, YouTube Music, Deezer) in the future.
+vibez is an open-source TUI (terminal user interface) Apple Music player for Linux. It streams full tracks directly from Apple Music — no external player required — and lets you search, browse, queue, and control playback entirely from the keyboard.
 
-Playback is handled by any MPRIS-compatible player (e.g. [Cider](https://cider.sh/)), so vibez acts as a smart remote and library browser, not a standalone audio engine.
+Playback is powered by an embedded Chrome instance with Widevine DRM (auto-downloaded via Playwright), falling back to WebKit+GStreamer (30-second previews) when Chrome is unavailable. MPRIS is registered so desktop media controls and notifications show "vibez" as the player.
 
 ---
 
 ## Features
 
 - 🎵 Browse your Apple Music library (playlists, albums, tracks)
-- 🔍 Search the Apple Music catalog in real-time
-- 🎮 Control playback via MPRIS D-Bus (play, pause, next, previous, volume, seek)
-- 🧠 Vibe agent: type a mood ("coding", "chill", "gym") and get a matching search query
+- 🔍 Real-time search of the Apple Music catalog
+- 🎶 Full-track streaming via Chrome + Widevine DRM (no external player needed)
+- 📋 Queue management — add songs with `tab`, navigate with `n`/`p`
+- 🐻 Animated bear mascot — sleeps when idle, dances when music plays
+- ⏳ Pulsing spinner (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) when loading or buffering
+- 🖥️  MPRIS D-Bus registration — desktop media keys and notifications work out of the box
 - ⌨️  Fully keyboard-driven TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)
-- 🔌 Extensible provider architecture (Spotify, YouTube Music coming soon)
+- 🔌 Extensible provider architecture (Spotify, YouTube Music planned)
 
 ---
 
 ## Requirements
 
-- **Linux** with a D-Bus session bus
-- **Go 1.26+**
-- **Apple Developer Account** with a MusicKit key (for Apple Music)
-- **An MPRIS-compatible player** installed and running for audio playback
-  - [Cider](https://cider.sh/) (recommended — full Apple Music experience on Linux)
-  - Any other player that exposes `org.mpris.MediaPlayer2`
+- **Linux** (x86-64 or arm64)
+- **Go 1.22+**
+- **Apple Developer Account** with a MusicKit key (for full-track streaming)
+- **Chrome** — downloaded automatically (~150 MB, one-time) to `~/.cache/vibez/playwright` via Playwright; no system install needed
+- **webkit2gtk-4.0** — only needed for the WebKit fallback mode (30 s previews)
+
+> **No Cider, no VLC, no external music app.** vibez streams Apple Music directly.
 
 ---
 
@@ -48,7 +52,7 @@ go build -o vibez .
 
 ## Configuration
 
-vibez stores its configuration at `~/.config/vibez/config.json`.  
+vibez stores its configuration at `~/.config/vibez/config.json`.
 The file is created automatically on first run with sensible defaults.
 
 ```json
@@ -70,16 +74,16 @@ The file is created automatically on first run with sensible defaults.
 2. Create a new key with the **MusicKit** capability
 3. Download the `.p8` private key file
 4. Note your **Key ID** and **Team ID**
-5. Generate a signed JWT:
+5. Run the bundled helper to generate a signed JWT:
 
 ```bash
-# Using jwt-cli (https://github.com/mike-engel/jwt-cli) or any JWT tool
-# Header: { "alg": "ES256", "kid": "<KEY_ID>" }
-# Payload: { "iss": "<TEAM_ID>", "iat": <now>, "exp": <now+15776000> }
+go run ./scripts/gen-devtoken \
+  --key-id   <KEY_ID>   \
+  --team-id  <TEAM_ID>  \
+  --key-file <path/to/AuthKey_XXXXXX.p8>
 ```
 
-6. Paste the JWT into `apple_developer_token` in `~/.config/vibez/config.json`
-7. Fill in `apple_key_id` and `apple_team_id` as well
+6. Paste the output into `apple_developer_token` in `~/.config/vibez/config.json`
 
 ---
 
@@ -91,7 +95,7 @@ The file is created automatically on first run with sensible defaults.
 vibez auth login
 ```
 
-This starts a local web server, opens your browser, and uses MusicKit JS to authorize your Apple Music account. The user token is saved automatically.
+On first run Chrome opens a login window. Sign in with your Apple ID and the user token is saved automatically.
 
 ### Check auth status
 
@@ -121,23 +125,54 @@ vibez version
 
 ## TUI Key Bindings
 
+### Global
+
 | Key | Action |
 |-----|--------|
-| `1` | Now Playing view |
-| `2` | Queue view |
-| `3` | Library view |
-| `4` / `/` | Search view |
 | `space` | Play / Pause |
 | `n` | Next track |
 | `p` | Previous track |
 | `+` / `=` | Volume up |
 | `-` | Volume down |
-| `↑` / `k` | Navigate up |
-| `↓` / `j` | Navigate down |
-| `enter` | Select item |
-| `tab` | Switch library tab (Playlists / Albums / Tracks) |
-| `?` | Toggle help |
-| `q` / `ctrl+c` | Quit |
+| `r` | Cycle repeat mode (off → all → one) |
+| `s` | Toggle shuffle |
+| `/` | Open search |
+| `l` | Toggle library panel |
+| `q` | Toggle queue panel |
+| `:q` | Quit |
+| `ctrl+c` | Quit |
+
+### Search mode (`/`)
+
+| Key | Action |
+|-----|--------|
+| *(type)* | Filter results in real time |
+| `↑` / `↓` | Navigate results |
+| `enter` | Play now (replaces current queue) |
+| `tab` | Add to queue (keeps playing) |
+| `esc` | Close search |
+
+### Library panel (`l`)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate list |
+| `enter` | Open playlist / play track |
+| `tab` | Switch tab (Playlists / Albums / Tracks) |
+| `esc` | Back / close panel |
+
+---
+
+## Audio Engines
+
+vibez auto-selects the best available engine at startup and prints which one it chose:
+
+| Engine | Tracks | How it works |
+|--------|--------|--------------|
+| **Chrome + Widevine** *(primary)* | Full tracks | Playwright launches a headless Chrome; MusicKit JS streams via Widevine DRM |
+| **WebKit + GStreamer** *(fallback)* | 30 s previews | Embedded webkit2gtk-4.0 webview; GStreamer decodes preview URLs |
+
+Chrome is downloaded once to `~/.cache/vibez/playwright` and reused on every subsequent start.
 
 ---
 
@@ -145,22 +180,31 @@ vibez version
 
 ```
 vibez/
-├── cmd/               # CLI commands (cobra)
+├── cmd/                    # CLI commands (cobra): root, auth, version
 ├── internal/
-│   ├── config/        # Config file management
-│   ├── auth/          # MusicKit JS auth flow
-│   ├── provider/      # Provider interface + Apple Music implementation
-│   ├── player/        # Player interface + MPRIS D-Bus implementation
-│   ├── tui/           # Bubble Tea TUI (model, views, styles, keys)
-│   └── vibe/          # Vibe agent: mood/keyword → search query
-└── web/               # Embedded HTML for auth login page
+│   ├── config/             # Config file management
+│   ├── auth/               # MusicKit JS OAuth flow (local web server)
+│   ├── provider/           # Provider interface + Apple Music implementation
+│   ├── player/
+│   │   ├── player.go       # Player interface + State type
+│   │   ├── cdp/            # Chrome CDP player (primary — full Widevine tracks)
+│   │   ├── webkit/         # WebKit player (fallback — 30 s previews)
+│   │   ├── gst/            # GStreamer audio decoder (used by WebKit mode)
+│   │   └── mpris/          # MPRIS D-Bus server (desktop integration)
+│   ├── tui/
+│   │   ├── model.go        # Bubble Tea model, key handling, layout
+│   │   ├── views/          # Search, queue, library, bear mascot, now-playing
+│   │   └── styles/         # Colour palette and lipgloss styles
+│   └── vibe/               # Vibe agent: mood → search query
+├── scripts/
+│   └── gen-devtoken/       # Helper to generate Apple MusicKit JWT
+└── web/                    # Embedded HTML for auth login page
 ```
 
 The **provider** interface makes it easy to add new music services:
 
 ```go
 type Provider interface {
-    Name() string
     Search(ctx context.Context, query string) (*SearchResult, error)
     GetLibraryTracks(ctx context.Context) ([]Track, error)
     GetLibraryPlaylists(ctx context.Context) ([]Playlist, error)
@@ -175,6 +219,9 @@ type Player interface {
     Play() error
     Pause() error
     Next() error
+    Previous() error
+    SetQueue(ids []string) error
+    AppendQueue(ids []string) error
     // ...
 }
 ```
@@ -183,14 +230,13 @@ type Player interface {
 
 ## Roadmap
 
+- [x] Queue management (add, navigate, auto-advance)
 - [ ] **Spotify** provider (OAuth2 + Web API)
 - [ ] **YouTube Music** provider
-- [ ] **Deezer** provider
 - [ ] LLM-powered vibe agent (OpenAI / Ollama)
-- [ ] Queue management (add, remove, reorder)
 - [ ] Lyrics display
 - [ ] Last.fm scrobbling
-- [ ] Notification support
+- [ ] Notification support (desktop popups on track change)
 
 ---
 
@@ -204,6 +250,13 @@ cd vibez
 go mod tidy
 go build ./...
 go test ./...
+```
+
+Pre-commit hooks run `go build`, `go vet`, `go test`, `golangci-lint`, and the MusicKit JS test suite. Install them with:
+
+```bash
+pip install pre-commit
+pre-commit install
 ```
 
 ---
