@@ -142,11 +142,10 @@
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls setQueue+play WITHOUT a prior stop():
-        //   • no stop()  → nowPlayingItemDidChange(null) never fires mid-transition,
-        //                   eliminating the spurious auto-advance that caused the
-        //                   "skips to last track / player freezes" bug
-        //   • _busy flag → no concurrent setQueue/play calls (drops duplicate reqs)
+        // through _doPlayAt() which calls stop→setQueue→play:
+        //   • _busy set BEFORE stop() → nowPlayingItemDidChange(null) that stop()
+        //     fires is suppressed by "if (_busy) return" in the listener, eliminating
+        //     the spurious auto-advance that caused "skips / player freezes"
         //   • _wantIdx   → latest index requested while busy; honoured after current
         //                   op completes so rapid next/prev lands on the right track
 
@@ -179,12 +178,14 @@
         // Actually play the item at idx.  Never called recursively by itself;
         // pending requests are drained via _wantIdx after each op completes.
         async function _doPlayAt(idx) {
-          _busy    = true;
+          _busy    = true; // set FIRST — before any async op, including stop()
           _wantIdx = -1;
           _qi      = idx;
           const m  = _m();
-          // No stop() — setQueue() handles the transition internally and avoids
-          // firing nowPlayingItemDidChange(null) which would trigger auto-advance.
+          // stop() is required: play() hangs without a prior stop/pause call.
+          // _busy is already true, so the nowPlayingItemDidChange(null) that stop()
+          // fires is suppressed by the "if (_busy) return" guard in the listener.
+          try { await m.stop(); } catch(_) {}
           try {
             await m.setQueue({ items: [_q[idx]] });
           } catch(e) {
@@ -213,8 +214,8 @@
         }
 
         // Auto-advance when a track ends naturally.
-        // Since we never call stop(), nowPlayingItemDidChange(null) only fires
-        // when MusicKit exhausts its single-item queue after natural playback end.
+        // stop() fires nowPlayingItemDidChange(null), but _busy is true at that point
+        // so the guard below suppresses it.  Only fires for real end-of-track events.
         music.addEventListener('nowPlayingItemDidChange', () => {
           if (_busy) return; // mid-transition — ignore
           const m = _m();
