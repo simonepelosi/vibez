@@ -175,9 +175,12 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 						idx := m.drillList.Index()
 						ids := make([]string, 0, len(m.drillTracks)-idx)
 						for i := idx; i < len(m.drillTracks); i++ {
-							ids = append(ids, m.drillTracks[i].ID)
+							ids = append(ids, playbackID(m.drillTracks[i]))
 						}
-						return m, func() tea.Msg { return PlayTracksMsg{IDs: ids} }
+						first := m.drillTracks[idx]
+						return m, func() tea.Msg {
+							return PlayTracksMsg{IDs: ids, Track: &first}
+						}
 					}
 				}
 				return m, nil
@@ -202,8 +205,9 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 				switch m.activeTab {
 				case tabTracks:
 					if item, ok := selected.(trackListItem); ok {
+						t := item.t
 						return m, func() tea.Msg {
-							return PlayTracksMsg{IDs: []string{item.t.ID}}
+							return PlayTracksMsg{IDs: []string{playbackID(item.t)}, Track: &t}
 						}
 					}
 				case tabPlaylists:

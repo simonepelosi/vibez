@@ -30,14 +30,15 @@ func newMockPlayer() *mockPlayer {
 	return &mockPlayer{stateCh: make(chan player.State, 4)}
 }
 
-func (m *mockPlayer) Play() error                { m.playCalled = true; return m.err }
-func (m *mockPlayer) Pause() error               { m.pauseCalled = true; return m.err }
-func (m *mockPlayer) Stop() error                { return m.err }
-func (m *mockPlayer) Next() error                { m.nextCalled = true; return m.err }
-func (m *mockPlayer) Previous() error            { m.prevCalled = true; return m.err }
-func (m *mockPlayer) Seek(_ time.Duration) error { return m.err }
-func (m *mockPlayer) SetVolume(_ float64) error  { return m.err }
-func (m *mockPlayer) SetQueue(_ []string) error  { return m.err }
+func (m *mockPlayer) Play() error                       { m.playCalled = true; return m.err }
+func (m *mockPlayer) Pause() error                      { m.pauseCalled = true; return m.err }
+func (m *mockPlayer) Stop() error                       { return m.err }
+func (m *mockPlayer) Next() error                       { m.nextCalled = true; return m.err }
+func (m *mockPlayer) Previous() error                   { m.prevCalled = true; return m.err }
+func (m *mockPlayer) Seek(_ time.Duration) error        { return m.err }
+func (m *mockPlayer) SetVolume(_ float64) error         { return m.err }
+func (m *mockPlayer) SetQueue(_ []string) error         { return m.err }
+func (m *mockPlayer) SetPlaylist(_ string, _ int) error { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err

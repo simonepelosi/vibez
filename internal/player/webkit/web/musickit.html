@@ -4,10 +4,17 @@
   <meta charset="utf-8">
   <!--
     This page runs inside a hidden WebKit2GTK window.
-    MusicKit JS handles FairPlay DRM and Apple Music streaming.
+    MusicKit JS is used ONLY for:
+      - Developer token validation / MusicKit.configure()
+      - User authorization (music.authorize())
+      - Apple Music catalog API calls (m.api.music())
+    WebKit's audio stack is NEVER used. GStreamer (Go side) handles all audio.
+    This means WebKit never registers with MPRIS/D-Bus as a media player.
+
     Go communicates bidirectionally:
-      Go → JS: w.Eval("window.vibez*(...)") for playback commands
-      JS → Go: bound functions (goNeedsAuth, goAuthComplete, goPlayerStateChange, goUserTokenChanged, goError)
+      Go → JS: w.Eval("window.vibez*(...)") for commands
+      JS → Go: goNeedsAuth, goAuthComplete, goPlayerStateChange,
+                goUserTokenChanged, goStorefrontChanged, goStreamURL, goError
   -->
   <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"></script>
 </head>
@@ -15,118 +22,156 @@
 <script>
   document.addEventListener('musickitloaded', async function() {
     try {
-      const music = await MusicKit.configure({
+      const configOpts = {
         developerToken: '{{.DeveloperToken}}',
-        app: { name: 'vibez', build: '{{.Version}}' }
-      });
+        app: { name: 'vibez', build: '{{.Version}}' },
+      };
+      const configuredStorefront = '{{.Storefront}}';
+      if (configuredStorefront) {
+        configOpts.storefrontId = configuredStorefront;
+      }
+      const music = await MusicKit.configure(configOpts);
 
-      // Inject an existing user token if the Go side already has one.
-      // MusicKit v3 exposes a setter for musicUserToken on the instance.
       const savedToken = '{{.UserToken}}';
       if (savedToken !== '') {
         music.musicUserToken = savedToken;
       }
 
-      // Notify state on every relevant event.
-      // MusicKit JS v3: playback properties live directly on the instance,
-      // not on the removed music.player sub-object.
-      function notifyState() {
-        const m    = MusicKit.getInstance();
-        const item = m.nowPlayingItem;
+      // Forward user token / storefront changes to Go for persistence.
+      music.addEventListener('userTokenDidChange', function() {
+        goUserTokenChanged(MusicKit.getInstance().musicUserToken || '').catch(console.error);
+      });
+      music.addEventListener('storefrontIdentifierDidChange', function() {
+        goStorefrontChanged(MusicKit.getInstance().storefrontId || '').catch(console.error);
+      });
+
+      // ── Our own queue ────────────────────────────────────────────────────
+      // We never call m.play() or m.setQueue() — WebKit's audio element is
+      // never activated, so WebKit never registers with MPRIS/D-Bus.
+      // GStreamer receives preview URLs via goStreamURL and plays natively.
+      let _queue = [];   // resolved MediaItem objects
+      let _idx   = 0;
+
+      // notifyQueueItem pushes track metadata and a "playing=true" state to Go.
+      function notifyQueueItem(item, isPlaying) {
+        if (!item) return;
+        const artwork = item.attributes.artwork;
         const state = {
-          isPlaying:     m.isPlaying,
-          playbackState: m.playbackState,
-          currentTime:   m.currentPlaybackTime,
-          duration:      m.currentPlaybackDuration,
-          volume:        m.volume,
-          nowPlaying: item ? {
+          isPlaying:     isPlaying !== false,
+          playbackState: 3, // MusicKit.PlaybackStates.playing
+          currentTime:   0, // GStreamer is authoritative; Go reads gst.Position()
+          duration:      (item.attributes.durationInMillis || 0) / 1000,
+          volume:        1.0,
+          nowPlaying: {
             id:         item.id,
             title:      item.attributes.name,
             artist:     item.attributes.artistName,
             album:      item.attributes.albumName,
-            artworkURL: MusicKit.formatArtworkURL(item.attributes.artwork, 300, 300),
-            durationMs: item.attributes.durationInMillis
-          } : null
+            artworkURL: artwork ? MusicKit.formatArtworkURL(artwork, 300, 300) : '',
+            durationMs: item.attributes.durationInMillis || 0,
+          },
         };
         goPlayerStateChange(JSON.stringify(state)).catch(console.error);
       }
 
-      music.addEventListener('playbackStateDidChange',  notifyState);
-      music.addEventListener('nowPlayingItemDidChange', notifyState);
-      music.addEventListener('playbackTimeDidChange',   notifyState);
+      // playIdx selects track at index, sends its preview URL to GStreamer,
+      // and notifies Go of the new track metadata.
+      function playIdx(idx) {
+        if (idx < 0 || idx >= _queue.length) return;
+        _idx = idx;
+        const item = _queue[idx];
+        const previews = item.attributes && item.attributes.previews;
+        if (previews && previews.length > 0) {
+          goStreamURL(previews[0].url).catch(() => {});
+        } else {
+          goError('no preview URL for: ' + item.attributes.name).catch(() => {});
+        }
+        notifyQueueItem(item, true);
+      }
 
-      // Forward user token changes so Go can persist them.
-      music.addEventListener('userTokenDidChange', function() {
-        const tok = MusicKit.getInstance().musicUserToken || '';
-        goUserTokenChanged(tok).catch(console.error);
-      });
-
-      // Playback controls — called via w.Eval() from Go.
-      const _m = () => MusicKit.getInstance();
-      const _err = async (prefix, e) => {
-        const msg = (e instanceof Error) ? e.message : String(e ?? 'unknown');
-        await goError(prefix + msg).catch(() => {});
+      // errName extracts a consistent error code from MusicKit's non-standard errors.
+      const errName = (e) => {
+        if (!e) return '';
+        if (typeof e.name === 'string' && e.name) return e.name;
+        if (typeof e.message === 'string') return e.message;
+        return String(e);
       };
-      window.vibezPlay   = async () => { try { await _m().play(); } catch(e) { await _err('play: ', e); } };
-      window.vibezPause  = async () => { try { await _m().pause(); } catch(e) { await _err('pause: ', e); } };
-      window.vibezToggle = async () => { try { _m().isPlaying ? await _m().pause() : await _m().play(); } catch(e) { await _err('toggle: ', e); } };
-      window.vibezNext   = async () => { try { await _m().skipToNextItem(); } catch(e) { await _err('next: ', e); } };
-      window.vibezPrev   = async () => { try { await _m().skipToPreviousItem(); } catch(e) { await _err('prev: ', e); } };
-      window.vibezSeek   = (t) => _m().seekToTime(t);
-      window.vibezSetVolume = (v) => { _m().volume = v; };
 
-      // Queue a list of song IDs and start playback immediately.
-      // Library IDs start with "i." — use the /v1/me/library/songs/ URL
-      // descriptor so MusicKit plays the full owned track instead of the
-      // 30-second catalog preview.
-      // NOTE: do NOT call m.stop() before setQueue — it tears down the
-      // GStreamer pipeline and races with the XWayland compositor, causing
-      // a screen flash/crash. MusicKit handles the transition internally.
+      // ── Playback controls called from Go via w.Eval() ───────────────────
+      window.vibezPlay  = () => { notifyQueueItem(_queue[_idx], true); };
+      window.vibezPause = () => { notifyQueueItem(_queue[_idx], false); };
+      window.vibezNext  = () => { if (_idx < _queue.length - 1) playIdx(_idx + 1); };
+      window.vibezPrev  = () => { if (_idx > 0) playIdx(_idx - 1); };
+      // Seek and volume are handled entirely in Go (gst.Seek / gst.SetVolume).
+      window.vibezSeek      = () => {};
+      window.vibezSetVolume = () => {};
+
+      // ── Queue songs and start playback ──────────────────────────────────
+      // IDs from Go are catalog IDs (numeric) when available, else library IDs.
       window.vibezSetQueue = async function(idsJSON) {
         try {
           const ids = JSON.parse(idsJSON);
-          if (!ids || ids.length === 0) {
-            await goError('setQueue: empty id list').catch(() => {});
-            return;
-          }
           const m = MusicKit.getInstance();
-          if (!m) {
-            await goError('setQueue: MusicKit instance not available').catch(() => {});
+          if (!m) { goError('setQueue: no MusicKit instance').catch(() => {}); return; }
+
+          const allIds    = (ids || []).filter(Boolean);
+          const catalogIds = allIds.filter(id => !id.startsWith('i.'));
+          const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
+          const sf = m.storefrontId || 'us';
+
+          await goError(`[queue] sf=${sf} catalog=${catalogIds.length} library=${libraryIds.length}`).catch(() => {});
+
+          if (allIds.length === 0) {
+            goError('setQueue: empty id list').catch(() => {});
             return;
           }
 
-          // Determine queue descriptor.
-          // Library IDs (i.XXXXX) → URL format → full owned-track playback.
-          // Catalog IDs (numeric) → { song/songs } → catalog playback.
-          let descriptor;
-          const isLibrary = ids[0].startsWith('i.');
-          if (isLibrary) {
-            const path = ids.length === 1
-              ? `/v1/me/library/songs/${ids[0]}`
-              : `/v1/me/library/songs?ids=${ids.map(encodeURIComponent).join(',')}`;
-            descriptor = { url: path };
-          } else {
-            descriptor = ids.length === 1 ? { song: ids[0] } : { songs: ids };
+          let items = [];
+
+          if (catalogIds.length > 0) {
+            // Fetch MediaItem objects from the catalog API for full metadata
+            // (artwork, duration, preview URLs).
+            try {
+              const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+              items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              await goError(`[queue] resolved ${items.length} items`).catch(() => {});
+            } catch (apiErr) {
+              goError(`[queue] catalog API failed: ${errName(apiErr)}`).catch(() => {});
+            }
           }
 
-          await m.setQueue(descriptor);
-          await m.play();
+          if (items.length === 0 && libraryIds.length > 0) {
+            // Library-only fallback: fetch from library API.
+            try {
+              const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+              items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              await goError(`[queue] library fallback: ${items.length} items`).catch(() => {});
+            } catch (apiErr) {
+              goError(`[queue] library API failed: ${errName(apiErr)}`).catch(() => {});
+            }
+          }
+
+          if (items.length === 0) {
+            goError('setQueue: no items resolved').catch(() => {});
+            return;
+          }
+
+          _queue = items;
+          playIdx(0);
         } catch (e) {
-          const msg = (e instanceof Error) ? e.message
-                    : (e != null ? String(e) : 'unknown error');
-          await goError('setQueue failed: ' + msg).catch(() => {});
+          goError('setQueue failed: ' + errName(e)).catch(() => {});
         }
       };
 
-      // Authorize — signal Go to show the window if needed, then run the
-      // MusicKit auth flow, then hide the window and unblock WaitReady.
+      // ── Authorize ───────────────────────────────────────────────────────
       try {
         await goNeedsAuth('pending').catch(() => {});
         const token = await music.authorize();
         await goUserTokenChanged(token || '').catch(() => {});
+        await goStorefrontChanged(music.storefrontId || '').catch(() => {});
         await goAuthComplete('done').catch(() => {});
       } catch (e) {
-        await goError('auth failed: ' + (e.message || String(e))).catch(() => {});
+        goError('auth failed: ' + (e.message || String(e))).catch(() => {});
         return;
       }
 
