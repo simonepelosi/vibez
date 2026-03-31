@@ -145,19 +145,26 @@
         // skipToNextItem() unreliability never bites us.
         //
         // All MusicKit state changes go through _withLock():
-        //   • promise mutex  → no concurrent stop/setQueue/play calls
-        //   • sequence number → rapid next/prev: only the last press executes,
-        //     stale ops self-cancel after acquiring the lock
+        //   • promise mutex     → no concurrent stop/setQueue/play calls
+        //   • sequence number   → rapid next/prev: only the last press executes,
+        //                         stale ops self-cancel after acquiring the lock
+        //   • _transitioning    → stop() fires nowPlayingItemDidChange(null) which
+        //                         would otherwise trigger a spurious auto-advance
+        //                         mid-transition; this flag suppresses it
 
-        let _q       = [];               // resolved MediaItem objects
-        let _qi      = -1;               // current index (-1 = nothing loaded)
-        let _playSeq = 0;                // bumped on every new play intent
-        let _opLock  = Promise.resolve();// one MusicKit op at a time
+        let _q             = [];               // resolved MediaItem objects
+        let _qi            = -1;               // current index (-1 = nothing loaded)
+        let _playSeq       = 0;                // bumped on every new play intent
+        let _opLock        = Promise.resolve();// one MusicKit op at a time
+        let _transitioning = false;            // true inside _playAt; suppresses auto-advance
 
         function _withLock(seq, fn) {
           _opLock = _opLock
             .then(() => (seq === _playSeq ? fn() : undefined))
-            .catch(e => { if (e?.name !== 'CONTENT_EQUIVALENT') goError('player: '+errName(e)).catch(()=>{}); });
+            .catch(e => {
+              _transitioning = false; // always reset on error
+              if (e?.name !== 'CONTENT_EQUIVALENT') goError('player: '+errName(e)).catch(()=>{});
+            });
           return _opLock;
         }
 
@@ -167,25 +174,29 @@
           const seq  = ++_playSeq;
           const item = _q[idx];
           return _withLock(seq, async () => {
+            _transitioning = true;
             const m = _m();
             try { await m.stop(); }      catch(_) {}
-            if (seq !== _playSeq) return;
+            if (seq !== _playSeq) { _transitioning = false; return; }
             try { await m.setQueue({ items: [item] }); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
-            if (seq !== _playSeq) return;
+            if (seq !== _playSeq) { _transitioning = false; return; }
             try { await m.play(); }      catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') throw e; }
+            _transitioning = false;
           });
         }
 
-        // Auto-advance: when MusicKit runs out of items (item → null after ours
-        // finished) advance our own index respecting the current repeat mode.
+        // Auto-advance: when MusicKit runs out of items (item → null after the
+        // track finishes naturally) advance our index per the repeat mode.
+        // Suppressed while _playAt is executing — stop() also fires this event.
         music.addEventListener('nowPlayingItemDidChange', () => {
           const m = _m();
+          if (_transitioning) return;
           if (m.nowPlayingItem !== null || _qi < 0 || _q.length === 0) return;
           if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
           const next = _qi + 1;
           if (next < _q.length)                   { _playAt(next); return; }
           if (m.repeatMode === 2 /* repeat-all */) { _playAt(0); }
-          // else: end of queue — let it stay stopped
+          // else: end of queue — stay stopped
         });
 
         // Resolve a mixed array of catalog + library IDs → MediaItem objects.
