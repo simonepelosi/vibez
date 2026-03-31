@@ -67,3 +67,16 @@ func runPlaywright() (*playwright.Playwright, error) {
 	}
 	return pw, nil
 }
+
+// findCachedChrome returns the path to the Google Chrome binary that was
+// downloaded into vibez's private browsers cache by EnsureBrowser.
+// Using ExecutablePath instead of Channel avoids touching system Chrome.
+func findCachedChrome() (string, error) {
+	// Playwright stores Chrome as: $PLAYWRIGHT_BROWSERS_PATH/chrome-REVISION/chrome-linux/chrome
+	pattern := filepath.Join(browsersDir(), "chrome-*", "chrome-linux", "chrome")
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return "", fmt.Errorf("chrome not found in vibez cache (%s); run vibez once to download it", browsersDir())
+	}
+	return matches[len(matches)-1], nil // use latest if multiple revisions exist
+}

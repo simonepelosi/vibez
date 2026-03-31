@@ -78,12 +78,20 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	}
 	p.pw = pw
 
+	// Find our privately cached Chrome binary. Using ExecutablePath instead
+	// of Channel means we NEVER use any system Chrome installation.
+	chromePath, err := findCachedChrome()
+	if err != nil {
+		_ = pw.Stop()
+		_ = srv.Close()
+		return nil, fmt.Errorf("cdp: %w", err)
+	}
+
 	// headless once we have a saved token; visible window for first-run auth.
 	headless := userToken != ""
-	channel := "chrome"
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Channel:  &channel,
-		Headless: &headless,
+		ExecutablePath: &chromePath,
+		Headless:       &headless,
 		Args: []string{
 			"--autoplay-policy=no-user-gesture-required",
 			"--enable-features=MediaCapabilities",
