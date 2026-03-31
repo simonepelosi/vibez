@@ -45,12 +45,13 @@
       // In Chrome mode it is absent and MusicKit plays natively.
       const GSTREAMER_MODE = typeof goStreamURL === 'function';
 
-      // errName extracts a consistent error code from MusicKit's non-standard errors.
+      // errName extracts a human-readable description from MusicKit errors.
       const errName = (e) => {
         if (!e) return '';
-        if (typeof e.name === 'string' && e.name) return e.name;
-        if (typeof e.message === 'string') return e.message;
-        return String(e);
+        const name = (typeof e.name === 'string' && e.name) ? e.name : '';
+        const msg  = (typeof e.message === 'string' && e.message) ? e.message : '';
+        if (name && msg && name !== 'Error') return name + ': ' + msg;
+        return msg || name || String(e);
       };
 
       // ── State notification ───────────────────────────────────────────────
@@ -214,7 +215,9 @@
         };
 
         // Append items to the queue without stopping current playback.
-        // Falls back to setQueue (restart from beginning) if queue.append is unavailable.
+        // For catalog IDs we pass them directly as { songs: [...] } — MusicKit resolves
+        // them natively without an extra API call and without the TypeError that raw API
+        // response objects cause.  Library IDs (i.*) must still go through the API first.
         window.vibezAppendQueue = async function(idsJSON) {
           try {
             const m = _m();
@@ -224,31 +227,46 @@
             const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
             const sf = m.storefrontId || 'us';
 
-            let items = [];
+            const isPlaying = m.isPlaying || !!m.nowPlayingItem;
+
+            if (!isPlaying) {
+              // Nothing playing yet — resolve everything and start fresh.
+              let items = [];
+              if (catalogIds.length > 0) {
+                try {
+                  const r = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                  items = r && r.data && r.data.data ? r.data.data : [];
+                } catch(e) { goError('[append] catalog API: '+errName(e)).catch(()=>{}); }
+              }
+              if (items.length === 0 && libraryIds.length > 0) {
+                try {
+                  const r = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                  items = r && r.data && r.data.data ? r.data.data : [];
+                } catch(e) { goError('[append] library API: '+errName(e)).catch(()=>{}); }
+              }
+              if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
+              try { await m.setQueue({ items }); } catch(_) {}
+              try { await m.play(); }              catch(_) {}
+              return;
+            }
+
+            // Playing — append without stopping.
+            // Catalog IDs: pass as { songs } so MusicKit resolves them natively (avoids TypeError).
             if (catalogIds.length > 0) {
               try {
-                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
-                items = resp && resp.data && resp.data.data ? resp.data.data : [];
-              } catch(e) { goError('[append] catalog API failed: '+errName(e)).catch(()=>{}); }
-            }
-            if (items.length === 0 && libraryIds.length > 0) {
-              try {
-                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
-                items = resp && resp.data && resp.data.data ? resp.data.data : [];
-              } catch(e) { goError('[append] library API failed: '+errName(e)).catch(()=>{}); }
-            }
-            if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
-
-            if (!m.isPlaying && !m.nowPlayingItem) {
-              // Nothing playing — start fresh
-              try { await m.setQueue({ items }); } catch(_) {}
-              try { await m.play(); } catch(_) {}
-            } else {
-              // Append to live queue using MusicKit v3 queue.append()
-              try {
-                await m.queue.append({ items });
+                await m.queue.append({ songs: catalogIds });
               } catch(e) {
-                goError('appendQueue failed: '+errName(e)).catch(()=>{});
+                goError('appendQueue(songs) failed: '+errName(e)).catch(()=>{});
+              }
+            }
+            // Library IDs: resolve via API first, then append resolved items.
+            if (libraryIds.length > 0) {
+              try {
+                const r = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                const items = r && r.data && r.data.data ? r.data.data : [];
+                if (items.length > 0) await m.queue.append({ items });
+              } catch(e) {
+                goError('appendQueue(library) failed: '+errName(e)).catch(()=>{});
               }
             }
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
