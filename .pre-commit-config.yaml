@@ -41,6 +41,16 @@ repos:
         types: [go]
         pass_filenames: false
 
+  # ── JS (musickit.html pure-logic tests) ──────────────────────────────────
+  - repo: local
+    hooks:
+      - id: musickit-js-test
+        name: musickit js test
+        language: node
+        entry: node internal/player/web/musickit_test.mjs
+        files: '^internal/player/(web|webkit/web)/musickit'
+        pass_filenames: false
+
   # ── General file hygiene ───────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

@@ -1,6 +1,7 @@
 package views
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,4 +158,119 @@ func TestSearch_Update_TypeWhileFocused(t *testing.T) {
 	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	_ = cmd // cmd may be nil — that is correct in the new design
 	_ = s
+}
+
+// --- SelectedTrack ────────────────────────────────────────────────────────────
+
+func TestSearch_SelectedTrack_NoResults(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	if got := s.SelectedTrack(); got != nil {
+		t.Errorf("SelectedTrack() with no results = %v, want nil", got)
+	}
+}
+
+func TestSearch_SelectedTrack_ReturnsFirstByDefault(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	tracks := []provider.Track{
+		{Title: "First", Artist: "A", CatalogID: "111"},
+		{Title: "Second", Artist: "B", CatalogID: "222"},
+	}
+	s.SetState(tracks, false, nil)
+
+	got := s.SelectedTrack()
+	if got == nil {
+		t.Fatal("SelectedTrack() returned nil after SetState with tracks")
+	}
+	if got.Title != "First" {
+		t.Errorf("SelectedTrack().Title = %q, want %q", got.Title, "First")
+	}
+}
+
+func TestSearch_SelectedTrack_ChangesAfterNavigation(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	tracks := []provider.Track{
+		{Title: "Alpha", CatalogID: "1"},
+		{Title: "Beta", CatalogID: "2"},
+		{Title: "Gamma", CatalogID: "3"},
+	}
+	s.SetState(tracks, false, nil)
+
+	// Move down once — should select "Beta".
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+
+	got := s.SelectedTrack()
+	if got == nil {
+		t.Fatal("SelectedTrack() returned nil after navigating down")
+	}
+	if got.Title != "Beta" {
+		t.Errorf("SelectedTrack().Title after Down = %q, want %q", got.Title, "Beta")
+	}
+}
+
+func TestSearch_SelectedIndex_TracksCursorPosition(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetState([]provider.Track{
+		{Title: "A", CatalogID: "1"},
+		{Title: "B", CatalogID: "2"},
+	}, false, nil)
+
+	if s.SelectedIndex() != 0 {
+		t.Errorf("initial SelectedIndex() = %d, want 0", s.SelectedIndex())
+	}
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if s.SelectedIndex() != 1 {
+		t.Errorf("SelectedIndex() after Down = %d, want 1", s.SelectedIndex())
+	}
+}
+
+func TestSearch_SetState_ResetsSelection(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetState([]provider.Track{
+		{Title: "X", CatalogID: "x"},
+		{Title: "Y", CatalogID: "y"},
+	}, false, nil)
+
+	// Navigate to second item.
+	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+
+	// Replace results — cursor should reset to 0.
+	s.SetState([]provider.Track{{Title: "New", CatalogID: "n"}}, false, nil)
+	if s.SelectedIndex() != 0 {
+		t.Errorf("SelectedIndex() after SetState = %d, want 0 (reset)", s.SelectedIndex())
+	}
+}
+
+func TestSearch_Loading_View_NonemptyString(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetState(nil, true, nil)
+	v := s.View()
+	if v == "" {
+		t.Error("View() during loading should return non-empty string")
+	}
+}
+
+func TestSearch_EmptyResults_View_ReturnsEmpty(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetState(nil, false, nil)
+	v := s.View()
+	if v != "" {
+		t.Errorf("View() with no results/loading/error should be empty, got %q", v)
+	}
+}
+
+func TestSearch_ErrorState_View_ContainsError(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 20)
+	s.SetState(nil, false, errors.New("network timeout"))
+	v := s.View()
+	if !strings.Contains(v, "network timeout") {
+		t.Errorf("View() with error should contain error text, got %q", v)
+	}
 }
