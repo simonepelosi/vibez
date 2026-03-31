@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -74,17 +73,17 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Try Chrome via Playwright — full Widevine DRM, direct audio output.
-	// EnsureBrowser downloads Chrome once (~300 MB) and caches it; subsequent
-	// starts are instant. Fall back to WebKit + GStreamer (30 s preview) if
-	// the download or launch fails.
+	// On first run, Playwright downloads Chrome (~150 MB) into
+	// ~/.cache/vibez/playwright — NOT a system install; invisible to apt/snap.
+	// Subsequent starts are instant (cached binary, no network).
+	// PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=1 prevents it from running
+	// apt-get/polkit for system library dependencies.
 	var audioEngine vibezPlayer
 
-	fmt.Fprint(os.Stderr, "Checking browser (Chrome)... ")
-	if browserErr := cdp.EnsureBrowser(io.Discard); browserErr != nil {
-		fmt.Fprintf(os.Stderr, "unavailable (%v) — using 30 s preview mode\n", browserErr)
-	} else {
-		fmt.Fprintln(os.Stderr, "ready")
+	if err := cdp.EnsureBrowser(os.Stderr); err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "debug: browser setup failed (%v); falling back to WebKit+GStreamer\n", err)
+		}
 	}
 
 	if cdpPlayer, cdpErr := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront); cdpErr == nil {
