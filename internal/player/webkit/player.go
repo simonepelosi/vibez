@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"text/template"
@@ -68,6 +69,19 @@ func New(devToken, userToken string) (*Player, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Force GTK to use the X11 (XWayland) backend on Wayland sessions.
+	// The native Wayland backend (GDK_BACKEND=wayland) does not support
+	// off-screen window management: moving a window outside the screen is a
+	// Wayland protocol violation that causes compositor crashes and monitor
+	// flicker. XWayland handles this correctly.
+	// Also disable WebKit's GPU process before GTK init — WebKit reads this
+	// at startup and the env vars must be set before webview.New().
+	if os.Getenv("GDK_BACKEND") == "" {
+		_ = os.Setenv("GDK_BACKEND", "x11")
+	}
+	// Disable WebKit compositing mode — vibez is audio-only, GPU is not needed.
+	_ = os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
 
 	p := &Player{
 		readyCh: make(chan struct{}),
