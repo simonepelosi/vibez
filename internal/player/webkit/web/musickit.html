@@ -215,9 +215,8 @@
         };
 
         // Append items to the queue without stopping current playback.
-        // For catalog IDs we pass them directly as { songs: [...] } — MusicKit resolves
-        // them natively without an extra API call and without the TypeError that raw API
-        // response objects cause.  Library IDs (i.*) must still go through the API first.
+        // queue.append() expects a plain array of MediaItem objects — resolve IDs via
+        // the catalog/library API first, then pass the array directly.
         window.vibezAppendQueue = async function(idsJSON) {
           try {
             const m = _m();
@@ -227,47 +226,35 @@
             const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
             const sf = m.storefrontId || 'us';
 
-            const isPlaying = m.isPlaying || !!m.nowPlayingItem;
+            // Resolve all IDs to MediaItem objects (same path for playing and not-playing).
+            let items = [];
+            if (catalogIds.length > 0) {
+              try {
+                const r = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                items = items.concat(r && r.data && r.data.data ? r.data.data : []);
+              } catch(e) { goError('[append] catalog API: '+errName(e)).catch(()=>{}); }
+            }
+            if (libraryIds.length > 0) {
+              try {
+                const r = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                items = items.concat(r && r.data && r.data.data ? r.data.data : []);
+              } catch(e) { goError('[append] library API: '+errName(e)).catch(()=>{}); }
+            }
+            if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
 
+            const isPlaying = m.isPlaying || !!m.nowPlayingItem;
             if (!isPlaying) {
-              // Nothing playing yet — resolve everything and start fresh.
-              let items = [];
-              if (catalogIds.length > 0) {
-                try {
-                  const r = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
-                  items = r && r.data && r.data.data ? r.data.data : [];
-                } catch(e) { goError('[append] catalog API: '+errName(e)).catch(()=>{}); }
-              }
-              if (items.length === 0 && libraryIds.length > 0) {
-                try {
-                  const r = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
-                  items = r && r.data && r.data.data ? r.data.data : [];
-                } catch(e) { goError('[append] library API: '+errName(e)).catch(()=>{}); }
-              }
-              if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
+              // Nothing playing yet — start fresh.
               try { await m.setQueue({ items }); } catch(_) {}
               try { await m.play(); }              catch(_) {}
               return;
             }
 
-            // Playing — append without stopping.
-            // Catalog IDs: pass as { songs } so MusicKit resolves them natively (avoids TypeError).
-            if (catalogIds.length > 0) {
-              try {
-                await m.queue.append({ songs: catalogIds });
-              } catch(e) {
-                goError('appendQueue(songs) failed: '+errName(e)).catch(()=>{});
-              }
-            }
-            // Library IDs: resolve via API first, then append resolved items.
-            if (libraryIds.length > 0) {
-              try {
-                const r = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
-                const items = r && r.data && r.data.data ? r.data.data : [];
-                if (items.length > 0) await m.queue.append({ items });
-              } catch(e) {
-                goError('appendQueue(library) failed: '+errName(e)).catch(()=>{});
-              }
+            // Playing — queue.append() takes a raw array of MediaItem objects.
+            try {
+              await m.queue.append(items);
+            } catch(e) {
+              goError('appendQueue failed: '+errName(e)).catch(()=>{});
             }
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
         };
