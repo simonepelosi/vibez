@@ -685,8 +685,7 @@ func (m *Model) renderContent(h int) string {
 	// Default idle state — animated bear + search hint, vertically centred.
 	if raw == "" {
 		const bearContent = views.BearLines + 2 // bear(3) + blank + hint
-		bob := (m.glowStep / 3) % 2
-		topPad := max(0, (h-bearContent)/2-bob)
+		topPad := max(0, (h-bearContent)/2)
 		var sb strings.Builder
 		sb.WriteString(strings.Repeat("\n", topPad))
 		sb.WriteString(views.RenderBear(m.glowStep, m.width))
