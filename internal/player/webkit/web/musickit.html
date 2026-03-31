@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <title>vibez</title>
   <!--
     Shared MusicKit JS page used by both the WebKit and Chrome (CDP) backends.
 
@@ -12,15 +13,16 @@
                      URLs are sent to Go's GStreamer pipeline for audio output.
 
     Go ↔ JS bridge:
-      Go → JS : w.Eval / chromedp.Evaluate for vibez*() commands
+      Go → JS : w.Eval / page.Evaluate for vibez*() commands
       JS → Go : goNeedsAuth, goAuthComplete, goPlayerStateChange,
                 goUserTokenChanged, goStorefrontChanged, goStreamURL*, goError
                 (* GStreamer mode only)
+
+    IMPORTANT: the musickitloaded listener MUST be registered before the
+    musickit.js <script> tag — MusicKit dispatches the event synchronously
+    during its own script execution, before any <body> scripts run.
   -->
-  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"></script>
-</head>
-<body>
-<script>
+  <script>
   document.addEventListener('musickitloaded', async function() {
     try {
       const configOpts = {
@@ -87,9 +89,30 @@
       if (!GSTREAMER_MODE) {
         const _m = () => MusicKit.getInstance();
 
+        // Update the W3C MediaSession so OS notifications and MPRIS clients
+        // show the current track under the "vibez" player identity rather
+        // than a generic Chrome media entry.
+        function updateMediaSession(item, isPlaying) {
+          if (item) {
+            const artwork = item.attributes.artwork;
+            navigator.mediaSession.metadata = new MediaMetadata({
+              title:  item.attributes.name,
+              artist: item.attributes.artistName,
+              album:  item.attributes.albumName,
+              artwork: artwork
+                ? [{ src: MusicKit.formatArtworkURL(artwork, 512, 512), sizes: '512x512', type: 'image/jpeg' }]
+                : [],
+            });
+          } else {
+            navigator.mediaSession.metadata = null;
+          }
+          navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+        }
+
         function notifyState() {
           const m = _m();
           const item = m.nowPlayingItem;
+          updateMediaSession(item, m.isPlaying);
           const state = {
             isPlaying:     m.isPlaying,
             playbackState: m.playbackState,
@@ -119,11 +142,18 @@
         window.vibezSeek      = (t) => _m().seekToTime(t);
         window.vibezSetVolume = (v) => { _m().volume = v; };
 
-        window.vibezSetQueue = async function(idsJSON) {
+        // Wire OS media keys / MPRIS actions back to MusicKit.
+        navigator.mediaSession.setActionHandler('play',          () => _m().play());
+        navigator.mediaSession.setActionHandler('pause',         () => _m().pause());
+        navigator.mediaSession.setActionHandler('nexttrack',     () => _m().skipToNextItem());
+        navigator.mediaSession.setActionHandler('previoustrack', () => _m().skipToPreviousItem());
+        navigator.mediaSession.setActionHandler('seekto', (d) => _m().seekToTime(d.seekTime));
+
+
           try {
             const ids = JSON.parse(idsJSON);
             const m = _m();
-            const allIds    = (ids || []).filter(Boolean);
+            const allIds     = (ids || []).filter(Boolean);
             const catalogIds = allIds.filter(id => !id.startsWith('i.'));
             const sf = m.storefrontId || 'us';
 
@@ -145,6 +175,27 @@
               if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
             }
           } catch(e) { goError('setQueue failed: '+errName(e)).catch(()=>{}); }
+        };
+
+        window.vibezSetPlaylist = async function(playlistID, startIdx) {
+          try {
+            const m = _m();
+            const sf = m.storefrontId || 'us';
+            let items = [];
+            try {
+              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              items = resp && resp.data && resp.data.data ? resp.data.data : [];
+            } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
+            if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
+
+            try { await m.stop(); } catch(_) {}
+            try { await m.setQueue({ items, startPosition: startIdx || 0 }); } catch(e) {
+              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+            }
+            try { await m.play(); } catch(e) {
+              if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
+            }
+          } catch(e) { goError('setPlaylist failed: '+errName(e)).catch(()=>{}); }
         };
 
       // ════════════════════════════════════════════════════════════════════
@@ -183,7 +234,6 @@
             const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
             const sf = m.storefrontId || 'us';
 
-            await goError(`[queue] sf=${sf} catalog=${catalogIds.length} library=${libraryIds.length}`).catch(() => {});
             if (allIds.length === 0) { goError('setQueue: empty id list').catch(() => {}); return; }
 
             let items = [];
@@ -191,7 +241,6 @@
               try {
                 const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
-                await goError(`[queue] resolved ${items.length} items`).catch(() => {});
               } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
             }
             if (items.length === 0 && libraryIds.length > 0) {
@@ -205,6 +254,21 @@
             _queue = items;
             playIdx(0);
           } catch(e) { goError('setQueue failed: ' + errName(e)).catch(() => {}); }
+        };
+
+        window.vibezSetPlaylist = async function(playlistID, startIdx) {
+          try {
+            const m = MusicKit.getInstance();
+            const sf = m.storefrontId || 'us';
+            let items = [];
+            try {
+              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              items = resp && resp.data && resp.data.data ? resp.data.data : [];
+            } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
+            if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
+            _queue = items;
+            playIdx(startIdx || 0);
+          } catch(e) { goError('setPlaylist failed: ' + errName(e)).catch(() => {}); }
         };
       }
 
@@ -234,6 +298,10 @@
       goError(e.message || String(e)).catch(console.error);
     }
   });
-</script>
+  </script>
+  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"
+          onerror="if(typeof goError==='function'){goError('MusicKit.js failed to load from CDN').catch(function(){});}"></script>
+</head>
+<body>
 </body>
 </html>
