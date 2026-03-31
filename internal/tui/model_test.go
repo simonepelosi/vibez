@@ -171,8 +171,9 @@ func TestModel_Init(t *testing.T) {
 func TestModel_View_WidthZero(t *testing.T) {
 	m := newModel(nil)
 	got := m.View()
-	if got != "Loading…" {
-		t.Errorf("View() with width=0 should return 'Loading…', got %q", got)
+	// With width=0 the intro animation hasn't started yet — expect empty string.
+	if got != "" {
+		t.Errorf("View() with width=0 should return empty string, got %q", got)
 	}
 }
 
@@ -535,7 +536,8 @@ func TestModel_View_WithErrMsg(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
 	m.height = 24
-	m.nowPlaying.SetSize(80, 22)
+	m.introStep = introDone // skip startup animation
+	m.nowPlaying.SetSize(m.contentWidth(), m.contentHeight())
 	m.errMsg = "something went wrong"
 	m.errExpiry = time.Now().Add(10 * time.Second)
 	got := m.View()

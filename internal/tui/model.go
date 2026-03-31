@@ -40,8 +40,29 @@ var sidebarNav = []sidebarEntry{
 
 type tickMsg time.Time
 type glowTickMsg time.Time
+type introTickMsg time.Time
 type playerStateMsg player.State
 type errMsg struct{ err error }
+
+// introFrames is the sequence of text shown during the startup animation.
+// Each frame is displayed for one introTick (60 ms). The logo types out
+// letter-by-letter, then a subtitle pulses in with the glow palette.
+var introFrames = func() []string {
+	logo := "♪ vibez"
+	runes := []rune(logo)
+	frames := make([]string, 0, len(runes)+16)
+	// Phase 1: type out the logo one rune at a time.
+	for i := range runes {
+		frames = append(frames, string(runes[:i+1]))
+	}
+	// Phase 2: hold the full logo for 8 frames, then add subtitle.
+	for range 8 {
+		frames = append(frames, logo)
+	}
+	return frames
+}()
+
+const introDone = -1
 
 type Model struct {
 	cfg      *config.Config
@@ -64,7 +85,8 @@ type Model struct {
 	errExpiry time.Time
 	showHelp  bool
 
-	glowStep int
+	glowStep  int
+	introStep int // counts up through introFrames; introDone when complete
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
@@ -90,6 +112,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
+		introTick(), // startup animation
 		m.library.Init(),
 		m.search.Init(),
 	}
@@ -108,6 +131,12 @@ func tick() tea.Cmd {
 func glowTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
 		return glowTickMsg(t)
+	})
+}
+
+func introTick() tea.Cmd {
+	return tea.Tick(60*time.Millisecond, func(t time.Time) tea.Msg {
+		return introTickMsg(t)
 	})
 }
 
@@ -141,6 +170,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.glowStep++
 			m.nowPlaying.SetGlowStep(m.glowStep)
 			cmds = append(cmds, glowTick())
+		}
+
+	case introTickMsg:
+		if m.introStep != introDone {
+			m.introStep++
+			if m.introStep >= len(introFrames) {
+				m.introStep = introDone
+			} else {
+				cmds = append(cmds, introTick())
+			}
 		}
 
 	case playerStateMsg:
@@ -342,7 +381,12 @@ func (m *Model) forwardMsgToActive(msg tea.Msg) tea.Cmd {
 
 func (m *Model) View() string {
 	if m.width == 0 {
-		return "Loading…"
+		return ""
+	}
+
+	// Startup animation: show centered logo typing out, then fade to main UI.
+	if m.introStep != introDone {
+		return m.renderIntro()
 	}
 
 	sep := m.renderSeparator()
@@ -355,33 +399,47 @@ func (m *Model) View() string {
 	)
 }
 
-func (m *Model) renderHeader() string {
-	logo := styles.Header.Render("♪ vibez")
-
-	var trackInfo string
-	if m.playerState.Track != nil {
-		t := m.playerState.Track
-		icon := "⏸"
-		if m.playerState.Playing {
-			icon = "▶"
-		}
-		elapsed := views.FormatDuration(m.playerState.Position)
-		total := views.FormatDuration(t.Duration)
-		raw := fmt.Sprintf("%s %s — %s  %s/%s", icon, t.Title, t.Artist, elapsed, total)
-		if m.playerState.Playing {
-			idx := m.glowStep % len(styles.GlowPalette)
-			trackInfo = lipgloss.NewStyle().
-				Foreground(styles.GlowPalette[idx]).
-				Render(raw)
-		} else {
-			trackInfo = styles.QueueItemMuted.Render(raw)
-		}
+// renderIntro renders the Copilot-style startup animation: the logo types out
+// letter-by-letter in the center of the screen with a glow pulse underneath.
+func (m *Model) renderIntro() string {
+	if m.introStep < 0 || m.introStep >= len(introFrames) {
+		return ""
 	}
 
-	logoW := lipgloss.Width(logo)
-	trackW := lipgloss.Width(trackInfo)
-	spacerW := max(0, m.width-logoW-trackW)
-	return logo + strings.Repeat(" ", spacerW) + trackInfo
+	frame := introFrames[m.introStep]
+	glowIdx := m.introStep % len(styles.GlowPalette)
+
+	// Render each character of the current frame with the glow color.
+	var logo strings.Builder
+	for _, r := range frame {
+		logo.WriteString(lipgloss.NewStyle().
+			Foreground(styles.GlowPalette[glowIdx]).
+			Render(string(r)))
+	}
+
+	// Subtitle fades in only after the logo is complete (phase 2).
+	var subtitle string
+	if m.introStep >= len("♪ vibez") {
+		subtitle = "\n" + centerStr(
+			lipgloss.NewStyle().Foreground(styles.ColorMuted).Render("connecting…"),
+			m.width,
+		)
+	}
+
+	topPad := max(0, (m.height-3)/2)
+	return strings.Repeat("\n", topPad) +
+		centerStr(logo.String(), m.width) +
+		subtitle
+}
+
+func centerStr(s string, width int) string {
+	w := lipgloss.Width(s)
+	pad := max(0, (width-w)/2)
+	return strings.Repeat(" ", pad) + s
+}
+
+func (m *Model) renderHeader() string {
+	return "  " + styles.Header.Render("♪ vibez")
 }
 
 func (m *Model) renderSeparator() string {

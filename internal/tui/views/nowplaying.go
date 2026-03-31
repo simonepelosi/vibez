@@ -48,11 +48,9 @@ func (m *NowPlayingModel) View() string {
 	var sb strings.Builder
 
 	if m.state.Playing {
-		// Playing: glow bar + blank + title + artist + album + blank + status = 7 lines.
-		topPad := max(0, (m.height-7)/2)
+		// Playing: title + artist + album + blank + status = 5 lines.
+		topPad := max(0, (m.height-5)/2)
 		sb.WriteString(strings.Repeat("\n", topPad))
-		sb.WriteString(centerLine(renderGlowBar(m.glowStep), m.width))
-		sb.WriteString("\n\n")
 		sb.WriteString(centerLine(renderGlowTitle(t.Title, m.glowStep), m.width))
 	} else {
 		// Paused: title + artist + album + blank + status = 5 lines.
@@ -81,22 +79,6 @@ func (m *NowPlayingModel) View() string {
 	return sb.String()
 }
 
-// renderGlowBar renders a 12-block gradient bar with the brightest block at
-// the position that cycles with glowStep.
-func renderGlowBar(glowStep int) string {
-	const barLen = 12
-	palette := styles.GlowPalette
-	pLen := len(palette)
-	center := glowStep % barLen
-	var sb strings.Builder
-	for i := range barLen {
-		dist := max(i-center, center-i)
-		idx := max(0, pLen-1-dist)
-		sb.WriteString(lipgloss.NewStyle().Foreground(palette[idx]).Render("█"))
-	}
-	return sb.String()
-}
-
 // renderGlowTitle renders each rune with a colour based on how far the
 // "bright spot" has swept past it. The spot starts before the first char,
 // sweeps right, exits after the last char, then the cycle restarts.
@@ -119,7 +101,7 @@ func renderGlowTitle(title string, glowStep int) string {
 		} else {
 			color = palette[0] // dim outside the sweep window
 		}
-		sb.WriteString(lipgloss.NewStyle().Foreground(color).Bold(true).Render(string(r)))
+		sb.WriteString(lipgloss.NewStyle().Foreground(color).Italic(true).Render(string(r)))
 	}
 	return sb.String()
 }
