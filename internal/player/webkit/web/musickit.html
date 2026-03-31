@@ -76,8 +76,12 @@
       window.vibezSetVolume = (v) => { _m().volume = v; };
 
       // Queue a list of song IDs and start playback immediately.
-      // Uses MusicKit.getInstance() (always current) rather than the closure
-      // variable to avoid stale-reference issues after re-auth.
+      // Library IDs start with "i." — use the /v1/me/library/songs/ URL
+      // descriptor so MusicKit plays the full owned track instead of the
+      // 30-second catalog preview.
+      // NOTE: do NOT call m.stop() before setQueue — it tears down the
+      // GStreamer pipeline and races with the XWayland compositor, causing
+      // a screen flash/crash. MusicKit handles the transition internally.
       window.vibezSetQueue = async function(idsJSON) {
         try {
           const ids = JSON.parse(idsJSON);
@@ -90,13 +94,21 @@
             await goError('setQueue: MusicKit instance not available').catch(() => {});
             return;
           }
-          // Stop current playback before swapping the queue to avoid DRM conflicts.
-          await m.stop().catch(() => {});
-          // MusicKit v3: prefer { song: id } for a single item,
-          // { songs: [id…] } for multiple. Both are valid queue descriptors.
-          const descriptor = ids.length === 1
-            ? { song: ids[0] }
-            : { songs: ids };
+
+          // Determine queue descriptor.
+          // Library IDs (i.XXXXX) → URL format → full owned-track playback.
+          // Catalog IDs (numeric) → { song/songs } → catalog playback.
+          let descriptor;
+          const isLibrary = ids[0].startsWith('i.');
+          if (isLibrary) {
+            const path = ids.length === 1
+              ? `/v1/me/library/songs/${ids[0]}`
+              : `/v1/me/library/songs?ids=${ids.map(encodeURIComponent).join(',')}`;
+            descriptor = { url: path };
+          } else {
+            descriptor = ids.length === 1 ? { song: ids[0] } : { songs: ids };
+          }
+
           await m.setQueue(descriptor);
           await m.play();
         } catch (e) {
