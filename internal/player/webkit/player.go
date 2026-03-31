@@ -240,6 +240,17 @@ func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
 	return nil
 }
 
+func (p *Player) AppendQueue(ids []string) error {
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("webkit: marshal append ids: %w", err)
+	}
+	js := fmt.Sprintf(`window.vibezSetQueue && window.vibezSetQueue(%s)`,
+		jsonStringLiteral(string(b)))
+	p.dispatch(js)
+	return nil
+}
+
 func (p *Player) SetRepeat(mode int) error {
 	p.dispatch(fmt.Sprintf(`window.vibezSetRepeat && window.vibezSetRepeat(%d)`, mode))
 	return nil

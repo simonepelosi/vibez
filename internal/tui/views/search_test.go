@@ -108,7 +108,8 @@ func TestSearch_Update_SearchResultMsg(t *testing.T) {
 			{Title: "Found Track", Artist: "Found Artist"},
 		},
 	}
-	s, _ = s.Update(searchResultMsg{result: result, err: nil})
+	// In the new design, search results are set via SetState (called by model.go).
+	s.SetState(result.Tracks, false, nil)
 	got := s.View()
 	if got == "" {
 		t.Error("View() after search result should return non-empty string")
@@ -129,7 +130,7 @@ func TestSearch_Update_EscBlursInput(t *testing.T) {
 func TestSearch_Update_NonSearchMsg_NoPanic(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
-	_, _ = s.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) // should not panic
+	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown}) // should not panic
 }
 
 func TestSearch_ScheduleSearch_NonEmpty(t *testing.T) {

@@ -3,9 +3,9 @@ package views
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
@@ -40,20 +40,40 @@ type searchResultMsg struct {
 	err    error
 }
 
+// searchTrackItem implements list.Item.
+type searchTrackItem struct{ t provider.Track }
+
+func (i searchTrackItem) Title() string       { return i.t.Title }
+func (i searchTrackItem) Description() string { return fmt.Sprintf("%s — %s", i.t.Artist, i.t.Album) }
+func (i searchTrackItem) FilterValue() string { return i.t.Title }
+
+// SearchModel holds search results rendered with a list.Model (same as library/queue).
 type SearchModel struct {
+	list     list.Model
 	provider provider.Provider
-	cursor   int
 	results  []provider.Track
 	loading  bool
 	err      error
-	width    int
-	height   int
 }
 
 func NewSearch(prov provider.Provider) *SearchModel {
-	return &SearchModel{
-		provider: prov,
-	}
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
+		Foreground(styles.ColorAccent).Bold(true)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
+		Foreground(styles.ColorSubtle)
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
+		Foreground(styles.ColorFg)
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.
+		Foreground(styles.ColorMuted)
+
+	l := list.New(nil, delegate, 0, 0)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowHelp(false)
+
+	return &SearchModel{list: l, provider: prov}
 }
 
 func (m *SearchModel) Init() tea.Cmd {
@@ -61,50 +81,68 @@ func (m *SearchModel) Init() tea.Cmd {
 }
 
 func (m *SearchModel) SetSize(w, h int) {
-	m.width = w
-	m.height = h
+	m.list.SetSize(w, h)
 }
 
-// SetState updates the search results state directly (called by the model).
+// SetState replaces the current results/loading/error state.
 func (m *SearchModel) SetState(results []provider.Track, loading bool, err error) {
 	m.results = results
 	m.loading = loading
 	m.err = err
+	items := make([]list.Item, len(results))
+	for i, t := range results {
+		items[i] = searchTrackItem{t}
+	}
+	m.list.SetItems(items)
+	m.list.ResetSelected()
 }
 
-// Results returns the current search results.
+// Results returns the current track list.
 func (m *SearchModel) Results() []provider.Track { return m.results }
 
 // Loading returns whether a search is in progress.
 func (m *SearchModel) Loading() bool { return m.loading }
 
-// SetCursor sets the cursor position.
-func (m *SearchModel) SetCursor(n int) { m.cursor = n }
+// SelectedTrack returns the currently highlighted track, or nil if none.
+func (m *SearchModel) SelectedTrack() *provider.Track {
+	if item, ok := m.list.SelectedItem().(searchTrackItem); ok {
+		t := item.t
+		return &t
+	}
+	return nil
+}
 
-// Cursor returns the current cursor position.
-func (m *SearchModel) Cursor() int { return m.cursor }
+// SelectedIndex returns the current list cursor index.
+func (m *SearchModel) SelectedIndex() int { return m.list.Index() }
 
-// Focus is a no-op kept for backward compatibility.
-func (m *SearchModel) Focus() {}
+// Update forwards key messages to the list (for ↑/↓ navigation).
+func (m *SearchModel) Update(msg tea.KeyMsg) (*SearchModel, tea.Cmd) {
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
 
-// Focused always returns false; input focus is now managed by the model.
+// View renders the list (used inside the search popup).
+func (m *SearchModel) View() string {
+	if m.loading {
+		return styles.QueueItemMuted.Render("  searching…")
+	}
+	if m.err != nil {
+		return styles.ErrorStyle.Render("⚠  " + m.err.Error())
+	}
+	if len(m.results) == 0 {
+		return ""
+	}
+	return m.list.View()
+}
+
+// Focus / Focused kept for backward compatibility.
+func (m *SearchModel) Focus()        {}
 func (m *SearchModel) Focused() bool { return false }
 
-func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
-	if srm, ok := msg.(searchResultMsg); ok {
-		m.loading = false
-		if srm.err != nil {
-			m.err = srm.err
-		} else {
-			m.err = nil
-			if srm.result != nil {
-				m.results = searchResultItems(srm.result)
-				m.cursor = 0
-			}
-		}
-	}
-	return m, nil
-}
+// SetCursor / Cursor kept for backward compatibility.
+func (m *SearchModel) SetCursor(_ int) {}
+func (m *SearchModel) Cursor() int     { return m.list.Index() }
 
 func (m *SearchModel) scheduleSearch(query string) tea.Cmd {
 	if query == "" {
@@ -117,50 +155,6 @@ func (m *SearchModel) scheduleSearch(query string) tea.Cmd {
 		return searchResultMsg{result: result, err: err}
 	}
 }
-
-func (m *SearchModel) View() string {
-	var sb strings.Builder
-	switch {
-	case m.err != nil:
-		sb.WriteString(styles.ErrorStyle.Render("⚠  " + m.err.Error()))
-	case m.loading:
-		sb.WriteString(styles.Spinner.Render("  searching…"))
-	case len(m.results) == 0 && !m.loading:
-		// empty — model handles the empty-state hint
-	default:
-		sb.WriteString(m.renderResults())
-	}
-	return sb.String()
-}
-
-func (m *SearchModel) renderResults() string {
-	if len(m.results) == 0 {
-		return ""
-	}
-	selected := styles.Playing.Bold(true)
-	var sb strings.Builder
-	for i, t := range m.results {
-		if i == m.cursor {
-			sb.WriteString(selected.Render("  ● "+t.Title) + "\n")
-		} else {
-			sb.WriteString(styles.QueueItem.Render("    "+t.Title) + "\n")
-		}
-		sb.WriteString(styles.QueueItemMuted.Render("    "+t.Artist+" — "+t.Album) + "\n\n")
-	}
-	return sb.String()
-}
-
-// --- searchTrackItem kept for test compatibility ---
-
-type searchTrackItem struct{ t provider.Track }
-
-func (i searchTrackItem) Title() string {
-	return i.t.Title
-}
-func (i searchTrackItem) Description() string {
-	return fmt.Sprintf("%s — %s", i.t.Artist, i.t.Album)
-}
-func (i searchTrackItem) FilterValue() string { return i.t.Title }
 
 func searchResultItems(r *provider.SearchResult) []provider.Track {
 	return r.Tracks

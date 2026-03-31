@@ -120,8 +120,7 @@ type Model struct {
 	mode viewMode
 
 	// Search accumulation (mode == modeSearch)
-	searchQuery  string
-	searchOffset int // scroll offset for search results popup
+	searchQuery string
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf string
@@ -136,9 +135,6 @@ type Model struct {
 	// Animation
 	glowStep  int
 	introStep int // introDone (-1) when complete
-
-	// Cursor in results list
-	searchCursor int
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
@@ -251,7 +247,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			false,
 			msg.err,
 		)
-		m.searchCursor = 0
 
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
@@ -300,7 +295,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch m.mode {
 	case modeSearch:
-		return m.handleSearchKey(k)
+		return m.handleSearchKey(k, msg)
 	case modeCommand:
 		return m.handleCommandKey(k)
 	default:
@@ -308,7 +303,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	}
 }
 
-func (m *Model) handleSearchKey(k string) tea.Cmd {
+func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	switch k {
 	case "esc":
 		m.mode = modeNormal
@@ -316,10 +311,8 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 		return nil
 	case "enter":
 		// Play now — replaces queue and starts immediately.
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results) {
-			t := results[m.searchCursor]
-			tc := t
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
@@ -330,26 +323,17 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 		return nil
 	case "tab":
 		// Add to queue — appends without interrupting playback.
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results) {
-			t := results[m.searchCursor]
-			m.queueTracks = append(m.queueTracks, t)
-			m.queueIDs = append(m.queueIDs, views.PlaybackID(t))
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
+			m.queueTracks = append(m.queueTracks, tc)
+			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
-			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
+			return m.playerCmd(func() error { return m.player.AppendQueue([]string{views.PlaybackID(tc)}) })
 		}
 		return nil
-	case "up":
-		if m.searchCursor > 0 {
-			m.searchCursor--
-		}
-		return nil
-	case "down":
-		results := m.search.Results()
-		if m.searchCursor < len(results)-1 {
-			m.searchCursor++
-		}
-		return nil
+	case "up", "down", "pgup", "pgdown":
+		_, cmd := m.search.Update(msg)
+		return cmd
 	case "backspace":
 		if len(m.searchQuery) > 0 {
 			runes := []rune(m.searchQuery)
@@ -477,20 +461,12 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "j", "down":
 		m.lastKey = ""
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results)-1 {
-			m.searchCursor++
-		}
 
 	case "k", "up":
 		m.lastKey = ""
-		if m.searchCursor > 0 {
-			m.searchCursor--
-		}
 
 	case "g":
 		if m.lastKey == "g" {
-			m.searchCursor = 0
 			m.lastKey = ""
 		} else {
 			m.lastKey = "g"
@@ -498,17 +474,11 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "G":
 		m.lastKey = ""
-		results := m.search.Results()
-		if len(results) > 0 {
-			m.searchCursor = len(results) - 1
-		}
 
 	case "enter":
 		m.lastKey = ""
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results) {
-			t := results[m.searchCursor]
-			tc := t
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
@@ -518,13 +488,12 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "a":
 		m.lastKey = ""
-		results := m.search.Results()
-		if len(results) > 0 && m.searchCursor < len(results) {
-			t := results[m.searchCursor]
-			m.queueTracks = append(m.queueTracks, t)
-			m.queueIDs = append(m.queueIDs, views.PlaybackID(t))
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
+			m.queueTracks = append(m.queueTracks, tc)
+			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
-			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
+			return m.playerCmd(func() error { return m.player.AppendQueue([]string{views.PlaybackID(tc)}) })
 		}
 
 	default:
@@ -535,8 +504,6 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 }
 
 func (m *Model) scheduleSearch(query string) tea.Cmd {
-	m.searchCursor = 0
-	m.searchOffset = 0
 	if query == "" {
 		m.search.SetState(nil, false, nil)
 		return nil
@@ -737,7 +704,6 @@ func (m *Model) renderSearchPopup(h int) string {
 	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
 	cursor := accent.Render("█")
 
-	// Input line
 	inputLine := accent.Render("/") + "  " +
 		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) +
 		cursor
@@ -745,70 +711,28 @@ func (m *Model) renderSearchPopup(h int) string {
 	popupW := max(40, m.width-16)
 	sep := muted.Render(strings.Repeat("─", popupW-2))
 
-	// Fixed rows: border(2) + input(1) + sep(1) + footerSep(1) + footer(1) = 6
-	// Each result entry is 2 lines (title + artist·album).
-	innerH := max(0, h-6)
-	maxVisible := max(1, innerH/2)
+	// Footer: 2 lines (footerSep + footer text). Fixed: border(2)+input(1)+sep(1)+footer(2) = 6.
+	listH := max(1, h-6)
+	m.search.SetSize(popupW-4, listH) // -4 for border(2)+padding(2)
 
-	results := m.search.Results()
-
-	// Keep scroll offset in sync with the cursor so the selection is always visible.
-	if m.searchCursor < m.searchOffset {
-		m.searchOffset = m.searchCursor
-	}
-	if m.searchCursor >= m.searchOffset+maxVisible {
-		m.searchOffset = m.searchCursor - maxVisible + 1
-	}
-	// Clamp offset so we don't show an empty window at the end.
-	if maxVisible < len(results) && m.searchOffset > len(results)-maxVisible {
-		m.searchOffset = len(results) - maxVisible
-	}
-	if m.searchOffset < 0 {
-		m.searchOffset = 0
+	listView := m.search.View()
+	if listView == "" && !m.search.Loading() && m.searchQuery != "" {
+		listView = "  " + muted.Render("no results")
 	}
 
-	var resultLines []string
-	end := min(m.searchOffset+maxVisible, len(results))
-	for i := m.searchOffset; i < end; i++ {
-		t := results[i]
-		titleStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
-		metaStyle := muted
-		if i == m.searchCursor {
-			titleStyle = lipgloss.NewStyle().Foreground(styles.ColorAccent).Bold(true)
-			metaStyle = lipgloss.NewStyle().Foreground(styles.ColorSubtle)
-		}
-		resultLines = append(resultLines,
-			"  "+titleStyle.Render(t.Title),
-			"  "+metaStyle.Render(t.Artist+" · "+t.Album),
-		)
+	// Pad list view to exactly listH lines so the footer stays pinned.
+	listLines := strings.Split(listView, "\n")
+	for len(listLines) < listH {
+		listLines = append(listLines, "")
 	}
-	if len(results) == 0 && m.search.Loading() {
-		resultLines = []string{"  " + muted.Render("searching…")}
-	} else if len(results) == 0 && m.searchQuery != "" {
-		resultLines = []string{"  " + muted.Render("no results")}
-	}
+	listBlock := strings.Join(listLines[:listH], "\n")
 
-	// Scroll indicators replace the first/last result line when content is clipped.
-	if m.searchOffset > 0 && len(resultLines) > 0 {
-		resultLines[0] = "  " + muted.Render("▲ more results")
-	}
-	if end < len(results) && len(resultLines) > 0 {
-		resultLines[len(resultLines)-1] = "  " + muted.Render("▼ more results")
-	}
-
-	// Pad to fill the result block exactly.
-	for len(resultLines) < innerH {
-		resultLines = append(resultLines, "")
-	}
-	resultBlock := strings.Join(resultLines[:innerH], "\n")
-
-	// Footer with key hints.
 	footerSep := muted.Render(strings.Repeat("─", popupW-2))
 	footer := "  " + accent.Render("Enter") + muted.Render(" play now") +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
-	inner := inputLine + "\n" + sep + "\n" + resultBlock + "\n" + footerSep + "\n" + footer
+	inner := inputLine + "\n" + sep + "\n" + listBlock + "\n" + footerSep + "\n" + footer
 
 	popup := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
