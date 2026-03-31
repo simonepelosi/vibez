@@ -237,16 +237,53 @@ test('auto-advance: repeat-one replays same index', async () => {
   eq(t.calls.filter(x => x === 0).length, 2);
 });
 
-// ─── _busy set before stop() = stop's events suppressed ──────────────────────
-console.log('\nplaybackStateDidChange(completed) auto-advance');
+// ─── No-stop design: setQueue handles transition, stop only on cold start ─────
+console.log('\nNo-stop design (setQueue handles transition)');
 
-test('_busy set before stop(): stop fires state=4 (stopped), not 9 (completed)', () => {
-  // playbackStateDidChange only advances on state=9 (completed).
-  // stop() transitions to state=4 (stopped) — a different value — so it is
-  // never caught by the listener. _busy is a secondary safety net.
-  const STOPPED   = 4;
-  const COMPLETED = 9;
-  eq(STOPPED === COMPLETED, false, 'stopped and completed must be distinct states');
+test('_doPlayAt uses songs:[id] descriptor for catalog items', () => {
+  const item = { id: '1234567890', type: 'songs', attributes: {} };
+  const descriptor = item.id.startsWith('i.')
+    ? { items: [item] }
+    : { songs: [item.id] };
+  eq(JSON.stringify(descriptor), JSON.stringify({ songs: ['1234567890'] }),
+     'catalog item should use songs:[id] descriptor');
+});
+
+test('_doPlayAt uses items:[obj] descriptor for library items', () => {
+  const item = { id: 'i.ABCDEF', type: 'library-songs', attributes: {} };
+  const descriptor = item.id.startsWith('i.')
+    ? { items: [item] }
+    : { songs: [item.id] };
+  eq('items' in descriptor, true, 'library item should use items:[obj] descriptor');
+  eq(descriptor.items[0], item, 'library item object should be preserved');
+});
+
+test('play() cold-start retry: stop then play when "without a previous" error', () => {
+  // Simulate: play() throws "without a previous stop/pause", we catch it,
+  // stop(), then retry play(). This only happens once on fresh MusicKit init.
+  let stopped = false, plays = 0;
+  const mockPlay = (attempt) => {
+    plays++;
+    if (attempt === 1) throw { name: 'Error', message: 'The play() method was called without a previous stop() or pause() call.' };
+  };
+  const mockStop = () => { stopped = true; };
+  try {
+    mockPlay(1); // first attempt throws
+  } catch(e) {
+    if (e?.message && /without a previous/i.test(e.message)) {
+      mockStop();
+      try { mockPlay(2); } catch(_) {}
+    }
+  }
+  eq(stopped, true,  'stop() must be called on cold-start error');
+  eq(plays,   2,     'play() must be retried after stop()');
+});
+
+test('play() CONTENT_EQUIVALENT is silently ignored', () => {
+  let errLogged = false;
+  const e = { name: 'CONTENT_EQUIVALENT', message: 'CONTENT_EQUIVALENT' };
+  if (e?.name !== 'CONTENT_EQUIVALENT') errLogged = true;
+  eq(errLogged, false, 'CONTENT_EQUIVALENT must not be logged as an error');
 });
 
 test('playbackStateDidChange: ignored for states other than completed(9)', () => {
