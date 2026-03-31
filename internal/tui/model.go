@@ -120,7 +120,8 @@ type Model struct {
 	mode viewMode
 
 	// Search accumulation (mode == modeSearch)
-	searchQuery string
+	searchQuery  string
+	searchOffset int // scroll offset for search results popup
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf string
@@ -314,6 +315,7 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 		m.searchQuery = ""
 		return nil
 	case "enter":
+		// Play now — replaces queue and starts immediately.
 		results := m.search.Results()
 		if len(results) > 0 && m.searchCursor < len(results) {
 			t := results[m.searchCursor]
@@ -323,6 +325,17 @@ func (m *Model) handleSearchKey(k string) tea.Cmd {
 			m.playerState.Track = &tc
 			m.queue.SetTracks(m.queueTracks)
 			m.mode = modeNormal
+			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
+		}
+		return nil
+	case "tab":
+		// Add to queue — appends without interrupting playback.
+		results := m.search.Results()
+		if len(results) > 0 && m.searchCursor < len(results) {
+			t := results[m.searchCursor]
+			m.queueTracks = append(m.queueTracks, t)
+			m.queueIDs = append(m.queueIDs, views.PlaybackID(t))
+			m.queue.SetTracks(m.queueTracks)
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 		return nil
@@ -522,6 +535,8 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 }
 
 func (m *Model) scheduleSearch(query string) tea.Cmd {
+	m.searchCursor = 0
+	m.searchOffset = 0
 	if query == "" {
 		m.search.SetState(nil, false, nil)
 		return nil
@@ -727,18 +742,35 @@ func (m *Model) renderSearchPopup(h int) string {
 		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) +
 		cursor
 
-	// Separator
 	popupW := max(40, m.width-16)
 	sep := muted.Render(strings.Repeat("─", popupW-2))
 
-	// Results — number of rows available inside the popup
-	innerH := max(0, h-6) // borders(2) + input(1) + sep(1) + padding(2)
+	// Fixed rows: border(2) + input(1) + sep(1) + footerSep(1) + footer(1) = 6
+	// Each result entry is 2 lines (title + artist·album).
+	innerH := max(0, h-6)
+	maxVisible := max(1, innerH/2)
+
 	results := m.search.Results()
+
+	// Keep scroll offset in sync with the cursor so the selection is always visible.
+	if m.searchCursor < m.searchOffset {
+		m.searchOffset = m.searchCursor
+	}
+	if m.searchCursor >= m.searchOffset+maxVisible {
+		m.searchOffset = m.searchCursor - maxVisible + 1
+	}
+	// Clamp offset so we don't show an empty window at the end.
+	if maxVisible < len(results) && m.searchOffset > len(results)-maxVisible {
+		m.searchOffset = len(results) - maxVisible
+	}
+	if m.searchOffset < 0 {
+		m.searchOffset = 0
+	}
+
 	var resultLines []string
-	for i, t := range results {
-		if len(resultLines) >= innerH {
-			break
-		}
+	end := min(m.searchOffset+maxVisible, len(results))
+	for i := m.searchOffset; i < end; i++ {
+		t := results[i]
 		titleStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
 		metaStyle := muted
 		if i == m.searchCursor {
@@ -756,13 +788,27 @@ func (m *Model) renderSearchPopup(h int) string {
 		resultLines = []string{"  " + muted.Render("no results")}
 	}
 
-	// Pad result area to innerH
+	// Scroll indicators replace the first/last result line when content is clipped.
+	if m.searchOffset > 0 && len(resultLines) > 0 {
+		resultLines[0] = "  " + muted.Render("▲ more results")
+	}
+	if end < len(results) && len(resultLines) > 0 {
+		resultLines[len(resultLines)-1] = "  " + muted.Render("▼ more results")
+	}
+
+	// Pad to fill the result block exactly.
 	for len(resultLines) < innerH {
 		resultLines = append(resultLines, "")
 	}
 	resultBlock := strings.Join(resultLines[:innerH], "\n")
 
-	inner := inputLine + "\n" + sep + "\n" + resultBlock
+	// Footer with key hints.
+	footerSep := muted.Render(strings.Repeat("─", popupW-2))
+	footer := "  " + accent.Render("Enter") + muted.Render(" play now") +
+		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
+		"  ·  " + accent.Render("Esc") + muted.Render(" close")
+
+	inner := inputLine + "\n" + sep + "\n" + resultBlock + "\n" + footerSep + "\n" + footer
 
 	popup := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
