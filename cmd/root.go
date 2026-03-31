@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/player"
+	"github.com/simone-vibes/vibez/internal/player/cdp"
 	"github.com/simone-vibes/vibez/internal/player/webkit"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 	"github.com/simone-vibes/vibez/internal/tui"
@@ -46,21 +48,23 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("apple developer token not set — run: vibez auth login")
 	}
 
-	// Create the WebKit player (does not start GTK yet).
-	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
-	if err != nil {
-		return fmt.Errorf("creating audio engine: %w", err)
+	// vibezPlayer combines the player.Player playback interface with the
+	// lifecycle methods common to both the webkit and CDP backends.
+	type vibezPlayer interface {
+		player.Player
+		Run()
+		Terminate()
+		WaitReady(ctx context.Context) error
 	}
 
-	// Persist any user token refreshes that MusicKit JS reports.
-	wkPlayer.OnUserToken = func(token string) {
+	// onUserToken / onStorefront closures are shared between backends.
+	onUserToken := func(token string) {
 		cfg.AppleUserToken = token
 		if saveErr := cfg.Save(""); saveErr != nil && debug {
 			fmt.Fprintf(os.Stderr, "debug: saving user token: %v\n", saveErr)
 		}
 	}
-	// Persist the real storefront detected after auth (overrides the "us" default).
-	wkPlayer.OnStorefront = func(sf string) {
+	onStorefront := func(sf string) {
 		if sf != "" && sf != cfg.StoreFront {
 			cfg.StoreFront = sf
 			if saveErr := cfg.Save(""); saveErr != nil && debug {
@@ -69,38 +73,61 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Try Chrome (CDP) first — full Widevine DRM, direct audio output.
+	// Fall back to WebKit + GStreamer (30 s preview) if Chrome is not found.
+	var audioEngine vibezPlayer
+
+	if cdpPlayer, cdpErr := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront); cdpErr == nil {
+		if debug {
+			fmt.Fprintln(os.Stderr, "debug: using Chrome (CDP) audio engine")
+		}
+		cdpPlayer.OnUserToken = onUserToken
+		cdpPlayer.OnStorefront = onStorefront
+		audioEngine = cdpPlayer
+	} else {
+		if debug {
+			fmt.Fprintf(os.Stderr, "debug: Chrome not found (%v); using WebKit+GStreamer fallback\n", cdpErr)
+		}
+		wkPlayer, wkErr := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
+		if wkErr != nil {
+			return fmt.Errorf("creating audio engine: %w", wkErr)
+		}
+		wkPlayer.OnUserToken = onUserToken
+		wkPlayer.OnStorefront = onStorefront
+		audioEngine = wkPlayer
+	}
+
 	prov := apple.New(cfg)
 	tuiErr := make(chan error, 1)
 
-	// BubbleTea runs in a goroutine — GTK must own the main OS thread.
+	// BubbleTea runs in a goroutine — GTK (WebKit mode) must own the main OS thread.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				tuiErr <- fmt.Errorf("panic: %v", r)
-				wkPlayer.Terminate()
+				audioEngine.Terminate()
 			}
 		}()
 		// Wait for MusicKit JS to finish initialising before showing the TUI.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if waitErr := wkPlayer.WaitReady(ctx); waitErr != nil {
+		if waitErr := audioEngine.WaitReady(ctx); waitErr != nil {
 			tuiErr <- fmt.Errorf("audio engine init: %w", waitErr)
-			wkPlayer.Terminate()
+			audioEngine.Terminate()
 			return
 		}
 
-		m := tui.New(cfg, prov, wkPlayer)
+		m := tui.New(cfg, prov, audioEngine)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		_, runErr := p.Run()
 		tuiErr <- runErr
 
-		// TUI exited — stop the GTK event loop so Run() returns.
-		wkPlayer.Terminate()
+		audioEngine.Terminate()
 	}()
 
-	// GTK event loop on the main OS goroutine — blocks until Terminate().
-	wkPlayer.Run()
+	// Run blocks until Terminate() is called (GTK loop for WebKit; channel for CDP).
+	audioEngine.Run()
 
 	return <-tuiErr
 }
