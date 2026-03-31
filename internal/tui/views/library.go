@@ -70,11 +70,11 @@ func NewLibrary(prov provider.Provider) *LibraryModel {
 
 	l := list.New(nil, delegate, 0, 0)
 	l.SetShowTitle(false)
-	l.SetFilteringEnabled(true)
+	l.SetFilteringEnabled(false)
 
 	drill := list.New(nil, delegate, 0, 0)
 	drill.SetShowTitle(false)
-	drill.SetFilteringEnabled(true)
+	drill.SetFilteringEnabled(false)
 
 	sp := spinner.New()
 	sp.Style = styles.Spinner
