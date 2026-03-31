@@ -15,25 +15,19 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
-	"text/template"
 	"time"
-
-	_ "embed"
 
 	webview "github.com/webview/webview_go"
 
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/gst"
+	"github.com/simone-vibes/vibez/internal/player/web"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-//go:embed web/musickit.html
-var musickitHTML string
-
-// jsState mirrors the JSON object sent by the MusicKit JS notifyState function.
+// jsState
 type jsState struct {
 	IsPlaying     bool     `json:"isPlaying"`
 	PlaybackState int      `json:"playbackState"`
@@ -71,7 +65,7 @@ type Player struct {
 // New creates a Player and loads MusicKit JS into a fully hidden WebView.
 // Call Run() on the main OS goroutine to start the GTK event loop.
 func New(devToken, userToken, storefront string) (*Player, error) {
-	html, err := renderHTML(devToken, userToken, storefront)
+	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
 	if err != nil {
 		return nil, err
 	}
@@ -374,25 +368,6 @@ func bindAll(w webview.WebView, p *Player) error {
 	return nil
 }
 
-func renderHTML(devToken, userToken, storefront string) (string, error) {
-	tmpl, err := template.New("musickit").Parse(musickitHTML)
-	if err != nil {
-		return "", fmt.Errorf("parsing musickit template: %w", err)
-	}
-	var buf strings.Builder
-	if err := tmpl.Execute(&buf, map[string]string{
-		"DeveloperToken": devToken,
-		"UserToken":      userToken,
-		"Storefront":     storefront,
-		"Version":        "1.0.0",
-	}); err != nil {
-		return "", fmt.Errorf("rendering musickit template: %w", err)
-	}
-	return buf.String(), nil
-}
-
-// jsonStringLiteral wraps a JSON string in a JS string literal so it can be
-// passed safely as an argument to a JS function via Eval.
 func jsonStringLiteral(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
