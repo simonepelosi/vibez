@@ -19,16 +19,14 @@ import (
 )
 
 // Player drives Apple Music playback through a Playwright-managed Chrome
-// browser. Chrome's built-in Widevine CDM handles DRM; audio is output
-// directly by Chrome to PulseAudio/PipeWire — GStreamer is not used.
+// browser stored in vibez's private cache. Chrome's built-in Widevine CDM
+// enables full-track DRM playback. Audio goes directly to PulseAudio/PipeWire
+// via Chrome — GStreamer is not used.
 //
-// Playwright's page.ExposeFunction wraps Go callbacks so they return Promises
-// in JS automatically — no shim is needed. The absence of goStreamURL tells
-// musickit.html to use Chrome's native m.play()/m.setQueue() Widevine path.
+// The absence of the goStreamURL binding tells musickit.html to use Chrome's
+// native m.play()/m.setQueue() Widevine path instead of GStreamer previews.
 type Player struct {
-	// OnUserToken is called when MusicKit JS reports a new or refreshed token.
-	OnUserToken func(token string)
-	// OnStorefront is called when MusicKit JS detects the user's storefront.
+	OnUserToken  func(token string)
 	OnStorefront func(sf string)
 
 	pw      *playwright.Playwright
@@ -40,14 +38,12 @@ type Player struct {
 	state player.State
 	subs  []chan player.State
 
-	readyCh chan struct{} // closed when goAuthComplete fires
-	errCh   chan error    // receives the first fatal auth error
-	doneCh  chan struct{} // closed by Terminate()
+	readyCh chan struct{}
+	errCh   chan error
+	doneCh  chan struct{}
 }
 
-// New creates a CDP Player. It starts the Playwright driver, launches Chrome,
-// and navigates to the local MusicKit page. Call EnsureBrowser before New()
-// on first run so the browser download can be shown to the user.
+// New creates a CDP Player. EnsureBrowser must be called once before New().
 func New(devToken, userToken, storefront string) (*Player, error) {
 	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
 	if err != nil {
@@ -65,11 +61,7 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(html))
 	})
-	srv := &http.Server{
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
+	srv := &http.Server{Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 
 	p := &Player{
@@ -79,14 +71,14 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		doneCh:  make(chan struct{}),
 	}
 
-	pw, err := playwright.Run()
+	pw, err := runPlaywright()
 	if err != nil {
 		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: start playwright: %w", err)
+		return nil, err
 	}
 	p.pw = pw
 
-	// headless=new once we have a saved token; visible for first-run auth.
+	// headless once we have a saved token; visible window for first-run auth.
 	headless := userToken != ""
 	channel := "chrome"
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
@@ -114,9 +106,9 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	}
 	p.page = pg
 
-	// ExposeFunction wraps each Go callback so the JS side receives a Promise.
-	// goStreamURL is intentionally absent — musickit.html uses its absence to
-	// detect Chrome mode and call m.play()/m.setQueue() natively via Widevine.
+	// Playwright's ExposeFunction wraps Go callbacks to return JS Promises
+	// automatically — no Promise shim needed. goStreamURL is intentionally
+	// absent; its absence triggers Chrome/Widevine mode in musickit.html.
 	bindings := map[string]playwright.ExposedFunction{
 		"goNeedsAuth": func(_ ...any) any { return nil },
 		"goAuthComplete": func(_ ...any) any {
@@ -205,7 +197,6 @@ func (p *Player) sendError(err error) {
 	}
 }
 
-// jsState mirrors the JSON payload sent by goPlayerStateChange.
 type jsState struct {
 	IsPlaying   bool     `json:"isPlaying"`
 	CurrentTime float64  `json:"currentTime"`
@@ -257,7 +248,6 @@ func (p *Player) dispatch(js string) {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-// Run blocks until Terminate() is called, mirroring webkit.Player.Run().
 func (p *Player) Run() {
 	<-p.doneCh
 	_ = p.browser.Close()
@@ -265,7 +255,6 @@ func (p *Player) Run() {
 	_ = p.srv.Close()
 }
 
-// Terminate stops Chrome and unblocks Run(). Safe to call multiple times.
 func (p *Player) Terminate() {
 	select {
 	case <-p.doneCh:
@@ -274,7 +263,6 @@ func (p *Player) Terminate() {
 	}
 }
 
-// WaitReady blocks until MusicKit JS completes authorization, or ctx is cancelled.
 func (p *Player) WaitReady(ctx context.Context) error {
 	select {
 	case <-p.readyCh:
