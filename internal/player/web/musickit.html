@@ -209,15 +209,28 @@
       }
 
       // ── Auth (both modes) ────────────────────────────────────────────────
-      try {
-        await goNeedsAuth('pending').catch(() => {});
-        const token = await music.authorize();
-        await goUserTokenChanged(token || '').catch(() => {});
-        await goStorefrontChanged(music.storefrontId || '').catch(() => {});
+      // If a saved token was injected at render time, skip music.authorize()
+      // entirely. In headless Chrome, authorize() opens a popup for OAuth
+      // which is invisible and hangs forever. With a valid saved token we
+      // don't need it — MusicKit uses musicUserToken directly for API calls.
+      // If the token is expired, API calls will fail and we handle it then.
+      const savedToken = '{{.UserToken}}';
+      if (savedToken !== '') {
+        // Token already set above via music.musicUserToken = savedToken.
+        await goStorefrontChanged(music.storefrontId || 'us').catch(() => {});
         await goAuthComplete('done').catch(() => {});
-      } catch(e) {
-        goError('auth failed: ' + (e.message || String(e))).catch(() => {});
-        return;
+      } else {
+        // No saved token: need interactive auth (Chrome window is visible).
+        try {
+          await goNeedsAuth('pending').catch(() => {});
+          const token = await music.authorize();
+          await goUserTokenChanged(token || '').catch(() => {});
+          await goStorefrontChanged(music.storefrontId || '').catch(() => {});
+          await goAuthComplete('done').catch(() => {});
+        } catch(e) {
+          goError('auth failed: ' + (e.message || String(e))).catch(() => {});
+          return;
+        }
       }
 
     } catch(e) {

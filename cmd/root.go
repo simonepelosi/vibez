@@ -113,8 +113,15 @@ func runTUI(_ *cobra.Command, _ []string) error {
 				audioEngine.Terminate()
 			}
 		}()
-		// Wait for MusicKit JS to finish initialising before showing the TUI.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// WaitReady blocks until MusicKit auth completes. WebKit is fast (~10 s).
+		// CDP with a saved token is also fast (<10 s) because we skip authorize().
+		// CDP first-run needs a visible Chrome window for the user to log in, so
+		// we allow up to 10 minutes for that interaction.
+		waitTimeout := 30 * time.Second
+		if cfg.AppleUserToken == "" {
+			waitTimeout = 10 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), waitTimeout)
 		defer cancel()
 
 		if waitErr := audioEngine.WaitReady(ctx); waitErr != nil {
