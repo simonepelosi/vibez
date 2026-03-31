@@ -13,7 +13,7 @@
                      URLs are sent to Go's GStreamer pipeline for audio output.
 
     Go ↔ JS bridge:
-      Go → JS : w.Eval / page.Evaluate for vibez*() commands
+      Go → JS : page.Evaluate for vibez*() commands
       JS → Go : goNeedsAuth, goAuthComplete, goPlayerStateChange,
                 goUserTokenChanged, goStorefrontChanged, goStreamURL*, goError
                 (* GStreamer mode only)
@@ -89,9 +89,8 @@
       if (!GSTREAMER_MODE) {
         const _m = () => MusicKit.getInstance();
 
-        // Update the W3C MediaSession so OS notifications and MPRIS clients
-        // show the current track under the "vibez" player identity rather
-        // than a generic Chrome media entry.
+        // Update the W3C MediaSession so OS notifications / MPRIS show the
+        // current track under the "vibez" player identity.
         function updateMediaSession(item, isPlaying) {
           if (item) {
             const artwork = item.attributes.artwork;
@@ -149,7 +148,7 @@
         navigator.mediaSession.setActionHandler('previoustrack', () => _m().skipToPreviousItem());
         navigator.mediaSession.setActionHandler('seekto', (d) => _m().seekToTime(d.seekTime));
 
-
+        window.vibezSetQueue = async function(idsJSON) {
           try {
             const ids = JSON.parse(idsJSON);
             const m = _m();
@@ -167,7 +166,6 @@
             if (items.length === 0) { goError('setQueue: no items resolved').catch(()=>{}); return; }
 
             try { await m.stop(); } catch(_) {}
-
             try { await m.setQueue({ items }); } catch(e) {
               if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
             }
@@ -208,7 +206,7 @@
         function playIdx(idx) {
           if (idx < 0 || idx >= _queue.length) return;
           _idx = idx;
-          const item    = _queue[idx];
+          const item     = _queue[idx];
           const previews = item.attributes && item.attributes.previews;
           if (previews && previews.length > 0) {
             goStreamURL(previews[0].url).catch(() => {});
