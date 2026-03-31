@@ -84,14 +84,15 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// Widevine CDM is bundled inside Chrome at this well-known relative path.
 	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 
-	// Playwright 1.33+ maps Headless:true to --headless=new, which in Chrome
-	// 112+ shares the same audio pipeline as headed mode — PulseAudio/PipeWire
-	// work correctly without a visible window. Use headless when we already
-	// have a saved token; show the window only for first-run interactive login.
+	// Playwright injects --mute-audio into every headless Chromium launch.
+	// We must strip it so Chrome's audio service can route through
+	// PulseAudio/PipeWire normally. Use headless when we have a saved token
+	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		ExecutablePath: &chromePath,
-		Headless:       &headless,
+		ExecutablePath:    &chromePath,
+		Headless:          &headless,
+		IgnoreDefaultArgs: []string{"--mute-audio"},
 		Args: []string{
 			// Sandbox requires suid/namespace support unavailable from a non-system path.
 			"--no-sandbox",
