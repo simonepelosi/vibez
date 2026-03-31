@@ -142,18 +142,30 @@
 
         window.vibezPlay  = async () => { try { await _m().play();  } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); } };
         window.vibezPause = async () => { try { await _m().pause(); } catch(e) { goError('pause: '+errName(e)).catch(()=>{}); } };
-        window.vibezNext  = async () => { try { await _m().skipToNextItem();     } catch(e) { goError('next: '+errName(e)).catch(()=>{}); } };
-        window.vibezPrev  = async () => { try { await _m().skipToPreviousItem(); } catch(e) { goError('prev: '+errName(e)).catch(()=>{}); } };
+        window.vibezNext  = async () => {
+          try {
+            await _m().skipToNextItem();
+            try { await _m().play(); } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') throw e; }
+          } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('next: '+errName(e)).catch(()=>{}); }
+        };
+        window.vibezPrev  = async () => {
+          try {
+            await _m().skipToPreviousItem();
+            try { await _m().play(); } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') throw e; }
+          } catch(e) { if (errName(e) !== 'CONTENT_EQUIVALENT') goError('prev: '+errName(e)).catch(()=>{}); }
+        };
         window.vibezSeek      = (t) => _m().seekToTime(t);
         window.vibezSetVolume = (v) => { _m().volume = v; };
         window.vibezSetRepeat  = (mode) => { _m().repeatMode  = mode; };
         window.vibezSetShuffle = (on)   => { _m().shuffleMode = on ? 1 : 0; };
 
         // Wire OS media keys / MPRIS actions back to MusicKit.
+        music.addEventListener('play',           () => _m().play());
+        music.addEventListener('pause',          () => _m().pause());
         navigator.mediaSession.setActionHandler('play',          () => _m().play());
         navigator.mediaSession.setActionHandler('pause',         () => _m().pause());
-        navigator.mediaSession.setActionHandler('nexttrack',     () => _m().skipToNextItem());
-        navigator.mediaSession.setActionHandler('previoustrack', () => _m().skipToPreviousItem());
+        navigator.mediaSession.setActionHandler('nexttrack',     async () => { await _m().skipToNextItem();     try { await _m().play(); } catch(_) {} });
+        navigator.mediaSession.setActionHandler('previoustrack', async () => { await _m().skipToPreviousItem(); try { await _m().play(); } catch(_) {} });
         navigator.mediaSession.setActionHandler('seekto', (d) => _m().seekToTime(d.seekTime));
 
         window.vibezSetQueue = async function(idsJSON) {
