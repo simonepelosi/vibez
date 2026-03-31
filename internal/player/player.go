@@ -37,6 +37,9 @@ type Player interface {
 	// SetPlaylist queues a library playlist by its ID (e.g. "p.XXXXX") and starts
 	// playback from startIdx. This avoids per-song catalog ID resolution.
 	SetPlaylist(playlistID string, startIdx int) error
+	// AppendQueue adds the given track IDs to the end of the current queue
+	// without interrupting playback. If nothing is playing it starts playback.
+	AppendQueue(ids []string) error
 	// SetRepeat sets the repeat mode: 0=off, 1=one, 2=all.
 	SetRepeat(mode int) error
 	// SetShuffle enables or disables shuffle playback.

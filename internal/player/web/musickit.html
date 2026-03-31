@@ -161,6 +161,7 @@
             const m = _m();
             const allIds     = (ids || []).filter(Boolean);
             const catalogIds = allIds.filter(id => !id.startsWith('i.'));
+            const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
             const sf = m.storefrontId || 'us';
 
             let items = [];
@@ -169,6 +170,12 @@
                 const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError('[queue] catalog API failed: '+errName(e)).catch(()=>{}); }
+            }
+            if (items.length === 0 && libraryIds.length > 0) {
+              try {
+                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              } catch(e) { goError('[queue] library API failed: '+errName(e)).catch(()=>{}); }
             }
             if (items.length === 0) { goError('setQueue: no items resolved').catch(()=>{}); return; }
 
@@ -188,7 +195,10 @@
             const sf = m.storefrontId || 'us';
             let items = [];
             try {
-              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              const endpoint = playlistID.startsWith('p.')
+                ? `/v1/me/library/playlists/${playlistID}/tracks`
+                : `/v1/catalog/${sf}/playlists/${playlistID}/tracks`;
+              const resp = await m.api.music(endpoint);
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
@@ -201,6 +211,47 @@
               if (errName(e) !== 'CONTENT_EQUIVALENT') throw e;
             }
           } catch(e) { goError('setPlaylist failed: '+errName(e)).catch(()=>{}); }
+        };
+
+        // Append items to the queue without stopping current playback.
+        // Falls back to setQueue (restart from beginning) if queue.append is unavailable.
+        window.vibezAppendQueue = async function(idsJSON) {
+          try {
+            const m = _m();
+            const ids = JSON.parse(idsJSON);
+            const allIds     = (ids || []).filter(Boolean);
+            const catalogIds = allIds.filter(id => !id.startsWith('i.'));
+            const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
+            const sf = m.storefrontId || 'us';
+
+            let items = [];
+            if (catalogIds.length > 0) {
+              try {
+                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              } catch(e) { goError('[append] catalog API failed: '+errName(e)).catch(()=>{}); }
+            }
+            if (items.length === 0 && libraryIds.length > 0) {
+              try {
+                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              } catch(e) { goError('[append] library API failed: '+errName(e)).catch(()=>{}); }
+            }
+            if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
+
+            if (!m.isPlaying && !m.nowPlayingItem) {
+              // Nothing playing — start fresh
+              try { await m.setQueue({ items }); } catch(_) {}
+              try { await m.play(); } catch(_) {}
+            } else {
+              // Append to live queue using MusicKit v3 queue.append()
+              try {
+                await m.queue.append({ items });
+              } catch(e) {
+                goError('appendQueue failed: '+errName(e)).catch(()=>{});
+              }
+            }
+          } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
         };
 
       // ════════════════════════════════════════════════════════════════════

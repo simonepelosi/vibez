@@ -41,6 +41,7 @@ func (m *mockPlayer) SetRepeat(_ int) error             { return m.err }
 func (m *mockPlayer) SetShuffle(_ bool) error           { return m.err }
 func (m *mockPlayer) SetQueue(_ []string) error         { return m.err }
 func (m *mockPlayer) SetPlaylist(_ string, _ int) error { return m.err }
+func (m *mockPlayer) AppendQueue(_ []string) error      { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
