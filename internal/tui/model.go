@@ -602,8 +602,8 @@ func (m *Model) renderNowPlaying() string {
 	t := m.playerState.Track
 	if t == nil {
 		return lipgloss.JoinVertical(lipgloss.Left,
-			centerStr(styles.QueueItemMuted.Render("♪"), m.width),
-			centerStr(styles.QueueItemMuted.Render("press / to search"), m.width),
+			"",
+			centerStr(styles.QueueItemMuted.Render("silence is not a vibe"), m.width),
 			"",
 			"",
 		)
