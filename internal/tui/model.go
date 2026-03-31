@@ -688,7 +688,7 @@ func (m *Model) renderContent(h int) string {
 		topPad := max(0, (h-bearContent)/2)
 		var sb strings.Builder
 		sb.WriteString(strings.Repeat("\n", topPad))
-		sb.WriteString(views.RenderBear(m.glowStep, m.width))
+		sb.WriteString(views.RenderBear(m.glowStep, m.playerState.Playing, m.width))
 		sb.WriteString("\n\n")
 		sb.WriteString(centerStr(styles.QueueItemMuted.Render("press / to search"), m.width))
 		raw = sb.String()
