@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -83,17 +84,31 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// Widevine CDM is bundled inside Chrome at this well-known relative path.
 	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 
-	// headless once we have a saved token; visible window for first-run auth.
-	headless := userToken != ""
+	// Always run headed — headless Chrome uses a null audio sink and produces
+	// no sound. When we already have a saved token (no auth UI needed), shrink
+	// the window to 1×1 px so it is invisible in practice.
+	headless := false
+	args := []string{
+		// Sandbox requires suid/namespace support unavailable from a non-system path.
+		"--no-sandbox",
+		"--disable-setuid-sandbox",
+		// Avoid GPU init crashes on headless-ish sessions.
+		"--disable-gpu",
+		"--autoplay-policy=no-user-gesture-required",
+		"--enable-features=MediaCapabilities,WidevineCdm",
+		"--disable-blink-features=AutomationControlled",
+		"--widevine-path=" + widevinePath,
+		// Set the window title so MPRIS / OS media notifications say "vibez".
+		"--app=about:blank",
+	}
+	if userToken != "" {
+		// Hide the Chrome window — it is only used for audio output, not UI.
+		args = append(args, "--window-size=1,1", "--window-position=-10000,-10000")
+	}
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath: &chromePath,
 		Headless:       &headless,
-		Args: []string{
-			"--autoplay-policy=no-user-gesture-required",
-			"--enable-features=MediaCapabilities,WidevineCdm",
-			"--disable-blink-features=AutomationControlled",
-			"--widevine-path=" + widevinePath,
-		},
+		Args:           args,
 	})
 	if err != nil {
 		_ = pw.Stop()
@@ -110,6 +125,21 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		return nil, fmt.Errorf("cdp: new page: %w", err)
 	}
 	p.page = pg
+
+	// Forward page crashes and unhandled JS errors to errCh so WaitReady
+	// returns immediately instead of waiting for the full timeout.
+	pg.On("crash", func() {
+		p.sendError(fmt.Errorf("cdp: Chrome page crashed"))
+	})
+	pg.On("pageerror", func(err error) {
+		p.sendError(fmt.Errorf("cdp: page JS error: %w", err))
+	})
+	// Forward browser console messages to stderr for diagnostics.
+	pg.On("console", func(msg playwright.ConsoleMessage) {
+		if msg.Type() == "error" || msg.Type() == "warning" {
+			fmt.Fprintf(os.Stderr, "[chrome %s] %s\n", msg.Type(), msg.Text())
+		}
+	})
 
 	// Playwright's ExposeFunction wraps Go callbacks to return JS Promises
 	// automatically — no Promise shim needed. goStreamURL is intentionally
