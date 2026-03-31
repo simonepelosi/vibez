@@ -47,7 +47,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 
 	// Create the WebKit player (does not start GTK yet).
-	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken)
+	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 	if err != nil {
 		return fmt.Errorf("creating audio engine: %w", err)
 	}
@@ -57,6 +57,15 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		cfg.AppleUserToken = token
 		if saveErr := cfg.Save(""); saveErr != nil && debug {
 			fmt.Fprintf(os.Stderr, "debug: saving user token: %v\n", saveErr)
+		}
+	}
+	// Persist the real storefront detected after auth (overrides the "us" default).
+	wkPlayer.OnStorefront = func(sf string) {
+		if sf != "" && sf != cfg.StoreFront {
+			cfg.StoreFront = sf
+			if saveErr := cfg.Save(""); saveErr != nil && debug {
+				fmt.Fprintf(os.Stderr, "debug: saving storefront: %v\n", saveErr)
+			}
 		}
 	}
 
@@ -82,7 +91,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 
 		m := tui.New(cfg, prov, wkPlayer)
-		p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+		p := tea.NewProgram(m, tea.WithAltScreen())
 		_, runErr := p.Run()
 		tuiErr <- runErr
 

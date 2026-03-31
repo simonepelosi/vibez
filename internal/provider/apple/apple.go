@@ -165,7 +165,7 @@ func toTrack(s songResource) provider.Track {
 	// /v1/me/library/songs/ URL queue format, which plays the full owned track.
 	// Catalog IDs use { song: id } which triggers the preview limit if the
 	// user doesn't own the track — so we never map library IDs to catalog IDs.
-	return provider.Track{
+	t := provider.Track{
 		ID:         s.ID,
 		Title:      s.Attributes.Name,
 		Artist:     s.Attributes.ArtistName,
@@ -175,6 +175,10 @@ func toTrack(s songResource) provider.Track {
 		PreviewURL: preview,
 		Genres:     s.Attributes.GenreNames,
 	}
+	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
+		t.CatalogID = s.Attributes.PlayParams.CatalogID
+	}
+	return t
 }
 
 func toAlbum(r albumResource) provider.Album {

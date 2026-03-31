@@ -13,10 +13,28 @@ import (
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
-// PlayTracksMsg is emitted by the search view when the user presses Enter on a
-// result. The model handles it by calling player.SetQueue.
+// PlayTracksMsg is emitted when the user selects a track to play.
+// Track carries the metadata for an immediate (optimistic) UI update so the
+// Now Playing view feels instant — audio startup latency is hidden from the user.
+// When PlaylistID is set, the player uses SetPlaylist instead of SetQueue so
+// MusicKit resolves the playlist natively without per-song catalog ID lookups.
 type PlayTracksMsg struct {
-	IDs []string
+	IDs        []string
+	Track      *provider.Track // first track, for instant UI update (may be nil)
+	PlaylistID string          // non-empty → use SetPlaylist
+	StartIdx   int             // start position within the playlist
+}
+
+// playbackID returns the best ID to use for MusicKit queue descriptors.
+// Catalog IDs (numeric, e.g. "1622205917") are preferred because MusicKit
+// resolves them against the configured storefront and streams full tracks.
+// Library IDs (i.XXXXX) are a fallback for songs without a catalog match
+// (e.g. iCloud Music Library uploads that were never matched to the catalog).
+func playbackID(t provider.Track) string {
+	if t.CatalogID != "" {
+		return t.CatalogID
+	}
+	return t.ID
 }
 
 type searchResultMsg struct {
@@ -92,8 +110,9 @@ func (m *SearchModel) Update(msg tea.Msg) (*SearchModel, tea.Cmd) {
 		case "enter":
 			if !m.input.Focused() && len(m.results) > 0 {
 				track := m.results[m.cursor]
+				t := track
 				return m, func() tea.Msg {
-					return PlayTracksMsg{IDs: []string{track.ID}}
+					return PlayTracksMsg{IDs: []string{playbackID(track)}, Track: &t}
 				}
 			}
 		case "up", "k":

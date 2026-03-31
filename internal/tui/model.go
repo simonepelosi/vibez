@@ -129,7 +129,7 @@ func tick() tea.Cmd {
 }
 
 func glowTick() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
 		return glowTickMsg(t)
 	})
 }
@@ -205,10 +205,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForState(m.stateCh))
 
 	case views.PlayTracksMsg:
+		if msg.Track != nil {
+			m.playerState.Track = msg.Track
+			m.nowPlaying.SetState(&m.playerState)
+		}
 		cmds = append(cmds, m.playerCmd(func() error {
 			return m.player.SetQueue(msg.IDs)
 		}))
-		// Switch to Now Playing so the user sees what started.
 		m.activeView = viewNowPlaying
 
 	case errMsg:

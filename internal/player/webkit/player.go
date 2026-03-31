@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	webview "github.com/webview/webview_go"
 
 	"github.com/simone-vibes/vibez/internal/player"
+	"github.com/simone-vibes/vibez/internal/player/gst"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -52,6 +55,7 @@ type jsTrack struct {
 // Player implements player.Player using a hidden WebKit2GTK window.
 type Player struct {
 	w       webview.WebView
+	gst     *gst.Player
 	mu      sync.RWMutex
 	state   player.State
 	subs    []chan player.State
@@ -60,38 +64,63 @@ type Player struct {
 
 	// OnUserToken is called when MusicKit JS reports a new or updated user token.
 	OnUserToken func(token string)
+	// OnStorefront is called when MusicKit JS reports the user's storefront after auth.
+	OnStorefront func(storefront string)
 }
 
 // New creates a Player and loads MusicKit JS into a fully hidden WebView.
 // Call Run() on the main OS goroutine to start the GTK event loop.
-func New(devToken, userToken string) (*Player, error) {
-	html, err := renderHTML(devToken, userToken)
+func New(devToken, userToken, storefront string) (*Player, error) {
+	html, err := renderHTML(devToken, userToken, storefront)
 	if err != nil {
 		return nil, err
 	}
 
-	// Force GTK to use the X11 (XWayland) backend on Wayland sessions.
-	// The native Wayland backend (GDK_BACKEND=wayland) does not support
-	// off-screen window management: moving a window outside the screen is a
-	// Wayland protocol violation that causes compositor crashes and monitor
-	// flicker. XWayland handles this correctly.
-	// Also disable WebKit's GPU process before GTK init — WebKit reads this
-	// at startup and the env vars must be set before webview.New().
-	if os.Getenv("GDK_BACKEND") == "" {
-		_ = os.Setenv("GDK_BACKEND", "x11")
-	}
+	// Do NOT force GDK_BACKEND=x11. The window hiding strategy (opacity=0 +
+	// gtk_widget_hide + UTILITY hint) works on both X11 and native Wayland
+	// without any off-screen positioning. Forcing x11 breaks pure Wayland
+	// sessions that don't have XWayland installed.
+	//
+	// WEBKIT_DISABLE_COMPOSITING_MODE=1 disables WebKit's GPU compositor for
+	// web content rendering (independent of the EME/CDM stack). Without it,
+	// WebKit's GPU process competes with the system compositor on every track
+	// transition, freezing the entire desktop for 1-3 seconds. The EME/DRM
+	// pipeline is driven by GStreamer (not the GPU compositor) so FairPlay key
+	// exchange continues to work with compositing disabled.
 	_ = os.Setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1")
-	// JSC uses SIGUSR1 (10) for its GC by default, which conflicts with Go's
-	// signal handling. Redirect it to SIGRTMIN+4 (38), a real-time signal
-	// unused by Go's runtime and not reserved by the OS on Linux.
-	if os.Getenv("JSC_SIGNAL_FOR_GC") == "" {
-		_ = os.Setenv("JSC_SIGNAL_FOR_GC", "38")
-	}
+	// Suppress Go's SIGUSR1 handler so JSC (WebKit's JS engine) can install
+	// its own signal-10 handler for GC. signal.Ignore sets SIG_IGN, which
+	// JSC can override. Using signal.Reset (SIG_DFL) was wrong: SIG_DFL for
+	// SIGUSR1 terminates the process, so any signal-10 delivery during CGO
+	// caused a SIGSEGV ("signal arrived during cgo execution").
+	signal.Ignore(syscall.SIGUSR1)
 
 	p := &Player{
 		readyCh: make(chan struct{}),
 		errCh:   make(chan error, 1),
 	}
+
+	gstPlayer, err := gst.New()
+	if err != nil {
+		return nil, fmt.Errorf("webkit player: %w", err)
+	}
+	p.gst = gstPlayer
+	p.gst.OnEOS(func() {
+		// When GStreamer finishes a track, advance to the next one in the JS queue.
+		p.dispatch(`window.vibezNext && window.vibezNext()`)
+	})
+	p.gst.OnError(func(e error) {
+		p.mu.Lock()
+		s := p.state
+		s.Error = e.Error()
+		p.mu.Unlock()
+		for _, ch := range p.subs {
+			select {
+			case ch <- s:
+			default:
+			}
+		}
+	})
 
 	w := webview.New(false)
 	w.SetTitle("vibez-audio")
@@ -104,17 +133,22 @@ func New(devToken, userToken string) (*Player, error) {
 	// Connect a "map" signal callback that re-hides the window whenever GTK
 	// tries to show it while opacity is 0. This eliminates the startup flash.
 	connectHideOnMap(w.Window())
-	// Disable WebKit's "user gesture required" autoplay policy so MusicKit JS
-	// can call music.play() programmatically after setting the queue.
-	// Scheduled via Dispatch so it runs once the GTK loop is up.
-	w.Dispatch(func() { allowAutoplay(w.Window()) })
+	// Apply WebKit settings (EME, MSE, autoplay, hardware acceleration)
+	// SYNCHRONOUSLY before loading any content. If these are deferred via
+	// Dispatch(), the WebContent process is already initialised with default
+	// settings by the time they run, and the changes have no effect.
+	// We're still on the main OS goroutine here, so direct GTK calls are safe.
+	allowAutoplay(w.Window())
 
 	if err := bindAll(w, p); err != nil {
 		w.Destroy()
 		return nil, err
 	}
 
-	w.SetHtml(html)
+	// Load the HTML with "http://localhost/" as the base URI so the page has
+	// a "potentially trustworthy" secure context. EME (requestMediaKeySystemAccess)
+	// is only available in secure contexts — SetHtml's null origin blocks it.
+	loadHTMLLocalhost(w.Window(), html)
 	p.w = w
 	return p, nil
 }
@@ -127,7 +161,10 @@ func (p *Player) Run() {
 }
 
 // Terminate signals GTK to stop. Safe to call from any goroutine.
+// A recover guard protects against calling Terminate on a webview whose
+// underlying GTK window was already destroyed by a signal or other crash.
 func (p *Player) Terminate() {
+	defer func() { recover() }() //nolint:errcheck
 	p.w.Terminate()
 }
 
@@ -145,39 +182,48 @@ func (p *Player) WaitReady(ctx context.Context) error {
 
 // --- player.Player implementation ---
 
+// Play resumes GStreamer and keeps MusicKit in sync.
 func (p *Player) Play() error {
+	p.gst.Play()
 	p.dispatch(`window.vibezPlay && window.vibezPlay()`)
 	return nil
 }
 
+// Pause pauses GStreamer and keeps MusicKit in sync.
 func (p *Player) Pause() error {
+	p.gst.Pause()
 	p.dispatch(`window.vibezPause && window.vibezPause()`)
 	return nil
 }
 
+// Stop halts GStreamer and MusicKit.
 func (p *Player) Stop() error {
+	p.gst.Stop()
 	p.dispatch(`window.vibezPause && window.vibezPause()`)
 	return nil
 }
 
+// Next advances the MusicKit queue; the audio interceptor fires the next URL to GStreamer.
 func (p *Player) Next() error {
 	p.dispatch(`window.vibezNext && window.vibezNext()`)
 	return nil
 }
 
+// Previous goes back in the MusicKit queue.
 func (p *Player) Previous() error {
 	p.dispatch(`window.vibezPrev && window.vibezPrev()`)
 	return nil
 }
 
+// Seek seeks GStreamer to position (MusicKit seek is skipped — WebView is muted).
 func (p *Player) Seek(position time.Duration) error {
-	secs := position.Seconds()
-	p.dispatch(fmt.Sprintf(`window.vibezSeek && window.vibezSeek(%f)`, secs))
+	p.gst.Seek(position)
 	return nil
 }
 
+// SetVolume sets GStreamer output volume (WebView is muted; MusicKit volume has no effect).
 func (p *Player) SetVolume(v float64) error {
-	p.dispatch(fmt.Sprintf(`window.vibezSetVolume && window.vibezSetVolume(%f)`, v))
+	p.gst.SetVolume(v)
 	return nil
 }
 
@@ -187,6 +233,13 @@ func (p *Player) SetQueue(ids []string) error {
 		return fmt.Errorf("marshalling queue ids: %w", err)
 	}
 	js := fmt.Sprintf(`window.vibezSetQueue && window.vibezSetQueue(%s)`, jsonStringLiteral(string(b)))
+	p.dispatch(js)
+	return nil
+}
+
+func (p *Player) SetPlaylist(playlistID string, startIdx int) error {
+	js := fmt.Sprintf(`window.vibezSetPlaylist && window.vibezSetPlaylist(%s, %d)`,
+		jsonStringLiteral(playlistID), startIdx)
 	p.dispatch(js)
 	return nil
 }
@@ -207,6 +260,7 @@ func (p *Player) Subscribe() <-chan player.State {
 }
 
 func (p *Player) Close() error {
+	p.gst.Destroy()
 	p.Terminate()
 	return nil
 }
@@ -222,7 +276,7 @@ func (p *Player) dispatch(js string) {
 func (p *Player) applyState(js jsState) {
 	s := player.State{
 		Playing:  js.IsPlaying,
-		Position: time.Duration(js.CurrentTime * float64(time.Second)),
+		Position: p.gst.Position(), // GStreamer is authoritative for position
 		Volume:   js.Volume,
 	}
 	if js.NowPlaying != nil {
@@ -280,6 +334,18 @@ func bindAll(w webview.WebView, p *Player) error {
 				p.OnUserToken(token)
 			}
 		},
+		"goStorefrontChanged": func(sf string) {
+			if p.OnStorefront != nil && sf != "" {
+				p.OnStorefront(sf)
+			}
+		},
+		// goStreamURL is called when MusicKit fires nowPlayingItemDidChange — we
+		// extract the preview URL from the item's attributes in JS and forward it
+		// here so GStreamer can play it natively (MusicKit uses MSE/blob URLs
+		// internally that GStreamer cannot consume).
+		"goStreamURL": func(url string) {
+			p.gst.PlayURI(url)
+		},
 		"goError": func(msg string) {
 			// Send to errCh for WaitReady (e.g. auth failure).
 			select {
@@ -308,7 +374,7 @@ func bindAll(w webview.WebView, p *Player) error {
 	return nil
 }
 
-func renderHTML(devToken, userToken string) (string, error) {
+func renderHTML(devToken, userToken, storefront string) (string, error) {
 	tmpl, err := template.New("musickit").Parse(musickitHTML)
 	if err != nil {
 		return "", fmt.Errorf("parsing musickit template: %w", err)
@@ -317,6 +383,7 @@ func renderHTML(devToken, userToken string) (string, error) {
 	if err := tmpl.Execute(&buf, map[string]string{
 		"DeveloperToken": devToken,
 		"UserToken":      userToken,
+		"Storefront":     storefront,
 		"Version":        "1.0.0",
 	}); err != nil {
 		return "", fmt.Errorf("rendering musickit template: %w", err)

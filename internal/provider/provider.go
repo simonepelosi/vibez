@@ -7,6 +7,7 @@ import (
 
 type Track struct {
 	ID         string
+	CatalogID  string // catalog ID for playback; set for library tracks where ID is "i.XXXXX"
 	Title      string
 	Artist     string
 	Album      string
