@@ -209,14 +209,11 @@
       }
 
       // ── Auth (both modes) ────────────────────────────────────────────────
-      // If a saved token was injected at render time, skip music.authorize()
-      // entirely. In headless Chrome, authorize() opens a popup for OAuth
-      // which is invisible and hangs forever. With a valid saved token we
-      // don't need it — MusicKit uses musicUserToken directly for API calls.
-      // If the token is expired, API calls will fail and we handle it then.
-      const savedToken = '{{.UserToken}}';
+      // savedToken is already declared above and musicUserToken pre-set.
+      // If a token exists, skip music.authorize() — in headless Chrome it
+      // opens an invisible OAuth popup that hangs forever. Use the token
+      // directly; if it's expired, API calls will fail and we handle it then.
       if (savedToken !== '') {
-        // Token already set above via music.musicUserToken = savedToken.
         await goStorefrontChanged(music.storefrontId || 'us').catch(() => {});
         await goAuthComplete('done').catch(() => {});
       } else {
