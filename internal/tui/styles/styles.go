@@ -39,12 +39,20 @@ var (
 			PaddingLeft(1).
 			PaddingRight(1)
 
+	NowPlayingLabel = lipgloss.NewStyle().
+			Italic(true).
+			Foreground(lipgloss.Color("#E5C07B")) // warm amber
+
 	NowPlayingTitle = lipgloss.NewStyle().
 			Italic(true).
-			Foreground(ColorFg)
+			Foreground(ColorFg) // soft gray when paused
+
+	NowPlayingTitlePlaying = lipgloss.NewStyle().
+				Italic(true).
+				Foreground(lipgloss.Color("#E0D4FF")) // bright lavender when playing
 
 	NowPlayingArtist = lipgloss.NewStyle().
-				Foreground(ColorAccent)
+				Foreground(lipgloss.Color("#C678DD")) // violet — replaces boring blue
 
 	NowPlayingAlbum = lipgloss.NewStyle().
 			Foreground(ColorMuted)

@@ -806,7 +806,6 @@ func (m *Model) renderBoxHeader(inner int) string {
 // nowPlayingLines returns exactly h lines for the Now Playing section.
 func (m *Model) nowPlayingLines(contentW, h int) []string {
 	muted := styles.QueueItemMuted
-	accent := styles.NowPlayingArtist
 
 	t := m.playerState.Track
 	if t == nil {
@@ -819,28 +818,33 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		return lines
 	}
 
-	// Title with glow sweep when playing.
+	// Title: bright lavender while playing, softer gray while paused.
 	var titleStr string
 	if m.playerState.Playing || m.playerState.Loading {
-		titleStr = views.RenderGlowTitle(t.Title, m.glowStep)
+		titleStr = styles.NowPlayingTitlePlaying.Render(t.Title)
 	} else {
 		titleStr = styles.NowPlayingTitle.Render(t.Title)
 	}
 
-	// "Artist — Title"
-	trackLine := accent.Render(t.Artist) + muted.Render(" — ") + titleStr
+	// "Artist — Title" — centred
+	trackLine := centerStr(
+		styles.NowPlayingArtist.Render(t.Artist)+muted.Render(" — ")+titleStr,
+		contentW,
+	)
 
-	// "Album • elapsed / total"
+	// "Album • elapsed / total" — centred
 	elapsed := views.FormatDuration(m.playerState.Position)
 	total := views.FormatDuration(t.Duration)
-	albumLine := styles.NowPlayingAlbum.Render(t.Album+" • ") +
-		styles.TimeStyle.Render(elapsed+" / "+total)
+	albumLine := centerStr(
+		styles.NowPlayingAlbum.Render(t.Album+" • ")+styles.TimeStyle.Render(elapsed+" / "+total),
+		contentW,
+	)
 
-	// Progress bar
-	barW := max(10, contentW-4)
-	progressBar := views.RenderProgressBar(m.playerState.Position, t.Duration, barW)
+	// Progress bar — centred, slightly narrower than full width
+	barW := max(10, contentW-8)
+	progressLine := centerStr(views.RenderProgressBar(m.playerState.Position, t.Duration, barW), contentW)
 
-	// Controls: ↺  ⇄  ▶/⏸
+	// Controls: ↺  ⇄  ▶/⏸  ♡/♥
 	var playIcon string
 	var playStyle lipgloss.Style
 	switch {
@@ -873,30 +877,33 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		heartIcon, heartStyle = "♥", styles.FavoriteActive
 	}
 
-	controls := repeatStyle.Render(repeatIcon) + "   " +
-		shuffleStyle.Render("⇄") + "   " +
-		playStyle.Render(playIcon) + "   " +
-		heartStyle.Render(heartIcon)
+	controls := centerStr(
+		repeatStyle.Render(repeatIcon)+"   "+
+			shuffleStyle.Render("⇄")+"   "+
+			playStyle.Render(playIcon)+"   "+
+			heartStyle.Render(heartIcon),
+		contentW,
+	)
 
-	// Last line: error message (truncated to fit) or blank.
+	// Error line — centred, or blank.
 	errLine := ""
 	if m.errMsg != "" {
 		const prefix = "⚠  "
 		errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
-		errLine = styles.ErrorStyle.Render(prefix + errText)
+		errLine = centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
 	}
 
 	lines := []string{
 		"",
-		styles.Header.Render("Now Playing"),
-		muted.Render(strings.Repeat("─", 11)),
+		centerStr(styles.NowPlayingLabel.Render("Now Playing"), contentW),
+		centerStr(muted.Render(strings.Repeat("─", 11)), contentW),
 		trackLine,
 		albumLine,
 		"",
-		"  " + progressBar,
+		progressLine,
 		"",
 		"",
-		"  " + controls,
+		controls,
 		"",
 		errLine,
 	}
