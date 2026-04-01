@@ -10,6 +10,8 @@ type Options struct {
 	// MemProfiling enables live RSS display (vibez + helper) in the header.
 	// Activate with --mem-profiling on the command line.
 	MemProfiling bool
+	// IconPath is the absolute path of the installed app icon (may be empty).
+	IconPath string
 }
 
 // InitStatusMsg updates the status text shown on the loading screen.
