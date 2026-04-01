@@ -45,5 +45,9 @@ type Provider interface {
 	GetLibraryPlaylists(ctx context.Context) ([]Playlist, error)
 	GetPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error)
 	GetAlbumTracks(ctx context.Context, albumID string) ([]Track, error)
+	// CreatePlaylist creates a new playlist in the user's library with the given
+	// name and the supplied track IDs (library or catalog IDs). It returns the
+	// newly created Playlist on success.
+	CreatePlaylist(ctx context.Context, name string, trackIDs []string) (Playlist, error)
 	IsAuthenticated() bool
 }

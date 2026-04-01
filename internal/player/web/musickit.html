@@ -425,6 +425,37 @@
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
         };
 
+        window.vibezQueueRemove = function(idxStr) {
+          const idx = parseInt(idxStr);
+          if (idx < 0 || idx >= _q.length) return;
+          if (idx === _qi) {
+            _q.splice(idx, 1);
+            if (_q.length === 0) { _qi = -1; _m().stop().catch(()=>{}); return; }
+            if (_qi >= _q.length) _qi = _q.length - 1;
+            _playAt(_qi);
+          } else {
+            _q.splice(idx, 1);
+            if (idx < _qi) _qi--;
+          }
+        };
+
+        window.vibezQueueMove = function(fromStr, toStr) {
+          const from = parseInt(fromStr);
+          const to   = parseInt(toStr);
+          if (from < 0 || from >= _q.length || to < 0 || to >= _q.length || from === to) return;
+          const item = _q.splice(from, 1)[0];
+          _q.splice(to, 0, item);
+          if (_qi === from)                 _qi = to;
+          else if (from < _qi && to >= _qi) _qi--;
+          else if (from > _qi && to <= _qi) _qi++;
+        };
+
+        window.vibezQueueClear = function() {
+          _q  = [];
+          _qi = -1;
+          _m().stop().catch(()=>{});
+        };
+
       // ════════════════════════════════════════════════════════════════════
       // GSTREAMER MODE — preview URLs sent to Go; MusicKit is auth+API only.
       // ════════════════════════════════════════════════════════════════════
@@ -528,6 +559,34 @@
             _queue = _queue.concat(items);
             if (wasEmpty) playIdx(0);
           } catch(e) { goError('appendQueue failed: ' + errName(e)).catch(() => {}); }
+        };
+
+        window.vibezQueueRemove = function(idxStr) {
+          const idx = parseInt(idxStr);
+          if (idx < 0 || idx >= _queue.length) return;
+          _queue.splice(idx, 1);
+          if (idx < _idx)       _idx--;
+          else if (idx === _idx) {
+            if (_queue.length === 0) { _idx = -1; return; }
+            if (_idx >= _queue.length) _idx = _queue.length - 1;
+            playIdx(_idx);
+          }
+        };
+
+        window.vibezQueueMove = function(fromStr, toStr) {
+          const from = parseInt(fromStr);
+          const to   = parseInt(toStr);
+          if (from < 0 || from >= _queue.length || to < 0 || to >= _queue.length || from === to) return;
+          const item = _queue.splice(from, 1)[0];
+          _queue.splice(to, 0, item);
+          if (_idx === from)                  _idx = to;
+          else if (from < _idx && to >= _idx) _idx--;
+          else if (from > _idx && to <= _idx) _idx++;
+        };
+
+        window.vibezQueueClear = function() {
+          _queue = [];
+          _idx   = -1;
         };
       }
 

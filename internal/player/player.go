@@ -46,6 +46,13 @@ type Player interface {
 	SetRepeat(mode int) error
 	// SetShuffle enables or disables shuffle playback.
 	SetShuffle(on bool) error
+	// RemoveFromQueue removes the track at idx from the queue without
+	// interrupting playback of any other track.
+	RemoveFromQueue(idx int) error
+	// MoveInQueue moves the track at from to position to.
+	MoveInQueue(from, to int) error
+	// ClearQueue empties the queue and stops playback.
+	ClearQueue() error
 	GetState() (*State, error)
 	Subscribe() <-chan State
 	Close() error
