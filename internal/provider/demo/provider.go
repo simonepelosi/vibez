@@ -100,3 +100,7 @@ func (Provider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, e
 func (Provider) CreatePlaylist(_ context.Context, name string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{ID: "dp-new-" + name, Name: name}, nil
 }
+
+func (Provider) LoveSong(_ context.Context, _ string, _ bool) error { return nil }
+
+func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }

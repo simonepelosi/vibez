@@ -80,7 +80,9 @@ func (m *mockProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.T
 func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{}, nil
 }
-func (m *mockProvider) IsAuthenticated() bool { return true }
+func (m *mockProvider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
+func (m *mockProvider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
+func (m *mockProvider) IsAuthenticated() bool                                   { return true }
 
 // --- helpers ---
 

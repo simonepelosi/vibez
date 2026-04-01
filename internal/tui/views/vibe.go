@@ -23,15 +23,26 @@ const (
 	vibeSearching                  // search in progress
 	vibeDone                       // tracks added to queue
 	vibeError                      // search returned no results / error
+	vibeDiscovery                  // discovery mode is active
 )
+
+// DiscoveryInfo carries the discovery-mode display data set by the model.
+type DiscoveryInfo struct {
+	Active     bool
+	SeedArtist string
+	SeedTitle  string
+	Similarity float64 // 0.0=very different, 1.0=very similar
+	Refilling  bool    // background search in progress
+}
 
 // VibeModel drives the interactive vibe panel (right split of the bottom area).
 type VibeModel struct {
-	state  vibeState
-	input  textinput.Model
-	lastQ  string // last submitted query
-	added  int    // tracks added on last successful search
-	errStr string // error message from last search
+	state     vibeState
+	input     textinput.Model
+	lastQ     string // last submitted query
+	added     int    // tracks added on last successful search
+	errStr    string // error message from last search
+	discovery DiscoveryInfo
 }
 
 func NewVibe() *VibeModel {
@@ -70,10 +81,30 @@ func (v *VibeModel) SetResult(n int, err error) {
 		v.state = vibeError
 		v.errStr = err.Error()
 	} else {
-		v.state = vibeDone
+		if v.discovery.Active {
+			v.state = vibeDiscovery
+		} else {
+			v.state = vibeDone
+		}
 		v.added = n
 	}
 }
+
+// SetDiscovery updates the discovery-mode display and switches state accordingly.
+func (v *VibeModel) SetDiscovery(info DiscoveryInfo) {
+	v.discovery = info
+	if info.Active {
+		if v.state != vibeSearching {
+			v.state = vibeDiscovery
+		}
+		v.input.Blur()
+	} else if v.state == vibeDiscovery {
+		v.state = vibeIdle
+	}
+}
+
+// DiscoveryActive reports whether discovery mode is currently active.
+func (v *VibeModel) DiscoveryActive() bool { return v.discovery.Active }
 
 // Update processes keyboard input when the vibe panel is focused (vibeInputting).
 // Returns a Cmd that dispatches VibeQueryMsg when the user presses Enter.
@@ -107,6 +138,27 @@ func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// similarityBar returns a block-progress bar and a label for the similarity value.
+func similarityBar(similarity float64, barWidth int) (string, string) {
+	filled := min(int(similarity*float64(barWidth)), barWidth)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	var label string
+	switch {
+	case similarity >= 0.9:
+		label = "same artist"
+	case similarity >= 0.7:
+		label = "similar artists"
+	case similarity >= 0.5:
+		label = "same genre"
+	case similarity >= 0.25:
+		label = "exploring"
+	default:
+		label = "pure discovery"
+	}
+	return bar, label
+}
+
 // Lines returns the vibe panel content as exactly h lines each visually ≤ w chars wide.
 func (v *VibeModel) Lines(w, h, step int) []string {
 	accent := styles.NowPlayingArtist
@@ -114,23 +166,58 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	primary := styles.Playing
 	errSt := lipgloss.NewStyle().Foreground(styles.ColorError)
 
-	label := styles.TabActive.Render("Vibe")
-	sep := muted.Render(strings.Repeat("─", 5))
-
 	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ•̀ᴥ•́ʔ"}
 	bear := bearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
 
 	v.input.Width = max(w-4, 10)
 
-	clip := func(s string) string {
-		if len(s) > w-4 {
-			return s[:w-4] + "…"
+	clip := func(s string, maxLen int) string {
+		if maxLen <= 0 {
+			maxLen = w - 4
+		}
+		if len([]rune(s)) > maxLen {
+			return string([]rune(s)[:maxLen-1]) + "…"
 		}
 		return s
 	}
 
+	labelTitle := "Vibe"
+	if v.state == vibeDiscovery {
+		labelTitle = "Discovery"
+	}
+	label := styles.TabActive.Render(labelTitle)
+	sep := muted.Render(strings.Repeat("─", 5))
+
 	var lines []string
 	switch v.state {
+	case vibeDiscovery:
+		d := v.discovery
+		barW := max(w-20, 6)
+		bar, simLabel := similarityBar(d.Similarity, barW)
+		pct := fmt.Sprintf("%.0f%%", d.Similarity*100)
+
+		bearStatus := bear + " "
+		if d.Refilling {
+			bearStatus += primary.Render("refilling queue…")
+		} else {
+			bearStatus += muted.Render("listening…")
+		}
+
+		lines = []string{
+			label, sep,
+			accent.Render(clip(d.SeedArtist, w-4)),
+			muted.Render(clip(d.SeedTitle, w-4)),
+			"",
+			muted.Render("Similarity") + "  " + accent.Render(bar) + "  " + accent.Render(pct),
+			muted.Render("           ") + primary.Render(simLabel),
+			"",
+			bearStatus,
+			"",
+			accent.Render("+") + muted.Render(" similar") +
+				"  " + accent.Render("-") + muted.Render(" different") +
+				"  " + accent.Render("d") + muted.Render(" stop"),
+		}
+
 	case vibeIdle:
 		lines = []string{
 			label, sep,
@@ -138,7 +225,10 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			"> " + accent.Render(v.input.Placeholder),
 			"",
 			bear + " " + muted.Render("press v to start"),
+			"",
+			muted.Render("or ") + accent.Render("d") + muted.Render(" discovery mode"),
 		}
+
 	case vibeInputting:
 		lines = []string{
 			label, sep,
@@ -150,15 +240,17 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			accent.Render("Enter") + muted.Render(" search") +
 				"  " + accent.Render("esc") + muted.Render(" cancel"),
 		}
+
 	case vibeSearching:
 		lines = []string{
 			label, sep,
-			muted.Render(`"` + clip(v.lastQ) + `"`),
+			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
 			bear + " " + primary.Render("searching…"),
 			"",
 			muted.Render("adding tracks to your queue…"),
 		}
+
 	case vibeDone:
 		suffix := "s"
 		if v.added == 1 {
@@ -166,20 +258,23 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		}
 		lines = []string{
 			label, sep,
-			muted.Render(`"` + clip(v.lastQ) + `"`),
+			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
 			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
 			"",
-			accent.Render("v") + muted.Render(" new vibe"),
+			accent.Render("v") + muted.Render(" new vibe") +
+				"  " + accent.Render("d") + muted.Render(" discovery"),
 		}
+
 	case vibeError:
 		lines = []string{
 			label, sep,
-			muted.Render(`"` + clip(v.lastQ) + `"`),
+			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
 			bearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
 			"",
-			accent.Render("v") + muted.Render(" try again"),
+			accent.Render("v") + muted.Render(" try again") +
+				"  " + accent.Render("d") + muted.Render(" discovery"),
 		}
 	}
 
