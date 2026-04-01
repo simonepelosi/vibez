@@ -80,7 +80,10 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	}
 	p.pw = pw
 
-	chromePath := ChromePath()
+	chromePath := HelperPath()
+	if _, err := os.Stat(chromePath); err != nil {
+		chromePath = ChromePath() // fall back if link not yet created
+	}
 	// Widevine CDM is bundled inside Chrome at this well-known relative path.
 	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 

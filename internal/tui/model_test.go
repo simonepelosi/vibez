@@ -94,7 +94,7 @@ func testCfg() *config.Config {
 }
 
 func newModel(plyr player.Player) *Model {
-	return New(testCfg(), &mockProvider{}, plyr)
+	return New(testCfg(), &mockProvider{}, plyr, Options{})
 }
 
 // --- clamp ---

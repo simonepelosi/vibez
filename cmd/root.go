@@ -20,6 +20,7 @@ import (
 
 var cfgFile string
 var debug bool
+var memProfiling bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -38,6 +39,7 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
+	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
@@ -83,7 +85,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 // auth and engine init in a background goroutine, sending progress messages
 // to the running TUI. Chrome runs headless throughout.
 func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) error {
-	prog := tea.NewProgram(tui.New(cfg, nil, nil), tea.WithAltScreen())
+	prog := tea.NewProgram(tui.New(cfg, nil, nil, tui.Options{MemProfiling: memProfiling}), tea.WithAltScreen())
 
 	go func() {
 		// Step 1: Ensure Chrome is installed — may download ~130 MB on first run.
@@ -133,7 +135,11 @@ func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) erro
 			}()
 		}
 
-		prog.Send(tui.EngineReadyMsg{Player: cdpPlayer, Provider: apple.New(cfg)})
+		prog.Send(tui.EngineReadyMsg{
+			Player:      cdpPlayer,
+			Provider:    apple.New(cfg),
+			HelperPaths: []string{cdp.HelperPath(), cdp.ChromePath()},
+		})
 	}()
 
 	_, err := prog.Run()
@@ -181,7 +187,7 @@ func runWebKitFlow(cfg *config.Config, onUserToken, onStorefront func(string)) e
 			}()
 		}
 
-		m := tui.New(cfg, prov, wkPlayer)
+		m := tui.New(cfg, prov, wkPlayer, tui.Options{MemProfiling: memProfiling})
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		_, runErr := p.Run()
 		tuiErr <- runErr

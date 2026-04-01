@@ -76,6 +76,7 @@ type searchResultMsg struct {
 type tickMsg time.Time
 type glowTickMsg time.Time
 type introTickMsg time.Time
+type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
 type playlistCreatedMsg struct{ name string }
 
@@ -151,14 +152,20 @@ type Model struct {
 	glowStep   int
 	introStep  int    // introDone (-1) when complete
 	initStatus string // status text shown on the loading screen
+
+	// Memory profiling (enabled with --mem-profiling)
+	memProfiling bool
+	memStats     string
+	helperPaths  []string
 }
 
-func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
+func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
 	m := &Model{
-		cfg:         cfg,
-		provider:    prov,
-		player:      plyr,
-		activePanel: -1,
+		cfg:          cfg,
+		provider:     prov,
+		player:       plyr,
+		activePanel:  -1,
+		memProfiling: opts.MemProfiling,
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -200,6 +207,12 @@ func glowTick() tea.Cmd {
 
 func introTick() tea.Cmd {
 	return tea.Tick(60*time.Millisecond, func(t time.Time) tea.Msg { return introTickMsg(t) })
+}
+
+func memTick(helperPaths []string) tea.Cmd {
+	return tea.Tick(3*time.Second, func(_ time.Time) tea.Msg {
+		return memTickMsg{stats: collectMemStats(helperPaths)}
+	})
 }
 
 func waitForState(ch <-chan player.State) tea.Cmd {
@@ -305,7 +318,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stateCh = msg.Player.Subscribe()
 		m.library = &libraryPanel{m: views.NewLibrary(msg.Provider)}
 		m.search = views.NewSearch(msg.Provider)
+		m.helperPaths = msg.HelperPaths
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
+		if m.memProfiling {
+			cmds = append(cmds, memTick(m.helperPaths))
+		}
+
+	case memTickMsg:
+		m.memStats = msg.stats
+		if m.memProfiling {
+			return m, memTick(m.helperPaths)
+		}
 
 	case InitErrMsg:
 		m.appendLog("[init error] " + msg.Err.Error())
@@ -969,17 +992,22 @@ func (m *Model) renderBoxHeader(inner int) string {
 	vol := int(m.playerState.Volume * 100)
 	volStr := styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
 
+	rightStr := volStr
+	if m.memStats != "" {
+		rightStr = styles.QueueItemMuted.Render(m.memStats) + "  " + volStr
+	}
+
 	bearW := lipgloss.Width(bear)
 	titleW := lipgloss.Width(title)
-	volW := lipgloss.Width(volStr)
+	rightW := lipgloss.Width(rightStr)
 	contentW := inner - 2 // for " " padding on each side
 
 	// Place title at the horizontal centre of the header.
 	titleStart := max(bearW+1, (contentW-titleW)/2)
 	leftPad := titleStart - bearW
-	rightPad := max(1, contentW-bearW-leftPad-titleW-volW)
+	rightPad := max(1, contentW-bearW-leftPad-titleW-rightW)
 
-	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + volStr + " │"
+	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + rightStr + " │"
 }
 
 // nowPlayingLines returns exactly h lines for the Now Playing section.

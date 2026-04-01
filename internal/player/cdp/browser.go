@@ -39,13 +39,31 @@ func ChromePath() string {
 	return filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "chrome")
 }
 
+// HelperPath returns the path to the vibez-helper hard link of the Chrome
+// binary. Launching Chrome via this path causes the process (and child
+// processes that re-exec via /proc/self/exe) to appear as "vibez-helper"
+// in ps/top instead of "chrome".
+func HelperPath() string {
+	return filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "vibez-helper")
+}
+
+// linkHelper creates a hard link vibez-helper → chrome so the spawned
+// process shows as "vibez-helper" in process listings. Idempotent.
+func linkHelper() {
+	if _, err := os.Stat(HelperPath()); err == nil {
+		return // already exists
+	}
+	_ = os.Link(ChromePath(), HelperPath())
+}
+
 // EnsureBrowser downloads and extracts Google Chrome into vibez's private
 // cache directory if not already present. Never calls apt-get or sudo.
 // onProgress is called with human-readable status strings (e.g. "Downloading
 // Chrome… 42%", "Extracting Chrome…"). Pass func(string){} to silence.
 func EnsureBrowser(onProgress func(string)) error {
 	if _, err := os.Stat(ChromePath()); err == nil {
-		return nil // already installed
+		linkHelper() // idempotent — creates vibez-helper link if absent
+		return nil   // already installed
 	}
 
 	// Also ensure the playwright driver is available (no browser install via playwright).
@@ -77,6 +95,7 @@ func EnsureBrowser(onProgress func(string)) error {
 	if _, err := os.Stat(ChromePath()); err != nil {
 		return fmt.Errorf("chrome binary not found after extraction: %w", err)
 	}
+	linkHelper()
 	onProgress("Chrome ready.")
 	return nil
 }
