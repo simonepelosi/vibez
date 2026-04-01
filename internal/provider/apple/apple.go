@@ -217,11 +217,10 @@ func toPlaylist(r playlistResource) provider.Playlist {
 
 // --- Provider interface ---
 
-// Search returns tracks exclusively from the user's library (guaranteed
-// playable) and albums/playlists from the catalog (browsed, not directly
-// streamed).  Mixing catalog tracks into results causes "no items resolved"
-// errors in MusicKit.js because the REST catalog API and the MusicKit
-// streaming layer have different regional availability checks.
+// Search returns results from both the user's library and the catalog.
+// Library tracks appear first (guaranteed playable); catalog tracks follow,
+// deduplicated by (artist, title).  Any catalog track that MusicKit.js
+// cannot resolve is silently skipped at enqueue time — not shown as an error.
 func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.SearchResult, error) {
 	type libOut struct {
 		songs     []songResource
@@ -230,6 +229,7 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		err       error
 	}
 	type catOut struct {
+		songs     []songResource
 		albums    []albumResource
 		playlists []playlistResource
 		err       error
@@ -259,9 +259,10 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		}
 	}()
 
-	// Catalog: albums and playlists only — no tracks.
+	// Catalog: songs + albums + playlists. Library songs take priority;
+	// catalog songs fill in tracks not already owned by the user.
 	go func() {
-		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=albums,playlists&limit=25",
+		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25",
 			a.cfg.StoreFront, url.QueryEscape(query))
 		req, err := a.newRequest(ctx, http.MethodGet, ep)
 		if err != nil {
@@ -274,6 +275,7 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 			return
 		}
 		catCh <- catOut{
+			songs:     resp.Results.Songs.Data,
 			albums:    resp.Results.Albums.Data,
 			playlists: resp.Results.Playlists.Data,
 		}
@@ -288,9 +290,13 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 
 	result := &provider.SearchResult{}
 
+	// Library songs first — guaranteed playable.
+	seen := make(map[string]bool)
 	if lib.err == nil {
 		for _, s := range lib.songs {
-			result.Tracks = append(result.Tracks, toTrack(s))
+			t := toTrack(s)
+			result.Tracks = append(result.Tracks, t)
+			seen[strings.ToLower(t.Artist)+"§"+strings.ToLower(t.Title)] = true
 		}
 		for _, r := range lib.albums {
 			result.Albums = append(result.Albums, toAlbum(r))
@@ -300,8 +306,17 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		}
 	}
 
-	// Merge catalog albums/playlists (broader discovery), skipping duplicates.
+	// Catalog songs after — skip duplicates already covered by library.
+	// Any that fail to resolve in MusicKit are silently skipped by the JS layer.
 	if cat.err == nil {
+		for _, s := range cat.songs {
+			t := toTrack(s)
+			key := strings.ToLower(t.Artist) + "§" + strings.ToLower(t.Title)
+			if !seen[key] {
+				result.Tracks = append(result.Tracks, t)
+				seen[key] = true
+			}
+		}
 		seenAlbums := make(map[string]bool, len(result.Albums))
 		for _, al := range result.Albums {
 			seenAlbums[al.ID] = true

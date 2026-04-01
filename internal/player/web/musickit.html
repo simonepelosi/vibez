@@ -417,7 +417,7 @@
             const ids   = (JSON.parse(idsJSON) || []).filter(Boolean);
             _log(`[js:append] resolving id=${ids[0]}`);
             const items = await _resolveItems(ids);
-            if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
+            if (items.length === 0) { _log('[js:append] no items resolved — skip'); return; }
             _q = _q.concat(items);
             _log(`[js:append] +${items.length} → _q.length=${_q.length} _qi=${_qi}`);
             if (_qi < 0) _playAt(0); // nothing was playing — start now
@@ -522,7 +522,7 @@
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] library API failed: ${errName(e)}`).catch(() => {}); }
             }
-            if (items.length === 0) { goError('appendQueue: no items resolved').catch(() => {}); return; }
+            if (items.length === 0) { _log('[js:append] no items resolved — skip'); return; }
 
             const wasEmpty = _queue.length === 0;
             _queue = _queue.concat(items);
