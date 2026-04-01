@@ -49,5 +49,13 @@ type Provider interface {
 	// name and the supplied track IDs (library or catalog IDs). It returns the
 	// newly created Playlist on success.
 	CreatePlaylist(ctx context.Context, name string, trackIDs []string) (Playlist, error)
+	// LoveSong adds the song to the user's Apple Music library and marks it as
+	// "Loved". catalogID must be the catalog ID (not a library "i." ID).
+	// Passing loved=false removes the rating (un-loves the song).
+	LoveSong(ctx context.Context, catalogID string, loved bool) error
+	// GetSongRating returns true when the given catalog song is marked as Loved
+	// in the user's Apple Music account. Returns false (no error) when the song
+	// is not rated or the provider does not support ratings.
+	GetSongRating(ctx context.Context, catalogID string) (bool, error)
 	IsAuthenticated() bool
 }

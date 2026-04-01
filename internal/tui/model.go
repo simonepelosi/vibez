@@ -76,9 +76,19 @@ type searchResultMsg struct {
 	err    error
 }
 type vibeResultMsg struct {
-	query  string
-	tracks []provider.Track
-	err    error
+	query     string
+	tracks    []provider.Track
+	err       error
+	discovery bool // true when result is from a discovery auto-refill
+}
+type loveSongMsg struct {
+	title string
+	loved bool
+	err   error
+}
+type songRatingMsg struct {
+	trackID string
+	loved   bool
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -103,6 +113,25 @@ var introFrames = func() []string {
 
 const introDone = -1
 
+// ── Discovery mode ─────────────────────────────────────────────────────────
+
+// discoveryMode holds state for the continuous-discovery feature.
+// When enabled, one song is queued 30 seconds before the current track ends.
+// The similarity value (0=very different, 1=very similar) controls how
+// adventurous the search is.
+type discoveryMode struct {
+	enabled        bool
+	seed           *provider.Track
+	similarity     float64 // 0.0–1.0
+	refilling      bool    // background search in progress
+	triggeredForID string  // ID of track for which we already fired a search
+}
+
+const (
+	discoveryTriggerBefore  = 30 * time.Second // queue next song this long before track ends
+	discoverySimilarityStep = 0.1
+)
+
 // ── Model ─────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -116,6 +145,9 @@ type Model struct {
 	stateCh     <-chan player.State
 	queueIDs    []string         // current playback queue (for "add to queue")
 	queueTracks []provider.Track // full track objects parallel to queueIDs
+
+	// Discovery mode
+	discovery discoveryMode
 
 	// Panels
 	panels      []ContentView // registered content panels; add new ones in New()
@@ -296,12 +328,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
+			// Check whether the new track is already loved on Apple Music.
+			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
+		}
+		// Discovery: queue the next song 30 s before the current track ends.
+		// We guard with triggeredForID so the search fires exactly once per track.
+		if m.discovery.enabled && !m.discovery.refilling &&
+			s.Track != nil && s.Track.Duration > discoveryTriggerBefore &&
+			s.Position >= s.Track.Duration-discoveryTriggerBefore &&
+			m.discovery.triggeredForID != s.Track.ID {
+			m.discovery.triggeredForID = s.Track.ID
+			m.discovery.refilling = true
+			m.syncDiscoveryView()
+			cmds = append(cmds, m.runDiscoverySearch())
 		}
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
 			cmds = append(cmds, glowTick())
 		}
 		cmds = append(cmds, waitForState(m.stateCh))
+
+	case songRatingMsg:
+		// Update favorite state to match what Apple Music reports.
+		if msg.trackID != "" {
+			m.favorites[msg.trackID] = msg.loved
+		}
 
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
@@ -310,7 +361,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case vibeResultMsg:
 		if msg.err != nil {
-			m.vibe.SetResult(0, msg.err)
+			if !msg.discovery {
+				m.vibe.SetResult(0, msg.err)
+			}
+			m.appendLog(fmt.Sprintf("[vibe] search error: %v", msg.err))
 		} else {
 			ids := make([]string, len(msg.tracks))
 			for i, t := range msg.tracks {
@@ -318,15 +372,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.player != nil {
 				if err := m.player.AppendQueue(ids); err != nil {
-					m.vibe.SetResult(0, err)
+					if !msg.discovery {
+						m.vibe.SetResult(0, err)
+					}
 					break
 				}
 			}
 			m.queueTracks = append(m.queueTracks, msg.tracks...)
 			m.queueIDs = append(m.queueIDs, ids...)
 			m.queue.SetTracks(m.queueTracks)
-			m.vibe.SetResult(len(msg.tracks), nil)
-			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(msg.tracks), msg.query))
+			if msg.discovery {
+				m.discovery.refilling = false
+				m.syncDiscoveryView()
+				m.appendLog(fmt.Sprintf("[discovery] refilled %d tracks", len(msg.tracks)))
+			} else {
+				m.vibe.SetResult(len(msg.tracks), nil)
+				m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(msg.tracks), msg.query))
+			}
+		}
+
+	case loveSongMsg:
+		if msg.err != nil {
+			m.appendLog(fmt.Sprintf("[fav] ✗ %s: %v", msg.title, msg.err))
+		} else {
+			state := "♡"
+			if msg.loved {
+				state = "♥"
+			}
+			m.appendLog(fmt.Sprintf("[fav] %s %s synced to Apple Music", state, msg.title))
 		}
 
 	case searchResultMsg:
@@ -723,10 +796,24 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "+", "=":
 		m.lastKey = ""
+		if m.discovery.enabled {
+			// Adjust discovery similarity toward "more similar".
+			m.discovery.similarity = min(1.0, m.discovery.similarity+discoverySimilarityStep)
+			m.syncDiscoveryView()
+			m.appendLog(fmt.Sprintf("[discovery] similarity → %.0f%%", m.discovery.similarity*100))
+			return nil
+		}
 		return m.adjustVolume(0.05)
 
 	case "-":
 		m.lastKey = ""
+		if m.discovery.enabled {
+			// Adjust discovery similarity toward "more different".
+			m.discovery.similarity = max(0.0, m.discovery.similarity-discoverySimilarityStep)
+			m.syncDiscoveryView()
+			m.appendLog(fmt.Sprintf("[discovery] similarity → %.0f%%", m.discovery.similarity*100))
+			return nil
+		}
 		return m.adjustVolume(-0.05)
 
 	case "r":
@@ -757,8 +844,35 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		if m.playerState.Track != nil {
 			id := m.playerState.Track.ID
 			m.favorites[id] = !m.favorites[id]
-			m.appendLog(fmt.Sprintf("[fav] %s → %v", m.playerState.Track.Title, m.favorites[id]))
+			loved := m.favorites[id]
+			m.appendLog(fmt.Sprintf("[fav] %s → %v", m.playerState.Track.Title, loved))
+			// Sync to Apple Music asynchronously.
+			t := m.playerState.Track
+			return m.loveSongCmd(t, loved)
 		}
+
+	case "d":
+		m.lastKey = ""
+		if m.discovery.enabled {
+			// Toggle off.
+			m.discovery.enabled = false
+			m.discovery.seed = nil
+			m.discovery.refilling = false
+			m.discovery.triggeredForID = ""
+			m.syncDiscoveryView()
+			m.appendLog("[discovery] stopped")
+		} else if m.playerState.Track != nil {
+			// Activate with current song as seed; default similarity = 0.7.
+			m.discovery.enabled = true
+			m.discovery.seed = m.playerState.Track
+			m.discovery.similarity = 0.7
+			m.discovery.refilling = false
+			m.discovery.triggeredForID = ""
+			m.syncDiscoveryView()
+			m.appendLog(fmt.Sprintf("[discovery] started from %q (similarity %.0f%%)",
+				m.playerState.Track.Title, m.discovery.similarity*100))
+		}
+		return nil
 
 	case "v":
 		m.lastKey = ""
@@ -841,37 +955,224 @@ func (m *Model) scheduleSearch(query string) tea.Cmd {
 	}
 }
 
-// runVibeSearch uses the KeywordAgent to interpret the user's vibe description,
-// searches the provider, shuffles and caps results, then returns vibeResultMsg.
+// runVibeSearch uses the KeywordAgent to interpret the user's vibe description.
+// It fires multiple parallel searches using different query variants from the
+// agent, merges results, deduplicates, shuffles, and returns up to 15 tracks.
 func (m *Model) runVibeSearch(query string) tea.Cmd {
 	agent := &vibe.KeywordAgent{}
 	v := agent.Parse(query)
-	searchQ := agent.ToSearchQuery(v)
-	m.appendLog(fmt.Sprintf("[vibe] %q → search %q", query, searchQ))
+	// Get diverse query variants. Pick up to 3 randomly (already shuffled by the agent).
+	allQueries := agent.ToSearchQueries(v)
+	const maxQueries = 3
+	if len(allQueries) > maxQueries {
+		allQueries = allQueries[:maxQueries]
+	}
+	if len(allQueries) == 0 {
+		allQueries = []string{query}
+	}
+	m.appendLog(fmt.Sprintf("[vibe] %q → queries: %v", query, allQueries))
+	prov := m.provider
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		type searchOut struct {
+			tracks []provider.Track
+			err    error
+		}
+		chs := make([]chan searchOut, len(allQueries))
+		for i, q := range allQueries {
+			ch := make(chan searchOut, 1)
+			chs[i] = ch
+			go func(term string, out chan searchOut) {
+				res, err := prov.Search(ctx, term)
+				if err != nil || res == nil {
+					out <- searchOut{err: err}
+					return
+				}
+				out <- searchOut{tracks: res.Tracks}
+			}(q, ch)
+		}
+
+		// Merge results and deduplicate by (artist, title).
+		seen := map[string]bool{}
+		var merged []provider.Track
+		for _, ch := range chs {
+			r := <-ch
+			for _, t := range r.tracks {
+				key := strings.ToLower(t.Artist + "||" + t.Title)
+				if !seen[key] {
+					seen[key] = true
+					merged = append(merged, t)
+				}
+			}
+		}
+
+		if len(merged) == 0 {
+			// Fallback to raw input.
+			res, err := prov.Search(ctx, query)
+			if err != nil || res == nil || len(res.Tracks) == 0 {
+				return vibeResultMsg{query: query, err: fmt.Errorf("no results for %q", query)}
+			}
+			merged = res.Tracks
+		}
+
+		rand.Shuffle(len(merged), func(i, j int) { //nolint:gosec // music shuffle
+			merged[i], merged[j] = merged[j], merged[i]
+		})
+		const cap = 15
+		if len(merged) > cap {
+			merged = merged[:cap]
+		}
+		return vibeResultMsg{query: query, tracks: merged}
+	}
+}
+
+// loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
+func (m *Model) loveSongCmd(t *provider.Track, loved bool) tea.Cmd {
+	if m.provider == nil || t == nil {
+		return nil
+	}
+	catalogID := t.CatalogID
+	if catalogID == "" {
+		catalogID = t.ID
+	}
+	title := t.Title
 	prov := m.provider
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		result, err := prov.Search(ctx, searchQ)
-		if err != nil || result == nil || len(result.Tracks) == 0 {
-			// Fallback: search with the raw user input.
-			result2, err2 := prov.Search(ctx, query)
-			if err2 != nil || result2 == nil || len(result2.Tracks) == 0 {
-				if err != nil {
-					return vibeResultMsg{query: query, err: err}
+		err := prov.LoveSong(ctx, catalogID, loved)
+		return loveSongMsg{title: title, loved: loved, err: err}
+	}
+}
+
+// checkSongRatingCmd checks whether the track is already Loved on Apple Music
+// and returns a songRatingMsg so the model can update m.favorites accordingly.
+func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
+	if m.provider == nil || t == nil {
+		return nil
+	}
+	catalogID := t.CatalogID
+	if catalogID == "" {
+		catalogID = t.ID
+	}
+	trackID := t.ID
+	prov := m.provider
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		loved, _ := prov.GetSongRating(ctx, catalogID)
+		return songRatingMsg{trackID: trackID, loved: loved}
+	}
+}
+
+// syncDiscoveryView pushes the current discovery state into the vibe view.
+func (m *Model) syncDiscoveryView() {
+	info := views.DiscoveryInfo{}
+	if m.discovery.enabled && m.discovery.seed != nil {
+		info.Active = true
+		info.SeedArtist = m.discovery.seed.Artist
+		info.SeedTitle = m.discovery.seed.Title
+		info.Similarity = m.discovery.similarity
+		info.Refilling = m.discovery.refilling
+	}
+	m.vibe.SetDiscovery(info)
+}
+
+// runDiscoverySearch builds search queries from the seed track and similarity
+// value, fetches results in parallel, and returns a vibeResultMsg tagged as a
+// discovery refill so the model knows not to update the vibe panel state.
+func (m *Model) runDiscoverySearch() tea.Cmd {
+	if !m.discovery.enabled || m.discovery.seed == nil {
+		return nil
+	}
+	seed := m.discovery.seed
+	similarity := m.discovery.similarity
+	prov := m.provider
+	queries := discoveryQueries(seed, similarity)
+	m.appendLog(fmt.Sprintf("[discovery] queries (sim=%.0f%%): %v", similarity*100, queries))
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		type out struct{ tracks []provider.Track }
+		chs := make([]chan out, len(queries))
+		for i, q := range queries {
+			ch := make(chan out, 1)
+			chs[i] = ch
+			go func(term string, c chan out) {
+				res, err := prov.Search(ctx, term)
+				if err != nil || res == nil {
+					c <- out{}
+					return
 				}
-				return vibeResultMsg{query: query, err: fmt.Errorf("no results")}
+				c <- out{tracks: res.Tracks}
+			}(q, ch)
+		}
+
+		seen := map[string]bool{}
+		var merged []provider.Track
+		for _, ch := range chs {
+			r := <-ch
+			for _, t := range r.tracks {
+				key := strings.ToLower(t.Artist + "||" + t.Title)
+				if !seen[key] {
+					seen[key] = true
+					merged = append(merged, t)
+				}
 			}
-			result = result2
 		}
-		tracks := result.Tracks
-		rand.Shuffle(len(tracks), func(i, j int) { //nolint:gosec // music shuffle
-			tracks[i], tracks[j] = tracks[j], tracks[i]
+
+		rand.Shuffle(len(merged), func(i, j int) { //nolint:gosec
+			merged[i], merged[j] = merged[j], merged[i]
 		})
-		if len(tracks) > 15 {
-			tracks = tracks[:15]
+		const refillCap = 1
+		if len(merged) > refillCap {
+			merged = merged[:refillCap]
 		}
-		return vibeResultMsg{query: query, tracks: tracks}
+		if len(merged) == 0 {
+			return vibeResultMsg{discovery: true, err: fmt.Errorf("no results")}
+		}
+		return vibeResultMsg{discovery: true, tracks: merged}
+	}
+}
+
+// discoveryQueries returns search terms based on seed + similarity.
+// similarity 1.0 = same artist; 0.0 = completely random genre exploration.
+func discoveryQueries(seed *provider.Track, similarity float64) []string {
+	// Determine the seed's primary genre.
+	genre := "indie"
+	if len(seed.Genres) > 0 {
+		genre = seed.Genres[0]
+	}
+
+	explorationGenres := []string{
+		"electronic", "indie pop", "r&b", "jazz", "folk", "hip-hop",
+		"ambient", "soul", "funk", "alternative", "dream pop", "lofi",
+	}
+
+	switch {
+	case similarity >= 0.85:
+		return []string{seed.Artist, seed.Artist + " similar artists"}
+	case similarity >= 0.65:
+		return []string{seed.Artist, genre}
+	case similarity >= 0.45:
+		return []string{genre, genre + " playlist"}
+	case similarity >= 0.20:
+		// Mix seed genre with a random exploration genre.
+		other := explorationGenres[rand.Intn(len(explorationGenres))] //nolint:gosec
+		return []string{genre, other}
+	default:
+		// Pure discovery: two random unrelated genres.
+		i := rand.Intn(len(explorationGenres))     //nolint:gosec
+		j := rand.Intn(len(explorationGenres) - 1) //nolint:gosec
+		if j >= i {
+			j++
+		}
+		return []string{explorationGenres[i], explorationGenres[j]}
 	}
 }
 
@@ -1329,12 +1630,19 @@ func (m *Model) statusPlayContent(_ int) string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
 	dot := muted.Render("  ·  ")
+
+	discoverHint := accent.Render("d") + muted.Render(" discovery")
+	if m.discovery.enabled {
+		discoverHint = accent.Render("d") + styles.Playing.Render(" ● discovery")
+	}
+
 	parts := []string{
 		accent.Render("spc") + muted.Render(" play/pause"),
 		accent.Render("n/p") + muted.Render(" next/prev"),
 		accent.Render("f") + muted.Render(" fav"),
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
+		discoverHint,
 	}
 	return strings.Join(parts, dot)
 }

@@ -536,3 +536,100 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 	}
 	return toPlaylist(resp.Data[0]), nil
 }
+
+// ratingRequest is the body for PUT /v1/me/ratings/songs/{id}.
+type ratingRequest struct {
+	Type       string           `json:"type"`
+	Attributes ratingAttributes `json:"attributes"`
+}
+
+type ratingAttributes struct {
+	Value int `json:"value"` // 1 = love, -1 = dislike, 0 = neutral
+}
+
+// LoveSong adds the catalog song to the user's Apple Music library and marks it
+// as Loved (rating value = 1). Pass loved=false to remove the rating.
+// catalogID must be the Apple Music catalog ID (not a library "i." prefix ID).
+func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bool) error {
+	// Add to library first (idempotent — safe to call even if already in library).
+	if loved {
+		libURL := fmt.Sprintf("%s/me/library?ids[songs]=%s", a.baseURL, url.QueryEscape(catalogID))
+		addReq, err := http.NewRequestWithContext(ctx, http.MethodPost, libURL, http.NoBody)
+		if err != nil {
+			return fmt.Errorf("LoveSong: add to library: %w", err)
+		}
+		addReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+		addReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+		if err := a.do(addReq, nil); err != nil {
+			// Non-fatal: song may already be in library.
+			_ = err
+		}
+	}
+
+	ratingURL := fmt.Sprintf("%s/me/ratings/songs/%s", a.baseURL, url.QueryEscape(catalogID))
+
+	if !loved {
+		// Remove rating (un-love).
+		delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, ratingURL, http.NoBody)
+		if err != nil {
+			return fmt.Errorf("LoveSong: delete rating: %w", err)
+		}
+		delReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+		delReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+		return a.do(delReq, nil)
+	}
+
+	body := ratingRequest{
+		Type:       "ratings",
+		Attributes: ratingAttributes{Value: 1},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("LoveSong: marshal: %w", err)
+	}
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, ratingURL, bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("LoveSong: %w", err)
+	}
+	putReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	putReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	putReq.Header.Set("Content-Type", "application/json")
+	return a.do(putReq, nil)
+}
+
+// ratingResponse wraps GET /v1/me/ratings/songs/{id}.
+type ratingResponse struct {
+	Data []struct {
+		Attributes struct {
+			Value int `json:"value"` // 1=loved, -1=disliked
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+// GetSongRating returns true when the given catalog song is marked as Loved
+// in the user's Apple Music account.
+func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bool, error) {
+	ep := fmt.Sprintf("/me/ratings/songs/%s", url.QueryEscape(catalogID))
+	req, err := a.newRequest(ctx, http.MethodGet, ep)
+	if err != nil {
+		return false, fmt.Errorf("GetSongRating: %w", err)
+	}
+	// Use the raw client so we can distinguish 404 (not rated) from real errors.
+	resp, err := a.client.Do(req) //nolint:gosec
+	if err != nil {
+		return false, fmt.Errorf("GetSongRating: http: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return false, nil
+	}
+	if resp.StatusCode >= 400 {
+		return false, nil // treat all errors as "not rated" — non-fatal
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var rating ratingResponse
+	if err := json.Unmarshal(body, &rating); err != nil {
+		return false, nil
+	}
+	return len(rating.Data) > 0 && rating.Data[0].Attributes.Value == 1, nil
+}
