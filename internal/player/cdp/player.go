@@ -104,7 +104,12 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
 			// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
 			// visible to the desktop environment.
-			"--disable-features=HardwareMediaKeyHandling,MediaSessionService",
+			// Also disable the certificate-verifier component updater: when
+			// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
+			// which breaks all TLS connections including the MusicKit.js CDN load.
+			"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
+			"--disable-component-update",
+			"--ignore-certificate-errors",
 		},
 	})
 	if err != nil {
