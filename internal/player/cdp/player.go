@@ -100,6 +100,9 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			// Sandbox requires suid/namespace support unavailable from a non-system path.
 			"--no-sandbox",
 			"--disable-setuid-sandbox",
+			// --no-zygote removes the Linux process-spawning shim; safe when sandbox
+			// is already disabled and cuts one helper process.
+			"--no-zygote",
 			"--autoplay-policy=no-user-gesture-required",
 			"--enable-features=MediaCapabilities,WidevineCdm",
 			"--disable-blink-features=AutomationControlled",
@@ -113,6 +116,17 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
 			"--disable-component-update",
 			"--ignore-certificate-errors",
+			// Memory footprint reduction:
+			// Removes the GPU compositor process (~100–200 MB) — not needed for
+			// audio-only headless playback; Widevine CDM runs in a utility process
+			// and does not require GPU acceleration for audio DRM.
+			"--disable-gpu",
+			// Use /tmp for shared-memory segments instead of /dev/shm to avoid
+			// exhausting the (often small) tmpfs mounted there.
+			"--disable-dev-shm-usage",
+			// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
+			// within this limit; without it Chrome can balloon to 500 MB+.
+			"--js-flags=--max-old-space-size=256",
 		},
 	})
 	if err != nil {
