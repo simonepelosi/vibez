@@ -22,6 +22,7 @@ type AppleProvider struct {
 	cfg     *config.Config
 	client  *http.Client
 	baseURL string
+	sf      string // cached storefront, populated on first use
 }
 
 func New(cfg *config.Config) *AppleProvider {
@@ -30,6 +31,37 @@ func New(cfg *config.Config) *AppleProvider {
 		client:  &http.Client{Timeout: 15 * time.Second},
 		baseURL: defaultBaseURL,
 	}
+}
+
+type storefrontResponse struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// storefront returns the user's Apple Music storefront ID.
+// If the config has an explicit override it is used directly; otherwise the
+// value reported by Apple's /v1/me/storefront endpoint is fetched and cached.
+func (a *AppleProvider) storefront(ctx context.Context) (string, error) {
+	if a.cfg.StoreFront != "" {
+		return a.cfg.StoreFront, nil
+	}
+	if a.sf != "" {
+		return a.sf, nil
+	}
+	req, err := a.newRequest(ctx, http.MethodGet, "/me/storefront")
+	if err != nil {
+		return "", fmt.Errorf("storefront request: %w", err)
+	}
+	var resp storefrontResponse
+	if err := a.do(req, &resp); err != nil {
+		return "", fmt.Errorf("storefront: %w", err)
+	}
+	if len(resp.Data) == 0 {
+		return "", fmt.Errorf("storefront: empty response from Apple")
+	}
+	a.sf = resp.Data[0].ID
+	return a.sf, nil
 }
 
 func (a *AppleProvider) Name() string { return "apple" }
@@ -266,8 +298,13 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	// Catalog: songs + albums + playlists. Library songs take priority;
 	// catalog songs fill in tracks not already owned by the user.
 	go func() {
+		sf, err := a.storefront(ctx)
+		if err != nil {
+			catCh <- catOut{err: err}
+			return
+		}
 		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25",
-			a.cfg.StoreFront, url.QueryEscape(query))
+			sf, url.QueryEscape(query))
 		req, err := a.newRequest(ctx, http.MethodGet, ep)
 		if err != nil {
 			catCh <- catOut{err: err}
@@ -409,7 +446,11 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 }
 
 func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
-	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", a.cfg.StoreFront, albumID)
+	sf, err := a.storefront(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
+	}
+	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, albumID)
 	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 	if err != nil {
 		return nil, err

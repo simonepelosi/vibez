@@ -49,7 +49,11 @@ var authStatusCmd = &cobra.Command{
 			fmt.Println("Not authenticated.")
 			return nil
 		}
-		fmt.Printf("Authenticated with Apple Music (storefront: %s)\n", cfg.StoreFront)
+		sf := cfg.StoreFront
+		if sf == "" {
+			sf = "auto-detected"
+		}
+		fmt.Printf("Authenticated with Apple Music (storefront: %s)\n", sf)
 		return nil
 	},
 }

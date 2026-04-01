@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
@@ -45,11 +46,12 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	auth.ApplyEmbedded(cfg)
+
 	if cfg.AppleDeveloperToken == "" {
-		return fmt.Errorf("apple developer token not set — run: vibez auth login")
+		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
 	}
 
-	// vibezPlayer combines the player.Player playback interface with the
 	// lifecycle methods common to both the webkit and CDP backends.
 	type vibezPlayer interface {
 		player.Player
