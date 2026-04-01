@@ -138,10 +138,18 @@ func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// similarityBar returns a block-progress bar and a label for the similarity value.
+// similarityBar returns a styled block-progress bar and a label for the similarity value.
+// The bar interpolates from blue (adventurous/different) to purple (similar/focused).
 func similarityBar(similarity float64, barWidth int) (string, string) {
 	filled := min(int(similarity*float64(barWidth)), barWidth)
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+
+	// Colour of the filled portion: blue at 0.0 → purple at 1.0
+	barColor := styles.LerpColor(styles.ColorProgress, styles.ColorPrimary, similarity)
+	barStyle := lipgloss.NewStyle().Foreground(barColor)
+	bgStyle := lipgloss.NewStyle().Foreground(styles.ColorSurface)
+
+	bar := barStyle.Render(strings.Repeat("█", filled)) +
+		bgStyle.Render(strings.Repeat("░", barWidth-filled))
 
 	var label string
 	switch {
@@ -196,9 +204,13 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		bar, simLabel := similarityBar(d.Similarity, barW)
 		pct := fmt.Sprintf("%.0f%%", d.Similarity*100)
 
+		// Label colour follows the bar gradient.
+		labelColor := styles.LerpColor(styles.ColorProgress, styles.ColorPrimary, d.Similarity)
+		labelStyle := lipgloss.NewStyle().Foreground(labelColor)
+
 		bearStatus := bear + " "
 		if d.Refilling {
-			bearStatus += primary.Render("refilling queue…")
+			bearStatus += primary.Render("queuing next…")
 		} else {
 			bearStatus += muted.Render("listening…")
 		}
@@ -208,8 +220,8 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			accent.Render(clip(d.SeedArtist, w-4)),
 			muted.Render(clip(d.SeedTitle, w-4)),
 			"",
-			muted.Render("Similarity") + "  " + accent.Render(bar) + "  " + accent.Render(pct),
-			muted.Render("           ") + primary.Render(simLabel),
+			muted.Render("Similarity") + "  " + bar + "  " + labelStyle.Render(pct),
+			muted.Render("           ") + labelStyle.Render(simLabel),
 			"",
 			bearStatus,
 			"",
