@@ -3,8 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
+	"runtime"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,11 +67,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Try to prepare the CDP (Chrome) backend. If it succeeds we use the
-	// loading-screen flow where the TUI opens immediately and auth + engine
-	// init happen in the background. If it fails we fall back to WebKit where
-	// GTK must own the main OS thread, so the old blocking flow is kept.
-	cdpAvailable := cdp.EnsureBrowser(io.Discard) == nil
+	// Decide the audio backend without downloading anything.
+	// Chrome cached → CDP. Chrome absent but amd64 → CDP (will download in TUI).
+	// Any other arch → WebKit fallback.
+	_, chromeErr := os.Stat(cdp.ChromePath())
+	cdpAvailable := chromeErr == nil || runtime.GOARCH == "amd64"
 
 	if cdpAvailable {
 		return runCDPFlow(cfg, onUserToken, onStorefront)
@@ -86,7 +86,16 @@ func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) erro
 	prog := tea.NewProgram(tui.New(cfg, nil, nil), tea.WithAltScreen())
 
 	go func() {
-		// Auth phase — opens the system browser; TUI shows "Authorizing…"
+		// Step 1: Ensure Chrome is installed — may download ~130 MB on first run.
+		prog.Send(tui.InitStatusMsg("Initializing vibez…"))
+		if err := cdp.EnsureBrowser(func(msg string) {
+			prog.Send(tui.InitStatusMsg(msg))
+		}); err != nil {
+			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("browser setup: %w", err)})
+			return
+		}
+
+		// Step 2: Auth — opens the system browser; TUI shows status.
 		if cfg.AppleUserToken == "" {
 			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music…"))
 			if err := auth.Login(cfg); err != nil {
@@ -95,7 +104,7 @@ func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) erro
 			}
 		}
 
-		// Engine setup — Chrome launches headless because token is already set.
+		// Step 3: Start engine — Chrome launches headless because token is already set.
 		prog.Send(tui.InitStatusMsg("Starting audio engine…"))
 		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 		if err != nil {
