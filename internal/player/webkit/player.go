@@ -265,6 +265,21 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
+func (p *Player) RemoveFromQueue(idx int) error {
+	p.dispatch(fmt.Sprintf(`window.vibezQueueRemove && window.vibezQueueRemove(%d)`, idx))
+	return nil
+}
+
+func (p *Player) MoveInQueue(from, to int) error {
+	p.dispatch(fmt.Sprintf(`window.vibezQueueMove && window.vibezQueueMove(%d,%d)`, from, to))
+	return nil
+}
+
+func (p *Player) ClearQueue() error {
+	p.dispatch(`window.vibezQueueClear && window.vibezQueueClear()`)
+	return nil
+}
+
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

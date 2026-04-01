@@ -47,6 +47,9 @@ func (m *mockPlayer) AppendQueue(ids []string) error {
 	m.appendQueueIDs = append(m.appendQueueIDs, ids)
 	return m.err
 }
+func (m *mockPlayer) RemoveFromQueue(_ int) error { return m.err }
+func (m *mockPlayer) MoveInQueue(_, _ int) error  { return m.err }
+func (m *mockPlayer) ClearQueue() error           { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
@@ -73,6 +76,9 @@ func (m *mockProvider) GetPlaylistTracks(_ context.Context, _ string) ([]provide
 }
 func (m *mockProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
 	return nil, nil
+}
+func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
+	return provider.Playlist{}, nil
 }
 func (m *mockProvider) IsAuthenticated() bool { return true }
 
@@ -275,21 +281,22 @@ func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 
 func TestModel_Update_KeyQuit_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	// 'q' now quits (no player to close)
+	// 'q' now opens the queue panel (not quit)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	// activePanel should remain -1 (queue is no longer a toggle-able panel)
-	if m.activePanel >= 0 {
-		t.Error("q key should not activate any panel")
+	if m.activePanel < 0 {
+		t.Error("q key should activate the queue panel")
 	}
 }
 
 func TestModel_Update_KeyQuit_WithPlayer(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	// 'q' quits and closes the player
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	// ':q' quits and closes the player
+	m.mode = modeCommand
+	m.cmdBuf = "q"
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if !mp.closeCalled {
-		t.Error("player.Close() should be called when quitting with q")
+		t.Error("player.Close() should be called when quitting with :q")
 	}
 }
 

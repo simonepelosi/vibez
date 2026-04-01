@@ -77,6 +77,7 @@ type tickMsg time.Time
 type glowTickMsg time.Time
 type introTickMsg time.Time
 type errMsg struct{ err error }
+type playlistCreatedMsg struct{ name string }
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
 var introFrames = func() []string {
@@ -165,8 +166,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	// Only library is a toggle-able overlay panel; queue is always shown in split.
-	m.panels = []ContentView{m.library}
+	// Both library and queue are toggle-able overlay panels.
+	m.panels = []ContentView{m.library, m.queue}
 	return m
 }
 
@@ -292,6 +293,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = msg.err.Error()
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
+	case playlistCreatedMsg:
+		m.errMsg = "✓ Playlist \"" + msg.name + "\" saved"
+		m.errExpiry = time.Now().Add(4 * time.Second)
+
 	case tea.KeyMsg:
 		cmd := m.handleKey(msg)
 		cmds = append(cmds, cmd)
@@ -399,20 +404,43 @@ func (m *Model) handleCommandKey(k string) tea.Cmd {
 }
 
 func (m *Model) executeCommand(cmd string) tea.Cmd {
-	switch cmd {
-	case "q", "quit":
+	switch {
+	case cmd == "q" || cmd == "quit":
 		if m.player != nil {
 			_ = m.player.Close()
 		}
 		return tea.Quit
-	case "debug-logs":
+	case cmd == "debug-logs":
 		m.debugView = !m.debugView
 		m.debugScroll = 0
 		return nil
+	case strings.HasPrefix(cmd, "save-playlist "):
+		name := strings.TrimSpace(strings.TrimPrefix(cmd, "save-playlist "))
+		if name == "" {
+			m.errMsg = "save-playlist: name required"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		ids := make([]string, len(m.queueTracks))
+		for i, t := range m.queueTracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		return m.createPlaylistCmd(name, ids)
 	}
 	m.errMsg = fmt.Sprintf("unknown command: %s", cmd)
 	m.errExpiry = time.Now().Add(3 * time.Second)
 	return nil
+}
+
+func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
+	m.appendLog(fmt.Sprintf("[playlist] creating %q with %d tracks", name, len(ids)))
+	return func() tea.Msg {
+		_, err := m.provider.CreatePlaylist(context.Background(), name, ids)
+		if err != nil {
+			return errMsg{fmt.Errorf("save-playlist: %w", err)}
+		}
+		return playlistCreatedMsg{name: name}
+	}
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
@@ -514,13 +542,6 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		m.lastKey = ""
 		m.vibeFocused = !m.vibeFocused
 		return nil
-
-	case "q":
-		m.lastKey = ""
-		if m.player != nil {
-			_ = m.player.Close()
-		}
-		return tea.Quit
 	}
 
 	// Forward remaining keys to the active panel (navigation, selection, etc.)
@@ -531,13 +552,54 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 			return nil
 		}
 		// Queue panel: Enter plays the selected track from that position.
-		if m.panels[m.activePanel] == m.queue && k == "enter" {
-			if idx, t := m.queue.SelectedTrack(); t != nil {
-				ids := m.queueIDs[idx:]
-				m.queueTracks = m.queueTracks[idx:]
-				m.queueIDs = ids
-				m.queue.SetTracks(m.queueTracks)
-				return m.playerCmd(func() error { return m.player.SetQueue(ids) })
+		if m.panels[m.activePanel] == m.queue {
+			switch k {
+			case "enter":
+				if idx, t := m.queue.SelectedTrack(); t != nil {
+					ids := m.queueIDs[idx:]
+					m.queueTracks = m.queueTracks[idx:]
+					m.queueIDs = ids
+					m.queue.SetTracks(m.queueTracks)
+					return m.playerCmd(func() error { return m.player.SetQueue(ids) })
+				}
+			case "d":
+				// Remove selected track from queue.
+				if idx, _ := m.queue.SelectedTrack(); idx >= 0 {
+					m.queueTracks = append(m.queueTracks[:idx], m.queueTracks[idx+1:]...)
+					m.queueIDs = append(m.queueIDs[:idx], m.queueIDs[idx+1:]...)
+					m.queue.SetTracks(m.queueTracks)
+					i := idx // capture
+					return m.playerCmd(func() error { return m.player.RemoveFromQueue(i) })
+				}
+			case "K":
+				// Move selected track up one position.
+				if idx, _ := m.queue.SelectedTrack(); idx > 0 {
+					m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
+					m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
+					m.queue.SetTracks(m.queueTracks)
+					from, to := idx, idx-1
+					return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+				}
+			case "J":
+				// Move selected track down one position.
+				if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
+					m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
+					m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
+					m.queue.SetTracks(m.queueTracks)
+					from, to := idx, idx+1
+					return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+				}
+			case "c":
+				// Clear the entire queue.
+				m.queueTracks = nil
+				m.queueIDs = nil
+				m.queue.SetTracks(nil)
+				return m.playerCmd(func() error { return m.player.ClearQueue() })
+			case "s":
+				// Save queue as playlist — prompt for name via command mode.
+				m.mode = modeCommand
+				m.cmdBuf = "save-playlist "
+				return nil
 			}
 		}
 		return m.panels[m.activePanel].Update(msg)
@@ -1006,6 +1068,15 @@ func (m *Model) statusContent(_ int) string {
 				accent.Render("r") + muted.Render(" regenerate"),
 				accent.Render("v") + muted.Render(" exit vibe"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.queue:
+			parts = []string{
+				accent.Render("Enter") + muted.Render(" play"),
+				accent.Render("d") + muted.Render(" remove"),
+				accent.Render("K/J") + muted.Render(" move"),
+				accent.Render("c") + muted.Render(" clear"),
+				accent.Render("s") + muted.Render(" save playlist"),
+				accent.Render("esc") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				accent.Render("/") + muted.Render(" search"),
@@ -1014,6 +1085,7 @@ func (m *Model) statusContent(_ int) string {
 				accent.Render("f") + muted.Render(" fav"),
 				accent.Render("v") + muted.Render(" vibe"),
 				accent.Render("l") + muted.Render(" library"),
+				accent.Render("q") + muted.Render(" queue"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}

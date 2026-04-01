@@ -42,4 +42,8 @@ func (m *mockProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.T
 	return nil, nil
 }
 
+func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
+	return provider.Playlist{}, nil
+}
+
 func (m *mockProvider) IsAuthenticated() bool { return true }

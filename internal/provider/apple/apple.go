@@ -1,6 +1,7 @@
 package apple
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -58,11 +59,14 @@ func (a *AppleProvider) do(req *http.Request, dst any) error {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("apple music api %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	return json.NewDecoder(resp.Body).Decode(dst)
+	if dst == nil || len(body) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, dst)
 }
 
 // --- Apple Music API response types ---
@@ -419,4 +423,75 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		tracks = append(tracks, toTrack(s))
 	}
 	return tracks, nil
+}
+
+// createPlaylistRequest is the JSON body for POST /v1/me/library/playlists.
+type createPlaylistRequest struct {
+	Attributes    createPlaylistAttributes     `json:"attributes"`
+	Relationships *createPlaylistRelationships `json:"relationships,omitempty"`
+}
+
+type createPlaylistAttributes struct {
+	Name string `json:"name"`
+}
+
+type createPlaylistRelationships struct {
+	Tracks createPlaylistTracks `json:"tracks"`
+}
+
+type createPlaylistTracks struct {
+	Data []createPlaylistTrackRef `json:"data"`
+}
+
+type createPlaylistTrackRef struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// createPlaylistResponse wraps the newly created playlist.
+type createPlaylistResponse struct {
+	Data []playlistResource `json:"data"`
+}
+
+func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackIDs []string) (provider.Playlist, error) {
+	refs := make([]createPlaylistTrackRef, 0, len(trackIDs))
+	for _, id := range trackIDs {
+		typ := "songs"
+		if strings.HasPrefix(id, "i.") {
+			typ = "library-songs"
+		}
+		refs = append(refs, createPlaylistTrackRef{ID: id, Type: typ})
+	}
+
+	body := createPlaylistRequest{
+		Attributes: createPlaylistAttributes{Name: name},
+	}
+	if len(refs) > 0 {
+		body.Relationships = &createPlaylistRelationships{
+			Tracks: createPlaylistTracks{Data: refs},
+		}
+	}
+
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return provider.Playlist{}, fmt.Errorf("CreatePlaylist: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/me/library/playlists", bytes.NewReader(raw))
+	if err != nil {
+		return provider.Playlist{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	var resp createPlaylistResponse
+	if err := a.do(req, &resp); err != nil {
+		return provider.Playlist{}, fmt.Errorf("CreatePlaylist: %w", err)
+	}
+	// Some API versions return 201 with no body — treat as success without data.
+	if len(resp.Data) == 0 {
+		return provider.Playlist{Name: name}, nil
+	}
+	return toPlaylist(resp.Data[0]), nil
 }
