@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,39 @@ func TestName(t *testing.T) {
 
 // --- Search ---
 
+// searchHandler is a path-aware test handler for the three Search sub-requests:
+//
+//	/me/library/search          → libraryResp  (empty = no library hits)
+//	/catalog/{sf}/search        → catalogResp  (the catalog hits)
+//	/catalog/{sf}/songs         → verifyResp   (which IDs are truly available)
+func searchHandler(t *testing.T, w http.ResponseWriter, r *http.Request,
+	libraryResp, catalogResp, verifyResp any,
+) {
+	t.Helper()
+	switch {
+	case strings.Contains(r.URL.Path, "/me/library/search"):
+		writeJSON(t, w, libraryResp)
+	case strings.Contains(r.URL.Path, "/songs") && !strings.Contains(r.URL.Path, "search"):
+		// /catalog/{sf}/songs?ids=... — verification step
+		writeJSON(t, w, verifyResp)
+	default:
+		// /catalog/{sf}/search
+		writeJSON(t, w, catalogResp)
+	}
+}
+
 func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
+	song := songJSON("1", "Humble", "Kendrick Lamar", "DAMN.", 212000, "https://art/{w}x{h}.jpg")
+	catalogResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{song}},
+			"albums":    map[string]any{"data": []any{albumJSON("a1", "DAMN.", "Kendrick Lamar", 14)}},
+			"playlists": map[string]any{"data": []any{playlistJSON("p1", "Hip Hop Hits", 50)}},
+		},
+	}
+	libEmpty := map[string]any{"results": map[string]any{}}
+	verifyResp := map[string]any{"data": []any{song}} // ID "1" resolves
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify auth headers are sent.
 		if r.Header.Get("Authorization") != "Bearer test-dev-token" {
@@ -79,27 +112,7 @@ func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
 		if r.Header.Get("Music-User-Token") != "test-user-token" {
 			t.Errorf("Music-User-Token header = %q", r.Header.Get("Music-User-Token"))
 		}
-
-		resp := map[string]any{
-			"results": map[string]any{
-				"songs": map[string]any{
-					"data": []any{
-						songJSON("1", "Humble", "Kendrick Lamar", "DAMN.", 212000, "https://art/{w}x{h}.jpg"),
-					},
-				},
-				"albums": map[string]any{
-					"data": []any{
-						albumJSON("a1", "DAMN.", "Kendrick Lamar", 14),
-					},
-				},
-				"playlists": map[string]any{
-					"data": []any{
-						playlistJSON("p1", "Hip Hop Hits", 50),
-					},
-				},
-			},
-		}
-		writeJSON(t, w, resp)
+		searchHandler(t, w, r, libEmpty, catalogResp, verifyResp)
 	}))
 	defer srv.Close()
 
@@ -141,15 +154,81 @@ func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
 	}
 }
 
-func TestSearch_EmptyResults(t *testing.T) {
+func TestSearch_CatalogSongFilteredWhenNotVerified(t *testing.T) {
+	// The catalog returns a song, but the verify step returns nothing
+	// (song not available in user's storefront). It must be filtered out.
+	song := songJSON("257837972", "Son of a Preacher Man", "Dusty Springfield", "Dusty in Memphis", 180000, "")
+	catalogResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{song}},
+			"albums":    map[string]any{"data": []any{}},
+			"playlists": map[string]any{"data": []any{}},
+		},
+	}
+	libEmpty := map[string]any{"results": map[string]any{}}
+	verifyEmpty := map[string]any{"data": []any{}} // ID does not resolve in this storefront
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, map[string]any{
-			"results": map[string]any{
-				"songs":     map[string]any{"data": []any{}},
-				"albums":    map[string]any{"data": []any{}},
-				"playlists": map[string]any{"data": []any{}},
-			},
-		})
+		searchHandler(t, w, r, libEmpty, catalogResp, verifyEmpty)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	result, err := p.Search(context.Background(), "preacher")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(result.Tracks) != 0 {
+		t.Errorf("expected 0 tracks (filtered), got %d: %+v", len(result.Tracks), result.Tracks)
+	}
+}
+
+func TestSearch_LibraryResultsPreferredOverCatalog(t *testing.T) {
+	// Same song appears in both library and catalog. Library version (i.xxx ID)
+	// must appear first and the catalog duplicate must be deduped away.
+	libSong := songJSON("i.AbCdEf", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
+	catSong := songJSON("1234", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
+
+	libResp := map[string]any{
+		"results": map[string]any{
+			"library-songs":     map[string]any{"data": []any{libSong}},
+			"library-albums":    map[string]any{"data": []any{}},
+			"library-playlists": map[string]any{"data": []any{}},
+		},
+	}
+	catResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{catSong}},
+			"albums":    map[string]any{"data": []any{}},
+			"playlists": map[string]any{"data": []any{}},
+		},
+	}
+	verifyResp := map[string]any{"data": []any{catSong}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		searchHandler(t, w, r, libResp, catResp, verifyResp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	result, err := p.Search(context.Background(), "humble")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(result.Tracks) != 1 {
+		t.Fatalf("Tracks: got %d, want 1 (deduped)", len(result.Tracks))
+	}
+	if result.Tracks[0].ID != "i.AbCdEf" {
+		t.Errorf("expected library ID i.AbCdEf, got %q", result.Tracks[0].ID)
+	}
+}
+
+func TestSearch_EmptyResults(t *testing.T) {
+	empty := map[string]any{"results": map[string]any{}}
+	verifyEmpty := map[string]any{"data": []any{}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		searchHandler(t, w, r, empty, empty, verifyEmpty)
 	}))
 	defer srv.Close()
 
@@ -164,22 +243,25 @@ func TestSearch_EmptyResults(t *testing.T) {
 }
 
 func TestSearch_QueryEncoded(t *testing.T) {
-	var gotURL string
+	var gotURLs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotURL = r.URL.RawQuery
-		writeJSON(t, w, map[string]any{"results": map[string]any{}})
+		gotURLs = append(gotURLs, r.URL.RawQuery)
+		writeJSON(t, w, map[string]any{"results": map[string]any{}, "data": []any{}})
 	}))
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
 	_, _ = p.Search(context.Background(), "lofi hip hop")
 
-	if gotURL == "" {
-		t.Fatal("no request received")
+	found := false
+	for _, q := range gotURLs {
+		if containsStr(q, "lofi+hip+hop") || containsStr(q, "lofi%20hip%20hop") {
+			found = true
+			break
+		}
 	}
-	// "lofi hip hop" should be URL-encoded.
-	if !containsStr(gotURL, "lofi+hip+hop") && !containsStr(gotURL, "lofi%20hip%20hop") {
-		t.Errorf("query not encoded correctly in %q", gotURL)
+	if !found {
+		t.Errorf("query not encoded correctly in any request: %v", gotURLs)
 	}
 }
 
@@ -357,28 +439,32 @@ func TestGetAlbumTracks(t *testing.T) {
 // --- Track preview URL ---
 
 func TestSearch_TrackPreviewURL(t *testing.T) {
+	song := map[string]any{
+		"id": "99",
+		"attributes": map[string]any{
+			"name":             "Test Song",
+			"artistName":       "Test Artist",
+			"albumName":        "Test Album",
+			"durationInMillis": 180000,
+			"artwork":          map[string]any{"url": "", "width": 300, "height": 300},
+			"previews": []any{
+				map[string]any{"url": "https://preview.example.com/song.m4a"},
+			},
+			"genreNames": []string{"pop"},
+		},
+	}
+	catalogResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{song}},
+			"albums":    map[string]any{"data": []any{}},
+			"playlists": map[string]any{"data": []any{}},
+		},
+	}
+	libEmpty := map[string]any{"results": map[string]any{}}
+	verifyResp := map[string]any{"data": []any{song}}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		song := map[string]any{
-			"id": "99",
-			"attributes": map[string]any{
-				"name":             "Test Song",
-				"artistName":       "Test Artist",
-				"albumName":        "Test Album",
-				"durationInMillis": 180000,
-				"artwork":          map[string]any{"url": "", "width": 300, "height": 300},
-				"previews": []any{
-					map[string]any{"url": "https://preview.example.com/song.m4a"},
-				},
-				"genreNames": []string{"pop"},
-			},
-		}
-		writeJSON(t, w, map[string]any{
-			"results": map[string]any{
-				"songs":     map[string]any{"data": []any{song}},
-				"albums":    map[string]any{"data": []any{}},
-				"playlists": map[string]any{"data": []any{}},
-			},
-		})
+		searchHandler(t, w, r, libEmpty, catalogResp, verifyResp)
 	}))
 	defer srv.Close()
 
@@ -510,11 +596,12 @@ func TestGetAlbumTracks_HTTPError(t *testing.T) {
 }
 
 func TestSearch_NoResultsKey(t *testing.T) {
-	// Valid JSON but no recognized keys inside results
+	// Valid JSON but no recognized keys inside results — all three endpoints
+	// return an empty-ish object; no error expected, no tracks returned.
+	empty := map[string]any{"results": map[string]any{}, "data": []any{}}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(t, w, map[string]any{
-			"results": map[string]any{},
-		})
+		writeJSON(t, w, empty)
 	}))
 	defer srv.Close()
 
