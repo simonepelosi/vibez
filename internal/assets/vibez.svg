@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#2d2b55"/>
+      <stop offset="100%" stop-color="#1a1b26"/>
+    </radialGradient>
+    <radialGradient id="head" cx="45%" cy="38%" r="62%">
+      <stop offset="0%" stop-color="#cba6f7"/>
+      <stop offset="100%" stop-color="#9d7fea"/>
+    </radialGradient>
+    <radialGradient id="ear" cx="40%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#bb9af7"/>
+      <stop offset="100%" stop-color="#9d7fea"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+
+  <!-- Left ear -->
+  <circle cx="148" cy="184" r="76" fill="url(#ear)"/>
+  <circle cx="148" cy="184" r="47" fill="#6e57c4"/>
+
+  <!-- Right ear -->
+  <circle cx="364" cy="184" r="76" fill="url(#ear)"/>
+  <circle cx="364" cy="184" r="47" fill="#6e57c4"/>
+
+  <!-- Bear head -->
+  <circle cx="256" cy="306" r="184" fill="url(#head)"/>
+
+  <!-- Muzzle -->
+  <ellipse cx="256" cy="362" rx="92" ry="70" fill="#e0d4ff"/>
+
+  <!-- Nose -->
+  <ellipse cx="256" cy="324" rx="34" ry="23" fill="#2d2b55"/>
+
+  <!-- Left eye -->
+  <circle cx="190" cy="270" r="28" fill="#1a1b26"/>
+  <circle cx="199" cy="260" r="10" fill="#e0d4ff"/>
+
+  <!-- Right eye -->
+  <circle cx="322" cy="270" r="28" fill="#1a1b26"/>
+  <circle cx="331" cy="260" r="10" fill="#e0d4ff"/>
+
+  <!-- Music note (eighth note) — top-right corner -->
+  <g fill="#c678dd" transform="translate(312, 38)">
+    <!-- Note head -->
+    <ellipse cx="40" cy="110" rx="33" ry="22" transform="rotate(-18,40,110)"/>
+    <!-- Stem -->
+    <rect x="69" y="14" width="11" height="97" rx="5"/>
+    <!-- Flag -->
+    <path d="M80,14 C110,23 124,50 117,78 C100,55 81,61 80,72 Z"/>
+  </g>
+</svg>

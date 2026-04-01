@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/simone-vibes/vibez/internal/assets"
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
@@ -54,6 +55,10 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
 	}
 
+	// Install icon on every launch (idempotent, best-effort) so it is
+	// available for desktop notifications immediately.
+	iconPath := assets.InstallIcon()
+
 	onUserToken := func(token string) {
 		cfg.AppleUserToken = token
 		if saveErr := cfg.Save(""); saveErr != nil && debug {
@@ -76,15 +81,15 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	cdpAvailable := chromeErr == nil || runtime.GOARCH == "amd64"
 
 	if cdpAvailable {
-		return runCDPFlow(cfg, onUserToken, onStorefront)
+		return runCDPFlow(cfg, iconPath, onUserToken, onStorefront)
 	}
-	return runWebKitFlow(cfg, onUserToken, onStorefront)
+	return runWebKitFlow(cfg, iconPath, onUserToken, onStorefront)
 }
 
 // runCDPFlow starts the TUI immediately with a loading screen, then performs
 // auth and engine init in a background goroutine, sending progress messages
 // to the running TUI. Chrome runs headless throughout.
-func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) error {
+func runCDPFlow(cfg *config.Config, iconPath string, onUserToken, onStorefront func(string)) error {
 	prog := tea.NewProgram(tui.New(cfg, nil, nil, tui.Options{MemProfiling: memProfiling}), tea.WithAltScreen())
 
 	go func() {
@@ -148,7 +153,7 @@ func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) erro
 
 // runWebKitFlow is the legacy path: GTK must own the main OS thread so auth
 // and engine setup happen before the TUI, and BubbleTea runs in a goroutine.
-func runWebKitFlow(cfg *config.Config, onUserToken, onStorefront func(string)) error {
+func runWebKitFlow(cfg *config.Config, iconPath string, onUserToken, onStorefront func(string)) error {
 	fmt.Fprintln(os.Stderr, "Engine: WebKit + GStreamer (30 s preview)")
 
 	// Auth before engine creation (no loading TUI in WebKit path).

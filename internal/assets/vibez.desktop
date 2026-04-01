@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=vibez
+GenericName=Music Player
+Comment=A vibe-driven Apple Music player for your terminal
+Exec=vibez
+Icon=vibez
+Terminal=true
+Categories=AudioVideo;Audio;Player;
+Keywords=music;apple;terminal;tui;
+StartupNotify=false
