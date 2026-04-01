@@ -496,9 +496,9 @@ func TestModel_ContentHeight(t *testing.T) {
 	m := newModel(nil)
 	m.height = 26
 	got := m.panelHeight()
-	// fixed overhead = 19 lines (box layout)
-	if got != 7 {
-		t.Errorf("panelHeight() = %d, want 7", got)
+	// fixed overhead = 20 lines (box layout with two status lines)
+	if got != 6 {
+		t.Errorf("panelHeight() = %d, want 6", got)
 	}
 }
 
@@ -522,14 +522,14 @@ func TestModel_RenderHeader_ContainsVibez(t *testing.T) {
 	}
 }
 
-// --- statusContent ---
+// --- statusNavContent ---
 
 func TestModel_RenderFooter_ContainsKeyHints(t *testing.T) {
 	m := newModel(nil)
 	m.width = 100
-	got := m.statusContent(m.width - 4)
+	got := m.statusNavContent(m.width - 4)
 	if !strings.Contains(got, "search") {
-		t.Errorf("statusContent() should contain key hints, got %q", got)
+		t.Errorf("statusNavContent() should contain key hints, got %q", got)
 	}
 }
 

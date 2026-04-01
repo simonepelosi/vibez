@@ -829,7 +829,7 @@ func (m *Model) renderBoxLayout() string {
 
 	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
 	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
-	fullWidth := libraryActive || queueActive || m.mode == modeSearch || m.debugView
+	fullWidth := libraryActive || queueActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -864,6 +864,10 @@ func (m *Model) renderBoxLayout() string {
 		for _, line := range m.searchLines(inner-2, panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
+	case m.mode == modeCommand:
+		for _, line := range m.commandLines(inner-2, panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
 	case libraryActive:
 		for _, line := range toLines(m.library.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
@@ -890,8 +894,9 @@ func (m *Model) renderBoxLayout() string {
 		sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
 	}
 
-	// ── Status bar ──
-	sb.WriteString("│ " + padRight(m.statusContent(inner-2), inner-2) + " │\n")
+	// ── Status bar (two lines: context/mode + playback) ──
+	sb.WriteString("│ " + padRight(m.statusNavContent(inner-2), inner-2) + " │\n")
+	sb.WriteString("│ " + padRight(m.statusPlayContent(inner-2), inner-2) + " │\n")
 
 	// ── Bottom border ──
 	sb.WriteString("└" + strings.Repeat("─", inner) + "┘")
@@ -1126,61 +1131,120 @@ func (m *Model) searchLines(contentW, h int) []string {
 	return result[:h]
 }
 
-// statusContent builds the status bar inner string (without the │ borders).
-func (m *Model) statusContent(_ int) string {
+// statusNavContent is the top status line: mode chip + context-aware shortcuts.
+func (m *Model) statusNavContent(_ int) string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
-	mode := lipgloss.NewStyle().Foreground(styles.ColorAccent).Bold(true)
+	dot := muted.Render("  ·  ")
 
 	switch m.mode {
 	case modeSearch:
-		return accent.Render("/") + " " +
-			styles.Header.Render(m.searchQuery) + accent.Render("_")
+		return styles.ModeSearch.Render("SEARCH") + "  " +
+			accent.Render("/") + styles.Header.Render(m.searchQuery) + accent.Render("_")
 	case modeCommand:
-		return mode.Render("CMD") + "  " + muted.Render(":") + m.cmdBuf + accent.Render("_")
+		return styles.ModeCommand.Render("CMD") + "  " +
+			muted.Render(":") + m.cmdBuf + accent.Render("_") +
+			muted.Render("  Tab complete · ↑/↓ navigate · Esc cancel")
 	default:
-		dot := muted.Render("  ·  ")
 		var parts []string
 		switch {
 		case m.debugView:
 			parts = []string{
-				accent.Render("k/j") + muted.Render(" scroll"),
+				styles.ModeNormal.Render("DEBUG"),
+				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
 		case m.vibeFocused:
 			parts = []string{
+				styles.ModeNormal.Render("VIBE"),
 				accent.Render("+/-") + muted.Render(" energy"),
 				accent.Render("r") + muted.Render(" regenerate"),
-				accent.Render("v") + muted.Render(" exit vibe"),
+				accent.Render("v") + muted.Render(" exit"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.queue:
 			parts = []string{
+				styles.ModeNormal.Render("QUEUE"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
-				accent.Render("K/J") + muted.Render(" move"),
+				accent.Render("K/J") + muted.Render(" move up/down"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.library:
+			parts = []string{
+				styles.ModeNormal.Render("LIBRARY"),
+				accent.Render("Enter") + muted.Render(" play"),
+				accent.Render("Tab") + muted.Render(" add to queue"),
+				accent.Render("esc") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
-				mode.Render("NORMAL"),
+				styles.ModeNormal.Render("NORMAL"),
+				accent.Render(":") + muted.Render(" command"),
 				accent.Render("/") + muted.Render(" search"),
-				accent.Render("spc") + muted.Render(" play/pause"),
-				accent.Render("n/p") + muted.Render(" next/prev"),
-				accent.Render("f") + muted.Render(" fav"),
-				accent.Render("s") + muted.Render(" shuffle"),
-				accent.Render("r") + muted.Render(" repeat"),
+				accent.Render("l") + muted.Render(" library"),
+				accent.Render("q") + muted.Render(" queue"),
+				accent.Render("v") + muted.Render(" vibe"),
+				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
 		return strings.Join(parts, dot)
 	}
 }
 
+// statusPlayContent is the bottom status line: always shows playback controls.
+func (m *Model) statusPlayContent(_ int) string {
+	muted := styles.QueueItemMuted
+	accent := styles.KeyName
+	dot := muted.Render("  ·  ")
+	parts := []string{
+		accent.Render("spc") + muted.Render(" play/pause"),
+		accent.Render("n/p") + muted.Render(" next/prev"),
+		accent.Render("f") + muted.Render(" fav"),
+		accent.Render("s") + muted.Render(" shuffle"),
+		accent.Render("r") + muted.Render(" repeat"),
+	}
+	return strings.Join(parts, dot)
+}
+
+// commandLines renders the command palette in the panel area when CMD mode is active.
+func (m *Model) commandLines(w, h int) []string {
+	muted := styles.QueueItemMuted
+	accent := styles.KeyName
+	header := accent.Render("Commands")
+	sep := muted.Render(strings.Repeat("─", 8))
+
+	suggs := m.commandSuggestions()
+	var rows []string
+	for i, c := range suggs {
+		cursor := "  "
+		nameStyle := styles.QueueItem
+		descStyle := muted
+		if i == m.cmdSuggIdx {
+			cursor = styles.Playing.Render("▶ ")
+			nameStyle = styles.Playing
+			descStyle = styles.QueueItem
+		}
+		usage := nameStyle.Render(fmt.Sprintf("%-20s", c.usage))
+		desc := descStyle.Render(c.description)
+		rows = append(rows, cursor+usage+" "+desc)
+	}
+	if len(rows) == 0 {
+		rows = []string{"  " + muted.Render("no matching commands")}
+	}
+
+	result := append([]string{"", header, sep, ""}, rows...)
+	for len(result) < h {
+		result = append(result, "")
+	}
+	return result[:h]
+}
+
 // panelHeight returns the number of rows available for the split panel section.
-// Fixed overhead = top(1)+hdr(1)+hdrdiv(1)+np(12)+splitdiv(1)+joindiv(1)+status(1)+bottom(1) = 19.
+// Fixed overhead = top(1)+hdr(1)+hdrdiv(1)+np(12)+splitdiv(1)+joindiv(1)+status(2)+bottom(1) = 20.
 func (m *Model) panelHeight() int {
-	return max(3, m.height-19)
+	return max(3, m.height-20)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
