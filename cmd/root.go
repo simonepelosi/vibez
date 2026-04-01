@@ -62,8 +62,10 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		dp := demoProvider.Provider{}
 		opts.IconPath = iconPath
 		prog := tea.NewProgram(tui.New(cfg, dp, p, opts), tea.WithAltScreen())
-		// Send EngineReadyMsg immediately so the TUI shows the player, not the loading screen.
-		prog.Send(tui.EngineReadyMsg{Player: p, Provider: dp})
+		// Send EngineReadyMsg from a goroutine — prog.Run() must be running
+		// before the channel can be drained; calling Send() synchronously before
+		// Run() blocks forever.
+		go prog.Send(tui.EngineReadyMsg{Player: p, Provider: dp})
 		_, err = prog.Run()
 		return err
 	}
