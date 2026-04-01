@@ -44,6 +44,23 @@ func FormatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", mins, secs)
 }
 
+// RenderProgressBar renders a progress bar using █ (filled) and ░ (empty) chars.
+func RenderProgressBar(pos, dur time.Duration, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	ratio := 0.0
+	if dur > 0 {
+		ratio = float64(pos) / float64(dur)
+		if ratio > 1 {
+			ratio = 1
+		}
+	}
+	filled := int(ratio * float64(width))
+	return styles.ProgressBar.Render(strings.Repeat("█", filled)) +
+		styles.ProgressBg.Render(strings.Repeat("░", width-filled))
+}
+
 func centerLine(s string, width int) string {
 	sw := lipgloss.Width(s)
 	pad := max(0, (width-sw)/2)

@@ -186,6 +186,14 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			p.sendError(fmt.Errorf("musickit: %s", msg))
 			return nil
 		},
+		"goLog": func(args ...any) any {
+			msg := ""
+			if len(args) > 0 {
+				msg, _ = args[0].(string)
+			}
+			p.sendLog(msg)
+			return nil
+		},
 	}
 
 	for name, fn := range bindings {
@@ -219,6 +227,20 @@ func (p *Player) sendError(err error) {
 	p.mu.Lock()
 	p.state.Error = err.Error()
 	s := p.state
+	subs := p.subs
+	p.mu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- s:
+		default:
+		}
+	}
+}
+
+func (p *Player) sendLog(msg string) {
+	p.mu.Lock()
+	s := p.state
+	s.Log = msg
 	subs := p.subs
 	p.mu.Unlock()
 	for _, ch := range subs {

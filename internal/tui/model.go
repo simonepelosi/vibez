@@ -62,8 +62,9 @@ func (p *queuePanel) Update(msg tea.KeyMsg) tea.Cmd {
 	p.m.Update(msg)
 	return nil
 }
-func (p *queuePanel) View() string                      { return p.m.View() }
-func (p *queuePanel) SetTracks(tracks []provider.Track) { p.m.SetTracks(tracks) }
+func (p *queuePanel) View() string                          { return p.m.View() }
+func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
+func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
 
 // ── Messages ──────────────────────────────────────────────────────────────
 
@@ -113,6 +114,10 @@ type Model struct {
 	library     *libraryPanel
 	queue       *queuePanel
 
+	// Vibe panel (always visible, right split)
+	vibe        *views.VibeModel
+	vibeFocused bool // true when +/-/r keys target the vibe panel
+
 	// Search popup (not a panel)
 	search *views.SearchModel
 
@@ -132,6 +137,14 @@ type Model struct {
 	errMsg    string
 	errExpiry time.Time
 
+	// Debug log
+	debugLog    []string
+	debugView   bool
+	debugScroll int // lines scrolled up from tail (0 = show latest)
+
+	// Favorites: track IDs that the user has hearted this session.
+	favorites map[string]bool
+
 	// Animation
 	glowStep  int
 	introStep int // introDone (-1) when complete
@@ -149,9 +162,11 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model 
 	}
 	m.library = &libraryPanel{m: views.NewLibrary(prov)}
 	m.queue = &queuePanel{m: views.NewQueue()}
+	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
-	// Register panels — append here to add new views, nothing else changes:
-	m.panels = []ContentView{m.library, m.queue}
+	m.favorites = make(map[string]bool)
+	// Only library is a toggle-able overlay panel; queue is always shown in split.
+	m.panels = []ContentView{m.library}
 	return m
 }
 
@@ -196,11 +211,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		cw, ch := m.contentDimensions()
-		for _, p := range m.panels {
-			p.SetSize(cw, ch)
-		}
-		m.search.SetSize(cw, ch)
+		inner := max(0, m.width-2)
+		contentW := max(0, inner-2)
+		panelH := m.panelHeight()
+		m.library.SetSize(contentW, panelH)
+		m.search.SetSize(contentW, panelH)
 
 	case tickMsg:
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
@@ -225,10 +240,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playerStateMsg:
 		wasPlaying := m.playerState.Playing
 		s := player.State(msg)
+		if s.Log != "" {
+			m.appendLog(s.Log)
+			s.Log = ""
+		}
 		if s.Error != "" {
+			m.appendLog("[error] " + s.Error)
 			m.errMsg = s.Error
 			m.errExpiry = time.Now().Add(4 * time.Second)
 			s.Error = ""
+		}
+		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
+			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
 		}
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
@@ -265,6 +288,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activePanel = -1
 
 	case errMsg:
+		m.appendLog("[error] " + msg.err.Error())
 		m.errMsg = msg.err.Error()
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
@@ -313,6 +337,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 		// Play now — replaces queue and starts immediately.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
+			m.appendLog(fmt.Sprintf("[queue] play now: %s — %s", tc.Artist, tc.Title))
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
@@ -325,6 +350,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 		// Add to queue — appends without interrupting playback.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
+			m.appendLog(fmt.Sprintf("[queue] append: %s — %s", tc.Artist, tc.Title))
 			m.queueTracks = append(m.queueTracks, tc)
 			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
@@ -379,6 +405,10 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			_ = m.player.Close()
 		}
 		return tea.Quit
+	case "debug-logs":
+		m.debugView = !m.debugView
+		m.debugScroll = 0
+		return nil
 	}
 	m.errMsg = fmt.Sprintf("unknown command: %s", cmd)
 	m.errExpiry = time.Now().Add(3 * time.Second)
@@ -386,7 +416,39 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
-	// Check if key activates a panel (toggle off if already active)
+	// When debug log is open, j/k/G scroll it; esc closes it.
+	if m.debugView {
+		switch k {
+		case "j", "down":
+			if m.debugScroll > 0 {
+				m.debugScroll--
+			}
+			return nil
+		case "k", "up":
+			m.debugScroll++
+			return nil
+		case "G":
+			m.debugScroll = 0
+			return nil
+		case "esc":
+			m.debugView = false
+			return nil
+		}
+	}
+
+	// When vibe panel is focused, capture its control keys before anything else.
+	if m.vibeFocused {
+		switch k {
+		case "+", "=", "-", "r":
+			m.vibe.Update(msg)
+			return nil
+		case "esc", "v":
+			m.vibeFocused = false
+			return nil
+		}
+	}
+
+	// Panel nav keys toggle their panel (always checked first).
 	for i, p := range m.panels {
 		if k == p.NavKey() {
 			if m.activePanel == i {
@@ -399,26 +461,8 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		}
 	}
 
-	// Forward keys to the active panel (e.g. library list navigation)
-	if m.activePanel >= 0 {
-		if k == "esc" {
-			m.activePanel = -1
-			m.lastKey = ""
-			return nil
-		}
-		return m.panels[m.activePanel].Update(msg)
-	}
-
+	// Player control keys always work, even when a panel is active.
 	switch k {
-	case "/":
-		m.mode = modeSearch
-		m.searchQuery = ""
-		m.search.SetState(nil, false, nil)
-
-	case ":":
-		m.mode = modeCommand
-		m.cmdBuf = ""
-
 	case " ":
 		return m.togglePlayPause()
 
@@ -458,6 +502,57 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		on := !m.playerState.ShuffleMode
 		m.playerState.ShuffleMode = on
 		return m.playerCmd(func() error { return m.player.SetShuffle(on) })
+
+	case "f":
+		m.lastKey = ""
+		if m.playerState.Track != nil {
+			id := m.playerState.Track.ID
+			m.favorites[id] = !m.favorites[id]
+		}
+
+	case "v":
+		m.lastKey = ""
+		m.vibeFocused = !m.vibeFocused
+		return nil
+
+	case "q":
+		m.lastKey = ""
+		if m.player != nil {
+			_ = m.player.Close()
+		}
+		return tea.Quit
+	}
+
+	// Forward remaining keys to the active panel (navigation, selection, etc.)
+	if m.activePanel >= 0 {
+		if k == "esc" {
+			m.activePanel = -1
+			m.lastKey = ""
+			return nil
+		}
+		// Queue panel: Enter plays the selected track from that position.
+		if m.panels[m.activePanel] == m.queue && k == "enter" {
+			if idx, t := m.queue.SelectedTrack(); t != nil {
+				ids := m.queueIDs[idx:]
+				m.queueTracks = m.queueTracks[idx:]
+				m.queueIDs = ids
+				m.queue.SetTracks(m.queueTracks)
+				return m.playerCmd(func() error { return m.player.SetQueue(ids) })
+			}
+		}
+		return m.panels[m.activePanel].Update(msg)
+	}
+
+	// Keys that only work when no panel is covering the content area.
+	switch k {
+	case "/":
+		m.mode = modeSearch
+		m.searchQuery = ""
+		m.search.SetState(nil, false, nil)
+
+	case ":":
+		m.mode = modeCommand
+		m.cmdBuf = ""
 
 	case "j", "down":
 		m.lastKey = ""
@@ -569,20 +664,93 @@ func (m *Model) View() string {
 	if m.introStep != introDone {
 		return m.renderIntro()
 	}
+	return m.renderBoxLayout()
+}
 
-	sep := m.renderSeparator()
-	contentH := max(0, m.height-10) // fixed overhead: logo(1)+blank(1)+nowplaying(4)+blank(1)+sep(1)+sep(1)+status(1)
+// renderBoxLayout renders the full boxed UI.
+//
+//	┌─────────────────────────────────────┐
+//	│ ʕ•ᴥ•ʔ vibez ♪               ♪ 72% │
+//	├─────────────────────────────────────┤
+//	│  Now Playing                        │  (12 lines)
+//	│  …progress bar, controls, bear…     │
+//	├──────────────────┬──────────────────┤
+//	│ Queue            │ Vibe             │  (panelH lines)
+//	├──────────────────┴──────────────────┤
+//	│ ʕ•ᴥ•ʔ > / search  n next  :q quit  │
+//	└─────────────────────────────────────┘
+func (m *Model) renderBoxLayout() string {
+	inner := m.width - 2 // visual width between the │ border chars
+	npH := 12            // now playing section height (fixed)
+	panelH := m.panelHeight()
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.renderLogoLine(),        // line 1
-		"",                        // line 2 blank
-		m.renderNowPlaying(),      // lines 3-5 (3 lines)
-		"",                        // line 6 blank
-		sep,                       // line 7
-		m.renderContent(contentH), // variable
-		sep,
-		m.renderStatusBar(),
-	)
+	splitW := inner / 2          // left column inner width (includes padding)
+	rightW := inner - splitW - 1 // right column inner width (-1 for │ divider)
+
+	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
+	fullWidth := libraryActive || m.mode == modeSearch || m.debugView
+
+	var sb strings.Builder
+
+	// ── Top border ──
+	sb.WriteString("┌" + strings.Repeat("─", inner) + "┐\n")
+
+	// ── Header ──
+	sb.WriteString(m.renderBoxHeader(inner) + "\n")
+
+	// ── Header divider ──
+	sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+
+	// ── Now Playing (12 lines) ──
+	for _, line := range m.nowPlayingLines(inner-2, npH) {
+		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+	}
+
+	// ── Split or full divider ──
+	if fullWidth {
+		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+	} else {
+		sb.WriteString("├" + strings.Repeat("─", splitW) + "┬" + strings.Repeat("─", rightW) + "┤\n")
+	}
+
+	// ── Panel content ──
+	switch {
+	case m.debugView:
+		for _, line := range m.debugLogLines(inner-2, panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case m.mode == modeSearch:
+		for _, line := range m.searchLines(inner-2, panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case libraryActive:
+		for _, line := range toLines(m.library.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	default:
+		qLines := m.queuePanelLines(splitW-2, panelH)
+		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep, m.vibeFocused)
+		for i := range panelH {
+			left := safeIdx(qLines, i)
+			right := safeIdx(vLines, i)
+			sb.WriteString("│ " + padRight(left, splitW-2) + " │ " + padRight(right, rightW-2) + " │\n")
+		}
+	}
+
+	// ── Join or full divider ──
+	if fullWidth {
+		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+	} else {
+		sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
+	}
+
+	// ── Status bar ──
+	sb.WriteString("│ " + padRight(m.statusContent(inner-2), inner-2) + " │\n")
+
+	// ── Bottom border ──
+	sb.WriteString("└" + strings.Repeat("─", inner) + "┘")
+
+	return sb.String()
 }
 
 func (m *Model) renderIntro() string {
@@ -614,22 +782,44 @@ func (m *Model) renderIntro() string {
 		subtitle
 }
 
-func (m *Model) renderLogoLine() string {
-	return centerStr(views.RenderGlowTitle("♪ vibez", m.glowStep), m.width)
+// renderBoxHeader builds the header line including the border chars.
+func (m *Model) renderBoxHeader(inner int) string {
+	bear := views.BearExpr(m.glowStep, m.playerState.Playing)
+	title := views.RenderGlowTitle("vibez ♪", m.glowStep)
+
+	vol := int(m.playerState.Volume * 100)
+	volStr := styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
+
+	bearW := lipgloss.Width(bear)
+	titleW := lipgloss.Width(title)
+	volW := lipgloss.Width(volStr)
+	contentW := inner - 2 // for " " padding on each side
+
+	// Place title at the horizontal centre of the header.
+	titleStart := max(bearW+1, (contentW-titleW)/2)
+	leftPad := titleStart - bearW
+	rightPad := max(1, contentW-bearW-leftPad-titleW-volW)
+
+	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + volStr + " │"
 }
 
-func (m *Model) renderNowPlaying() string {
+// nowPlayingLines returns exactly h lines for the Now Playing section.
+func (m *Model) nowPlayingLines(contentW, h int) []string {
+	muted := styles.QueueItemMuted
+	accent := styles.NowPlayingArtist
+
 	t := m.playerState.Track
 	if t == nil {
-		return lipgloss.JoinVertical(lipgloss.Left,
-			"",
-			centerStr(styles.QueueItemMuted.Render("silence is not a vibe"), m.width),
-			"",
-			"",
-		)
+		lines := make([]string, h)
+		mid := h / 2
+		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
+		if m.errMsg != "" {
+			lines[max(0, mid-2)] = centerStr(styles.ErrorStyle.Render("⚠  "+m.errMsg), contentW)
+		}
+		return lines
 	}
 
-	// Title — glow sweep when playing, static italic when paused/loading.
+	// Title with glow sweep when playing.
 	var titleStr string
 	if m.playerState.Playing || m.playerState.Loading {
 		titleStr = views.RenderGlowTitle(t.Title, m.glowStep)
@@ -637,182 +827,286 @@ func (m *Model) renderNowPlaying() string {
 		titleStr = styles.NowPlayingTitle.Render(t.Title)
 	}
 
-	// Status icon: pulsing spinner while loading, ▶/⏸ otherwise.
-	var icon string
-	var statusStyle lipgloss.Style
+	// "Artist — Title"
+	trackLine := accent.Render(t.Artist) + muted.Render(" — ") + titleStr
+
+	// "Album • elapsed / total"
+	elapsed := views.FormatDuration(m.playerState.Position)
+	total := views.FormatDuration(t.Duration)
+	albumLine := styles.NowPlayingAlbum.Render(t.Album+" • ") +
+		styles.TimeStyle.Render(elapsed+" / "+total)
+
+	// Progress bar
+	barW := max(10, contentW-4)
+	progressBar := views.RenderProgressBar(m.playerState.Position, t.Duration, barW)
+
+	// Controls: ↺  ⇄  ▶/⏸
+	var playIcon string
+	var playStyle lipgloss.Style
 	switch {
 	case m.playerState.Loading:
 		spinnerFrames := [10]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		icon = spinnerFrames[m.glowStep%len(spinnerFrames)]
-		statusStyle = styles.Playing
+		playIcon = spinnerFrames[m.glowStep%10]
+		playStyle = styles.Playing
 	case m.playerState.Playing:
-		icon, statusStyle = "▶", styles.Playing
+		playIcon = "⏸"
+		playStyle = styles.Playing
 	default:
-		icon, statusStyle = "⏸", styles.Paused
+		playIcon = "▶"
+		playStyle = styles.Paused
 	}
-	elapsed := views.FormatDuration(m.playerState.Position)
-	total := views.FormatDuration(t.Duration)
-	timeStr := statusStyle.Render(fmt.Sprintf("%s  %s / %s", icon, elapsed, total))
 
-	repeatIcon, repeatStyle := "↺", styles.QueueItemMuted
+	repeatIcon, repeatStyle := "↺", muted
 	switch m.playerState.RepeatMode {
 	case player.RepeatModeAll:
 		repeatIcon, repeatStyle = "↺", styles.Playing
 	case player.RepeatModeOne:
 		repeatIcon, repeatStyle = "↻", styles.Playing
 	}
-	shuffleIcon, shuffleStyle := "⇄", styles.QueueItemMuted
+	shuffleStyle := muted
 	if m.playerState.ShuffleMode {
 		shuffleStyle = styles.Playing
 	}
-	modes := repeatStyle.Render(repeatIcon) + "  " + shuffleStyle.Render(shuffleIcon)
-	statusLine := timeStr + "   " + modes
 
-	return lipgloss.JoinVertical(lipgloss.Left,
-		centerStr(titleStr, m.width),
-		centerStr(styles.NowPlayingArtist.Render(t.Artist), m.width),
-		centerStr(styles.NowPlayingAlbum.Render(t.Album), m.width),
-		centerStr(statusLine, m.width),
-	)
-}
-
-func (m *Model) renderContent(h int) string {
-	if h <= 0 {
-		return ""
+	heartIcon, heartStyle := "♡", muted
+	if m.favorites[t.ID] {
+		heartIcon, heartStyle = "♥", styles.FavoriteActive
 	}
 
-	// Search popup overlays everything when in search mode
-	if m.mode == modeSearch {
-		return m.renderSearchPopup(h)
-	}
+	controls := repeatStyle.Render(repeatIcon) + "   " +
+		shuffleStyle.Render("⇄") + "   " +
+		playStyle.Render(playIcon) + "   " +
+		heartStyle.Render(heartIcon)
 
-	var raw string
-	if m.activePanel >= 0 && m.activePanel < len(m.panels) {
-		raw = m.panels[m.activePanel].View()
-	}
-	// Default idle state — animated bear + search hint, vertically centred.
-	if raw == "" {
-		const bearContent = views.BearLines + 2 // bear(3) + blank + hint
-		topPad := max(0, (h-bearContent)/2)
-		var sb strings.Builder
-		sb.WriteString(strings.Repeat("\n", topPad))
-		sb.WriteString(views.RenderBear(m.glowStep, m.playerState.Playing, m.width))
-		sb.WriteString("\n\n")
-		sb.WriteString(centerStr(styles.QueueItemMuted.Render("press / to search"), m.width))
-		raw = sb.String()
-	}
-
+	// Last line: error message (truncated to fit) or blank.
+	errLine := ""
 	if m.errMsg != "" {
-		raw = styles.ErrorStyle.Render("⚠  "+m.errMsg) + "\n" + raw
+		const prefix = "⚠  "
+		errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
+		errLine = styles.ErrorStyle.Render(prefix + errText)
 	}
 
-	lines := strings.Split(raw, "\n")
+	lines := []string{
+		"",
+		styles.Header.Render("Now Playing"),
+		muted.Render(strings.Repeat("─", 11)),
+		trackLine,
+		albumLine,
+		"",
+		"  " + progressBar,
+		"",
+		"",
+		"  " + controls,
+		"",
+		errLine,
+	}
+
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
-	return strings.Join(lines[:h], "\n")
+	return lines[:h]
 }
 
-func (m *Model) renderSearchPopup(h int) string {
+// queuePanelLines returns the Queue panel lines for the left split.
+func (m *Model) queuePanelLines(w, h int) []string {
+	header := styles.Header.Render("Queue")
+	sep := styles.QueueItemMuted.Render(strings.Repeat("─", 5))
+
+	currentTitle := ""
+	if m.playerState.Track != nil {
+		currentTitle = m.playerState.Track.Title
+	}
+
+	tracks := m.queue.m.Tracks()
+	var trackLines []string
+	for _, t := range tracks {
+		label := t.Artist + " — " + t.Title
+		if t.Title == currentTitle {
+			prefix := styles.Playing.Render("▶ ")
+			line := truncateStr(label, w-3)
+			trackLines = append(trackLines, prefix+styles.Playing.Render(line))
+		} else {
+			line := truncateStr(label, w-3)
+			trackLines = append(trackLines, "  "+styles.QueueItem.Render(line))
+		}
+	}
+	if len(trackLines) == 0 {
+		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
+	}
+
+	result := append([]string{header, sep}, trackLines...)
+	for len(result) < h {
+		result = append(result, "")
+	}
+	return result[:h]
+}
+
+// searchLines renders the search popup inline (full-width in the split area).
+func (m *Model) searchLines(contentW, h int) []string {
 	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
 	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
 	cursor := accent.Render("█")
 
 	inputLine := accent.Render("/") + "  " +
-		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) +
-		cursor
+		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) + cursor
+	sep := muted.Render(strings.Repeat("─", contentW))
 
-	popupW := max(40, m.width-16)
-	sep := muted.Render(strings.Repeat("─", popupW-2))
-
-	// Footer: 2 lines (footerSep + footer text). Fixed: border(2)+input(1)+sep(1)+footer(2) = 6.
-	listH := max(1, h-6)
-	m.search.SetSize(popupW-4, listH) // -4 for border(2)+padding(2)
-
+	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
+	listH := max(1, h-4)
+	m.search.SetSize(contentW, listH)
 	listView := m.search.View()
 	if listView == "" && !m.search.Loading() && m.searchQuery != "" {
 		listView = "  " + muted.Render("no results")
 	}
 
-	// Pad list view to exactly listH lines so the footer stays pinned.
-	listLines := strings.Split(listView, "\n")
-	for len(listLines) < listH {
-		listLines = append(listLines, "")
-	}
-	listBlock := strings.Join(listLines[:listH], "\n")
-
-	footerSep := muted.Render(strings.Repeat("─", popupW-2))
+	listLines := toLines(listView, listH)
+	footerSep := muted.Render(strings.Repeat("─", contentW))
 	footer := "  " + accent.Render("Enter") + muted.Render(" play now") +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
-	inner := inputLine + "\n" + sep + "\n" + listBlock + "\n" + footerSep + "\n" + footer
-
-	popup := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(styles.ColorAccent).
-		Width(popupW).
-		Padding(0, 1).
-		Render(inner)
-
-	return lipgloss.Place(m.width, h, lipgloss.Center, lipgloss.Center, popup,
-		lipgloss.WithWhitespaceBackground(styles.ColorBg))
+	result := append([]string{inputLine, sep}, listLines...)
+	result = append(result, footerSep, footer)
+	for len(result) < h {
+		result = append(result, "")
+	}
+	return result[:h]
 }
 
-func (m *Model) renderStatusBar() string {
-	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
-	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
-	dot := muted.Render("  ·  ")
+// statusContent builds the status bar inner string (without the │ borders).
+func (m *Model) statusContent(_ int) string {
+	muted := styles.QueueItemMuted
+	accent := styles.KeyName
 
 	switch m.mode {
 	case modeSearch:
-		cursor := lipgloss.NewStyle().Foreground(styles.ColorAccent).Render("_")
-		return " " + styles.ModeSearch.Render("SEARCH") + "  " +
-			accent.Render("/") + " " +
-			styles.Header.Render(m.searchQuery) + cursor
+		return accent.Render("/") + " " +
+			styles.Header.Render(m.searchQuery) + accent.Render("_")
 	case modeCommand:
-		cursor := lipgloss.NewStyle().Foreground(styles.ColorError).Render("_")
-		return " " + styles.ModeCommand.Render("COMMAND") + "  " +
-			accent.Render(":") + m.cmdBuf + cursor
+		return muted.Render(":") + m.cmdBuf + accent.Render("_")
 	default:
-		parts := []string{
-			accent.Render("/") + muted.Render(" search"),
-			accent.Render("a") + muted.Render(" add"),
-			accent.Render("n") + muted.Render(" next"),
-			accent.Render("r") + muted.Render(" repeat"),
-			accent.Render("s") + muted.Render(" shuffle"),
-		}
-		// Append one hint per registered panel (auto-generated)
-		for _, p := range m.panels {
-			label := p.NavLabel()
-			if m.activePanel >= 0 && m.panels[m.activePanel] == p {
-				label = lipgloss.NewStyle().Foreground(styles.ColorAccent).Underline(true).Render(label)
-				parts = append(parts, accent.Render(p.NavKey())+" "+label)
-			} else {
-				parts = append(parts, accent.Render(p.NavKey())+muted.Render(" "+label))
+		dot := muted.Render("  ·  ")
+		var parts []string
+		switch {
+		case m.debugView:
+			parts = []string{
+				accent.Render("k/j") + muted.Render(" scroll"),
+				accent.Render("esc") + muted.Render(" close"),
+			}
+		case m.vibeFocused:
+			parts = []string{
+				accent.Render("+/-") + muted.Render(" energy"),
+				accent.Render("r") + muted.Render(" regenerate"),
+				accent.Render("v") + muted.Render(" exit vibe"),
+			}
+		default:
+			parts = []string{
+				accent.Render("/") + muted.Render(" search"),
+				accent.Render("spc") + muted.Render(" pause"),
+				accent.Render("n") + muted.Render(" next"),
+				accent.Render("f") + muted.Render(" fav"),
+				accent.Render("v") + muted.Render(" vibe"),
+				accent.Render("l") + muted.Render(" library"),
+				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
-		parts = append(parts, accent.Render(":q")+muted.Render(" quit"))
-		return " " + styles.ModeNormal.Render("NORMAL") + "  " + strings.Join(parts, dot)
+		return strings.Join(parts, dot)
 	}
 }
 
-func (m *Model) renderSeparator() string {
-	return styles.Separator.Render(strings.Repeat("─", m.width))
+// panelHeight returns the number of rows available for the split panel section.
+// Fixed overhead = top(1)+hdr(1)+hdrdiv(1)+np(12)+splitdiv(1)+joindiv(1)+status(1)+bottom(1) = 19.
+func (m *Model) panelHeight() int {
+	return max(3, m.height-19)
 }
 
-// contentDimensions returns the width and height for the content area.
-func (m *Model) contentDimensions() (int, int) {
-	w := max(0, m.width)
-	h := max(0, m.height-10)
-	return w, h
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+// padRight pads s on the right with spaces to reach visual width w.
+func padRight(s string, w int) string {
+	sw := lipgloss.Width(s)
+	if sw >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-sw)
 }
 
-// contentHeight returns the number of rows available for the content area.
-// Fixed overhead = 10 lines: logo(1)+blank(1)+nowplaying(4)+blank(1)+sep(1)+sep(1)+status(1).
-func (m *Model) contentHeight() int {
-	_, h := m.contentDimensions()
-	return h
+// toLines splits s into exactly h lines, padding/truncating as needed.
+func toLines(s string, h int) []string {
+	lines := strings.Split(s, "\n")
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	return lines[:h]
+}
+
+// safeIdx returns lines[i] or "" if i is out of range.
+func safeIdx(lines []string, i int) string {
+	if i < len(lines) {
+		return lines[i]
+	}
+	return ""
+}
+
+// truncateStr truncates s to at most maxW runes, adding "…" if cut.
+func truncateStr(s string, maxW int) string {
+	if maxW <= 1 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= maxW {
+		return s
+	}
+	return string(runes[:maxW-1]) + "…"
+}
+
+// appendLog adds a timestamped entry to the debug log, capped at 500 lines.
+func (m *Model) appendLog(line string) {
+	const maxLines = 500
+	ts := time.Now().Format("15:04:05")
+	m.debugLog = append(m.debugLog, ts+"  "+line)
+	if len(m.debugLog) > maxLines {
+		m.debugLog = m.debugLog[len(m.debugLog)-maxLines:]
+	}
+}
+
+// debugLogLines renders the debug log as exactly h lines for the split area.
+func (m *Model) debugLogLines(w, h int) []string {
+	accent := styles.Header
+	muted := styles.QueueItemMuted
+
+	header := accent.Render("Debug Log") + "  " + muted.Render("esc / :debug-logs to close · k/j scroll")
+	sep := muted.Render(strings.Repeat("─", 9))
+	contentH := max(0, h-2)
+
+	total := len(m.debugLog)
+	scroll := min(m.debugScroll, max(0, total-contentH))
+	start := max(0, total-contentH-scroll)
+	end := min(total, start+contentH)
+
+	lines := []string{header, sep}
+	if total == 0 {
+		lines = append(lines, "  "+muted.Render("no log entries yet"))
+	} else {
+		for _, entry := range m.debugLog[start:end] {
+			var rendered string
+			switch {
+			case strings.Contains(entry, "[error]"):
+				rendered = styles.ErrorStyle.Render(entry)
+			case strings.Contains(entry, "[playing]"):
+				rendered = styles.Playing.Render(entry)
+			case strings.Contains(entry, "[js:"):
+				rendered = styles.Header.Render(entry)
+			default:
+				rendered = muted.Render(entry)
+			}
+			lines = append(lines, "  "+rendered)
+		}
+	}
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	return lines[:h]
 }
 
 func centerStr(s string, width int) string {

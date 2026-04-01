@@ -54,6 +54,17 @@ func (m *QueueModel) SetTracks(tracks []provider.Track) {
 
 func (m *QueueModel) Tracks() []provider.Track { return m.tracks }
 
+// SelectedTrack returns the index and track of the currently highlighted queue
+// item, or (-1, nil) if the queue is empty.
+func (m *QueueModel) SelectedTrack() (int, *provider.Track) {
+	idx := m.list.Index()
+	if idx < 0 || idx >= len(m.tracks) {
+		return -1, nil
+	}
+	t := m.tracks[idx]
+	return idx, &t
+}
+
 func (m *QueueModel) SetSize(w, h int) {
 	m.list.SetSize(w, h)
 }

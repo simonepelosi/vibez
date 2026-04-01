@@ -122,6 +122,7 @@ var (
 	ProgressBg     = lipgloss.NewStyle().Foreground(ColorMuted)
 	TimeStyle      = lipgloss.NewStyle().Foreground(ColorMuted)
 	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorAccent)
+	FavoriteActive = lipgloss.NewStyle().Foreground(lipgloss.Color("#E06C75"))
 )
 
 // GlowPalette drives the "now playing" breathing animation, from dark to bright.
