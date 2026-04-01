@@ -217,6 +217,11 @@ func toPlaylist(r playlistResource) provider.Playlist {
 
 // --- Provider interface ---
 
+// Search returns tracks exclusively from the user's library (guaranteed
+// playable) and albums/playlists from the catalog (browsed, not directly
+// streamed).  Mixing catalog tracks into results causes "no items resolved"
+// errors in MusicKit.js because the REST catalog API and the MusicKit
+// streaming layer have different regional availability checks.
 func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.SearchResult, error) {
 	type libOut struct {
 		songs     []songResource
@@ -225,7 +230,6 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		err       error
 	}
 	type catOut struct {
-		songs     []songResource
 		albums    []albumResource
 		playlists []playlistResource
 		err       error
@@ -234,7 +238,7 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	libCh := make(chan libOut, 1)
 	catCh := make(chan catOut, 1)
 
-	// Library search — results are always playable (songs the user owns/added).
+	// Library: songs the user owns — always playable.
 	go func() {
 		ep := fmt.Sprintf("/me/library/search?term=%s&types=library-songs,library-albums,library-playlists&limit=25",
 			url.QueryEscape(query))
@@ -255,11 +259,9 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		}
 	}()
 
-	// Catalog search — IDs must be verified against the user's storefront
-	// before displaying, because the catalog index can include songs that are
-	// not actually licensed/playable in the user's region.
+	// Catalog: albums and playlists only — no tracks.
 	go func() {
-		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25",
+		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=albums,playlists&limit=25",
 			a.cfg.StoreFront, url.QueryEscape(query))
 		req, err := a.newRequest(ctx, http.MethodGet, ep)
 		if err != nil {
@@ -272,7 +274,6 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 			return
 		}
 		catCh <- catOut{
-			songs:     resp.Results.Songs.Data,
 			albums:    resp.Results.Albums.Data,
 			playlists: resp.Results.Playlists.Data,
 		}
@@ -281,20 +282,15 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	lib := <-libCh
 	cat := <-catCh
 
-	// Both failed → surface the catalog error.
 	if lib.err != nil && cat.err != nil {
 		return nil, cat.err
 	}
 
 	result := &provider.SearchResult{}
 
-	// Library results first — guaranteed playable.
-	seen := make(map[string]bool)
 	if lib.err == nil {
 		for _, s := range lib.songs {
-			t := toTrack(s)
-			result.Tracks = append(result.Tracks, t)
-			seen[trackKey(t)] = true
+			result.Tracks = append(result.Tracks, toTrack(s))
 		}
 		for _, r := range lib.albums {
 			result.Albums = append(result.Albums, toAlbum(r))
@@ -304,58 +300,30 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		}
 	}
 
-	// Catalog results — batch-verify IDs are available, then deduplicate.
-	if cat.err == nil && len(cat.songs) > 0 {
-		available, _ := a.verifyCatalogSongs(ctx, cat.songs)
-		for _, s := range cat.songs {
-			if !available[s.ID] {
-				continue // not playable in this storefront — skip
-			}
-			t := toTrack(s)
-			if !seen[trackKey(t)] {
-				result.Tracks = append(result.Tracks, t)
-				seen[trackKey(t)] = true
-			}
+	// Merge catalog albums/playlists (broader discovery), skipping duplicates.
+	if cat.err == nil {
+		seenAlbums := make(map[string]bool, len(result.Albums))
+		for _, al := range result.Albums {
+			seenAlbums[al.ID] = true
 		}
 		for _, r := range cat.albums {
-			result.Albums = append(result.Albums, toAlbum(r))
+			if !seenAlbums[r.ID] {
+				result.Albums = append(result.Albums, toAlbum(r))
+			}
+		}
+
+		seenPlaylists := make(map[string]bool, len(result.Playlists))
+		for _, pl := range result.Playlists {
+			seenPlaylists[pl.ID] = true
 		}
 		for _, r := range cat.playlists {
-			result.Playlists = append(result.Playlists, toPlaylist(r))
+			if !seenPlaylists[r.ID] {
+				result.Playlists = append(result.Playlists, toPlaylist(r))
+			}
 		}
 	}
 
 	return result, nil
-}
-
-// verifyCatalogSongs batch-fetches song IDs from the catalog API and returns
-// the subset that actually resolves in the user's storefront. Songs absent
-// from the response are not licensed for this region and should not be shown.
-func (a *AppleProvider) verifyCatalogSongs(ctx context.Context, songs []songResource) (map[string]bool, error) {
-	ids := make([]string, len(songs))
-	for i, s := range songs {
-		ids[i] = s.ID
-	}
-	ep := fmt.Sprintf("/catalog/%s/songs?ids=%s", a.cfg.StoreFront, strings.Join(ids, ","))
-	req, err := a.newRequest(ctx, http.MethodGet, ep)
-	if err != nil {
-		return nil, err
-	}
-	var resp paginatedSongs
-	if err := a.do(req, &resp); err != nil {
-		return nil, err
-	}
-	available := make(map[string]bool, len(resp.Data))
-	for _, s := range resp.Data {
-		available[s.ID] = true
-	}
-	return available, nil
-}
-
-// trackKey returns a lowercase dedup key used to avoid showing the same song
-// from both library and catalog results.
-func trackKey(t provider.Track) string {
-	return strings.ToLower(t.Artist) + "§" + strings.ToLower(t.Title)
 }
 
 func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track, error) {
