@@ -129,7 +129,8 @@ type Model struct {
 	searchQuery string
 
 	// Command accumulation (mode == modeCommand)
-	cmdBuf string
+	cmdBuf     string
+	cmdSuggIdx int // currently highlighted suggestion (0-based)
 
 	// Double-key tracking (for 'gg')
 	lastKey string
@@ -381,23 +382,75 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// ── Command palette ───────────────────────────────────────────────────────
+
+// cmdEntry describes a single command shown in the command palette.
+type cmdEntry struct {
+	trigger     string // prefix matched against cmdBuf
+	usage       string // full usage shown to the user
+	description string
+}
+
+// allCommands is the master list shown in the command palette.
+var allCommands = []cmdEntry{
+	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
+	{"debug-logs", "debug-logs", "Toggle debug log panel"},
+	{"q", "q", "Quit vibez"},
+	{"quit", "quit", "Quit vibez"},
+}
+
+// commandSuggestions returns commands whose trigger starts with the current
+// cmdBuf, or all commands when the buffer is empty.
+func (m *Model) commandSuggestions() []cmdEntry {
+	var out []cmdEntry
+	for _, c := range allCommands {
+		if m.cmdBuf == "" || strings.HasPrefix(c.trigger, m.cmdBuf) ||
+			strings.HasPrefix(c.usage, m.cmdBuf) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (m *Model) handleCommandKey(k string) tea.Cmd {
 	switch k {
 	case "esc":
 		m.mode = modeNormal
 		m.cmdBuf = ""
+		m.cmdSuggIdx = 0
 	case "enter":
-		cmd := m.executeCommand(m.cmdBuf)
+		cmd := m.cmdBuf
 		m.cmdBuf = ""
+		m.cmdSuggIdx = 0
 		m.mode = modeNormal
-		return cmd
+		return m.executeCommand(cmd)
+	case "tab":
+		suggs := m.commandSuggestions()
+		if len(suggs) > 0 {
+			m.cmdBuf = suggs[m.cmdSuggIdx].usage
+			if idx := strings.Index(m.cmdBuf, " <"); idx >= 0 {
+				m.cmdBuf = m.cmdBuf[:idx+1]
+			}
+		}
+	case "up", "ctrl+p":
+		suggs := m.commandSuggestions()
+		if len(suggs) > 0 {
+			m.cmdSuggIdx = max(0, m.cmdSuggIdx-1)
+		}
+	case "down", "ctrl+n":
+		suggs := m.commandSuggestions()
+		if len(suggs) > 0 {
+			m.cmdSuggIdx = min(len(suggs)-1, m.cmdSuggIdx+1)
+		}
 	case "backspace":
 		if len(m.cmdBuf) > 0 {
 			m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-1]
+			m.cmdSuggIdx = 0
 		}
 	default:
 		if len(k) == 1 && k[0] >= 32 {
 			m.cmdBuf += k
+			m.cmdSuggIdx = 0
 		}
 	}
 	return nil
@@ -1077,13 +1130,14 @@ func (m *Model) searchLines(contentW, h int) []string {
 func (m *Model) statusContent(_ int) string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
+	mode := lipgloss.NewStyle().Foreground(styles.ColorAccent).Bold(true)
 
 	switch m.mode {
 	case modeSearch:
 		return accent.Render("/") + " " +
 			styles.Header.Render(m.searchQuery) + accent.Render("_")
 	case modeCommand:
-		return muted.Render(":") + m.cmdBuf + accent.Render("_")
+		return mode.Render("CMD") + "  " + muted.Render(":") + m.cmdBuf + accent.Render("_")
 	default:
 		dot := muted.Render("  ·  ")
 		var parts []string
@@ -1110,14 +1164,13 @@ func (m *Model) statusContent(_ int) string {
 			}
 		default:
 			parts = []string{
+				mode.Render("NORMAL"),
 				accent.Render("/") + muted.Render(" search"),
-				accent.Render("spc") + muted.Render(" pause"),
-				accent.Render("n") + muted.Render(" next"),
+				accent.Render("spc") + muted.Render(" play/pause"),
+				accent.Render("n/p") + muted.Render(" next/prev"),
 				accent.Render("f") + muted.Render(" fav"),
-				accent.Render("v") + muted.Render(" vibe"),
-				accent.Render("l") + muted.Render(" library"),
-				accent.Render("q") + muted.Render(" queue"),
-				accent.Render(":q") + muted.Render(" quit"),
+				accent.Render("s") + muted.Render(" shuffle"),
+				accent.Render("r") + muted.Render(" repeat"),
 			}
 		}
 		return strings.Join(parts, dot)
