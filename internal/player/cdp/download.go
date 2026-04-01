@@ -27,7 +27,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 		pct := int(float64(pr.read) / float64(pr.total) * 100)
 		if pct > pr.lastPct {
 			pr.lastPct = pct
-			pr.onProgress(fmt.Sprintf("Downloading Chrome… %d%%", pct))
+			pr.onProgress(fmt.Sprintf("Downloading Chromium drivers… %d%%", pct))
 		}
 	}
 	return
@@ -56,7 +56,7 @@ func downloadFile(onProgress func(string), dst, url string) error {
 	defer f.Close() //nolint:errcheck
 
 	total := resp.ContentLength
-	onProgress(fmt.Sprintf("Downloading Chrome… 0%% (%.0f MB)", float64(total)/1e6))
+	onProgress(fmt.Sprintf("Downloading Chromium drivers… 0%% (%.0f MB)", float64(total)/1e6))
 
 	pr := &progressReader{r: resp.Body, total: total, onProgress: onProgress}
 	if _, err := io.Copy(f, pr); err != nil {

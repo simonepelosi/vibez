@@ -64,7 +64,7 @@ func EnsureBrowser(onProgress func(string)) error {
 	}
 	defer os.Remove(debPath) //nolint:errcheck // best-effort cleanup of temp file
 
-	onProgress("Extracting Chrome…")
+	onProgress("Extracting Chromium drivers…")
 	if err := os.MkdirAll(chromeInstallDir(), 0o750); err != nil {
 		return fmt.Errorf("create chrome dir: %w", err)
 	}
