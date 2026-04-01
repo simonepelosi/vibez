@@ -414,10 +414,14 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.debugView = !m.debugView
 		m.debugScroll = 0
 		return nil
-	case strings.HasPrefix(cmd, "save-playlist "):
-		name := strings.TrimSpace(strings.TrimPrefix(cmd, "save-playlist "))
+	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
+		name := cmd
+		for _, prefix := range []string{"save-playlist ", "save "} {
+			name = strings.TrimPrefix(name, prefix)
+		}
+		name = strings.TrimSpace(name)
 		if name == "" {
-			m.errMsg = "save-playlist: name required"
+			m.errMsg = ":save requires a playlist name"
 			m.errExpiry = time.Now().Add(3 * time.Second)
 			return nil
 		}
@@ -545,7 +549,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 			return m.playerCmd(func() error { return m.player.ClearQueue() })
 		case "s":
 			m.mode = modeCommand
-			m.cmdBuf = "save-playlist "
+			m.cmdBuf = "save "
 			return nil
 		default:
 			return m.queue.Update(msg)
@@ -1098,7 +1102,7 @@ func (m *Model) statusContent(_ int) string {
 				accent.Render("d") + muted.Render(" remove"),
 				accent.Render("K/J") + muted.Render(" move"),
 				accent.Render("c") + muted.Render(" clear"),
-				accent.Render("s") + muted.Render(" save playlist"),
+				accent.Render("s") + muted.Render(" :save"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
 		default:
