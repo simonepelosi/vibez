@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/tui/views"
+	"github.com/simone-vibes/vibez/internal/vibe"
 )
 
 // ── Modal modes (vim-inspired) ────────────────────────────────────────────
@@ -73,6 +75,11 @@ type searchResultMsg struct {
 	result *provider.SearchResult
 	err    error
 }
+type vibeResultMsg struct {
+	query  string
+	tracks []provider.Track
+	err    error
+}
 type tickMsg time.Time
 type glowTickMsg time.Time
 type introTickMsg time.Time
@@ -117,8 +124,7 @@ type Model struct {
 	queue       *queuePanel
 
 	// Vibe panel (always visible, right split)
-	vibe        *views.VibeModel
-	vibeFocused bool // true when +/-/r keys target the vibe panel
+	vibe *views.VibeModel
 
 	// Search popup (not a panel)
 	search *views.SearchModel
@@ -175,8 +181,10 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	// Both library and queue are toggle-able overlay panels.
 	m.panels = []ContentView{m.library, m.queue}
+	if opts.Backend != "" {
+		m.appendLog("[engine] backend: " + opts.Backend)
+	}
 	return m
 }
 
@@ -281,6 +289,32 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, waitForState(m.stateCh))
 
+	case views.VibeQueryMsg:
+		// User submitted a vibe description — start async provider search.
+		m.vibe.SetSearching()
+		cmds = append(cmds, m.runVibeSearch(msg.Query))
+
+	case vibeResultMsg:
+		if msg.err != nil {
+			m.vibe.SetResult(0, msg.err)
+		} else {
+			ids := make([]string, len(msg.tracks))
+			for i, t := range msg.tracks {
+				ids[i] = views.PlaybackID(t)
+			}
+			if m.player != nil {
+				if err := m.player.AppendQueue(ids); err != nil {
+					m.vibe.SetResult(0, err)
+					break
+				}
+			}
+			m.queueTracks = append(m.queueTracks, msg.tracks...)
+			m.queueIDs = append(m.queueIDs, ids...)
+			m.queue.SetTracks(m.queueTracks)
+			m.vibe.SetResult(len(msg.tracks), nil)
+			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(msg.tracks), msg.query))
+		}
+
 	case searchResultMsg:
 		m.search.SetState(
 			func() []provider.Track {
@@ -319,6 +353,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.library = &libraryPanel{m: views.NewLibrary(msg.Provider)}
 		m.search = views.NewSearch(msg.Provider)
 		m.helperPaths = msg.HelperPaths
+		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
 		if m.memProfiling {
 			cmds = append(cmds, memTick(m.helperPaths))
@@ -568,16 +603,9 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		}
 	}
 
-	// When vibe panel is focused, capture its control keys before anything else.
-	if m.vibeFocused {
-		switch k {
-		case "+", "=", "-", "r":
-			m.vibe.Update(msg)
-			return nil
-		case "esc", "v":
-			m.vibeFocused = false
-			return nil
-		}
+	// When vibe panel has text-input focus, route all keys to it.
+	if m.vibe.IsFocused() {
+		return m.vibe.Update(msg)
 	}
 
 	// Panel nav keys toggle their panel (always checked first).
@@ -720,7 +748,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "v":
 		m.lastKey = ""
-		m.vibeFocused = !m.vibeFocused
+		m.vibe.Focus()
 		return nil
 	}
 
@@ -796,6 +824,40 @@ func (m *Model) scheduleSearch(query string) tea.Cmd {
 		time.Sleep(300 * time.Millisecond)
 		result, err := prov.Search(context.Background(), query)
 		return searchResultMsg{result: result, err: err}
+	}
+}
+
+// runVibeSearch uses the KeywordAgent to interpret the user's vibe description,
+// searches the provider, shuffles and caps results, then returns vibeResultMsg.
+func (m *Model) runVibeSearch(query string) tea.Cmd {
+	agent := &vibe.KeywordAgent{}
+	v := agent.Parse(query)
+	searchQ := agent.ToSearchQuery(v)
+	m.appendLog(fmt.Sprintf("[vibe] %q → search %q", query, searchQ))
+	prov := m.provider
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		result, err := prov.Search(ctx, searchQ)
+		if err != nil || result == nil || len(result.Tracks) == 0 {
+			// Fallback: search with the raw user input.
+			result2, err2 := prov.Search(ctx, query)
+			if err2 != nil || result2 == nil || len(result2.Tracks) == 0 {
+				if err != nil {
+					return vibeResultMsg{query: query, err: err}
+				}
+				return vibeResultMsg{query: query, err: fmt.Errorf("no results")}
+			}
+			result = result2
+		}
+		tracks := result.Tracks
+		rand.Shuffle(len(tracks), func(i, j int) { //nolint:gosec // music shuffle
+			tracks[i], tracks[j] = tracks[j], tracks[i]
+		})
+		if len(tracks) > 15 {
+			tracks = tracks[:15]
+		}
+		return vibeResultMsg{query: query, tracks: tracks}
 	}
 }
 
@@ -926,7 +988,7 @@ func (m *Model) renderBoxLayout() string {
 		}
 	default:
 		qLines := m.queuePanelLines(splitW-2, panelH)
-		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep, m.vibeFocused)
+		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep)
 		for i := range panelH {
 			left := safeIdx(qLines, i)
 			right := safeIdx(vLines, i)
@@ -1210,12 +1272,11 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
-		case m.vibeFocused:
+		case m.vibe.IsFocused():
 			parts = []string{
 				styles.ModeNormal.Render("VIBE"),
-				accent.Render("+/-") + muted.Render(" energy"),
-				accent.Render("r") + muted.Render(" regenerate"),
-				accent.Render("v") + muted.Render(" exit"),
+				accent.Render("Enter") + muted.Render(" search"),
+				accent.Render("esc") + muted.Render(" cancel"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.queue:
 			parts = []string{
@@ -1367,21 +1428,33 @@ func (m *Model) debugLogLines(w, h int) []string {
 	start := max(0, total-contentH-scroll)
 	end := min(total, start+contentH)
 
+	// Maximum text width: panel width minus the 2-char indent and 1-char safety margin.
+	maxW := max(1, w-3)
+
+	truncate := func(s string) string {
+		r := []rune(s)
+		if len(r) > maxW {
+			return string(r[:maxW-1]) + "…"
+		}
+		return s
+	}
+
 	lines := []string{header, sep}
 	if total == 0 {
 		lines = append(lines, "  "+muted.Render("no log entries yet"))
 	} else {
 		for _, entry := range m.debugLog[start:end] {
+			clipped := truncate(entry)
 			var rendered string
 			switch {
 			case strings.Contains(entry, "[error]"):
-				rendered = styles.ErrorStyle.Render(entry)
+				rendered = styles.ErrorStyle.Render(clipped)
 			case strings.Contains(entry, "[playing]"):
-				rendered = styles.Playing.Render(entry)
+				rendered = styles.Playing.Render(clipped)
 			case strings.Contains(entry, "[js:"):
-				rendered = styles.Header.Render(entry)
+				rendered = styles.Header.Render(clipped)
 			default:
-				rendered = muted.Render(entry)
+				rendered = muted.Render(clipped)
 			}
 			lines = append(lines, "  "+rendered)
 		}
