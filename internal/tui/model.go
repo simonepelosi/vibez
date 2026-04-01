@@ -489,17 +489,83 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		}
 	}
 
-	// Player control keys always work, even when a panel is active.
+	// Queue panel keys take priority over global controls when queue is active.
+	if m.activePanel >= 0 && m.panels[m.activePanel] == m.queue {
+		if k == "esc" {
+			m.activePanel = -1
+			m.lastKey = ""
+			return nil
+		}
+		switch k {
+		case "enter":
+			if idx, t := m.queue.SelectedTrack(); t != nil {
+				ids := m.queueIDs[idx:]
+				m.queueTracks = m.queueTracks[idx:]
+				m.queueIDs = ids
+				m.queue.SetTracks(m.queueTracks)
+				m.appendLog(fmt.Sprintf("[queue] playing from position %d: %s — %s", idx+1, t.Artist, t.Title))
+				return m.playerCmd(func() error { return m.player.SetQueue(ids) })
+			}
+		case "d":
+			if idx, t := m.queue.SelectedTrack(); idx >= 0 {
+				title := ""
+				if t != nil {
+					title = t.Artist + " — " + t.Title
+				}
+				m.queueTracks = append(m.queueTracks[:idx], m.queueTracks[idx+1:]...)
+				m.queueIDs = append(m.queueIDs[:idx], m.queueIDs[idx+1:]...)
+				m.queue.SetTracks(m.queueTracks)
+				m.appendLog(fmt.Sprintf("[queue] removed #%d: %s", idx+1, title))
+				i := idx
+				return m.playerCmd(func() error { return m.player.RemoveFromQueue(i) })
+			}
+		case "K":
+			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
+				m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
+				m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
+				m.queue.SetTracks(m.queueTracks)
+				m.appendLog(fmt.Sprintf("[queue] moved #%d up", idx+1))
+				from, to := idx, idx-1
+				return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+			}
+		case "J":
+			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
+				m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
+				m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
+				m.queue.SetTracks(m.queueTracks)
+				m.appendLog(fmt.Sprintf("[queue] moved #%d down", idx+1))
+				from, to := idx, idx+1
+				return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+			}
+		case "c":
+			m.appendLog("[queue] cleared")
+			m.queueTracks = nil
+			m.queueIDs = nil
+			m.queue.SetTracks(nil)
+			return m.playerCmd(func() error { return m.player.ClearQueue() })
+		case "s":
+			m.mode = modeCommand
+			m.cmdBuf = "save-playlist "
+			return nil
+		default:
+			return m.queue.Update(msg)
+		}
+		return nil
+	}
+
+	// Player control keys always work, even when other panels are active.
 	switch k {
 	case " ":
 		return m.togglePlayPause()
 
 	case "n":
 		m.lastKey = ""
+		m.appendLog("[player] next")
 		return m.playerCmd(func() error { return m.player.Next() })
 
 	case "p":
 		m.lastKey = ""
+		m.appendLog("[player] previous")
 		return m.playerCmd(func() error { return m.player.Previous() })
 
 	case "+", "=":
@@ -523,12 +589,14 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 			next = player.RepeatModeOff
 		}
 		m.playerState.RepeatMode = next
+		m.appendLog(fmt.Sprintf("[player] repeat → %d", next))
 		return m.playerCmd(func() error { return m.player.SetRepeat(next) })
 
 	case "s":
 		m.lastKey = ""
 		on := !m.playerState.ShuffleMode
 		m.playerState.ShuffleMode = on
+		m.appendLog(fmt.Sprintf("[player] shuffle → %v", on))
 		return m.playerCmd(func() error { return m.player.SetShuffle(on) })
 
 	case "f":
@@ -536,6 +604,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		if m.playerState.Track != nil {
 			id := m.playerState.Track.ID
 			m.favorites[id] = !m.favorites[id]
+			m.appendLog(fmt.Sprintf("[fav] %s → %v", m.playerState.Track.Title, m.favorites[id]))
 		}
 
 	case "v":
@@ -544,63 +613,12 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		return nil
 	}
 
-	// Forward remaining keys to the active panel (navigation, selection, etc.)
+	// Forward remaining keys to other active panels (e.g. library).
 	if m.activePanel >= 0 {
 		if k == "esc" {
 			m.activePanel = -1
 			m.lastKey = ""
 			return nil
-		}
-		// Queue panel: Enter plays the selected track from that position.
-		if m.panels[m.activePanel] == m.queue {
-			switch k {
-			case "enter":
-				if idx, t := m.queue.SelectedTrack(); t != nil {
-					ids := m.queueIDs[idx:]
-					m.queueTracks = m.queueTracks[idx:]
-					m.queueIDs = ids
-					m.queue.SetTracks(m.queueTracks)
-					return m.playerCmd(func() error { return m.player.SetQueue(ids) })
-				}
-			case "d":
-				// Remove selected track from queue.
-				if idx, _ := m.queue.SelectedTrack(); idx >= 0 {
-					m.queueTracks = append(m.queueTracks[:idx], m.queueTracks[idx+1:]...)
-					m.queueIDs = append(m.queueIDs[:idx], m.queueIDs[idx+1:]...)
-					m.queue.SetTracks(m.queueTracks)
-					i := idx // capture
-					return m.playerCmd(func() error { return m.player.RemoveFromQueue(i) })
-				}
-			case "K":
-				// Move selected track up one position.
-				if idx, _ := m.queue.SelectedTrack(); idx > 0 {
-					m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
-					m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
-					m.queue.SetTracks(m.queueTracks)
-					from, to := idx, idx-1
-					return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
-				}
-			case "J":
-				// Move selected track down one position.
-				if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
-					m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
-					m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
-					m.queue.SetTracks(m.queueTracks)
-					from, to := idx, idx+1
-					return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
-				}
-			case "c":
-				// Clear the entire queue.
-				m.queueTracks = nil
-				m.queueIDs = nil
-				m.queue.SetTracks(nil)
-				return m.playerCmd(func() error { return m.player.ClearQueue() })
-			case "s":
-				// Save queue as playlist — prompt for name via command mode.
-				m.mode = modeCommand
-				m.cmdBuf = "save-playlist "
-				return nil
-			}
 		}
 		return m.panels[m.activePanel].Update(msg)
 	}
@@ -750,7 +768,8 @@ func (m *Model) renderBoxLayout() string {
 	rightW := inner - splitW - 1 // right column inner width (-1 for │ divider)
 
 	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
-	fullWidth := libraryActive || m.mode == modeSearch || m.debugView
+	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
+	fullWidth := libraryActive || queueActive || m.mode == modeSearch || m.debugView
 
 	var sb strings.Builder
 
@@ -787,6 +806,11 @@ func (m *Model) renderBoxLayout() string {
 		}
 	case libraryActive:
 		for _, line := range toLines(m.library.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case queueActive:
+		m.queue.m.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.queue.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
