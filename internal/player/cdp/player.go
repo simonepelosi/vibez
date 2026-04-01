@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,11 +163,20 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	pg.On("pageerror", func(err error) {
 		p.sendError(fmt.Errorf("cdp: page JS error: %w", err))
 	})
-	// Forward browser console messages to stderr for diagnostics.
+	// Route browser console messages through the TUI debug log.
+	// Non-fatal 403s from resource loads (artwork, fonts) are filtered out
+	// to avoid polluting the log with Apple CDN noise.
 	pg.On("console", func(msg playwright.ConsoleMessage) {
-		if msg.Type() == "error" || msg.Type() == "warning" {
-			fmt.Fprintf(os.Stderr, "[chrome %s] %s\n", msg.Type(), msg.Text())
+		t := msg.Type()
+		if t != "error" && t != "warning" {
+			return
 		}
+		text := msg.Text()
+		// Apple CDN often returns 403 for artwork/font URLs — not actionable.
+		if strings.Contains(text, "403") && strings.Contains(text, "Failed to load resource") {
+			return
+		}
+		p.sendLog(fmt.Sprintf("[chrome %s] %s", t, text))
 	})
 
 	// Playwright's ExposeFunction wraps Go callbacks to return JS Promises

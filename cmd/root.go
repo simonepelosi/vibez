@@ -61,11 +61,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		p := demoPlayer.New()
 		dp := demoProvider.Provider{}
 		opts.IconPath = iconPath
+		opts.Backend = "Demo mode · built-in fake tracks, no credentials required"
 		prog := tea.NewProgram(tui.New(cfg, dp, p, opts), tea.WithAltScreen())
-		// Send EngineReadyMsg from a goroutine — prog.Run() must be running
-		// before the channel can be drained; calling Send() synchronously before
-		// Run() blocks forever.
-		go prog.Send(tui.EngineReadyMsg{Player: p, Provider: dp})
 		_, err = prog.Run()
 		return err
 	}
@@ -180,6 +177,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			Player:      cdpPlayer,
 			Provider:    apple.New(cfg),
 			HelperPaths: []string{cdp.HelperPath(), cdp.ChromePath()},
+			Backend:     fmt.Sprintf("Chrome/CDP (single-process) · provider: Apple Music · helper: %s", cdp.HelperPath()),
 		})
 	}()
 
@@ -240,6 +238,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 			}()
 		}
 
+		opts.Backend = "WebKit/GStreamer · 30s preview · provider: Apple Music"
 		m := tui.New(cfg, prov, wkPlayer, opts)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		_, runErr := p.Run()
