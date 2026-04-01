@@ -122,10 +122,10 @@ var (
 	Header = lipgloss.NewStyle().
 		Foreground(ColorAccent)
 
-	// Mode indicator styles
-	ModeNormal     = lipgloss.NewStyle().Background(lipgloss.Color("#7aa2f7")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
-	ModeSearch     = lipgloss.NewStyle().Background(lipgloss.Color("#9d7fea")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
-	ModeCommand    = lipgloss.NewStyle().Background(lipgloss.Color("#e06c75")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
+	// Mode indicator styles — distinct background chips like nvim
+	ModeNormal     = lipgloss.NewStyle().Background(lipgloss.Color("#98C379")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
+	ModeSearch     = lipgloss.NewStyle().Background(lipgloss.Color("#61AFEF")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
+	ModeCommand    = lipgloss.NewStyle().Background(lipgloss.Color("#E5C07B")).Foreground(lipgloss.Color("#1a1b26")).Bold(true).Padding(0, 1)
 	ProgressBar    = lipgloss.NewStyle().Foreground(ColorGlow5)
 	ProgressBg     = lipgloss.NewStyle().Foreground(ColorMuted)
 	TimeStyle      = lipgloss.NewStyle().Foreground(ColorMuted)
