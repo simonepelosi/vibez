@@ -9,3 +9,5 @@ Terminal=true
 Categories=AudioVideo;Audio;Player;
 Keywords=music;apple;terminal;tui;
 StartupNotify=false
+# Hidden from app launchers — present only so MPRIS can resolve the icon.
+NoDisplay=true
