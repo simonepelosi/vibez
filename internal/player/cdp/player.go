@@ -45,8 +45,17 @@ type Player struct {
 	doneCh  chan struct{}
 }
 
+// Options configures optional behaviour of the CDP player.
+type Options struct {
+	// SingleProcess runs the entire Chrome instance in a single OS process.
+	// This can reduce memory and eliminates all helper processes, but is
+	// officially unsupported by Google and may break Widevine DRM on some
+	// Chrome builds. Use for experimentation only.
+	SingleProcess bool
+}
+
 // New creates a CDP Player. EnsureBrowser must be called once before New().
-func New(devToken, userToken, storefront string) (*Player, error) {
+func New(devToken, userToken, storefront string, opts Options) (*Player, error) {
 	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
 	if err != nil {
 		return nil, fmt.Errorf("cdp: render html: %w", err)
@@ -92,45 +101,55 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// PulseAudio/PipeWire normally. Use headless when we have a saved token
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
+
+	args := []string{
+		// Sandbox requires suid/namespace support unavailable from a non-system path.
+		"--no-sandbox",
+		"--disable-setuid-sandbox",
+		// --no-zygote removes the Linux process-spawning shim; safe when sandbox
+		// is already disabled and cuts one helper process.
+		"--no-zygote",
+		"--autoplay-policy=no-user-gesture-required",
+		"--enable-features=MediaCapabilities,WidevineCdm",
+		"--disable-blink-features=AutomationControlled",
+		"--widevine-path=" + widevinePath,
+		// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
+		// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
+		// visible to the desktop environment.
+		// Also disable the certificate-verifier component updater: when
+		// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
+		// which breaks all TLS connections including the MusicKit.js CDN load.
+		"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
+		"--disable-component-update",
+		"--ignore-certificate-errors",
+		// Memory footprint reduction:
+		// Removes the GPU compositor process (~100–200 MB) — not needed for
+		// audio-only headless playback; Widevine CDM runs in a utility process
+		// and does not require GPU acceleration for audio DRM.
+		"--disable-gpu",
+		// Use /tmp for shared-memory segments instead of /dev/shm to avoid
+		// exhausting the (often small) tmpfs mounted there.
+		"--disable-dev-shm-usage",
+		// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
+		// within this limit; without it Chrome can balloon to 500 MB+.
+		"--js-flags=--max-old-space-size=256",
+		// Disable background network activity (prefetch, DNS pre-resolve,
+		// speculative connections). Not needed for a single-page music player.
+		"--disable-background-networking",
+	}
+	if opts.SingleProcess {
+		// Collapse all Chrome sub-processes (renderer, network, audio, Widevine)
+		// into the browser process. Cuts process count to 1 and removes inter-
+		// process shared-memory overhead. Officially unsupported — Widevine DRM
+		// may not function on all Chrome builds in this mode.
+		args = append(args, "--single-process")
+	}
+
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
 		IgnoreDefaultArgs: []string{"--mute-audio"},
-		Args: []string{
-			// Sandbox requires suid/namespace support unavailable from a non-system path.
-			"--no-sandbox",
-			"--disable-setuid-sandbox",
-			// --no-zygote removes the Linux process-spawning shim; safe when sandbox
-			// is already disabled and cuts one helper process.
-			"--no-zygote",
-			"--autoplay-policy=no-user-gesture-required",
-			"--enable-features=MediaCapabilities,WidevineCdm",
-			"--disable-blink-features=AutomationControlled",
-			"--widevine-path=" + widevinePath,
-			// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
-			// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
-			// visible to the desktop environment.
-			// Also disable the certificate-verifier component updater: when
-			// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
-			// which breaks all TLS connections including the MusicKit.js CDN load.
-			"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
-			"--disable-component-update",
-			"--ignore-certificate-errors",
-			// Memory footprint reduction:
-			// Removes the GPU compositor process (~100–200 MB) — not needed for
-			// audio-only headless playback; Widevine CDM runs in a utility process
-			// and does not require GPU acceleration for audio DRM.
-			"--disable-gpu",
-			// Use /tmp for shared-memory segments instead of /dev/shm to avoid
-			// exhausting the (often small) tmpfs mounted there.
-			"--disable-dev-shm-usage",
-			// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
-			// within this limit; without it Chrome can balloon to 500 MB+.
-			"--js-flags=--max-old-space-size=256",
-			// Disable background network activity (prefetch, DNS pre-resolve,
-			// speculative connections). Not needed for a single-page music player.
-			"--disable-background-networking",
-		},
+		Args:              args,
 	})
 	if err != nil {
 		_ = pw.Stop()
