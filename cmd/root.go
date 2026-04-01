@@ -21,7 +21,6 @@ import (
 var cfgFile string
 var debug bool
 var memProfiling bool
-var singleProcess bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -41,7 +40,6 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
 	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
-	rootCmd.PersistentFlags().BoolVar(&singleProcess, "single-process", false, "run Chrome in a single process (experimental: may break Widevine DRM)")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
@@ -110,9 +108,7 @@ func runCDPFlow(cfg *config.Config, onUserToken, onStorefront func(string)) erro
 
 		// Step 3: Start engine — Chrome launches headless because token is already set.
 		prog.Send(tui.InitStatusMsg("Starting audio engine…"))
-		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, cdp.Options{
-			SingleProcess: singleProcess,
-		})
+		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 		if err != nil {
 			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("audio engine: %w", err)})
 			return
