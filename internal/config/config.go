@@ -20,10 +20,9 @@ type Config struct {
 
 func defaults() *Config {
 	return &Config{
-		StoreFront: "us",
-		AuthPort:   7777,
-		Provider:   "apple",
-		Theme:      "default",
+		AuthPort: 7777,
+		Provider: "apple",
+		Theme:    "default",
 	}
 }
 
@@ -68,9 +67,6 @@ func Load(override string) (*Config, error) {
 // normalize replaces zero values with defaults so that an existing config file
 // with missing or empty fields still behaves correctly.
 func (c *Config) normalize() {
-	if c.StoreFront == "" {
-		c.StoreFront = "us"
-	}
 	if c.AuthPort == 0 {
 		c.AuthPort = 7777
 	}

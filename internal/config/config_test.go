@@ -57,8 +57,8 @@ func TestLoad_CreatesDefaultWhenMissing(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if cfg.StoreFront != "us" {
-		t.Errorf("StoreFront = %q, want %q", cfg.StoreFront, "us")
+	if cfg.StoreFront != "" {
+		t.Errorf("StoreFront = %q, want %q (auto-detected from Apple)", cfg.StoreFront, "")
 	}
 	if cfg.AuthPort != 7777 {
 		t.Errorf("AuthPort = %d, want %d", cfg.AuthPort, 7777)

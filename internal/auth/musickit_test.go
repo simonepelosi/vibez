@@ -288,16 +288,17 @@ func TestLogin_UsesInjectedDevToken(t *testing.T) {
 	}
 }
 
-// TestLogin_InjectedTokenNotOverridesExplicit verifies that an explicit config token
-// takes priority over the injected one.
-func TestLogin_InjectedTokenNotOverridesExplicit(t *testing.T) {
+// TestLogin_EmbeddedTokenOverridesExplicit verifies that the build-time embedded
+// token always takes priority over any value in the config, so release binaries
+// never use a stale user-supplied token.
+func TestLogin_EmbeddedTokenOverridesExplicit(t *testing.T) {
 	original := devToken
-	devToken = "injected-should-be-ignored" //nolint:gosec // G101: test value, not a real credential
+	devToken = "embedded-takes-priority" //nolint:gosec // G101: test value, not a real credential
 	t.Cleanup(func() { devToken = original })
 
 	port := 17783
-	cfg := &config.Config{
-		AppleDeveloperToken: "explicit-user-set-token",
+	cfg := &config.Config{ //nolint:gosec // G101: test value, not a real credential
+		AppleDeveloperToken: "stale-config-token",
 		AuthPort:            port,
 	}
 
@@ -316,8 +317,8 @@ func TestLogin_InjectedTokenNotOverridesExplicit(t *testing.T) {
 	if err := Login(cfg); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	// The developer token in config must remain unchanged (not overwritten).
-	if cfg.AppleDeveloperToken != "explicit-user-set-token" {
-		t.Errorf("AppleDeveloperToken was overwritten; got %q", cfg.AppleDeveloperToken)
+	// The embedded token must override the stale config token.
+	if cfg.AppleDeveloperToken != "embedded-takes-priority" {
+		t.Errorf("AppleDeveloperToken = %q, want embedded token %q", cfg.AppleDeveloperToken, "embedded-takes-priority")
 	}
 }
