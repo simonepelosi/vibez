@@ -617,6 +617,13 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		return nil
 	}
 
+	// ':' opens command mode from anywhere (like nvim).
+	if k == ":" {
+		m.mode = modeCommand
+		m.cmdBuf = ""
+		return nil
+	}
+
 	// Forward remaining keys to other active panels (e.g. library).
 	if m.activePanel >= 0 {
 		if k == "esc" {
@@ -633,10 +640,6 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		m.mode = modeSearch
 		m.searchQuery = ""
 		m.search.SetState(nil, false, nil)
-
-	case ":":
-		m.mode = modeCommand
-		m.cmdBuf = ""
 
 	case "j", "down":
 		m.lastKey = ""
