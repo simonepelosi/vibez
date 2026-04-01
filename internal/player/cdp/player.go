@@ -127,6 +127,9 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
 			// within this limit; without it Chrome can balloon to 500 MB+.
 			"--js-flags=--max-old-space-size=256",
+			// Disable background network activity (prefetch, DNS pre-resolve,
+			// speculative connections). Not needed for a single-page music player.
+			"--disable-background-networking",
 		},
 	})
 	if err != nil {
