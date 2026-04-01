@@ -493,6 +493,13 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		}
 	}
 
+	// ':' opens command mode from anywhere — checked before any panel handler.
+	if k == ":" {
+		m.mode = modeCommand
+		m.cmdBuf = ""
+		return nil
+	}
+
 	// Queue panel keys take priority over global controls when queue is active.
 	if m.activePanel >= 0 && m.panels[m.activePanel] == m.queue {
 		if k == "esc" {
@@ -614,13 +621,6 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 	case "v":
 		m.lastKey = ""
 		m.vibeFocused = !m.vibeFocused
-		return nil
-	}
-
-	// ':' opens command mode from anywhere (like nvim).
-	if k == ":" {
-		m.mode = modeCommand
-		m.cmdBuf = ""
 		return nil
 	}
 
