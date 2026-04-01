@@ -245,7 +245,7 @@ func (p *Player) AppendQueue(ids []string) error {
 	if err != nil {
 		return fmt.Errorf("webkit: marshal append ids: %w", err)
 	}
-	js := fmt.Sprintf(`window.vibezSetQueue && window.vibezSetQueue(%s)`,
+	js := fmt.Sprintf(`window.vibezAppendQueue && window.vibezAppendQueue(%s)`,
 		jsonStringLiteral(string(b)))
 	p.dispatch(js)
 	return nil
@@ -379,6 +379,19 @@ func bindAll(w webview.WebView, p *Player) error {
 			p.mu.Lock()
 			s := p.state
 			s.Error = msg
+			p.mu.Unlock()
+			for _, ch := range p.subs {
+				select {
+				case ch <- s:
+				default:
+				}
+			}
+		},
+		"goLog": func(msg string) {
+			// Debug log only — not shown in status bar.
+			p.mu.Lock()
+			s := p.state
+			s.Log = msg
 			p.mu.Unlock()
 			for _, ch := range p.subs {
 				select {

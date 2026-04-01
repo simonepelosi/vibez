@@ -29,10 +29,10 @@
         developerToken: '{{.DeveloperToken}}',
         app: { name: 'vibez', build: '{{.Version}}' },
       };
-      const configuredStorefront = '{{.Storefront}}';
-      if (configuredStorefront) {
-        configOpts.storefrontId = configuredStorefront;
-      }
+      // Do NOT pass storefrontId from config here. If the config still has the
+      // default "us" value for a non-US account, forcing it overrides MusicKit's
+      // auto-detection and causes CONTENT_EQUIVALENT for every non-US track.
+      // MusicKit derives the correct storefront from the user token automatically.
       const music = await MusicKit.configure(configOpts);
 
       const savedToken = '{{.UserToken}}';
@@ -140,24 +140,33 @@
         // Poll position every second so the TUI timer advances while playing.
         setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
 
-        // ─── Chrome-mode queue tracker ───────────────────────────────────────
-        // Owns _q[] and _qi like the GStreamer mode.  All track changes go
-        // through _doPlayAt() which calls [pause]→setQueue→[stop]→play:
-        //   • pause() if state=playing/paused — stops audio without clearing DRM
-        //   • setQueue() loads the new item (may reset state to none)
-        //   • stop() with 500 ms timeout if state is not already paused/stopped
-        //     after setQueue() — normalises to stopped(4) so play() works;
-        //     timeout prevents hanging if DRM cleanup takes too long
-        //   • _busy flag  → no concurrent setQueue/play calls
-        //   • _wantIdx    → latest index requested while busy; drained after each
-        //                    op so rapid next/prev always lands on the right track
+        // Shorthand: send a debug-only log entry (never shown in status bar).
+        const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed'];
+        const _log = (msg) => goLog(msg).catch(() => {});
 
-        let _q       = [];    // resolved MediaItem objects
-        let _qi      = -1;    // current index (-1 = nothing loaded)
-        let _busy    = false; // true while setQueue/play is running
-        let _wantIdx = -1;    // last index requested while _busy; -1 = none pending
+        // ─── Chrome-mode queue tracker ───────────────────────────────────────
+        // _q[]  = source of truth for all queued songs
+        // _qi   = index of the currently playing item in _q
+        //
+        // MusicKit's native queue is built ONCE (on first play / explicit rebuild)
+        // with ALL songs via setQueue({songs:[...]}).  Navigation uses
+        // skipToNextItem / skipToPreviousItem exclusively — no setQueue re-calls.
+        // New songs appended while playing go through m.queue.append().
+        //
+        // Why: setQueue() mid-session is silently ignored by MusicKit (it returns
+        // CONTENT_EQUIVALENT) and leaves the native queue unchanged, creating a
+        // hard desync between _q and what MusicKit is actually playing.
+
+        let _q       = [];    // resolved items from the Apple Music API
+        let _qi      = -1;    // index of the currently playing item (-1 = nothing)
+        let _busy    = false; // guard: only one _buildAndPlay running at a time
+        let _wantIdx = -1;    // pending explicit-jump target; -1 = none
+        let _libMap  = {};    // catalog ID → library song ID, for CONTENT_UNAVAILABLE fallback
 
         // Resolve a mixed array of catalog + library IDs → MediaItem objects.
+        // Catalog songs are fetched with include=library so we can cache the
+        // user's library copy ID for each matched song — used as a fallback when
+        // a catalog track is region-locked (CONTENT_UNAVAILABLE).
         async function _resolveItems(allIds) {
           const catalogIds = allIds.filter(id => !id.startsWith('i.'));
           const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
@@ -165,8 +174,14 @@
           let items = [];
           if (catalogIds.length > 0) {
             try {
-              const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
-              items = items.concat(r && r.data && r.data.data ? r.data.data : []);
+              const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds, include: 'library' });
+              const songs = r?.data?.data ?? [];
+              for (const song of songs) {
+                // Cache the user's library ID for this catalog song if present.
+                const libId = song.relationships?.library?.data?.[0]?.id;
+                if (libId) _libMap[song.id] = libId;
+              }
+              items = items.concat(songs);
             } catch(e) { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); }
           }
           if (libraryIds.length > 0) {
@@ -178,64 +193,130 @@
           return items;
         }
 
-        // Actually play the item at idx.  Never called recursively by itself;
-        // pending requests are drained via _wantIdx after each op completes.
-        // try/finally guarantees _busy is always released even on unexpected errors.
+        // Stop playback and wait (event-driven) for MusicKit to fully settle in
+        // stopped(4) or none(0) state before returning.  m.stop() resolves its
+        // Promise as soon as the command is sent, but MusicKit still goes through
+        // intermediate states (paused→seekFwd→paused→stopped).  Calling setQueue
+        // during that transition triggers CONTENT_EQUIVALENT even for unrelated
+        // songs.  500 ms cap prevents hanging if the event never fires.
+        function _stopAndWait(m) {
+          const stable = [0, 4]; // none, stopped
+          if (stable.includes(m.playbackState)) return Promise.resolve();
+          return new Promise(resolve => {
+            const handler = () => {
+              if (stable.includes(m.playbackState)) {
+                m.removeEventListener('playbackStateDidChange', handler);
+                clearTimeout(t);
+                resolve();
+              }
+            };
+            const t = setTimeout(() => {
+              m.removeEventListener('playbackStateDidChange', handler);
+              resolve();
+            }, 500);
+            m.addEventListener('playbackStateDidChange', handler);
+            m.stop().catch(() => {});
+          });
+        }
+
+        // Try the user's library copy of _q[idx] as a fallback when a catalog
+        // track is unavailable (CONTENT_UNAVAILABLE) or only exists in a different
+        // Apple Music storefront (CONTENT_EQUIVALENT).  Library items bypass all
+        // storefront restrictions.  On success: swap _q[idx] and schedule a retry.
+        // On failure: skip to the next track.
+        async function _libraryFallback(idx, item) {
+          if (item.id.startsWith('i.')) {
+            // Already using a library item and still failing — nothing left to try.
+            _log(`[js:doPlay] library item still failing → skip #${idx+1}`);
+            if (idx + 1 < _q.length) _wantIdx = idx + 1;
+            return;
+          }
+          const libId = _libMap[item.id];
+          _log(`[js:doPlay] fallback libId=${libId||'none'}`);
+          if (libId) {
+            try {
+              const r = await _m().api.music('/v1/me/library/songs', { ids: [libId] });
+              const lib = r?.data?.data ?? [];
+              if (lib.length > 0) {
+                _log(`[js:doPlay] library swap OK → retry #${idx}`);
+                _q[idx]  = lib[0];
+                _wantIdx = idx; // retry via finally
+                return;
+              }
+            } catch(_) {}
+          }
+          _log(`[js:doPlay] no library copy → skip #${idx+1}`);
+          if (idx + 1 < _q.length) _wantIdx = idx + 1;
+        }
+
+        // Play the item at idx in _q.
+        // Waits for MusicKit to fully settle in stopped state before setQueue so
+        // mid-transition states (seekFwd etc.) don't trigger spurious CE errors.
+        // CONTENT_EQUIVALENT / CONTENT_UNAVAILABLE → library fallback then skip.
+        // _busy + _wantIdx ensure only one call runs at a time; latest index wins.
         async function _doPlayAt(idx) {
           _busy    = true;
           _wantIdx = -1;
           _qi      = idx;
+
+          const m    = _m();
+          const item = _q[idx];
+          const name = item?.attributes?.name ?? item?.id ?? '?';
+          const descriptor = item.id.startsWith('i.')
+            ? { items: [item] }
+            : { songs: [item.id] };
+
+          _log(`[js:doPlay] → #${idx} "${name}" (${item?.id})`);
+
           try {
-            const m    = _m();
-            const item = _q[idx];
-            // pause() only when audio is active — stops it cleanly without
-            // clearing the EME/DRM session.  Skipped on cold start (state=none)
-            // because pause() there leaves MusicKit in a broken idle state.
-            const s = m.playbackState;
-            if (s === 2 /* playing */ || s === 3 /* paused */) {
-              try { await m.pause(); } catch(_) {}
-            }
-            const descriptor = item.id.startsWith('i.')
-              ? { items: [item] }           // library song — pass full object
-              : { songs: [item.id] };       // catalog song — pass ID only
+            // Wait for MusicKit to fully reach stopped/none before setQueue.
+            // Calling setQueue mid-transition (e.g. during seekFwd) causes CE.
+            await _stopAndWait(m);
+            _log(`[js:doPlay] state=${_stateN[m.playbackState]||m.playbackState} — setQueue`);
+
             try {
               await m.setQueue(descriptor);
             } catch(e) {
-              if (e?.name !== 'CONTENT_EQUIVALENT') {
-                goError('setQueue: '+errName(e)).catch(()=>{});
-                return; // finally block releases _busy
+              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE') {
+                _log(`[js:doPlay] setQueue ${e.name} — trying library`);
+                await _libraryFallback(idx, item);
+                return;
               }
+              throw e;
             }
-            // setQueue() often resets playbackState to none(0) — play() requires
-            // a prior stop/pause.  Normalise with a 500 ms-capped stop() so we
-            // can't block indefinitely if DRM cleanup takes too long.
-            if (m.playbackState !== 3 /* paused */ && m.playbackState !== 4 /* stopped */) {
-              await Promise.race([
-                m.stop().catch(() => {}),
-                new Promise(r => setTimeout(r, 500)),
-              ]);
-            }
+
             try {
               await m.play();
+              _log(`[js:doPlay] playing ✓ #${idx}`);
             } catch(e) {
-              if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{});
+              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE') {
+                _log(`[js:doPlay] play ${e.name} — trying library`);
+                await _libraryFallback(idx, item);
+                return;
+              }
+              throw e;
             }
           } catch(e) {
-            goError('_doPlayAt unexpected: '+errName(e)).catch(()=>{});
+            _log(`[js:doPlay] error: ${errName(e)}`);
+            goError('play: '+errName(e)).catch(() => {});
+            if (idx + 1 < _q.length) _wantIdx = idx + 1;
           } finally {
+            _log(`[js:doPlay] done #${idx}, wantIdx=${_wantIdx}`);
             _busy = false;
-            // Drain pending request (latest index requested while we were busy).
             if (_wantIdx >= 0 && _wantIdx < _q.length) {
-              const pending = _wantIdx;
-              _wantIdx = -1;
-              _doPlayAt(pending);
+              const next = _wantIdx;
+              _wantIdx   = -1;
+              _doPlayAt(next);
             }
           }
         }
 
         function _playAt(idx) {
-          if (idx < 0 || idx >= _q.length) return;
-          if (_busy) { _wantIdx = idx; return; } // store; will run after current op
+          if (idx < 0 || idx >= _q.length) {
+            _log(`[js:playAt] #${idx} out of range (len=${_q.length})`);
+            return;
+          }
+          if (_busy) { _log(`[js:playAt] busy → queue #${idx}`); _wantIdx = idx; return; }
           _doPlayAt(idx);
         }
 
@@ -246,7 +327,9 @@
         // _busy covers any edge-case fires during our own transitions.
         music.addEventListener('playbackStateDidChange', () => {
           const m = _m();
+          _log(`[js:state] ${_stateN[m.playbackState]||m.playbackState}`);
           if (m.playbackState !== 9 /* completed */) return;
+          _log(`[js:auto] completed _qi=${_qi} next=${_qi+1} len=${_q.length} busy=${_busy}`);
           if (_busy || _qi < 0 || _q.length === 0) return;
           if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
           const next = _qi + 1;
@@ -257,13 +340,36 @@
 
         window.vibezPlay = async () => {
           const m = _m();
+          _log(`[js:play] state=${_stateN[m.playbackState]||m.playbackState} item=${m.nowPlayingItem?.id||'null'} _qi=${_qi}`);
           // Restart from _qi if nothing is loaded (queue ended or fresh start).
-          if (!m.nowPlayingItem && _qi >= 0 && _q.length > 0) { _playAt(_qi); return; }
-          try { await m.play(); } catch(e) { if (e?.name !== 'CONTENT_EQUIVALENT') goError('play: '+errName(e)).catch(()=>{}); }
+          if (!m.nowPlayingItem && _qi >= 0 && _q.length > 0) { _log('[js:play] restart _qi'); _playAt(_qi); return; }
+          try { await m.play(); _log('[js:play] resumed ✓'); }
+          catch(e) {
+            if (e?.name === 'CONTENT_EQUIVALENT') {
+              // CE on resume: force stop → play to break out of the stuck state.
+              // Do NOT call _playAt here — that would re-run setQueue on the
+              // same item and trigger another CE chain.
+              _log('[js:play] CE → stop+play to recover');
+              await m.stop().catch(() => {});
+              try { await m.play(); _log('[js:play] recovered ✓'); }
+              catch(e2) { _log(`[js:play] recovery failed: ${errName(e2)}`); goError('play: '+errName(e2)).catch(()=>{}); }
+            } else {
+              _log(`[js:play] error: ${errName(e)}`);
+              goError('play: '+errName(e)).catch(()=>{});
+            }
+          }
         };
-        window.vibezPause = async () => { try { await _m().pause(); } catch(e) { goError('pause: '+errName(e)).catch(()=>{}); } };
-        window.vibezNext  = () => { if (_qi < _q.length - 1) _playAt(_qi + 1); };
-        window.vibezPrev  = () => { _playAt(_qi > 0 ? _qi - 1 : 0); };
+        window.vibezPause = async () => {
+          _log(`[js:pause] state=${_stateN[_m().playbackState]||_m().playbackState}`);
+          try { await _m().pause(); _log('[js:pause] paused ✓'); }
+          catch(e) { _log(`[js:pause] error: ${errName(e)}`); goError('pause: '+errName(e)).catch(()=>{}); }
+        };
+        window.vibezNext  = () => {
+          _log(`[js:next] _qi=${_qi} len=${_q.length} busy=${_busy}`);
+          if (_qi < _q.length - 1) _playAt(_qi + 1);
+          else _log(`[js:next] already at end of queue`);
+        };
+        window.vibezPrev  = () => { _log(`[js:prev] _qi=${_qi}`); _playAt(_qi > 0 ? _qi - 1 : 0); };
         window.vibezSeek      = (t) => _m().seekToTime(t);
         window.vibezSetVolume = (v) => { _m().volume = v; };
         window.vibezSetRepeat  = (mode) => { _m().repeatMode  = mode; };
@@ -309,9 +415,11 @@
         window.vibezAppendQueue = async function(idsJSON) {
           try {
             const ids   = (JSON.parse(idsJSON) || []).filter(Boolean);
+            _log(`[js:append] resolving id=${ids[0]}`);
             const items = await _resolveItems(ids);
             if (items.length === 0) { goError('appendQueue: no items resolved').catch(()=>{}); return; }
             _q = _q.concat(items);
+            _log(`[js:append] +${items.length} → _q.length=${_q.length} _qi=${_qi}`);
             if (_qi < 0) _playAt(0); // nothing was playing — start now
             // else: items enqueued; auto-advance (or next/prev) will pick them up
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
@@ -389,6 +497,38 @@
             playIdx(startIdx || 0);
           } catch(e) { goError('setPlaylist failed: ' + errName(e)).catch(() => {}); }
         };
+
+        window.vibezAppendQueue = async function(idsJSON) {
+          try {
+            const ids = JSON.parse(idsJSON);
+            const m = MusicKit.getInstance();
+            const allIds     = (ids || []).filter(Boolean);
+            const catalogIds = allIds.filter(id => !id.startsWith('i.'));
+            const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
+            const sf = m.storefrontId || 'us';
+
+            if (allIds.length === 0) { goError('appendQueue: empty id list').catch(() => {}); return; }
+
+            let items = [];
+            if (catalogIds.length > 0) {
+              try {
+                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
+            }
+            if (items.length === 0 && libraryIds.length > 0) {
+              try {
+                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                items = resp && resp.data && resp.data.data ? resp.data.data : [];
+              } catch(e) { goError(`[queue] library API failed: ${errName(e)}`).catch(() => {}); }
+            }
+            if (items.length === 0) { goError('appendQueue: no items resolved').catch(() => {}); return; }
+
+            const wasEmpty = _queue.length === 0;
+            _queue = _queue.concat(items);
+            if (wasEmpty) playIdx(0);
+          } catch(e) { goError('appendQueue failed: ' + errName(e)).catch(() => {}); }
+        };
       }
 
       // ── Auth (both modes) ────────────────────────────────────────────────
@@ -397,7 +537,9 @@
       // opens an invisible OAuth popup that hangs forever. Use the token
       // directly; if it's expired, API calls will fail and we handle it then.
       if (savedToken !== '') {
-        await goStorefrontChanged(music.storefrontId || 'us').catch(() => {});
+        const sf = music.storefrontId || '(unknown)';
+        await goStorefrontChanged(sf).catch(() => {});
+        await goLog(`[init] storefront=${sf} configured={{.Storefront}} musickit=${MusicKit.version||'?'} token=saved`).catch(() => {});
         await goAuthComplete('done').catch(() => {});
       } else {
         // No saved token: need interactive auth (Chrome window is visible).
@@ -405,7 +547,9 @@
           await goNeedsAuth('pending').catch(() => {});
           const token = await music.authorize();
           await goUserTokenChanged(token || '').catch(() => {});
-          await goStorefrontChanged(music.storefrontId || '').catch(() => {});
+          const sf = music.storefrontId || '(unknown)';
+          await goStorefrontChanged(sf).catch(() => {});
+          await goLog(`[init] storefront=${sf} configured={{.Storefront}} musickit=${MusicKit.version||'?'} token=new`).catch(() => {});
           await goAuthComplete('done').catch(() => {});
         } catch(e) {
           goError('auth failed: ' + (e.message || String(e))).catch(() => {});

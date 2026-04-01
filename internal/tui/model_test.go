@@ -275,27 +275,21 @@ func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 
 func TestModel_Update_KeyQuit_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	// 'q' now opens the queue panel, not quit
+	// 'q' now quits (no player to close)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if m.activePanel < 0 {
-		t.Error("q key should activate the queue panel")
-	}
-	if m.panels[m.activePanel].NavKey() != "q" {
-		t.Errorf("active panel NavKey = %q, want %q", m.panels[m.activePanel].NavKey(), "q")
+	// activePanel should remain -1 (queue is no longer a toggle-able panel)
+	if m.activePanel >= 0 {
+		t.Error("q key should not activate any panel")
 	}
 }
 
 func TestModel_Update_KeyQuit_WithPlayer(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	// 'q' now opens the queue panel
+	// 'q' quits and closes the player
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	if m.activePanel < 0 {
-		t.Error("q key should activate the queue panel")
-	}
-	// player.Close() should NOT be called just for toggling the queue panel
-	if mp.closeCalled {
-		t.Error("player.Close() should not be called when opening queue panel")
+	if !mp.closeCalled {
+		t.Error("player.Close() should be called when quitting with q")
 	}
 }
 
@@ -494,41 +488,41 @@ func TestModel_Update_PlayerStateMsg(t *testing.T) {
 func TestModel_ContentHeight(t *testing.T) {
 	m := newModel(nil)
 	m.height = 26
-	got := m.contentHeight()
-	// fixed overhead = 10 lines: logo+blank+nowplaying(4)+blank+sep+sep+status
-	if got != 16 {
-		t.Errorf("contentHeight() = %d, want 16", got)
+	got := m.panelHeight()
+	// fixed overhead = 19 lines (box layout)
+	if got != 7 {
+		t.Errorf("panelHeight() = %d, want 7", got)
 	}
 }
 
 func TestModel_ContentHeight_Small(t *testing.T) {
 	m := newModel(nil)
 	m.height = 1
-	got := m.contentHeight()
+	got := m.panelHeight()
 	if got < 0 {
-		t.Errorf("contentHeight() should not be negative, got %d", got)
+		t.Errorf("panelHeight() should not be negative, got %d", got)
 	}
 }
 
-// --- renderLogoLine ---
+// --- renderBoxHeader ---
 
 func TestModel_RenderHeader_ContainsVibez(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
-	got := m.renderLogoLine()
+	got := m.renderBoxHeader(m.width - 2)
 	if !strings.Contains(got, "vibez") {
-		t.Errorf("renderLogoLine() should contain 'vibez', got %q", got)
+		t.Errorf("renderBoxHeader() should contain 'vibez', got %q", got)
 	}
 }
 
-// --- renderStatusBar ---
+// --- statusContent ---
 
 func TestModel_RenderFooter_ContainsKeyHints(t *testing.T) {
 	m := newModel(nil)
 	m.width = 100
-	got := m.renderStatusBar()
-	if !strings.Contains(got, "NORMAL") {
-		t.Errorf("renderStatusBar() should contain mode indicator, got %q", got)
+	got := m.statusContent(m.width - 4)
+	if !strings.Contains(got, "search") {
+		t.Errorf("statusContent() should contain key hints, got %q", got)
 	}
 }
 
