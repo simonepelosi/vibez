@@ -66,10 +66,17 @@ To get one:
 	}()
 
 	loginURL := fmt.Sprintf("http://localhost:%d/login", cfg.AuthPort)
-	fmt.Printf("Opening browser at %s\n", loginURL)
-	fmt.Println("If the browser does not open, visit the URL manually.")
+	fmt.Println("Connecting to Apple Music...")
+	fmt.Println("Your browser will open to complete the login.")
 
 	_ = exec.Command("xdg-open", loginURL).Start() //nolint:gosec // intentional: opens browser at a known localhost URL
+
+	// Print the fallback URL after a short delay so users whose browser did
+	// not open automatically can still complete the flow.
+	go func() {
+		time.Sleep(4 * time.Second)
+		fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", loginURL)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

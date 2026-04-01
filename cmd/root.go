@@ -52,6 +52,15 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
 	}
 
+	// First-run: authenticate through the system browser before starting Chrome
+	// so the audio engine runs headless from the start and no blank Chrome window
+	// is shown. Subsequent runs skip this because the token is already saved.
+	if cfg.AppleUserToken == "" {
+		if err := auth.Login(cfg); err != nil {
+			return fmt.Errorf("authentication: %w", err)
+		}
+	}
+
 	// lifecycle methods common to both the webkit and CDP backends.
 	type vibezPlayer interface {
 		player.Player
