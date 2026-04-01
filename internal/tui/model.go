@@ -148,8 +148,9 @@ type Model struct {
 	favorites map[string]bool
 
 	// Animation
-	glowStep  int
-	introStep int // introDone (-1) when complete
+	glowStep   int
+	introStep  int    // introDone (-1) when complete
+	initStatus string // status text shown on the loading screen
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player) *Model {
@@ -177,7 +178,9 @@ func (m *Model) Init() tea.Cmd {
 		tick(),
 		glowTick(),
 		introTick(),
-		m.library.Init(),
+	}
+	if m.provider != nil {
+		cmds = append(cmds, m.library.Init())
 	}
 	if m.stateCh != nil {
 		cmds = append(cmds, waitForState(m.stateCh))
@@ -233,10 +236,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.introStep != introDone {
 			m.introStep++
 			if m.introStep >= len(introFrames) {
-				m.introStep = introDone
-			} else {
-				cmds = append(cmds, introTick())
+				if m.player == nil {
+					// Hold at last frame until the engine signals ready.
+					m.introStep = len(introFrames) - 1
+				} else {
+					m.introStep = introDone
+				}
 			}
+			cmds = append(cmds, introTick())
 		}
 
 	case playerStateMsg:
@@ -288,6 +295,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}))
 		m.mode = modeNormal
 		m.activePanel = -1
+
+	case InitStatusMsg:
+		m.initStatus = string(msg)
+
+	case EngineReadyMsg:
+		m.player = msg.Player
+		m.provider = msg.Provider
+		m.stateCh = msg.Player.Subscribe()
+		m.library = &libraryPanel{m: views.NewLibrary(msg.Provider)}
+		m.search = views.NewSearch(msg.Provider)
+		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
+
+	case InitErrMsg:
+		m.appendLog("[init error] " + msg.Err.Error())
+		m.errMsg = msg.Err.Error()
+		m.errExpiry = time.Now().Add(30 * time.Second)
+		m.introStep = introDone
 
 	case errMsg:
 		m.appendLog("[error] " + msg.err.Error())
@@ -921,8 +945,12 @@ func (m *Model) renderIntro() string {
 
 	var subtitle string
 	if m.introStep >= len("♪ vibez") {
+		statusText := m.initStatus
+		if statusText == "" {
+			statusText = "connecting…"
+		}
 		subtitle = "\n" + centerStr(
-			lipgloss.NewStyle().Foreground(styles.ColorMuted).Render("connecting…"),
+			lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(statusText),
 			m.width,
 		)
 	}
