@@ -11,7 +11,6 @@ package cdp
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,14 +41,16 @@ func ChromePath() string {
 
 // EnsureBrowser downloads and extracts Google Chrome into vibez's private
 // cache directory if not already present. Never calls apt-get or sudo.
-// Writes progress to w; pass os.Stderr for first-run UX or io.Discard to silence.
-func EnsureBrowser(w io.Writer) error {
+// onProgress is called with human-readable status strings (e.g. "Downloading
+// Chrome… 42%", "Extracting Chrome…"). Pass func(string){} to silence.
+func EnsureBrowser(onProgress func(string)) error {
 	if _, err := os.Stat(ChromePath()); err == nil {
 		return nil // already installed
 	}
 
 	// Also ensure the playwright driver is available (no browser install via playwright).
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
+	onProgress("Fetching dependencies…")
 	if err := playwright.Install(&playwright.RunOptions{
 		DriverDirectory:     driverDir(),
 		SkipInstallBrowsers: true,
@@ -58,19 +59,17 @@ func EnsureBrowser(w io.Writer) error {
 	}
 
 	debPath := filepath.Join(baseDir(), "chrome.deb")
-	if err := downloadFile(w, debPath, chromeDebURL); err != nil {
+	if err := downloadFile(onProgress, debPath, chromeDebURL); err != nil {
 		return fmt.Errorf("download Chrome: %w", err)
 	}
 	defer os.Remove(debPath) //nolint:errcheck // best-effort cleanup of temp file
 
-	_, _ = fmt.Fprintln(w, "Extracting Chrome...")
+	onProgress("Extracting Chrome…")
 	if err := os.MkdirAll(chromeInstallDir(), 0o750); err != nil {
 		return fmt.Errorf("create chrome dir: %w", err)
 	}
 	// dpkg-deb --extract extracts the .deb payload without root.
 	cmd := exec.Command("dpkg-deb", "--extract", debPath, chromeInstallDir()) //nolint:gosec // paths are constructed internally
-	cmd.Stdout = w
-	cmd.Stderr = w
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("extract chrome: %w", err)
 	}
@@ -78,7 +77,7 @@ func EnsureBrowser(w io.Writer) error {
 	if _, err := os.Stat(ChromePath()); err != nil {
 		return fmt.Errorf("chrome binary not found after extraction: %w", err)
 	}
-	_, _ = fmt.Fprintln(w, "Chrome ready.")
+	onProgress("Chrome ready.")
 	return nil
 }
 
