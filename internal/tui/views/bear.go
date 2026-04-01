@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
 // BearLines is the number of lines RenderBear always returns.
@@ -52,7 +53,7 @@ func RenderBearLine(step int, playing bool) string {
 		} else if f.below != "" {
 			note = f.below
 		}
-		status := lipgloss.NewStyle().Foreground(lipgloss.Color("#5C6370")).Render("vibing...")
+		status := styles.VibingStatus.Render("vibing...")
 		return bearStyle.Render(f.expr) + noteStyle.Render(note) + " " + status
 	}
 	f := sleepFrames[(step/12)%len(sleepFrames)]

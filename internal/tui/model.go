@@ -1435,10 +1435,10 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 	case m.playerState.Loading:
 		spinnerFrames := [10]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		playIcon = spinnerFrames[m.glowStep%10]
-		playStyle = styles.Playing
+		playStyle = styles.ControlActive
 	case m.playerState.Playing:
 		playIcon = "⏸"
-		playStyle = styles.Playing
+		playStyle = styles.ControlActive
 	default:
 		playIcon = "▶"
 		playStyle = styles.Paused
@@ -1447,13 +1447,13 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 	repeatIcon, repeatStyle := "↺", muted
 	switch m.playerState.RepeatMode {
 	case player.RepeatModeAll:
-		repeatIcon, repeatStyle = "↺", styles.Playing
+		repeatIcon, repeatStyle = "↺", styles.ControlActive
 	case player.RepeatModeOne:
-		repeatIcon, repeatStyle = "↻", styles.Playing
+		repeatIcon, repeatStyle = "↻", styles.ControlActive
 	}
 	shuffleStyle := muted
 	if m.playerState.ShuffleMode {
-		shuffleStyle = styles.Playing
+		shuffleStyle = styles.ControlActive
 	}
 
 	heartIcon, heartStyle := "♡", muted
@@ -1513,9 +1513,9 @@ func (m *Model) queuePanelLines(w, h int) []string {
 	for _, t := range tracks {
 		label := t.Artist + " — " + t.Title
 		if t.Title == currentTitle {
-			prefix := styles.Playing.Render("▶ ")
+			prefix := styles.ControlActive.Render("▶ ")
 			line := truncateStr(label, w-3)
-			trackLines = append(trackLines, prefix+styles.Playing.Render(line))
+			trackLines = append(trackLines, prefix+styles.ControlActive.Render(line))
 		} else {
 			line := truncateStr(label, w-3)
 			trackLines = append(trackLines, "  "+styles.QueueItem.Render(line))
