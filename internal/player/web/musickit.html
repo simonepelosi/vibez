@@ -181,7 +181,12 @@
                 const libId = song.relationships?.library?.data?.[0]?.id;
                 if (libId) _libMap[song.id] = libId;
               }
-              items = items.concat(songs);
+              // Pre-filter: drop songs without playParams — they cannot be streamed
+              // regardless of account or storefront (e.g. radio-only tracks).
+              const playable = songs.filter(s => !!s.attributes?.playParams);
+              const dropped  = songs.length - playable.length;
+              if (dropped > 0) _log(`[js:resolve] dropped ${dropped} non-playable song(s)`);
+              items = items.concat(playable);
             } catch(e) { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); }
           }
           if (libraryIds.length > 0) {
@@ -220,10 +225,11 @@
         }
 
         // Try the user's library copy of _q[idx] as a fallback when a catalog
-        // track is unavailable (CONTENT_UNAVAILABLE) or only exists in a different
-        // Apple Music storefront (CONTENT_EQUIVALENT).  Library items bypass all
-        // storefront restrictions.  On success: swap _q[idx] and schedule a retry.
-        // On failure: skip to the next track.
+        // track is unavailable (CONTENT_UNAVAILABLE), region-locked
+        // (CONTENT_EQUIVALENT), or restricted (CONTENT_RESTRICTED).
+        // Library items bypass storefront and account restrictions.
+        // On success: swap _q[idx] and schedule a retry.
+        // On failure: skip silently to the next track.
         async function _libraryFallback(idx, item) {
           if (item.id.startsWith('i.')) {
             // Already using a library item and still failing — nothing left to try.
@@ -277,7 +283,7 @@
             try {
               await m.setQueue(descriptor);
             } catch(e) {
-              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE') {
+              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE' || e?.name === 'CONTENT_RESTRICTED') {
                 _log(`[js:doPlay] setQueue ${e.name} — trying library`);
                 await _libraryFallback(idx, item);
                 return;
@@ -289,7 +295,7 @@
               await m.play();
               _log(`[js:doPlay] playing ✓ #${idx}`);
             } catch(e) {
-              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE') {
+              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE' || e?.name === 'CONTENT_RESTRICTED') {
                 _log(`[js:doPlay] play ${e.name} — trying library`);
                 await _libraryFallback(idx, item);
                 return;

@@ -275,9 +275,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.Log = ""
 		}
 		if s.Error != "" {
-			m.appendLog("[error] " + s.Error)
-			m.errMsg = s.Error
-			m.errExpiry = time.Now().Add(4 * time.Second)
+			if strings.Contains(s.Error, "CONTENT_RESTRICTED") {
+				// Track is region-locked or unavailable in this storefront.
+				// Log it silently and skip to the next track — same behaviour
+				// as any streaming app encountering a restricted title.
+				title := "track"
+				if s.Track != nil {
+					title = s.Track.Artist + " — " + s.Track.Title
+				}
+				m.appendLog(fmt.Sprintf("[skip] restricted: %s", title))
+				if m.player != nil {
+					cmds = append(cmds, m.playerCmd(func() error { return m.player.Next() }))
+				}
+			} else {
+				m.appendLog("[error] " + s.Error)
+				m.errMsg = s.Error
+				m.errExpiry = time.Now().Add(4 * time.Second)
+			}
 			s.Error = ""
 		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
