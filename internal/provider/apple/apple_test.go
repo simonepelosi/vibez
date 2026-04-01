@@ -85,7 +85,7 @@ func searchHandler(t *testing.T, w http.ResponseWriter, r *http.Request, library
 }
 
 func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
-	// Track comes from library; album and playlist come from catalog.
+	// Library song comes first; catalog adds album and playlist.
 	libSong := songJSON("i.Abc123", "Humble", "Kendrick Lamar", "DAMN.", 212000, "https://art/{w}x{h}.jpg")
 	libResp := map[string]any{
 		"results": map[string]any{
@@ -96,6 +96,7 @@ func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
 	}
 	catResp := map[string]any{
 		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{}},
 			"albums":    map[string]any{"data": []any{albumJSON("a1", "DAMN.", "Kendrick Lamar", 14)}},
 			"playlists": map[string]any{"data": []any{playlistJSON("p1", "Hip Hop Hits", 50)}},
 		},
@@ -145,16 +146,17 @@ func TestSearch_ReturnsTracksAlbumsPlaylists(t *testing.T) {
 	}
 }
 
-func TestSearch_CatalogTracksNeverReturned(t *testing.T) {
-	// Even if the catalog search returns songs (old behaviour), they must
-	// never appear in Tracks because catalog IDs can fail in MusicKit.js.
+func TestSearch_CatalogTracksIncluded(t *testing.T) {
+	// Catalog tracks appear when they are not already in the library.
+	catSong := songJSON("999", "New Song", "New Artist", "New Album", 180000, "")
+	libEmpty := map[string]any{"results": map[string]any{}}
 	catResp := map[string]any{
 		"results": map[string]any{
-			"albums":    map[string]any{"data": []any{albumJSON("a1", "Dusty in Memphis", "Dusty Springfield", 11)}},
+			"songs":     map[string]any{"data": []any{catSong}},
+			"albums":    map[string]any{"data": []any{}},
 			"playlists": map[string]any{"data": []any{}},
 		},
 	}
-	libEmpty := map[string]any{"results": map[string]any{}}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		searchHandler(t, w, r, libEmpty, catResp)
@@ -162,22 +164,20 @@ func TestSearch_CatalogTracksNeverReturned(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	result, err := p.Search(context.Background(), "preacher")
+	result, err := p.Search(context.Background(), "new song")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if len(result.Tracks) != 0 {
-		t.Errorf("expected 0 tracks, got %d: %+v", len(result.Tracks), result.Tracks)
-	}
-	// Albums from catalog are still returned.
-	if len(result.Albums) != 1 || result.Albums[0].ID != "a1" {
-		t.Errorf("Albums: got %+v", result.Albums)
+	if len(result.Tracks) != 1 || result.Tracks[0].ID != "999" {
+		t.Errorf("expected catalog track 999, got %+v", result.Tracks)
 	}
 }
 
 func TestSearch_LibraryTracksOnly(t *testing.T) {
-	// Only library songs appear as tracks; catalog songs (if any) are ignored.
+	// Library song deduplicates the same song from catalog (library wins).
 	libSong := songJSON("i.AbCdEf", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
+	catSong := songJSON("1234", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
+
 	libResp := map[string]any{
 		"results": map[string]any{
 			"library-songs":     map[string]any{"data": []any{libSong}},
@@ -185,7 +185,13 @@ func TestSearch_LibraryTracksOnly(t *testing.T) {
 			"library-playlists": map[string]any{"data": []any{}},
 		},
 	}
-	catResp := map[string]any{"results": map[string]any{}}
+	catResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{catSong}},
+			"albums":    map[string]any{"data": []any{}},
+			"playlists": map[string]any{"data": []any{}},
+		},
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		searchHandler(t, w, r, libResp, catResp)
@@ -198,7 +204,7 @@ func TestSearch_LibraryTracksOnly(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 	if len(result.Tracks) != 1 {
-		t.Fatalf("Tracks: got %d, want 1", len(result.Tracks))
+		t.Fatalf("Tracks: got %d, want 1 (deduped)", len(result.Tracks))
 	}
 	if result.Tracks[0].ID != "i.AbCdEf" {
 		t.Errorf("expected library ID i.AbCdEf, got %q", result.Tracks[0].ID)
