@@ -934,7 +934,7 @@ func (m *Model) renderIntro() string {
 	}
 
 	frame := introFrames[m.introStep]
-	glowIdx := m.introStep % len(styles.GlowPalette)
+	glowIdx := m.glowStep % len(styles.GlowPalette)
 
 	var logo strings.Builder
 	for _, r := range frame {
