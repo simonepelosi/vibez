@@ -86,11 +86,17 @@ jobs:
         env:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
-          # Extract just the vibez binary (explicit path, no wildcards).
-          tar -xzf vibez_linux_amd64.tar.gz --strip-components=1 vibez_linux_amd64/vibez
+          echo "=== Archive contents ==="
+          tar -tzf vibez_linux_amd64.tar.gz
+
+          # Extract everything, then locate the binary regardless of structure.
+          tar -xzf vibez_linux_amd64.tar.gz
+          if [ ! -f vibez ]; then
+            find . -maxdepth 3 -name 'vibez' -type f | head -1 | xargs -I{} mv {} vibez
+          fi
+
           chmod +x vibez
           sha=$(sha256sum vibez | awk '{print $1}')
-          # Patch the manifest to reference the extracted binary directly.
           sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
           cp vibez flatpak/
 
