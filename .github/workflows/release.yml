@@ -60,12 +60,9 @@ jobs:
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-  flatpak:
+  flatpak-prep:
     needs: release
     runs-on: ubuntu-latest
-    container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-47
-      options: --privileged
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -80,12 +77,34 @@ jobs:
           ASSET_URL=$(echo "$RELEASE" | python3 -c \
             "import sys,json; a=[x for x in json.load(sys.stdin).get('assets',[]) if 'linux_amd64' in x['name'] and x['name'].endswith('.tar.gz')]; print(a[0]['browser_download_url'] if a else '')")
           if [ -z "$ASSET_URL" ]; then echo "Asset not found in release"; exit 1; fi
-          curl -fsSL -L -H "Authorization: Bearer ${GH_TOKEN}" "$ASSET_URL" -o vibez_amd64.tar.gz
+          curl -fsSL -L "$ASSET_URL" -o vibez_amd64.tar.gz
 
           sha=$(sha256sum vibez_amd64.tar.gz | awk '{print $1}')
           sed -i "/x86_64/{n; s|url:.*|url: ${ASSET_URL}|; n; s|sha256:.*|sha256: ${sha}|}" \
             flatpak/io.github.simonepelosi.vibez.yml
           sed -i "s|/v0\.0\.0/|/${TAG}/|g" flatpak/io.github.simonepelosi.vibez.yml
+
+      - name: Upload patched manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-manifest
+          path: flatpak/io.github.simonepelosi.vibez.yml
+
+  flatpak:
+    needs: [release, flatpak-prep]
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download patched manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: flatpak-manifest
+          path: flatpak/
 
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
