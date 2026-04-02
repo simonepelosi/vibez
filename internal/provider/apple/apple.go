@@ -348,9 +348,13 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	}
 
 	// Catalog songs after — skip duplicates already covered by library.
-	// Any that fail to resolve in MusicKit are silently skipped by the JS layer.
+	// Songs without PlayParams are radio-only / unavailable and will always fail
+	// in MusicKit, so we drop them here before they can pollute the queue.
 	if cat.err == nil {
 		for _, s := range cat.songs {
+			if s.Attributes.PlayParams == nil {
+				continue // definitively unplayable — skip
+			}
 			t := toTrack(s)
 			key := strings.ToLower(t.Artist) + "§" + strings.ToLower(t.Title)
 			if !seen[key] {

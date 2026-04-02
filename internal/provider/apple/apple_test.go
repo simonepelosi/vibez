@@ -173,6 +173,34 @@ func TestSearch_CatalogTracksIncluded(t *testing.T) {
 	}
 }
 
+func TestSearch_UnplayableCatalogTracksDropped(t *testing.T) {
+	// Songs without playParams are radio-only and must be filtered out.
+	playable := songJSON("111", "Playable Song", "Artist A", "Album A", 200000, "")
+	unplayable := songJSONNoPlay("222", "Radio Song", "Artist B", "Album B", 200000)
+	libEmpty := map[string]any{"results": map[string]any{}}
+	catResp := map[string]any{
+		"results": map[string]any{
+			"songs":     map[string]any{"data": []any{playable, unplayable}},
+			"albums":    map[string]any{"data": []any{}},
+			"playlists": map[string]any{"data": []any{}},
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		searchHandler(t, w, r, libEmpty, catResp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	result, err := p.Search(context.Background(), "song")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(result.Tracks) != 1 || result.Tracks[0].ID != "111" {
+		t.Errorf("expected only playable track 111, got %+v", result.Tracks)
+	}
+}
+
 func TestSearch_LibraryTracksOnly(t *testing.T) {
 	// Library song deduplicates the same song from catalog (library wins).
 	libSong := songJSON("i.AbCdEf", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
@@ -481,6 +509,25 @@ func songJSON(id, name, artist, album string, durationMs int, artURL string) map
 			"artwork":          map[string]any{"url": artURL, "width": 300, "height": 300},
 			"previews":         []any{},
 			"genreNames":       []string{},
+			// Catalog songs with playParams are definitively playable.
+			"playParams": map[string]any{"id": id, "kind": "song"},
+		},
+	}
+}
+
+// songJSONNoPlay produces a catalog song fixture without playParams (radio-only / unplayable).
+func songJSONNoPlay(id, name, artist, album string, durationMs int) map[string]any {
+	return map[string]any{
+		"id": id,
+		"attributes": map[string]any{
+			"name":             name,
+			"artistName":       artist,
+			"albumName":        album,
+			"durationInMillis": durationMs,
+			"artwork":          map[string]any{"url": "", "width": 300, "height": 300},
+			"previews":         []any{},
+			"genreNames":       []string{},
+			// no playParams — should be filtered out by Search()
 		},
 	}
 }
