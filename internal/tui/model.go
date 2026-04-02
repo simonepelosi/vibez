@@ -328,6 +328,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
+			// Log playParams so we can confirm which ID path MusicKit will use.
+			trackType := "catalog"
+			if strings.HasPrefix(s.Track.ID, "i.") {
+				trackType = "library"
+			}
+			pp := fmt.Sprintf("[playParams] id=%s type=%s", s.Track.ID, trackType)
+			if s.Track.CatalogID != "" {
+				pp += " catalogId=" + s.Track.CatalogID
+			}
+			m.appendLog(pp)
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
 		}

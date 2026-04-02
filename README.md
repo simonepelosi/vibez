@@ -36,16 +36,30 @@ Playback is powered by an embedded Chrome instance with Widevine DRM (auto-downl
 
 ## Installation
 
+### Flatpak (recommended — any Linux distro)
+
+Download the latest `vibez.flatpak` bundle from the [Releases](https://github.com/simonepelosi/vibez/releases) page, then install it with:
+
 ```bash
-go install github.com/simone-vibes/vibez@latest
+flatpak install --user vibez.flatpak
+flatpak run io.github.simonepelosi.vibez
 ```
 
-Or clone and build locally:
+> **First run:** Chrome (~150 MB) is downloaded automatically to your Flatpak cache.  
+> The Flatpak bundles all native dependencies (WebKitGTK, GStreamer) — no system libraries required.
+
+### Homebrew (Linux)
 
 ```bash
-git clone https://github.com/simone-vibes/vibez
+brew install simonepelosi/tap/vibez
+```
+
+### From source
+
+```bash
+git clone https://github.com/simonepelosi/vibez
 cd vibez
-go build -o vibez .
+make build-with-token   # requires APPLE_KEY_ID / APPLE_TEAM_ID / APPLE_PRIVATE_KEY
 ```
 
 ---
@@ -245,7 +259,7 @@ type Player interface {
 Contributions are welcome! Please open an issue to discuss your idea before sending a PR.
 
 ```bash
-git clone https://github.com/simone-vibes/vibez
+git clone https://github.com/simonepelosi/vibez
 cd vibez
 go mod tidy
 go build ./...
