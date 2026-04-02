@@ -1,0 +1,3 @@
+#!/bin/sh
+# Wrapper used by goreleaser's gobinary — passes garble flags before the build command.
+exec garble -literals -tiny "$@"
