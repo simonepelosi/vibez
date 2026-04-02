@@ -50,8 +50,3 @@ modules:
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
         only-arches:
           - x86_64
-      - type: archive
-        url: https://github.com/simonepelosi/vibez/releases/download/v0.0.0/vibez_linux_arm64.tar.gz
-        sha256: 0000000000000000000000000000000000000000000000000000000000000000
-        only-arches:
-          - aarch64
