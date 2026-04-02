@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.0.2] — 2026-04-02
+
 ### Added
 - Automatic session re-authentication: when the Apple Music token expires vibez
   opens the browser silently and injects the fresh token into the running player —
@@ -20,29 +24,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   push and pull request to `main`.
 - `.desktop` file and 512 × 512 icon bundled into the Flatpak so vibez appears
   in application launchers with `Terminal=true`.
+- Animated glow title in the README — three-layer SVG that mirrors the TUI's
+  breathing lavender glow animation.
+- **Install script** (`scripts/install.sh`): one-liner installer à la rustup —
+  detects the platform, downloads the latest release from GitHub, verifies the
+  SHA-256 checksum, installs to `~/.local/bin/` (overridable via
+  `VIBEZ_INSTALL_DIR`), patches the shell profile (bash/zsh/fish) if the
+  install dir is not yet in `$PATH`, and skips the download entirely if the
+  installed version is already up to date.
+- Unit tests for `extractDeb`: synthetic `.deb` fixtures built in-process
+  (Go `archive/tar` + `compress/gzip` + hand-written ar writer), covering
+  basic extraction, control.tar skipping, multi-file payloads, invalid magic,
+  and missing `data.tar.*`.
 
 ### Changed
 - README redesigned: centered logo, shields.io badges (CI, release, Go version,
   license), concise feature list, cleaner section layout.
 - CI badge now tracks the `ci.yml` test workflow instead of `release.yml`.
 - GoReleaser version pinned to `~> v2` (silences deprecation warning).
-- **Install script** (`scripts/install.sh`): one-liner installer à la rustup —
-  detects the platform, downloads the latest release from GitHub, verifies the
-  SHA-256 checksum, installs to `~/.local/bin/` (overridable via
-  `VIBEZ_INSTALL_DIR`), and patches the shell profile (bash/zsh/fish) if the
-  install dir is not yet in `$PATH`. (unavailable in the
-  GNOME Platform sandbox) with a pure-Go `ar(1)` parser + system `tar`.
-  Chrome no longer re-downloads on every launch inside Flatpak.
-- Added unit tests for `extractDeb`: synthetic `.deb` fixtures are built
-  in-process (Go `archive/tar` + `compress/gzip` + hand-written ar writer),
-  covering basic extraction, control.tar skipping, multi-file payloads,
-  invalid magic, and missing `data.tar.*`.
-  (same endpoint as the Apple Music web player and Cider), which returns
+- **Search quality**: catalog search now goes through `amp-api.music.apple.com`
+  (same endpoint used by the Apple Music web player and Cider), which returns
   `extendedAssetUrls` in results. Songs without streaming URLs — purchase-only
   or region-locked tracks — are filtered out before they can appear in the list.
 - **Search debounce**: the API call now fires only after 400 ms of typing
   inactivity. Intermediate keystrokes are discarded via a generation counter,
   so rapid typing no longer triggers multiple parallel searches.
+- **Flatpak Chrome extraction**: replaced `dpkg-deb` (unavailable in the
+  GNOME Platform sandbox) with a pure-Go `ar(1)` parser + system `tar`.
+  Chrome no longer re-downloads on every launch inside Flatpak.
 
 ---
 
