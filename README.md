@@ -42,7 +42,19 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ## Installation
 
-### Flatpak (recommended)
+### One-liner (recommended)
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/simonepelosi/vibez/main/scripts/install.sh | sh
+```
+
+Installs the latest release binary to `~/.local/bin/` and updates your shell profile if needed.  
+You can also inspect the script before running it — that's always a good idea.
+
+> **Custom install dir:** `VIBEZ_INSTALL_DIR=/usr/local/bin curl ... | sh`
+
+### Flatpak
 
 Download `vibez.flatpak` from the [Releases](https://github.com/simonepelosi/vibez/releases) page:
 
