@@ -350,10 +350,14 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	// Catalog songs after — skip duplicates already covered by library.
 	// Songs without PlayParams are radio-only / unavailable and will always fail
 	// in MusicKit, so we drop them here before they can pollute the queue.
+	// We also require kind == "song" to exclude music videos, radio episodes, etc.
 	if cat.err == nil {
 		for _, s := range cat.songs {
 			if s.Attributes.PlayParams == nil {
 				continue // definitively unplayable — skip
+			}
+			if s.Attributes.PlayParams.Kind != "song" {
+				continue // music video, radio, etc. — not streamable as a song
 			}
 			t := toTrack(s)
 			key := strings.ToLower(t.Artist) + "§" + strings.ToLower(t.Title)

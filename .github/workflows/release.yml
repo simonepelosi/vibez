@@ -11,6 +11,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,3 +53,52 @@ jobs:
           APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PROJECT_DIR: ${{ github.workspace }}
+
+      - name: Extract tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+  flatpak:
+    needs: release
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute checksums and patch manifest
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          BASE="https://github.com/simonepelosi/vibez/releases/download/${TAG}"
+
+          for arch in amd64 arm64; do
+            url="${BASE}/vibez_linux_${arch}.tar.gz"
+            curl -fsSL "$url" -o "vibez_${arch}.tar.gz"
+            sha=$(sha256sum "vibez_${arch}.tar.gz" | awk '{print $1}')
+
+            flatpak_arch=$([ "$arch" = "amd64" ] && echo x86_64 || echo aarch64)
+            sed -i \
+              "/${flatpak_arch}/{n; s|url:.*|url: ${url}|; n; s|sha256:.*|sha256: ${sha}|}" \
+              flatpak/io.github.simonepelosi.vibez.yml
+          done
+
+          # Also update the placeholder version tag in the urls
+          sed -i "s|/v0\.0\.0/|/${TAG}/|g" flatpak/io.github.simonepelosi.vibez.yml
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: vibez.flatpak
+          manifest-path: flatpak/io.github.simonepelosi.vibez.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Upload Flatpak bundle to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.tag }}
+          files: vibez.flatpak
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

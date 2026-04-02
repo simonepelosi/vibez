@@ -181,9 +181,13 @@
                 const libId = song.relationships?.library?.data?.[0]?.id;
                 if (libId) _libMap[song.id] = libId;
               }
-              // Pre-filter: drop songs without playParams — they cannot be streamed
-              // regardless of account or storefront (e.g. radio-only tracks).
-              const playable = songs.filter(s => !!s.attributes?.playParams);
+              // Pre-filter: drop songs without playParams or with an empty
+              // playParams.id — they cannot be streamed (radio-only, region-locked
+              // or removed from the catalog).
+              const playable = songs.filter(s => {
+                const pp = s.attributes?.playParams;
+                return pp && pp.id && pp.kind === 'song';
+              });
               const dropped  = songs.length - playable.length;
               if (dropped > 0) _log(`[js:resolve] dropped ${dropped} non-playable song(s)`);
               items = items.concat(playable);
@@ -268,11 +272,24 @@
           const m    = _m();
           const item = _q[idx];
           const name = item?.attributes?.name ?? item?.id ?? '?';
+          // Library songs are passed as resolved items; catalog songs are resolved
+          // by ID so MusicKit can apply DRM/storefront resolution internally.
           const descriptor = item.id.startsWith('i.')
             ? { items: [item] }
             : { songs: [item.id] };
 
           _log(`[js:doPlay] → #${idx} "${name}" (${item?.id})`);
+          const pp = item?.attributes?.playParams;
+          _log(`[js:doPlay] playParams=${pp ? JSON.stringify(pp) : 'null'}`);
+
+          // Errors that mean "this song is unavailable here" — try library copy
+          // first, then silently skip. Never surface these to the user as errors.
+          const isUnavailable = (e) => {
+            const n = e?.name ?? '';
+            const d = errName(e);
+            return ['CONTENT_EQUIVALENT','CONTENT_UNAVAILABLE','CONTENT_RESTRICTED','NOT_FOUND']
+              .some(code => n === code || d.startsWith(code));
+          };
 
           try {
             // Wait for MusicKit to fully reach stopped/none before setQueue.
@@ -283,8 +300,8 @@
             try {
               await m.setQueue(descriptor);
             } catch(e) {
-              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE' || e?.name === 'CONTENT_RESTRICTED') {
-                _log(`[js:doPlay] setQueue ${e.name} — trying library`);
+              if (isUnavailable(e)) {
+                _log(`[js:doPlay] setQueue ${errName(e)} — trying library`);
                 await _libraryFallback(idx, item);
                 return;
               }
@@ -295,17 +312,25 @@
               await m.play();
               _log(`[js:doPlay] playing ✓ #${idx}`);
             } catch(e) {
-              if (e?.name === 'CONTENT_EQUIVALENT' || e?.name === 'CONTENT_UNAVAILABLE' || e?.name === 'CONTENT_RESTRICTED') {
-                _log(`[js:doPlay] play ${e.name} — trying library`);
+              if (isUnavailable(e)) {
+                _log(`[js:doPlay] play ${errName(e)} — trying library`);
                 await _libraryFallback(idx, item);
                 return;
               }
               throw e;
             }
           } catch(e) {
-            _log(`[js:doPlay] error: ${errName(e)}`);
-            goError('play: '+errName(e)).catch(() => {});
-            if (idx + 1 < _q.length) _wantIdx = idx + 1;
+            const desc = errName(e);
+            _log(`[js:doPlay] error: ${desc}`);
+            if (isUnavailable(e)) {
+              // Safety net: unavailability error that slipped past the inner
+              // catches (e.g. thrown by _stopAndWait or an unexpected path).
+              // Try library fallback; if that also fails it skips silently.
+              await _libraryFallback(idx, item);
+            } else {
+              goError('play: '+desc).catch(() => {});
+              if (idx + 1 < _q.length) _wantIdx = idx + 1;
+            }
           } finally {
             _log(`[js:doPlay] done #${idx}, wantIdx=${_wantIdx}`);
             _busy = false;

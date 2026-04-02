@@ -1,0 +1,57 @@
+id: io.github.simonepelosi.vibez
+
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+
+command: vibez
+
+finish-args:
+  # Apple Music API + MusicKit.js CDN
+  - --share=network
+  # Shared memory for IPC (Chrome needs this even with --disable-dev-shm-usage)
+  - --share=ipc
+  # Wayland + X11 fallback (login window on first run)
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Audio output (PulseAudio; PipeWire uses this socket for compat)
+  - --socket=pulseaudio
+  # DRI for Chrome GPU process (required even with --disable-gpu on some drivers)
+  - --device=dri
+  # MPRIS D-Bus interface so the desktop can control playback
+  - --socket=session-bus
+  - --talk-name=org.mpris.MediaPlayer2.*
+  - --own-name=org.mpris.MediaPlayer2.vibez
+  # Playwright-managed Chrome is downloaded here on first run.
+  # Flatpak remaps $XDG_CACHE_HOME → ~/.var/app/APP_ID/cache/ automatically.
+  - --filesystem=xdg-cache/vibez:create
+  # Config and auth tokens
+  - --filesystem=xdg-config/vibez:create
+  # Terminal colours / raw mode
+  - --env=TERM=xterm-256color
+  - --env=COLORTERM=truecolor
+
+modules:
+  - name: vibez
+    buildsystem: simple
+    build-commands:
+      # The release tarball contains a single 'vibez' binary built with the
+      # embedded Apple developer token. We just install it.
+      - install -Dm755 vibez /app/bin/vibez
+    sources:
+      # flatpak-builder-tools / the release CI will patch the url + sha256
+      # automatically before each release. To build manually:
+      #   1. Download the amd64 tarball from GitHub Releases.
+      #   2. Set url + sha256 below and run:
+      #      flatpak-builder --user --install --force-clean build-dir \
+      #        flatpak/io.github.simonepelosi.vibez.yml
+      - type: archive
+        url: https://github.com/simonepelosi/vibez/releases/download/v0.0.0/vibez_linux_amd64.tar.gz
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000
+        only-arches:
+          - x86_64
+      - type: archive
+        url: https://github.com/simonepelosi/vibez/releases/download/v0.0.0/vibez_linux_arm64.tar.gz
+        sha256: 0000000000000000000000000000000000000000000000000000000000000000
+        only-arches:
+          - aarch64
