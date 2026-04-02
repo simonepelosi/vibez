@@ -15,9 +15,15 @@
   <a href="https://github.com/simonepelosi/vibez/releases"><img src="https://img.shields.io/github/v/release/simonepelosi/vibez?style=flat-square" alt="Release"></a>
   <a href="https://github.com/simonepelosi/vibez/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/simonepelosi/vibez?style=flat-square" alt="Go version"></a>
   <a href="https://github.com/simonepelosi/vibez/blob/main/LICENSE"><img src="https://img.shields.io/github/license/simonepelosi/vibez?style=flat-square" alt="License"></a>
+  <a href="https://github.com/simonepelosi/vibez/releases"><img src="https://img.shields.io/github/downloads/simonepelosi/vibez/total?style=flat-square&label=downloads" alt="Downloads"></a>
+  <a href="https://github.com/simonepelosi/vibez/stargazers"><img src="https://img.shields.io/github/stars/simonepelosi/vibez?style=flat-square" alt="Stars"></a>
 </p>
 
-[Installation](#installation) · [Usage](#usage) · [Configuration](#configuration) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
+<p align="center">
+  <a href="https://ko-fi.com/simonepelosi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=flat-square" alt="Donate"></a>
+</p>
+
+[Installation](#installation) · [Usage](#usage) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
 
 ---
 
@@ -77,48 +83,15 @@ make build-with-token   # requires APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KE
 
 ---
 
-## Configuration
-
-vibez stores config at `~/.config/vibez/config.json` (auto-created on first run):
-
-```json
-{
-  "apple_developer_token": "",
-  "apple_user_token": "",
-  "apple_key_id": "",
-  "apple_team_id": "",
-  "storefront": "us",
-  "auth_port": 7777,
-  "provider": "apple",
-  "theme": "default"
-}
-```
-
-### Getting an Apple Developer Token
-
-1. Go to [developer.apple.com](https://developer.apple.com/account/resources/authkeys/list) → create a key with **MusicKit** capability
-2. Download the `.p8` file, note your **Key ID** and **Team ID**
-3. Generate a signed JWT with the bundled helper:
-
-```bash
-go run ./scripts/gen-devtoken \
-  --key-id   <KEY_ID>   \
-  --team-id  <TEAM_ID>  \
-  --key-file <path/to/AuthKey_XXXXXX.p8>
-```
-
-4. Paste the output into `apple_developer_token` in `config.json`
-
----
-
 ## Usage
 
 ```bash
-vibez auth login    # open Apple ID login (Chrome window)
-vibez auth status   # check current auth state
-vibez auth logout   # clear saved tokens
-vibez               # launch the TUI
-vibez version       # print version
+vibez                   # launch the TUI
+vibez --demo            # try vibez with built-in fake tracks — no account needed
+vibez auth login        # open Apple ID login (Chrome window)
+vibez auth status       # check current auth state
+vibez auth logout       # clear saved tokens
+vibez version           # print version
 ```
 
 ---
