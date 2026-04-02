@@ -26,7 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   license), concise feature list, cleaner section layout.
 - CI badge now tracks the `ci.yml` test workflow instead of `release.yml`.
 - GoReleaser version pinned to `~> v2` (silences deprecation warning).
-- **Flatpak Chrome extraction**: replaced `dpkg-deb` (unavailable in the
+- **Install script** (`scripts/install.sh`): one-liner installer à la rustup —
+  detects the platform, downloads the latest release from GitHub, verifies the
+  SHA-256 checksum, installs to `~/.local/bin/` (overridable via
+  `VIBEZ_INSTALL_DIR`), and patches the shell profile (bash/zsh/fish) if the
+  install dir is not yet in `$PATH`. (unavailable in the
   GNOME Platform sandbox) with a pure-Go `ar(1)` parser + system `tar`.
   Chrome no longer re-downloads on every launch inside Flatpak.
 - Added unit tests for `extractDeb`: synthetic `.deb` fixtures are built
