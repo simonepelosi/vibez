@@ -20,10 +20,11 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=flat-square" alt="Donate"></a>
+  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br>
+  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_Buy_me_a_coffee-Donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
 </p>
 
-[Installation](#installation) · [Usage](#usage) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
+[Installation](#installation) · [Usage](#usage) · [Features](#features) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
 
 ---
 
@@ -35,14 +36,42 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ## Features
 
-- 🎵 Browse your Apple Music library — playlists, albums, tracks
-- 🔍 Real-time search of the Apple Music catalog
-- 🎶 Full-track streaming via Chrome + Widevine DRM
-- 📋 Queue management — add with `tab`, skip with `n`/`p`
-- 🐻 Animated bear mascot that sleeps when idle and dances when music plays
-- 🖥️ MPRIS D-Bus — desktop media keys and notifications out of the box
-- ⌨️ Fully keyboard-driven TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)
-- 🔌 Extensible provider architecture (Spotify, YouTube Music planned)
+### 🎵 Music Playback
+
+- **Full-track streaming** via headless Chrome + Widevine DRM — the real deal, not 30-second clips
+- **Automatic fallback** to WebKit + GStreamer (30 s previews) when Chrome is unavailable
+- **Playback controls** — play/pause, next, previous, volume up/down
+- **Repeat modes** — cycle through off, repeat-all, and repeat-one
+- **Shuffle** — randomise your queue with a single keypress
+
+### 🔍 Apple Music Integration
+
+- **Browse your library** — playlists, albums, and tracks all in one place
+- **Real-time catalog search** — find any song, album, or artist from the full Apple Music catalog as you type
+- **Secure authentication** — MusicKit OAuth flow via an embedded Chrome window
+
+### 📋 Queue Management
+
+- **Add tracks to queue** with `tab` from search or library
+- **Navigate the queue** — jump to any track or let it auto-advance
+- **Persistent queue panel** — toggle it on/off without losing your place
+
+### 🖥️ System Integration
+
+- **MPRIS D-Bus** — your desktop media keys (play, pause, next, previous) work out of the box
+- **Desktop notifications** — see the current track in your notification area
+- **No external player needed** — vibez is fully self-contained, no Cider, no VLC
+
+### ⌨️ Terminal UI
+
+- **Fully keyboard-driven** — every action reachable without touching the mouse
+- **Animated bear mascot** 🐻 — sleeps when idle, dances when music is playing
+- **Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)** — a modern, composable TUI framework
+
+### 🔌 Extensibility
+
+- **Provider architecture** — the player core is decoupled from the music source
+- **More services coming** — Spotify, YouTube Music, Deezer, and Tidal are on the roadmap
 
 ---
 
