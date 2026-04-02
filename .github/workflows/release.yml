@@ -86,8 +86,9 @@ jobs:
         env:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
-          # Extract just the vibez binary from the tarball.
-          tar -xzf vibez_linux_amd64.tar.gz --wildcards --no-anchored 'vibez' --strip-components=1
+          # Extract just the vibez binary (explicit path, no wildcards).
+          tar -xzf vibez_linux_amd64.tar.gz --strip-components=1 vibez_linux_amd64/vibez
+          chmod +x vibez
           sha=$(sha256sum vibez | awk '{print $1}')
           # Patch the manifest to reference the extracted binary directly.
           sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
