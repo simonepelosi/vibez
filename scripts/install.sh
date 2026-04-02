@@ -109,7 +109,25 @@ VERSION="$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
 
 [ -n "${VERSION}" ] || die "Could not determine latest version from GitHub API."
 
-success "${VERSION}"
+success "Latest: ${VERSION}"
+
+# ── already up to date? ───────────────────────────────────────────────────────
+
+CURRENT_VERSION=""
+if [ -x "${INSTALL_DIR}/${BIN}" ]; then
+    # "vibez version" prints "vibez <tag>", e.g. "vibez v0.1.0"
+    CURRENT_VERSION="$("${INSTALL_DIR}/${BIN}" version 2>/dev/null | awk '{print $2}' || printf '')"
+fi
+
+if [ -n "${CURRENT_VERSION}" ]; then
+    if [ "${CURRENT_VERSION}" = "${VERSION}" ]; then
+        printf '\n'
+        printf '%s    ✓  vibez %s is already up to date.%s\n\n' \
+            "${BOLD}${GREEN}" "${VERSION}" "${RESET}"
+        exit 0
+    fi
+    info "Installed: ${CURRENT_VERSION}  →  upgrading to ${VERSION}"
+fi
 
 # ── set up temp dir ───────────────────────────────────────────────────────────
 
