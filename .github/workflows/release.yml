@@ -103,7 +103,7 @@ jobs:
     needs: [release, flatpak-prep]
     runs-on: ubuntu-latest
     container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-48
+      image: bilelmoussaoui/flatpak-github-actions:gnome-46
       options: --privileged
     steps:
       - name: Checkout
