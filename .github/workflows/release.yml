@@ -88,9 +88,10 @@ jobs:
         run: |
           url="https://github.com/simonepelosi/vibez/releases/download/${TAG}/vibez_linux_amd64.tar.gz"
           sha=$(sha256sum vibez_linux_amd64.tar.gz | awk '{print $1}')
-          sed -i "/x86_64/{n; s|url:.*|url: ${url}|; n; s|sha256:.*|sha256: ${sha}|}" \
-            flatpak/io.github.simonepelosi.vibez.yml
-          sed -i "s|/v0\.0\.0/|/${TAG}/|g" flatpak/io.github.simonepelosi.vibez.yml
+          # Replace placeholder url and sha256 directly — no anchor needed since
+          # there is only one archive source in the manifest.
+          sed -i "s|url: .*vibez_linux_amd64.*|url: ${url}|" flatpak/io.github.simonepelosi.vibez.yml
+          sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
 
       - name: Upload patched manifest
         uses: actions/upload-artifact@v4
@@ -102,7 +103,7 @@ jobs:
     needs: [release, flatpak-prep]
     runs-on: ubuntu-latest
     container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-47
+      image: bilelmoussaoui/flatpak-github-actions:gnome-48
       options: --privileged
     steps:
       - name: Checkout
