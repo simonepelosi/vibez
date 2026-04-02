@@ -99,6 +99,7 @@ jobs:
           sha=$(sha256sum vibez | awk '{print $1}')
           sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
           cp vibez flatpak/
+          cp assets/logo.png flatpak/logo.png
 
       - name: Upload patched manifest and tarball
         uses: actions/upload-artifact@v4
@@ -106,7 +107,9 @@ jobs:
           name: flatpak-sources
           path: |
             flatpak/io.github.simonepelosi.vibez.yml
+            flatpak/io.github.simonepelosi.vibez.desktop
             flatpak/vibez
+            flatpak/logo.png
 
   flatpak:
     needs: [release, flatpak-prep]

@@ -11,8 +11,6 @@ tags:
   - terminal
   - apple-music
 
-desktop-file-name-prefix: ""
-
 finish-args:
   # Apple Music API + MusicKit.js CDN
   - --share=network
@@ -42,18 +40,16 @@ modules:
   - name: vibez
     buildsystem: simple
     build-commands:
-      # The release tarball contains a single 'vibez' binary built with the
-      # embedded Apple developer token. We just install it.
       - install -Dm755 vibez /app/bin/vibez
+      - install -Dm644 io.github.simonepelosi.vibez.desktop /app/share/applications/io.github.simonepelosi.vibez.desktop
+      - install -Dm644 logo.png /app/share/icons/hicolor/512x512/apps/io.github.simonepelosi.vibez.png
     sources:
-      # flatpak-builder-tools / the release CI will patch the url + sha256
-      # automatically before each release. To build manually:
-      #   1. Download the amd64 tarball from GitHub Releases.
-      #   2. Set url + sha256 below and run:
-      #      flatpak-builder --user --install --force-clean build-dir \
-      #        flatpak/io.github.simonepelosi.vibez.yml
       - type: file
         path: vibez
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
         only-arches:
           - x86_64
+      - type: file
+        path: io.github.simonepelosi.vibez.desktop
+      - type: file
+        path: logo.png
