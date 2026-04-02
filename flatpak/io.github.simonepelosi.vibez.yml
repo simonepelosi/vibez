@@ -1,7 +1,7 @@
 id: io.github.simonepelosi.vibez
 
 runtime: org.gnome.Platform
-runtime-version: '48'
+runtime-version: '46'
 sdk: org.gnome.Sdk
 
 command: vibez
