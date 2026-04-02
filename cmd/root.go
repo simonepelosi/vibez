@@ -146,7 +146,21 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 		}
 		cdpPlayer.OnUserToken = onUserToken
 		cdpPlayer.OnStorefront = onStorefront
-		cdpPlayer.OnSessionExpired = func() { prog.Send(tui.SessionExpiredMsg{}) }
+		cdpPlayer.OnSessionExpired = func() {
+			prog.Send(tui.SessionExpiredMsg{})
+			go func() {
+				if err := auth.Login(cfg); err != nil {
+					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
+					return
+				}
+				if err := cdpPlayer.SetUserToken(cfg.AppleUserToken); err != nil {
+					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth token update: %w", err)})
+					return
+				}
+				cdpPlayer.ResetSessionExpired()
+				prog.Send(tui.SessionRestoredMsg{})
+			}()
+		}
 
 		// Expose the player so the cleanup block below can call Terminate().
 		playerCh <- cdpPlayer
