@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 88" width="460" height="88">
+  <defs>
+    <!--
+      Glow filter: blur the source graphic to create a soft halo.
+      stdDeviation drives the spread of the glow; a wider bbox ensures
+      the blur isn't clipped at the edges.
+    -->
+    <filter id="g" x="-20%" y="-80%" width="140%" height="260%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blur"/>
+    </filter>
+  </defs>
+
+  <!--
+    Layer 1 — blurred halo (breathing animation).
+    Colour: ColorGlow5 (#bb9af7, bright lavender) — same hue used for the
+    "now playing" glow sweep in the TUI.
+    Opacity pulses between dim and full to simulate the breathing effect.
+  -->
+  <text
+    x="230" y="66"
+    text-anchor="middle"
+    font-family="'Courier New', Courier, monospace"
+    font-size="62"
+    font-weight="bold"
+    fill="#bb9af7"
+    filter="url(#g)">♪ vibez<animate
+      attributeName="opacity"
+      values="0.2;1;0.2"
+      keyTimes="0;0.5;1"
+      dur="2.8s"
+      repeatCount="indefinite"/></text>
+
+  <!--
+    Layer 2 — additional wider halo for depth.
+    Colour: ColorGlow3 (#6e57c4, deep purple) — gives a two-tone corona.
+  -->
+  <text
+    x="230" y="66"
+    text-anchor="middle"
+    font-family="'Courier New', Courier, monospace"
+    font-size="62"
+    font-weight="bold"
+    fill="#6e57c4"
+    filter="url(#g)"
+    opacity="0.5">♪ vibez<animate
+      attributeName="opacity"
+      values="0.1;0.6;0.1"
+      keyTimes="0;0.5;1"
+      dur="2.8s"
+      repeatCount="indefinite"/></text>
+
+  <!--
+    Layer 3 — crisp foreground text.
+    Colour: ColorGlow7 (#e0d4ff, peak brightness) — the brightest tint in
+    the palette, matching the TUI title at peak glow.
+  -->
+  <text
+    x="230" y="66"
+    text-anchor="middle"
+    font-family="'Courier New', Courier, monospace"
+    font-size="62"
+    font-weight="bold"
+    fill="#e0d4ff">♪ vibez</text>
+</svg>

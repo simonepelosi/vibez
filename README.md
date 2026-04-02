@@ -2,7 +2,9 @@
   <img src="assets/logo.png" width="160" alt="vibez logo">
 </p>
 
-<h1 align="center">vibez</h1>
+<p align="center">
+  <img src="assets/title.svg" alt="♪ vibez" width="460">
+</p>
 
 <p align="center">
   <strong>Apple Music in your terminal. Vibe-driven. Keyboard-first.</strong>
