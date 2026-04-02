@@ -86,18 +86,19 @@ jobs:
         env:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
-          url="https://github.com/simonepelosi/vibez/releases/download/${TAG}/vibez_linux_amd64.tar.gz"
           sha=$(sha256sum vibez_linux_amd64.tar.gz | awk '{print $1}')
-          # Replace placeholder url and sha256 directly — no anchor needed since
-          # there is only one archive source in the manifest.
-          sed -i "s|url: .*vibez_linux_amd64.*|url: ${url}|" flatpak/io.github.simonepelosi.vibez.yml
+          # Use local path: flatpak-builder will find the tarball next to the manifest.
           sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
+          # Copy tarball into flatpak/ so it's included in the artifact
+          cp vibez_linux_amd64.tar.gz flatpak/
 
-      - name: Upload patched manifest
+      - name: Upload patched manifest and tarball
         uses: actions/upload-artifact@v4
         with:
-          name: flatpak-manifest
-          path: flatpak/io.github.simonepelosi.vibez.yml
+          name: flatpak-sources
+          path: |
+            flatpak/io.github.simonepelosi.vibez.yml
+            flatpak/vibez_linux_amd64.tar.gz
 
   flatpak:
     needs: [release, flatpak-prep]
@@ -109,10 +110,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download patched manifest
+      - name: Download sources
         uses: actions/download-artifact@v4
         with:
-          name: flatpak-manifest
+          name: flatpak-sources
           path: flatpak/
 
       - name: Build Flatpak bundle
