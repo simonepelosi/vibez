@@ -46,7 +46,7 @@ modules:
       #      flatpak-builder --user --install --force-clean build-dir \
       #        flatpak/io.github.simonepelosi.vibez.yml
       - type: archive
-        url: https://github.com/simonepelosi/vibez/releases/download/v0.0.0/vibez_linux_amd64.tar.gz
+        path: vibez_linux_amd64.tar.gz
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
         only-arches:
           - x86_64
