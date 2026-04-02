@@ -51,7 +51,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           PROJECT_DIR: ${{ github.workspace }}
           # Prevent Go from downloading a different toolchain into GOMODCACHE,
           # which garble cannot patch (overlay restrictions on GOMODCACHE).
