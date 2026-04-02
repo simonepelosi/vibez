@@ -48,5 +48,6 @@ modules:
       - type: archive
         path: vibez_linux_amd64.tar.gz
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
+        strip-components: 1
         only-arches:
           - x86_64
