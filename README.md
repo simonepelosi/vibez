@@ -21,7 +21,7 @@
 
 <p align="center">
   If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br>
-  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_Buy_me_a_coffee-Donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
+  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
 </p>
 
 [Installation](#installation) · [Usage](#usage) · [Features](#features) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
