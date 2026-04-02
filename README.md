@@ -1,5 +1,9 @@
 # ♪ vibez
 
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="vibez logo">
+</p>
+
 > **vibe-driven music player for your terminal**
 
 vibez is an open-source TUI (terminal user interface) Apple Music player for Linux. It streams full tracks directly from Apple Music — no external player required — and lets you search, browse, queue, and control playback entirely from the keyboard.
