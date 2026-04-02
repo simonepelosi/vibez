@@ -70,18 +70,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compute checksums and patch manifest
+      - name: Download release asset and patch manifest
         env:
           TAG: ${{ needs.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BASE="https://github.com/simonepelosi/vibez/releases/download/${TAG}"
-          url="${BASE}/vibez_linux_amd64.tar.gz"
-          curl -fsSL "$url" -o vibez_amd64.tar.gz
+          # gh CLI is available in the container; use it so auth + asset name
+          # discovery are handled automatically regardless of exact filename.
+          gh release download "${TAG}" \
+            --repo simonepelosi/vibez \
+            --pattern "vibez_linux_amd64.tar.gz" \
+            --output vibez_amd64.tar.gz
+
+          url="https://github.com/simonepelosi/vibez/releases/download/${TAG}/vibez_linux_amd64.tar.gz"
           sha=$(sha256sum vibez_amd64.tar.gz | awk '{print $1}')
           sed -i \
             "/x86_64/{n; s|url:.*|url: ${url}|; n; s|sha256:.*|sha256: ${sha}|}" \
             flatpak/io.github.simonepelosi.vibez.yml
-          # Update the placeholder version tag in the url
           sed -i "s|/v0\.0\.0/|/${TAG}/|g" flatpak/io.github.simonepelosi.vibez.yml
 
       - name: Build Flatpak bundle
