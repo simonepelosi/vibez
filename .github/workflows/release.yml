@@ -86,11 +86,12 @@ jobs:
         env:
           TAG: ${{ needs.release.outputs.tag }}
         run: |
-          sha=$(sha256sum vibez_linux_amd64.tar.gz | awk '{print $1}')
-          # Use local path: flatpak-builder will find the tarball next to the manifest.
+          # Extract just the vibez binary from the tarball.
+          tar -xzf vibez_linux_amd64.tar.gz --wildcards --no-anchored 'vibez' --strip-components=1
+          sha=$(sha256sum vibez | awk '{print $1}')
+          # Patch the manifest to reference the extracted binary directly.
           sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
-          # Copy tarball into flatpak/ so it's included in the artifact
-          cp vibez_linux_amd64.tar.gz flatpak/
+          cp vibez flatpak/
 
       - name: Upload patched manifest and tarball
         uses: actions/upload-artifact@v4
@@ -98,7 +99,7 @@ jobs:
           name: flatpak-sources
           path: |
             flatpak/io.github.simonepelosi.vibez.yml
-            flatpak/vibez_linux_amd64.tar.gz
+            flatpak/vibez
 
   flatpak:
     needs: [release, flatpak-prep]

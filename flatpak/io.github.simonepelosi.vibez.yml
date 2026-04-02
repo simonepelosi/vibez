@@ -6,6 +6,13 @@ sdk: org.gnome.Sdk
 
 command: vibez
 
+tags:
+  - music
+  - terminal
+  - apple-music
+
+desktop-file-name-prefix: ""
+
 finish-args:
   # Apple Music API + MusicKit.js CDN
   - --share=network
@@ -45,9 +52,8 @@ modules:
       #   2. Set url + sha256 below and run:
       #      flatpak-builder --user --install --force-clean build-dir \
       #        flatpak/io.github.simonepelosi.vibez.yml
-      - type: archive
-        path: vibez_linux_amd64.tar.gz
+      - type: file
+        path: vibez
         sha256: 0000000000000000000000000000000000000000000000000000000000000000
-        strip-components: 1
         only-arches:
           - x86_64
