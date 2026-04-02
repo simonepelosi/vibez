@@ -72,11 +72,18 @@ jobs:
           TAG: ${{ needs.release.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/simonepelosi/vibez/releases/tags/${TAG}")
-          ASSET_URL=$(echo "$RELEASE" | python3 -c \
-            "import sys,json; a=[x for x in json.load(sys.stdin).get('assets',[]) if 'linux_amd64' in x['name'] and x['name'].endswith('.tar.gz')]; print(a[0]['browser_download_url'] if a else '')")
-          if [ -z "$ASSET_URL" ]; then echo "Asset not found in release"; exit 1; fi
+          # Wait for the release to be fully indexed by GitHub's API.
+          ASSET_URL=""
+          for i in 1 2 3 4 5 6; do
+            RELEASE=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/simonepelosi/vibez/releases/tags/${TAG}" 2>/dev/null || true)
+            ASSET_URL=$(echo "$RELEASE" | python3 -c \
+              "import sys,json; a=[x for x in json.load(sys.stdin).get('assets',[]) if 'linux_amd64' in x['name'] and x['name'].endswith('.tar.gz')]; print(a[0]['browser_download_url'] if a else '')" 2>/dev/null || true)
+            if [ -n "$ASSET_URL" ]; then break; fi
+            echo "Attempt ${i}: release not ready yet, waiting 20s..."
+            sleep 20
+          done
+          if [ -z "$ASSET_URL" ]; then echo "Asset not found after retries"; exit 1; fi
           curl -fsSL -L "$ASSET_URL" -o vibez_amd64.tar.gz
 
           sha=$(sha256sum vibez_amd64.tar.gz | awk '{print $1}')
