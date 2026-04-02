@@ -29,8 +29,9 @@ import (
 // The absence of the goStreamURL binding tells musickit.html to use Chrome's
 // native m.play()/m.setQueue() Widevine path instead of GStreamer previews.
 type Player struct {
-	OnUserToken  func(token string)
-	OnStorefront func(sf string)
+	OnUserToken      func(token string)
+	OnStorefront     func(sf string)
+	OnSessionExpired func()
 
 	pw      *playwright.Playwright
 	browser playwright.Browser
@@ -183,7 +184,14 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// automatically — no Promise shim needed. goStreamURL is intentionally
 	// absent; its absence triggers Chrome/Widevine mode in musickit.html.
 	bindings := map[string]playwright.ExposedFunction{
-		"goNeedsAuth": func(_ ...any) any { return nil },
+		"goNeedsAuth": func(args ...any) any {
+			if len(args) > 0 {
+				if reason, ok := args[0].(string); ok && reason == "expired" && p.OnSessionExpired != nil {
+					p.OnSessionExpired()
+				}
+			}
+			return nil
+		},
 		"goAuthComplete": func(_ ...any) any {
 			select {
 			case <-p.readyCh:

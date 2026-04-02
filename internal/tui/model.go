@@ -96,6 +96,7 @@ type introTickMsg time.Time
 type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
 type playlistCreatedMsg struct{ name string }
+type SessionExpiredMsg struct{}
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
 var introFrames = func() []string {
@@ -476,6 +477,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playlistCreatedMsg:
 		m.errMsg = "✓ Playlist \"" + msg.name + "\" saved"
 		m.errExpiry = time.Now().Add(4 * time.Second)
+
+	case SessionExpiredMsg:
+		m.errMsg = "Session expired — run: vibez auth login"
+		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persistent
 
 	case tea.KeyMsg:
 		cmd := m.handleKey(msg)
