@@ -146,6 +146,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 		}
 		cdpPlayer.OnUserToken = onUserToken
 		cdpPlayer.OnStorefront = onStorefront
+		cdpPlayer.OnSessionExpired = func() { prog.Send(tui.SessionExpiredMsg{}) }
 
 		// Expose the player so the cleanup block below can call Terminate().
 		playerCh <- cdpPlayer

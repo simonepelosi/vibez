@@ -54,6 +54,14 @@
         return msg || name || String(e);
       };
 
+      // isAuthError returns true when an error indicates an expired/invalid token.
+      const isAuthError = (e) => {
+        if (!e) return false;
+        const s = (errName(e) + ' ' + String(e.status || '')).toLowerCase();
+        return s.includes('authorization') || s.includes('not authorized') ||
+               s.includes('unauthorized')  || s.includes('401');
+      };
+
       // ── State notification ───────────────────────────────────────────────
       function notifyStateFromItem(item, isPlaying) {
         if (!item) return;
@@ -82,6 +90,12 @@
       });
       music.addEventListener('storefrontIdentifierDidChange', function() {
         goStorefrontChanged(MusicKit.getInstance().storefrontId || '').catch(console.error);
+      });
+      // Detect token expiry: MusicKit fires this when it invalidates the session.
+      music.addEventListener('authorizationStatusDidChange', async function() {
+        if (savedToken !== '' && !MusicKit.getInstance().isAuthorized) {
+          await goNeedsAuth('expired').catch(() => {});
+        }
       });
 
       // ════════════════════════════════════════════════════════════════════
@@ -191,13 +205,13 @@
               const dropped  = songs.length - playable.length;
               if (dropped > 0) _log(`[js:resolve] dropped ${dropped} non-playable song(s)`);
               items = items.concat(playable);
-            } catch(e) { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); }
+            } catch(e) { if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); } else { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); } }
           }
           if (libraryIds.length > 0) {
             try {
               const r = await _m().api.music('/v1/me/library/songs', { ids: libraryIds });
               items = items.concat(r && r.data && r.data.data ? r.data.data : []);
-            } catch(e) { goError('[resolve] library: '+errName(e)).catch(()=>{}); }
+            } catch(e) { if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); } else { goError('[resolve] library: '+errName(e)).catch(()=>{}); } }
           }
           return items;
         }
