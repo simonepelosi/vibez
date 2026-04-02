@@ -8,7 +8,7 @@ before:
 builds:
   - id: vibez
     binary: vibez
-    gobinary: garble -literals -tiny
+    gobinary: ./scripts/garble-go
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
