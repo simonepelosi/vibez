@@ -48,7 +48,7 @@ changelog:
 
 release:
   github:
-    owner: simone-vibes
+    owner: simonepelosi
     name: vibez
   draft: false
   prerelease: auto
@@ -56,10 +56,10 @@ release:
 brews:
   - name: vibez
     repository:
-      owner: simone-vibes
+      owner: simonepelosi
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/simone-vibes/vibez"
+    homepage: "https://github.com/simonepelosi/vibez"
     description: "Apple Music TUI for Linux — vibe-driven music discovery"
     license: "MIT"
     install: |
