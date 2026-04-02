@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/simonepelosi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=flat-square" alt="Donate"></a>
+  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=flat-square" alt="Donate"></a>
 </p>
 
 [Installation](#installation) · [Usage](#usage) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
