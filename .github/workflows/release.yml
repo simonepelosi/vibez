@@ -75,17 +75,15 @@ jobs:
           TAG: ${{ needs.release.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # gh CLI is available in the container; use it so auth + asset name
-          # discovery are handled automatically regardless of exact filename.
-          gh release download "${TAG}" \
-            --repo simonepelosi/vibez \
-            --pattern "vibez_linux_amd64.tar.gz" \
-            --output vibez_amd64.tar.gz
+          RELEASE=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/simonepelosi/vibez/releases/tags/${TAG}")
+          ASSET_URL=$(echo "$RELEASE" | python3 -c \
+            "import sys,json; a=[x for x in json.load(sys.stdin).get('assets',[]) if 'linux_amd64' in x['name'] and x['name'].endswith('.tar.gz')]; print(a[0]['browser_download_url'] if a else '')")
+          if [ -z "$ASSET_URL" ]; then echo "Asset not found in release"; exit 1; fi
+          curl -fsSL -L -H "Authorization: Bearer ${GH_TOKEN}" "$ASSET_URL" -o vibez_amd64.tar.gz
 
-          url="https://github.com/simonepelosi/vibez/releases/download/${TAG}/vibez_linux_amd64.tar.gz"
           sha=$(sha256sum vibez_amd64.tar.gz | awk '{print $1}')
-          sed -i \
-            "/x86_64/{n; s|url:.*|url: ${url}|; n; s|sha256:.*|sha256: ${sha}|}" \
+          sed -i "/x86_64/{n; s|url:.*|url: ${ASSET_URL}|; n; s|sha256:.*|sha256: ${sha}|}" \
             flatpak/io.github.simonepelosi.vibez.yml
           sed -i "s|/v0\.0\.0/|/${TAG}/|g" flatpak/io.github.simonepelosi.vibez.yml
 
