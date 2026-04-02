@@ -75,6 +75,13 @@ type searchResultMsg struct {
 	result *provider.SearchResult
 	err    error
 }
+
+// searchDebounceMsg is emitted after the debounce delay. The gen field lets
+// Update discard messages that belong to earlier keystrokes.
+type searchDebounceMsg struct {
+	query string
+	gen   int
+}
 type vibeResultMsg struct {
 	query     string
 	tracks    []provider.Track
@@ -168,6 +175,7 @@ type Model struct {
 
 	// Search accumulation (mode == modeSearch)
 	searchQuery string
+	searchGen   int // incremented on every keystroke; used to discard stale results
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf     string
@@ -412,6 +420,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				state = "♥"
 			}
 			m.appendLog(fmt.Sprintf("[fav] %s %s synced to Apple Music", state, msg.title))
+		}
+
+	case searchDebounceMsg:
+		// Drop stale debounce ticks — only the latest keystroke wins.
+		if msg.gen != m.searchGen {
+			return m, nil
+		}
+		prov := m.provider
+		query := msg.query
+		return m, func() tea.Msg {
+			result, err := prov.Search(context.Background(), query)
+			return searchResultMsg{result: result, err: err}
 		}
 
 	case searchResultMsg:
@@ -966,12 +986,12 @@ func (m *Model) scheduleSearch(query string) tea.Cmd {
 		m.search.SetState(nil, false, nil)
 		return nil
 	}
+	m.searchGen++
+	gen := m.searchGen
 	m.search.SetState(nil, true, nil)
-	prov := m.provider
 	return func() tea.Msg {
-		time.Sleep(300 * time.Millisecond)
-		result, err := prov.Search(context.Background(), query)
-		return searchResultMsg{result: result, err: err}
+		time.Sleep(400 * time.Millisecond)
+		return searchDebounceMsg{query: query, gen: gen}
 	}
 }
 

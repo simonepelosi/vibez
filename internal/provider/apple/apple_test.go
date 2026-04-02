@@ -174,13 +174,16 @@ func TestSearch_CatalogTracksIncluded(t *testing.T) {
 }
 
 func TestSearch_UnplayableCatalogTracksDropped(t *testing.T) {
-	// Songs without playParams are radio-only and must be filtered out.
+	// Songs without playParams (radio-only) OR without extendedAssetUrls
+	// (purchase-only) must both be filtered out; only genuinely streamable
+	// tracks should reach the result list.
 	playable := songJSON("111", "Playable Song", "Artist A", "Album A", 200000, "")
-	unplayable := songJSONNoPlay("222", "Radio Song", "Artist B", "Album B", 200000)
+	noPlayParams := songJSONNoPlay("222", "Radio Song", "Artist B", "Album B", 200000)
+	purchaseOnly := songJSONNoStream("333", "Buy Only Song", "Artist C", "Album C", 200000)
 	libEmpty := map[string]any{"results": map[string]any{}}
 	catResp := map[string]any{
 		"results": map[string]any{
-			"songs":     map[string]any{"data": []any{playable, unplayable}},
+			"songs":     map[string]any{"data": []any{playable, noPlayParams, purchaseOnly}},
 			"albums":    map[string]any{"data": []any{}},
 			"playlists": map[string]any{"data": []any{}},
 		},
@@ -509,8 +512,9 @@ func songJSON(id, name, artist, album string, durationMs int, artURL string) map
 			"artwork":          map[string]any{"url": artURL, "width": 300, "height": 300},
 			"previews":         []any{},
 			"genreNames":       []string{},
-			// Catalog songs with playParams are definitively playable.
-			"playParams": map[string]any{"id": id, "kind": "song"},
+			// Catalog songs with playParams and extendedAssetUrls are streamable.
+			"playParams":        map[string]any{"id": id, "kind": "song"},
+			"extendedAssetUrls": map[string]any{"hlsMediaPlaylist": "https://hls.example.com/" + id + ".m3u8"},
 		},
 	}
 }
@@ -527,7 +531,29 @@ func songJSONNoPlay(id, name, artist, album string, durationMs int) map[string]a
 			"artwork":          map[string]any{"url": "", "width": 300, "height": 300},
 			"previews":         []any{},
 			"genreNames":       []string{},
-			// no playParams — should be filtered out by Search()
+			// no playParams — filtered out by Search()
+		},
+	}
+}
+
+// songJSONNoStream produces a catalog song with playParams but an explicit
+// empty extendedAssetUrls (purchase-only / not streamable with Apple Music
+// subscription). This is distinct from a nil/absent field, which means unknown.
+func songJSONNoStream(id, name, artist, album string, durationMs int) map[string]any {
+	return map[string]any{
+		"id": id,
+		"attributes": map[string]any{
+			"name":             name,
+			"artistName":       artist,
+			"albumName":        album,
+			"durationInMillis": durationMs,
+			"artwork":          map[string]any{"url": "", "width": 300, "height": 300},
+			"previews":         []any{},
+			"genreNames":       []string{},
+			// has playParams but extendedAssetUrls is explicitly empty —
+			// purchase-only, filtered out by Search()
+			"playParams":        map[string]any{"id": id, "kind": "song"},
+			"extendedAssetUrls": map[string]any{},
 		},
 	}
 }

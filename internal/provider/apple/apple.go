@@ -16,20 +16,25 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-const defaultBaseURL = "https://api.music.apple.com/v1"
+const (
+	defaultBaseURL    = "https://api.music.apple.com/v1"
+	defaultCatalogURL = "https://amp-api.music.apple.com/v1" // used for catalog search: returns extendedAssetUrls
+)
 
 type AppleProvider struct {
-	cfg     *config.Config
-	client  *http.Client
-	baseURL string
-	sf      string // cached storefront, populated on first use
+	cfg            *config.Config
+	client         *http.Client
+	baseURL        string
+	catalogBaseURL string
+	sf             string // cached storefront, populated on first use
 }
 
 func New(cfg *config.Config) *AppleProvider {
 	return &AppleProvider{
-		cfg:     cfg,
-		client:  &http.Client{Timeout: 15 * time.Second},
-		baseURL: defaultBaseURL,
+		cfg:            cfg,
+		client:         &http.Client{Timeout: 15 * time.Second},
+		baseURL:        defaultBaseURL,
+		catalogBaseURL: defaultCatalogURL,
 	}
 }
 
@@ -67,7 +72,12 @@ func (a *AppleProvider) storefront(ctx context.Context) (string, error) {
 func (a *AppleProvider) Name() string { return "apple" }
 
 // SetBaseURL overrides the API base URL. Intended for use in tests only.
-func (a *AppleProvider) SetBaseURL(url string) { a.baseURL = url }
+// It also sets catalogBaseURL to the same value so both sub-requests hit the
+// same test server.
+func (a *AppleProvider) SetBaseURL(url string) {
+	a.baseURL = url
+	a.catalogBaseURL = url
+}
 
 func (a *AppleProvider) IsAuthenticated() bool {
 	return a.cfg.AppleDeveloperToken != "" && a.cfg.AppleUserToken != ""
@@ -80,6 +90,21 @@ func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string)
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
 	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	return req, nil
+}
+
+// newCatalogRequest builds a request against the catalog (amp-api) base URL.
+// amp-api.music.apple.com is the endpoint used by the Apple Music web player;
+// unlike the standard API it returns extendedAssetUrls in search responses,
+// which lets us reliably detect purchase-only / region-locked tracks.
+func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, a.catalogBaseURL+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	req.Header.Set("Origin", "https://music.apple.com")
 	return req, nil
 }
 
@@ -123,6 +148,21 @@ type playParams struct {
 	CatalogID string `json:"catalogId"` // catalog ID for library songs — use this for playback
 }
 
+// extendedAssetURLs is returned when the catalog search is made with
+// extend=extendedAssetUrls. Its presence indicates that the song can actually
+// be streamed with an Apple Music subscription. Songs available only for
+// purchase (or unavailable in the user's storefront) will have this field nil.
+type extendedAssetURLs struct {
+	Plus             string `json:"plus"`
+	HLSMediaPlaylist string `json:"hlsMediaPlaylist"`
+	EnhancedHLS      string `json:"enhancedHls"`
+	LightTunnel      string `json:"lightTunnel"`
+}
+
+func (e *extendedAssetURLs) hasStream() bool {
+	return e != nil && (e.Plus != "" || e.HLSMediaPlaylist != "" || e.EnhancedHLS != "" || e.LightTunnel != "")
+}
+
 type songAttributes struct {
 	Name       string       `json:"name"`
 	ArtistName string       `json:"artistName"`
@@ -132,8 +172,9 @@ type songAttributes struct {
 	Previews   []struct {
 		URL string `json:"url"`
 	} `json:"previews"`
-	GenreNames []string    `json:"genreNames"`
-	PlayParams *playParams `json:"playParams"`
+	GenreNames        []string           `json:"genreNames"`
+	PlayParams        *playParams        `json:"playParams"`
+	ExtendedAssetURLs *extendedAssetURLs `json:"extendedAssetUrls"`
 }
 
 type songResource struct {
@@ -297,15 +338,17 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 
 	// Catalog: songs + albums + playlists. Library songs take priority;
 	// catalog songs fill in tracks not already owned by the user.
+	// amp-api.music.apple.com returns extendedAssetUrls in search results,
+	// which we use to filter purchase-only / region-locked songs.
 	go func() {
 		sf, err := a.storefront(ctx)
 		if err != nil {
 			catCh <- catOut{err: err}
 			return
 		}
-		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25",
+		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25&extend=extendedAssetUrls",
 			sf, url.QueryEscape(query))
-		req, err := a.newRequest(ctx, http.MethodGet, ep)
+		req, err := a.newCatalogRequest(ctx, http.MethodGet, ep)
 		if err != nil {
 			catCh <- catOut{err: err}
 			return
@@ -351,13 +394,19 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	// Songs without PlayParams are radio-only / unavailable and will always fail
 	// in MusicKit, so we drop them here before they can pollute the queue.
 	// We also require kind == "song" to exclude music videos, radio episodes, etc.
+	// Finally, we require extendedAssetUrls to be present and non-empty: songs
+	// that lack streaming URLs are purchase-only or unavailable in the user's
+	// storefront, so they would fail on playback too.
 	if cat.err == nil {
 		for _, s := range cat.songs {
 			if s.Attributes.PlayParams == nil {
-				continue // definitively unplayable — skip
+				continue
 			}
 			if s.Attributes.PlayParams.Kind != "song" {
-				continue // music video, radio, etc. — not streamable as a song
+				continue
+			}
+			if !s.Attributes.ExtendedAssetURLs.hasStream() {
+				continue
 			}
 			t := toTrack(s)
 			key := strings.ToLower(t.Artist) + "§" + strings.ToLower(t.Title)

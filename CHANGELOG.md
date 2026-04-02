@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   license), concise feature list, cleaner section layout.
 - CI badge now tracks the `ci.yml` test workflow instead of `release.yml`.
 - GoReleaser version pinned to `~> v2` (silences deprecation warning).
+- **Search quality**: catalog search now goes through `amp-api.music.apple.com`
+  (same endpoint as the Apple Music web player and Cider), which returns
+  `extendedAssetUrls` in results. Songs without streaming URLs — purchase-only
+  or region-locked tracks — are filtered out before they can appear in the list.
+- **Search debounce**: the API call now fires only after 400 ms of typing
+  inactivity. Intermediate keystrokes are discarded via a generation counter,
+  so rapid typing no longer triggers multiple parallel searches.
 
 ---
 
