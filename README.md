@@ -20,10 +20,11 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=flat-square" alt="Donate"></a>
+  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br>
+  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
 </p>
 
-[Installation](#installation) · [Usage](#usage) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
+[Installation](#installation) · [Usage](#usage) · [Features](#features) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
 
 ---
 
@@ -35,14 +36,58 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ## Features
 
-- 🎵 Browse your Apple Music library — playlists, albums, tracks
-- 🔍 Real-time search of the Apple Music catalog
-- 🎶 Full-track streaming via Chrome + Widevine DRM
-- 📋 Queue management — add with `tab`, skip with `n`/`p`
-- 🐻 Animated bear mascot that sleeps when idle and dances when music plays
-- 🖥️ MPRIS D-Bus — desktop media keys and notifications out of the box
-- ⌨️ Fully keyboard-driven TUI built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)
-- 🔌 Extensible provider architecture (Spotify, YouTube Music planned)
+### 🎵 Music Playback
+
+- **Full-track streaming** via headless Chrome + Widevine DRM — the real deal, not 30-second clips
+- **Automatic fallback** to WebKit + GStreamer (30 s previews) when Chrome is unavailable
+- **Playback controls** — play/pause, next, previous, volume up/down
+- **Repeat modes** — cycle through off, repeat-all, and repeat-one
+- **Shuffle** — randomise your queue with a single keypress
+
+### 🔍 Apple Music Integration
+
+- **Browse your library** — playlists, albums, and tracks all in one place
+- **Real-time catalog search** — find any song, album, or artist from the full Apple Music catalog as you type
+- **Secure authentication** — MusicKit OAuth flow via an embedded Chrome window
+
+### 📋 Queue Management
+
+- **Add tracks to queue** with `tab` from search or library
+- **Navigate the queue** — jump to any track or let it auto-advance
+- **Persistent queue panel** — toggle it on/off without losing your place
+
+### 🖥️ System Integration
+
+- **MPRIS D-Bus** — your desktop media keys (play, pause, next, previous) work out of the box
+- **Desktop notifications** — see the current track in your notification area
+- **No external player needed** — vibez is fully self-contained, no Cider, no VLC
+
+### 🌀 Vibe Mode
+
+- **Describe music in plain English** — press `v`, type your mood or activity ("late night coding", "Sunday morning chill"), and vibez builds a queue of matching tracks
+- **Keyword-based mood engine** — maps your description to a mood, energy level, genres, and multiple search query variants for variety
+- **Diverse results** — runs several searches and shuffles up to 15 tracks into your queue so it never feels repetitive
+- **Works for any occasion** — focus, workout, party, road trip, heartbreak, romance, and more
+
+### 🔭 Discovery Mode
+
+- **Continuous automatic queuing** — press `d` to turn on discovery mode; vibez finds similar tracks and adds them 30 seconds before each song ends, so the music never stops
+- **Adjustable similarity** — use `+`/`-` to dial between "same artist" (0.9) and "pure discovery" (0.0), giving you full control over how adventurous the next pick is
+- **Seed-aware** — the currently playing track is used as the seed; searches adapt progressively from same artist → same genre → completely random as similarity decreases
+- **Toggle anytime** — press `d` again to stop discovery and return to a manual queue
+
+### ⌨️ Terminal UI
+
+- **Fully keyboard-driven** — every action reachable without touching the mouse
+- **Vim-style command mode** — press `:` to run commands like `:save <name>` to save the queue as a playlist, or `:q` / `:quit` to exit
+- **Vim-style navigation** — `gg` to jump to top, `G` to jump to bottom, `j`/`k` for list scrolling in panels
+- **Animated bear mascot** 🐻 — sleeps when idle, dances when music is playing
+- **Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)** — a modern, composable TUI framework
+
+### 🔌 Extensibility
+
+- **Provider architecture** — the player core is decoupled from the music source
+- **More services coming** — Spotify, YouTube Music, Deezer, and Tidal are on the roadmap
 
 ---
 
@@ -109,6 +154,9 @@ vibez version           # print version
 | `-` | Volume down |
 | `r` | Cycle repeat (off → all → one) |
 | `s` | Toggle shuffle |
+| `f` | Heart / favourite current track |
+| `v` | Open vibe input (mood-driven search) |
+| `d` | Toggle discovery mode |
 | `/` | Open search |
 | `l` | Toggle library panel |
 | `q` | Toggle queue panel |
@@ -132,6 +180,39 @@ vibez version           # print version
 | `enter` | Open / play |
 | `tab` | Switch tab (Playlists / Albums / Tracks) |
 | `esc` | Back / close |
+
+### Queue (`q`)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate list |
+| `enter` | Play selected track |
+| `d` | Remove track from queue |
+| `K` | Move track up |
+| `J` | Move track down |
+| `c` | Clear entire queue |
+| `s` | Save queue as playlist (opens command prompt) |
+| `esc` | Close |
+
+### Command mode (`:`)
+
+Vim-style command mode — press `:` from anywhere to open the command prompt.
+
+| Command | Description |
+|---------|-------------|
+| `:save <name>` | Save the current queue as an Apple Music playlist |
+| `:debug-logs` | Toggle the debug log panel |
+| `:q` / `:quit` | Quit vibez |
+
+Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `tab` to autocomplete.
+
+### Discovery mode (`d`)
+
+| Key | Action |
+|-----|--------|
+| `+` / `=` | Increase similarity (stay closer to current artist / genre) |
+| `-` | Decrease similarity (explore further afield) |
+| `d` | Stop discovery mode |
 
 ---
 
