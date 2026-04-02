@@ -2,8 +2,9 @@
 
 // Package cdp provides an Apple Music player backed by a private Chrome
 // installation managed entirely by vibez. On first run, vibez downloads the
-// Google Chrome .deb (~130 MB) from Google's public CDN, extracts it with
-// dpkg-deb (no root required), and caches the result in ~/.cache/vibez/chrome/.
+// Google Chrome .deb (~130 MB) from Google's public CDN, extracts it without
+// requiring dpkg-deb or root (using a pure-Go ar parser + system tar), and
+// caches the result in ~/.cache/vibez/chrome/.
 // Subsequent launches use the cached binary instantly — no system packages,
 // no apt-get, no sudo, invisible to the rest of the OS.
 // Widevine CDM is bundled inside Chrome and is available automatically.
@@ -11,9 +12,12 @@ package cdp
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	playwright "github.com/playwright-community/playwright-go"
 )
@@ -83,12 +87,7 @@ func EnsureBrowser(onProgress func(string)) error {
 	defer os.Remove(debPath) //nolint:errcheck // best-effort cleanup of temp file
 
 	onProgress("Extracting Chromium drivers…")
-	if err := os.MkdirAll(chromeInstallDir(), 0o750); err != nil {
-		return fmt.Errorf("create chrome dir: %w", err)
-	}
-	// dpkg-deb --extract extracts the .deb payload without root.
-	cmd := exec.Command("dpkg-deb", "--extract", debPath, chromeInstallDir()) //nolint:gosec // paths are constructed internally
-	if err := cmd.Run(); err != nil {
+	if err := extractDeb(debPath, chromeInstallDir()); err != nil {
 		return fmt.Errorf("extract chrome: %w", err)
 	}
 
@@ -98,6 +97,80 @@ func EnsureBrowser(onProgress func(string)) error {
 	linkHelper()
 	onProgress("Chrome ready.")
 	return nil
+}
+
+// extractDeb unpacks the payload of a Debian .deb archive into destDir without
+// requiring dpkg-deb (which is absent in sandboxed environments like Flatpak).
+//
+// A .deb is an ar(1) archive containing three members:
+//
+//	debian-binary   — format version ("2.0\n")
+//	control.tar.*   — package metadata (ignored here)
+//	data.tar.*      — the actual filesystem payload (xz / gz / zst / bz2)
+//
+// We parse the ar header in pure Go to locate data.tar.*, write it to a
+// temporary file, then delegate decompression+extraction to system tar, which
+// auto-detects the compression format and is guaranteed to be present on any
+// Linux system (including the GNOME Platform Flatpak runtime).
+func extractDeb(debPath, destDir string) error {
+	f, err := os.Open(debPath) //nolint:gosec // path constructed from cache dir
+	if err != nil {
+		return fmt.Errorf("open deb: %w", err)
+	}
+	defer f.Close() //nolint:errcheck
+
+	// Verify the ar magic header.
+	magic := make([]byte, 8)
+	if _, err := io.ReadFull(f, magic); err != nil || string(magic) != "!<arch>\n" {
+		return fmt.Errorf("not a valid ar archive")
+	}
+
+	// Walk ar entries (each header is exactly 60 bytes).
+	hdr := make([]byte, 60)
+	for {
+		if _, err := io.ReadFull(f, hdr); err != nil {
+			break // EOF — data.tar.* was not found
+		}
+		name := strings.TrimRight(string(hdr[:16]), " ")
+		size, _ := strconv.ParseInt(strings.TrimRight(string(hdr[48:58]), " "), 10, 64)
+
+		if strings.HasPrefix(name, "data.tar") {
+			// Write the embedded data.tar.* into a sibling temp file so that
+			// tar can seek it (some tar builds require a seekable input).
+			tmp, err := os.CreateTemp(filepath.Dir(debPath), "vibez-data.tar.*")
+			if err != nil {
+				return fmt.Errorf("create temp: %w", err)
+			}
+			tmpPath := tmp.Name()
+			defer os.Remove(tmpPath) //nolint:errcheck
+
+			if _, err := io.CopyN(tmp, f, size); err != nil {
+				_ = tmp.Close()
+				return fmt.Errorf("write data tar: %w", err)
+			}
+			_ = tmp.Close()
+
+			if err := os.MkdirAll(destDir, 0o750); err != nil {
+				return fmt.Errorf("create dest dir: %w", err)
+			}
+			// tar auto-detects xz / gz / zst / bz2 via the file's magic bytes.
+			cmd := exec.Command("tar", "-xf", tmpPath, "-C", destDir) //nolint:gosec
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("tar extract: %w\n%s", err, out)
+			}
+			return nil
+		}
+
+		// Skip this entry's data (ar pads entries to even offsets).
+		skip := size
+		if skip%2 != 0 {
+			skip++
+		}
+		if _, err := f.Seek(skip, io.SeekCurrent); err != nil {
+			return fmt.Errorf("seek past entry: %w", err)
+		}
+	}
+	return fmt.Errorf("data.tar.* member not found in %s", filepath.Base(debPath))
 }
 
 // runPlaywright starts the Playwright driver backed by our cached Chrome.

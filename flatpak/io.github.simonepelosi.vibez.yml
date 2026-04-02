@@ -27,8 +27,9 @@ finish-args:
   - --socket=session-bus
   - --talk-name=org.mpris.MediaPlayer2.*
   - --own-name=org.mpris.MediaPlayer2.vibez
-  # Playwright-managed Chrome is downloaded here on first run.
-  # Flatpak remaps $XDG_CACHE_HOME → ~/.var/app/APP_ID/cache/ automatically.
+  # Chrome is downloaded and extracted here on first run (pure-Go ar parser +
+  # system tar — no dpkg-deb required). Flatpak remaps $XDG_CACHE_HOME →
+  # ~/.var/app/APP_ID/cache/ automatically, so this maps to the host path.
   - --filesystem=xdg-cache/vibez:create
   # Config and auth tokens
   - --filesystem=xdg-config/vibez:create
