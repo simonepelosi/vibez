@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   license), concise feature list, cleaner section layout.
 - CI badge now tracks the `ci.yml` test workflow instead of `release.yml`.
 - GoReleaser version pinned to `~> v2` (silences deprecation warning).
-- **Search quality**: catalog search now goes through `amp-api.music.apple.com`
+- **Flatpak Chrome extraction**: replaced `dpkg-deb` (unavailable in the
+  GNOME Platform sandbox) with a pure-Go `ar(1)` parser + system `tar`.
+  Chrome no longer re-downloads on every launch inside Flatpak.
+- Added unit tests for `extractDeb`: synthetic `.deb` fixtures are built
+  in-process (Go `archive/tar` + `compress/gzip` + hand-written ar writer),
+  covering basic extraction, control.tar skipping, multi-file payloads,
+  invalid magic, and missing `data.tar.*`.
   (same endpoint as the Apple Music web player and Cider), which returns
   `extendedAssetUrls` in results. Songs without streaming URLs — purchase-only
   or region-locked tracks — are filtered out before they can appear in the list.
