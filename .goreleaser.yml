@@ -15,6 +15,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - PKG_CONFIG_PATH={{ .Env.PROJECT_DIR }}/pkg-config
+      - GOTOOLCHAIN=local
     goos:
       - linux
     goarch:
