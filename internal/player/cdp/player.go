@@ -38,9 +38,10 @@ type Player struct {
 	page    playwright.Page
 	srv     *http.Server
 
-	mu    sync.RWMutex
-	state player.State
-	subs  []chan player.State
+	mu                 sync.RWMutex
+	state              player.State
+	subs               []chan player.State
+	sessionExpiredOnce sync.Once
 
 	readyCh chan struct{}
 	errCh   chan error
@@ -187,7 +188,8 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		"goNeedsAuth": func(args ...any) any {
 			if len(args) > 0 {
 				if reason, ok := args[0].(string); ok && reason == "expired" && p.OnSessionExpired != nil {
-					p.OnSessionExpired()
+					// Use Once so multiple simultaneous API failures only trigger one re-auth.
+					p.sessionExpiredOnce.Do(func() { p.OnSessionExpired() })
 				}
 			}
 			return nil
@@ -284,6 +286,19 @@ func (p *Player) sendError(err error) {
 		default:
 		}
 	}
+}
+
+// SetUserToken injects a fresh user token into the running MusicKit.js page
+// so playback can resume without restarting the browser.
+func (p *Player) SetUserToken(token string) error {
+	_, err := p.page.Evaluate(fmt.Sprintf(`MusicKit.getInstance().musicUserToken = %q`, token))
+	return err
+}
+
+// ResetSessionExpired allows OnSessionExpired to fire again after a successful
+// re-authentication (in case the token expires a second time).
+func (p *Player) ResetSessionExpired() {
+	p.sessionExpiredOnce = sync.Once{}
 }
 
 func (p *Player) sendLog(msg string) {
