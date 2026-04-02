@@ -15,9 +15,7 @@
   <a href="https://github.com/simonepelosi/vibez/blob/main/LICENSE"><img src="https://img.shields.io/github/license/simonepelosi/vibez?style=flat-square" alt="License"></a>
 </p>
 
-<p align="center">
-  <a href="#installation">Installation</a> · <a href="#usage">Usage</a> · <a href="#configuration">Configuration</a> · <a href="#key-bindings">Key Bindings</a> · <a href="#roadmap">Roadmap</a>
-</p>
+[Installation](#installation) · [Usage](#usage) · [Configuration](#configuration) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
 
 ---
 
