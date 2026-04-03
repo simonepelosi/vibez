@@ -20,8 +20,18 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit
+        run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config pre-commit run --all-files
 
       - name: Build
         run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config go build ./...
