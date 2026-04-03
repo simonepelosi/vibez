@@ -36,7 +36,7 @@ func TestRenderBearLine_Sleeping_ContainsZzz(t *testing.T) {
 }
 
 func TestRenderBearLine_CyclesFrames_NoPanic(t *testing.T) {
-	for step := 0; step < 60; step++ {
+	for step := range 60 {
 		_ = RenderBearLine(step, true)
 		_ = RenderBearLine(step, false)
 	}
@@ -59,7 +59,7 @@ func TestBearExpr_Sleeping_NonEmpty(t *testing.T) {
 }
 
 func TestBearExpr_CyclesNoPanic(t *testing.T) {
-	for step := 0; step < 120; step++ {
+	for step := range 120 {
 		_ = BearExpr(step, true)
 		_ = BearExpr(step, false)
 	}
@@ -91,7 +91,7 @@ func TestRenderBear_ContainsBearLines(t *testing.T) {
 }
 
 func TestRenderBear_CyclesNoPanic(t *testing.T) {
-	for step := 0; step < 60; step++ {
+	for step := range 60 {
 		_ = RenderBear(step, true, 80)
 		_ = RenderBear(step, false, 80)
 	}
