@@ -30,4 +30,8 @@ jobs:
         run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config go vet ./...
 
       - name: Test
-        run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config go test ./...
+        run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config go test -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out | tail -1 | awk '{print "Total coverage: " $3}' >> $GITHUB_STEP_SUMMARY
