@@ -237,6 +237,14 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 			p.sendError(fmt.Errorf("musickit: %s", msg))
 			return nil
 		},
+		"goSkipped": func(args ...any) any {
+			id := ""
+			if len(args) > 0 {
+				id, _ = args[0].(string)
+			}
+			p.sendSkipped(id)
+			return nil
+		},
 		"goLog": func(args ...any) any {
 			msg := ""
 			if len(args) > 0 {
@@ -278,6 +286,20 @@ func (p *Player) sendError(err error) {
 	p.mu.Lock()
 	p.state.Error = err.Error()
 	s := p.state
+	subs := p.subs
+	p.mu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- s:
+		default:
+		}
+	}
+}
+
+func (p *Player) sendSkipped(id string) {
+	p.mu.Lock()
+	s := p.state
+	s.SkippedID = id
 	subs := p.subs
 	p.mu.Unlock()
 	for _, ch := range subs {

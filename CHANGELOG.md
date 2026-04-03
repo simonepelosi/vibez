@@ -11,6 +11,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.3] — 2026-04-09
+
+### Fixed
+- **Discovery: unavailable / CONTENT_RESTRICTED tracks** — when Apple Music marks a
+  discovery track as unavailable or restricted, vibez now:
+  - receives a `goSkipped` notification from the JavaScript layer and records the
+    track ID in a per-session blacklist so it is never proposed again;
+  - purges the entire current queue of any blacklisted entries (not just the one that
+    just triggered the notification);
+  - filters blacklisted and already-queued IDs out of incoming search results before
+    they are added to the queue (handles races where a track is blacklisted while a
+    search is in flight, and prevents duplicate proposals);
+  - immediately re-arms discovery so a fresh replacement is fetched without
+    interrupting playback.
+- **Discovery: stricter streamability filter** — the catalog search now only keeps
+  tracks where `extendedAssetUrls.plus` is present. This field specifically indicates
+  that a song can be streamed with an Apple Music subscription; the other URL fields
+  (`hlsMediaPlaylist`, `enhancedHls`, `lightTunnel`) can be present for purchase-only
+  tracks that would still fail at playback time.
+- **Discovery: deduplication against the current queue** — discovery searches now
+  snapshot the full queue at call time and exclude any track (by ID or artist/title)
+  that is already queued, preventing the same song from being proposed twice.
+- **Discovery: circuit breaker** — if discovery cannot find a fresh playable candidate
+  after 5 consecutive retries it stops re-arming itself and logs a notice, preventing
+  an infinite loop in edge cases where the search consistently returns blocked content.
+- **Discovery trigger timing** — the background search now fires as soon as the last
+  item in the queue starts playing, instead of 30 seconds before the end of any track.
+  This gives discovery the maximum possible time to find a replacement before the queue
+  runs dry. Trigger timing will be fully configurable in a future release.
+- **Command-mode tab crash** — pressing `tab` after navigating the suggestion list and
+  then narrowing the query no longer panics with `index out of range`.
+
+---
+
 ## [0.0.2] — 2026-04-02
 
 ### Added

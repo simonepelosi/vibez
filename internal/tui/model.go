@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"time"
 
@@ -131,13 +132,16 @@ const introDone = -1
 type discoveryMode struct {
 	enabled        bool
 	seed           *provider.Track
-	similarity     float64 // 0.0–1.0
-	refilling      bool    // background search in progress
-	triggeredForID string  // ID of track for which we already fired a search
+	similarity     float64         // 0.0–1.0
+	refilling      bool            // background search in progress
+	triggeredForID string          // ID of track for which we already fired a search
+	skipped        map[string]bool // IDs/keys of tracks skipped due to unavailability
+	retries        int             // consecutive failed refill attempts (circuit breaker)
 }
 
+const discoveryMaxRetries = 5 // give up re-arming after this many consecutive failures
+
 const (
-	discoveryTriggerBefore  = 30 * time.Second // queue next song this long before track ends
 	discoverySimilarityStep = 0.1
 )
 
@@ -336,6 +340,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			s.Error = ""
 		}
+		if s.SkippedID != "" {
+			// JS silently skipped a track (CONTENT_RESTRICTED / unavailable).
+			// Record the ID in the discovery blacklist so it won't be proposed
+			// again this session, purge ALL blacklisted entries from the queue
+			// (there may be duplicates from earlier discovery cycles), then
+			// re-arm discovery so music keeps flowing without interruption.
+			skippedID := s.SkippedID
+			s.SkippedID = ""
+			if m.discovery.skipped == nil {
+				m.discovery.skipped = make(map[string]bool)
+			}
+			m.discovery.skipped[skippedID] = true
+			m.purgeSkippedFromQueue()
+			if m.discovery.enabled && !m.discovery.refilling &&
+				m.discovery.retries < discoveryMaxRetries {
+				m.discovery.retries++
+				m.discovery.triggeredForID = ""
+				m.discovery.refilling = true
+				m.syncDiscoveryView()
+				cmds = append(cmds, m.runDiscoverySearch())
+			} else if m.discovery.retries >= discoveryMaxRetries {
+				m.appendLog("[discovery] max retries reached — giving up")
+			}
+		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
 			// Log playParams so we can confirm which ID path MusicKit will use.
@@ -351,11 +379,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
 		}
-		// Discovery: queue the next song 30 s before the current track ends.
-		// We guard with triggeredForID so the search fires exactly once per track.
+		// Discovery: fire as soon as the last track in the queue starts playing.
+		// Triggering at the start of the last track gives the search the maximum
+		// possible time to complete before the queue runs dry.
+		// triggeredForID ensures we fire exactly once per track.
+		isLastQueued := len(m.queueTracks) > 0 && s.Track != nil &&
+			views.PlaybackID(*s.Track) == views.PlaybackID(m.queueTracks[len(m.queueTracks)-1])
 		if m.discovery.enabled && !m.discovery.refilling &&
-			s.Track != nil && s.Track.Duration > discoveryTriggerBefore &&
-			s.Position >= s.Track.Duration-discoveryTriggerBefore &&
+			isLastQueued &&
 			m.discovery.triggeredForID != s.Track.ID {
 			m.discovery.triggeredForID = s.Track.ID
 			m.discovery.refilling = true
@@ -385,30 +416,79 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.vibe.SetResult(0, msg.err)
 			}
 			m.appendLog(fmt.Sprintf("[vibe] search error: %v", msg.err))
-		} else {
-			ids := make([]string, len(msg.tracks))
-			for i, t := range msg.tracks {
-				ids[i] = views.PlaybackID(t)
-			}
-			if m.player != nil {
-				if err := m.player.AppendQueue(ids); err != nil {
-					if !msg.discovery {
-						m.vibe.SetResult(0, err)
-					}
-					break
-				}
-			}
-			m.queueTracks = append(m.queueTracks, msg.tracks...)
-			m.queueIDs = append(m.queueIDs, ids...)
-			m.queue.SetTracks(m.queueTracks)
 			if msg.discovery {
 				m.discovery.refilling = false
 				m.syncDiscoveryView()
-				m.appendLog(fmt.Sprintf("[discovery] refilled %d tracks", len(msg.tracks)))
-			} else {
-				m.vibe.SetResult(len(msg.tracks), nil)
-				m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(msg.tracks), msg.query))
 			}
+			break
+		}
+		// For discovery results, drop any track that arrived in the blacklist
+		// while the search was in flight (race between search goroutine and a
+		// concurrent goSkipped notification), and also drop any track already
+		// present in the queue (dedup by ID and artist||title).
+		tracks := msg.tracks
+		if msg.discovery {
+			filtered := tracks[:0]
+			for _, t := range tracks {
+				id := views.PlaybackID(t)
+				key := strings.ToLower(t.Artist + "||" + t.Title)
+				if m.discovery.skipped[id] {
+					continue
+				}
+				dup := slices.Contains(m.queueIDs, id)
+				if !dup {
+					for _, qt := range m.queueTracks {
+						if strings.ToLower(qt.Artist+"||"+qt.Title) == key {
+							dup = true
+							break
+						}
+					}
+				}
+				if !dup {
+					filtered = append(filtered, t)
+				}
+			}
+			tracks = filtered
+		}
+		if len(tracks) == 0 {
+			if msg.discovery && m.discovery.retries < discoveryMaxRetries {
+				m.discovery.retries++
+				m.discovery.refilling = true
+				m.syncDiscoveryView()
+				cmds = append(cmds, m.runDiscoverySearch())
+			} else {
+				if msg.discovery {
+					m.discovery.refilling = false
+					m.syncDiscoveryView()
+				} else {
+					m.vibe.SetResult(0, fmt.Errorf("no streamable results"))
+				}
+			}
+			break
+		}
+		ids := make([]string, len(tracks))
+		for i, t := range tracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		if m.player != nil {
+			if err := m.player.AppendQueue(ids); err != nil {
+				if !msg.discovery {
+					m.vibe.SetResult(0, err)
+				}
+				break
+			}
+		}
+		m.queueTracks = append(m.queueTracks, tracks...)
+		m.queueIDs = append(m.queueIDs, ids...)
+		m.queue.SetTracks(m.queueTracks)
+		if msg.discovery {
+			m.discovery.refilling = false
+			m.discovery.retries = 0 // successful refill — reset circuit breaker
+			m.syncDiscoveryView()
+			m.appendLog(fmt.Sprintf("[discovery] refilled %d tracks", len(tracks)))
+		} else {
+			m.vibe.SetResult(len(tracks), nil)
+			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(tracks), msg.query))
 		}
 
 	case loveSongMsg:
@@ -636,6 +716,9 @@ func (m *Model) handleCommandKey(k string) tea.Cmd {
 	case "tab":
 		suggs := m.commandSuggestions()
 		if len(suggs) > 0 {
+			if m.cmdSuggIdx >= len(suggs) {
+				m.cmdSuggIdx = len(suggs) - 1
+			}
 			m.cmdBuf = suggs[m.cmdSuggIdx].usage
 			if idx := strings.Index(m.cmdBuf, " <"); idx >= 0 {
 				m.cmdBuf = m.cmdBuf[:idx+1]
@@ -644,7 +727,7 @@ func (m *Model) handleCommandKey(k string) tea.Cmd {
 	case "up", "ctrl+p":
 		suggs := m.commandSuggestions()
 		if len(suggs) > 0 {
-			m.cmdSuggIdx = max(0, m.cmdSuggIdx-1)
+			m.cmdSuggIdx = max(0, min(len(suggs)-1, m.cmdSuggIdx)-1)
 		}
 	case "down", "ctrl+n":
 		suggs := m.commandSuggestions()
@@ -1121,6 +1204,34 @@ func (m *Model) syncDiscoveryView() {
 	m.vibe.SetDiscovery(info)
 }
 
+// purgeSkippedFromQueue removes every queued track whose PlaybackID appears in
+// the discovery skip blacklist. It also tells the JS player to remove those
+// slots so both sides stay in sync. Iterates from the end so index removal
+// doesn't shift the positions of entries not yet processed.
+func (m *Model) purgeSkippedFromQueue() {
+	if len(m.discovery.skipped) == 0 {
+		return
+	}
+	changed := false
+	for i := len(m.queueIDs) - 1; i >= 0; i-- {
+		if !m.discovery.skipped[m.queueIDs[i]] {
+			continue
+		}
+		m.appendLog(fmt.Sprintf("[skip] removing from queue: %s — %s",
+			m.queueTracks[i].Artist, m.queueTracks[i].Title))
+		if m.player != nil {
+			idx := i // capture for closure
+			_ = m.player.RemoveFromQueue(idx)
+		}
+		m.queueTracks = slices.Delete(m.queueTracks, i, i+1)
+		m.queueIDs = slices.Delete(m.queueIDs, i, i+1)
+		changed = true
+	}
+	if changed {
+		m.queue.SetTracks(m.queueTracks)
+	}
+}
+
 // runDiscoverySearch builds search queries from the seed track and similarity
 // value, fetches results in parallel, and returns a vibeResultMsg tagged as a
 // discovery refill so the model knows not to update the vibe panel state.
@@ -1133,6 +1244,21 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 	prov := m.provider
 	queries := discoveryQueries(seed, similarity)
 	m.appendLog(fmt.Sprintf("[discovery] queries (sim=%.0f%%): %v", similarity*100, queries))
+
+	// Snapshot both the skip blacklist and the already-queued set so the
+	// goroutine can filter without racing on the model's maps/slices.
+	exclude := make(map[string]bool, len(m.discovery.skipped)+len(m.queueIDs))
+	for k := range m.discovery.skipped {
+		exclude[k] = true
+	}
+	for _, id := range m.queueIDs {
+		exclude[id] = true
+	}
+	// Also exclude by normalised artist||title to catch the same song under
+	// a different ID (e.g. library vs catalog copy).
+	for _, t := range m.queueTracks {
+		exclude[strings.ToLower(t.Artist+"||"+t.Title)] = true
+	}
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1158,7 +1284,11 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		for _, ch := range chs {
 			r := <-ch
 			for _, t := range r.tracks {
+				id := views.PlaybackID(t)
 				key := strings.ToLower(t.Artist + "||" + t.Title)
+				if exclude[id] || exclude[key] {
+					continue // already queued, skipped, or blacklisted
+				}
 				if !seen[key] {
 					seen[key] = true
 					merged = append(merged, t)

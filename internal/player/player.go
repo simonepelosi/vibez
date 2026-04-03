@@ -23,6 +23,7 @@ type State struct {
 	ShuffleMode bool    // true = shuffle on
 	Error       string  // non-empty when JS reports a playback error
 	Log         string  // non-empty for debug-only log entries (not shown in status bar)
+	SkippedID   string  // catalog/library ID of a track JS silently skipped (unavailable/restricted)
 }
 
 type Player interface {

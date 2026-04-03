@@ -512,9 +512,9 @@ func songJSON(id, name, artist, album string, durationMs int, artURL string) map
 			"artwork":          map[string]any{"url": artURL, "width": 300, "height": 300},
 			"previews":         []any{},
 			"genreNames":       []string{},
-			// Catalog songs with playParams and extendedAssetUrls are streamable.
+			// Catalog songs with playParams and extendedAssetUrls.plus are streamable
 			"playParams":        map[string]any{"id": id, "kind": "song"},
-			"extendedAssetUrls": map[string]any{"hlsMediaPlaylist": "https://hls.example.com/" + id + ".m3u8"},
+			"extendedAssetUrls": map[string]any{"plus": "https://aod.itunes.apple.com/itunes-assets/" + id},
 		},
 	}
 }
