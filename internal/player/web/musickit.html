@@ -15,8 +15,8 @@
     Go ↔ JS bridge:
       Go → JS : page.Evaluate for vibez*() commands
       JS → Go : goNeedsAuth, goAuthComplete, goPlayerStateChange,
-                goUserTokenChanged, goStorefrontChanged, goStreamURL*, goError
-                (* GStreamer mode only)
+                goUserTokenChanged, goStorefrontChanged, goStreamURL*, goError,
+                goSkipped (* GStreamer mode only for goStreamURL)
 
     IMPORTANT: the musickitloaded listener MUST be registered before the
     musickit.js <script> tag — MusicKit dispatches the event synchronously
@@ -252,6 +252,7 @@
           if (item.id.startsWith('i.')) {
             // Already using a library item and still failing — nothing left to try.
             _log(`[js:doPlay] library item still failing → skip #${idx+1}`);
+            goSkipped(item.id).catch(() => {});
             if (idx + 1 < _q.length) _wantIdx = idx + 1;
             return;
           }
@@ -270,6 +271,7 @@
             } catch(_) {}
           }
           _log(`[js:doPlay] no library copy → skip #${idx+1}`);
+          goSkipped(item.id).catch(() => {});
           if (idx + 1 < _q.length) _wantIdx = idx + 1;
         }
 

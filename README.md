@@ -71,7 +71,7 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ### 🔭 Discovery Mode
 
-- **Continuous automatic queuing** — press `d` to turn on discovery mode; vibez finds similar tracks and adds them 30 seconds before each song ends, so the music never stops
+- **Continuous automatic queuing** — press `d` to turn on discovery mode; vibez finds a similar track as soon as the last song in the queue starts playing, so the music never stops. Trigger timing will be fully configurable in a future release
 - **Adjustable similarity** — use `+`/`-` to dial between "same artist" (0.9) and "pure discovery" (0.0), giving you full control over how adventurous the next pick is
 - **Seed-aware** — the currently playing track is used as the seed; searches adapt progressively from same artist → same genre → completely random as similarity decreases
 - **Toggle anytime** — press `d` again to stop discovery and return to a manual queue

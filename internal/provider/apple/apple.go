@@ -160,7 +160,11 @@ type extendedAssetURLs struct {
 }
 
 func (e *extendedAssetURLs) hasStream() bool {
-	return e != nil && (e.Plus != "" || e.HLSMediaPlaylist != "" || e.EnhancedHLS != "" || e.LightTunnel != "")
+	// Only the `plus` field signals that a song is streamable with an Apple
+	// Music subscription. The other fields (hlsMediaPlaylist, enhancedHls,
+	// lightTunnel) may be present for purchase-only or preview-only tracks
+	// that will still fail with CONTENT_RESTRICTED at playback time.
+	return e != nil && e.Plus != ""
 }
 
 type songAttributes struct {
