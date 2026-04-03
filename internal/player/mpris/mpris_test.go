@@ -281,7 +281,9 @@ conn:           conn,
 busName:        busName,
 playbackStatus: "Paused",
 volume:         0.5,
-metadata:       map[string]dbus.Variant{},
+metadata:       map[string]dbus.Variant{
+		"mpris:trackid": dbus.MakeVariant(dbus.ObjectPath("/org/mpris/MediaPlayer2/TrackList/NoTrack")),
+	},
 }
 
 // Export root and player objects.
