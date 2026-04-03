@@ -253,3 +253,50 @@ func TestSave_WriteError(t *testing.T) {
 		t.Error("expected error when directory is read-only, got nil")
 	}
 }
+
+// --- normalize called via Load ---
+
+func TestLoad_NormalizesOnLoad(t *testing.T) {
+dir := t.TempDir()
+path := filepath.Join(dir, "config.json")
+
+// Write a config with 0 AuthPort and empty Provider — normalize should fix both.
+raw := `{"auth_port": 0, "provider": "", "storefront": "us"}`
+if err := os.WriteFile(path, []byte(raw), 0o600); err != nil { //nolint:gosec // test fixture
+t.Fatal(err)
+}
+
+cfg, err := config.Load(path)
+if err != nil {
+t.Fatalf("Load: %v", err)
+}
+if cfg.AuthPort != 7777 {
+t.Errorf("AuthPort = %d, want 7777 (normalize should have set it)", cfg.AuthPort)
+}
+if cfg.Provider != "apple" {
+t.Errorf("Provider = %q, want 'apple' (normalize should have set it)", cfg.Provider)
+}
+}
+
+// --- Save with override path ---
+
+func TestSave_WithOverridePath(t *testing.T) {
+dir := t.TempDir()
+path := filepath.Join(dir, "override-config.json")
+cfg := &config.Config{AuthPort: 1234, Provider: "apple", StoreFront: "gb"}
+if err := cfg.Save(path); err != nil {
+t.Fatalf("Save: %v", err)
+}
+// Verify file exists and is valid JSON.
+data, err := os.ReadFile(path) //nolint:gosec // test fixture
+if err != nil {
+t.Fatalf("ReadFile: %v", err)
+}
+var loaded config.Config
+if err := json.Unmarshal(data, &loaded); err != nil {
+t.Fatalf("Unmarshal: %v", err)
+}
+if loaded.AuthPort != 1234 {
+t.Errorf("AuthPort = %d, want 1234", loaded.AuthPort)
+}
+}
