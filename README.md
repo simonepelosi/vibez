@@ -105,17 +105,6 @@ You can also inspect the script before running it — that's always a good idea.
 
 > **Custom install dir:** `VIBEZ_INSTALL_DIR=/usr/local/bin curl ... | sh`
 
-### Flatpak
-
-Download `vibez.flatpak` from the [Releases](https://github.com/simonepelosi/vibez/releases) page:
-
-```bash
-flatpak install --user vibez.flatpak
-flatpak run io.github.simonepelosi.vibez
-```
-
-> Bundles all native dependencies (WebKitGTK, GStreamer). Chrome (~150 MB) is downloaded automatically on first run.
-
 ### From source
 
 ```bash
