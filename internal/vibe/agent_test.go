@@ -214,6 +214,112 @@ func TestToSearchQuery_PhraseKeyword(t *testing.T) {
 	}
 }
 
+// --- ToSearchQueries tests ---
+
+func TestToSearchQueries_UnknownVibeUsesKeywords(t *testing.T) {
+	a := newAgent()
+	v := &vibe.Vibe{
+		Mood:     "unknown",
+		Keywords: []string{"jazzy", "funk"},
+	}
+	queries := a.ToSearchQueries(v)
+	if len(queries) != 1 {
+		t.Fatalf("ToSearchQueries(unknown) = %d results, want 1", len(queries))
+	}
+	if queries[0] != "jazzy funk" {
+		t.Errorf("query = %q, want %q", queries[0], "jazzy funk")
+	}
+}
+
+func TestToSearchQueries_NoGenresFallsBackToMood(t *testing.T) {
+	a := newAgent()
+	v := &vibe.Vibe{
+		Mood:   "chill",
+		Genres: []string{},
+	}
+	queries := a.ToSearchQueries(v)
+	if len(queries) != 1 {
+		t.Fatalf("ToSearchQueries(no genres) = %d results, want 1", len(queries))
+	}
+	if queries[0] != "chill" {
+		t.Errorf("query = %q, want %q", queries[0], "chill")
+	}
+}
+
+func TestToSearchQueries_MatchedVibeReturnsMultiple(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("coding session tonight")
+	queries := a.ToSearchQueries(v)
+	if len(queries) < 2 {
+		t.Errorf("ToSearchQueries(coding) = %d queries, want >= 2", len(queries))
+	}
+}
+
+func TestToSearchQueries_ContainsGenres(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("gym heavy set")
+	queries := a.ToSearchQueries(v)
+
+	// At least one of the genre terms should appear in the results.
+	found := false
+	for _, q := range queries {
+		for _, g := range v.Genres {
+			if strings.Contains(q, g) || q == g {
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	if !found {
+		t.Errorf("ToSearchQueries(gym) %v does not contain any known genre", queries)
+	}
+}
+
+func TestToSearchQueries_GymVibeIncludesTerms(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("gym workout")
+	queries := a.ToSearchQueries(v)
+	if len(queries) == 0 {
+		t.Fatal("ToSearchQueries returned empty slice")
+	}
+}
+
+func TestToSearchQueries_ChillVibeIncludesTerms(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("chill relax")
+	queries := a.ToSearchQueries(v)
+	if len(queries) < 2 {
+		t.Errorf("expected >= 2 queries for chill vibe, got %d: %v", len(queries), queries)
+	}
+}
+
+func TestToSearchQueries_PartyVibeIncludesTerms(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("party hype")
+	queries := a.ToSearchQueries(v)
+	if len(queries) == 0 {
+		t.Fatal("ToSearchQueries returned empty slice for party vibe")
+	}
+}
+
+func TestToSearchQueries_NeverReturnsNil(t *testing.T) {
+	a := newAgent()
+	keywords := []string{"coding", "gym", "chill", "party", "sad", "morning", "unknown-input-xyz"}
+	for _, kw := range keywords {
+		v := a.Parse(kw)
+		q := a.ToSearchQueries(v)
+		if q == nil {
+			t.Errorf("ToSearchQueries(%q) returned nil", kw)
+		}
+		if len(q) == 0 {
+			t.Errorf("ToSearchQueries(%q) returned empty slice", kw)
+		}
+	}
+}
+
 // --- helpers ---
 
 func containsGenre(genres []string, want string) bool {

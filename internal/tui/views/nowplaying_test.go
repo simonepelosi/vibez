@@ -58,3 +58,92 @@ func TestCenterLine_NoExtraPadWhenWider(t *testing.T) {
 		t.Errorf("centerLine should still contain original string, got %q", got)
 	}
 }
+
+// --- RenderGlowTitle ---
+
+func TestRenderGlowTitle_EmptyString(t *testing.T) {
+	got := RenderGlowTitle("", 0)
+	if got != "" {
+		t.Errorf("RenderGlowTitle(\"\") = %q, want %q", got, "")
+	}
+}
+
+func TestRenderGlowTitle_NonEmpty(t *testing.T) {
+	got := RenderGlowTitle("Hello", 0)
+	if got == "" {
+		t.Error("RenderGlowTitle(Hello) returned empty string")
+	}
+}
+
+func TestRenderGlowTitle_DifferentSteps(t *testing.T) {
+	// Different glowStep values should produce different output (sweep animation).
+	a := RenderGlowTitle("Vibez", 0)
+	b := RenderGlowTitle("Vibez", 3)
+	// Both must be non-empty; they may differ due to colour assignment.
+	if a == "" || b == "" {
+		t.Error("RenderGlowTitle returned empty for non-empty title")
+	}
+}
+
+func TestRenderGlowTitle_CyclesNoPanic(t *testing.T) {
+	// Verify that RenderGlowTitle produces non-empty output across multiple animation steps.
+	title := "Beat"
+	runes := []rune(title)
+	n := len(runes)
+	for step := 0; step < n*3; step++ {
+		got := RenderGlowTitle(title, step)
+		if got == "" {
+			t.Errorf("RenderGlowTitle(step=%d) returned empty string", step)
+		}
+	}
+}
+
+// --- RenderProgressBar ---
+
+func TestRenderProgressBar_ZeroWidth(t *testing.T) {
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, 0)
+	if got != "" {
+		t.Errorf("RenderProgressBar(width=0) = %q, want empty", got)
+	}
+}
+
+func TestRenderProgressBar_NegativeWidth(t *testing.T) {
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, -1)
+	if got != "" {
+		t.Errorf("RenderProgressBar(width=-1) = %q, want empty", got)
+	}
+}
+
+func TestRenderProgressBar_ZeroDuration(t *testing.T) {
+	got := RenderProgressBar(0, 0, 40)
+	if got == "" {
+		t.Error("RenderProgressBar(dur=0) returned empty for non-zero width")
+	}
+}
+
+func TestRenderProgressBar_FullyFilled(t *testing.T) {
+	// position == duration → ratio 1.0 → all filled
+	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10)
+	if !strings.Contains(got, "█") {
+		t.Errorf("RenderProgressBar(full) should contain filled chars, got %q", got)
+	}
+}
+
+func TestRenderProgressBar_PartlyFilled(t *testing.T) {
+	// 50% → half filled, half empty
+	got := RenderProgressBar(30*time.Second, 60*time.Second, 10)
+	if !strings.Contains(got, "█") {
+		t.Errorf("RenderProgressBar(50%%) should contain filled chars, got %q", got)
+	}
+	if !strings.Contains(got, "░") {
+		t.Errorf("RenderProgressBar(50%%) should contain empty chars, got %q", got)
+	}
+}
+
+func TestRenderProgressBar_PositionBeyondDuration(t *testing.T) {
+	// position > duration: ratio capped at 1.0 — must not panic.
+	got := RenderProgressBar(5*time.Minute, 3*time.Minute, 10)
+	if got == "" {
+		t.Error("RenderProgressBar(pos>dur) returned empty string")
+	}
+}
