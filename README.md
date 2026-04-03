@@ -28,7 +28,7 @@
 
 ---
 
-vibez is an open-source TUI Apple Music player for Linux. Search, queue, and control playback entirely from the keyboard — no Cider, no VLC, no external app.
+vibez is an open-source TUI Apple Music player for Linux. Search, queue, and control playback entirely from the keyboard.
 
 Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downloaded). Falls back to WebKit + GStreamer (30 s previews) when Chrome is unavailable. MPRIS support means desktop media keys and notifications just work.
 
