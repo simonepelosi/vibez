@@ -118,3 +118,60 @@ func TestQueueTrackLine_Selected(t *testing.T) {
 		t.Error("selected track line should not be empty")
 	}
 }
+
+// --- QueueModel.Tracks and SelectedTrack ---
+
+func TestQueue_Tracks_Empty(t *testing.T) {
+	q := NewQueue()
+	tracks := q.Tracks()
+	if tracks != nil {
+		t.Errorf("Tracks() on empty queue should be nil, got %v", tracks)
+	}
+}
+
+func TestQueue_Tracks_WithData(t *testing.T) {
+	q := NewQueue()
+	input := []provider.Track{
+		{Title: "Alpha", Artist: "AA"},
+		{Title: "Beta", Artist: "BB"},
+	}
+	q.SetTracks(input)
+	got := q.Tracks()
+	if len(got) != 2 {
+		t.Errorf("Tracks() = %d items, want 2", len(got))
+	}
+	if got[0].Title != "Alpha" || got[1].Title != "Beta" {
+		t.Errorf("Tracks() returned wrong order: %v", got)
+	}
+}
+
+func TestQueue_SelectedTrack_Empty(t *testing.T) {
+	q := NewQueue()
+	idx, track := q.SelectedTrack()
+	if track != nil {
+		t.Errorf("SelectedTrack() on empty queue should return nil track, got %v", track)
+	}
+	if idx >= 0 {
+		t.Errorf("SelectedTrack() on empty queue should return idx < 0, got %d", idx)
+	}
+}
+
+func TestQueue_SelectedTrack_WithData(t *testing.T) {
+	q := NewQueue()
+	q.SetSize(80, 20)
+	tracks := []provider.Track{
+		{Title: "First", Artist: "AA"},
+		{Title: "Second", Artist: "BB"},
+	}
+	q.SetTracks(tracks)
+	idx, track := q.SelectedTrack()
+	if track == nil {
+		t.Fatal("SelectedTrack() should return non-nil track when queue is populated")
+	}
+	if idx != 0 {
+		t.Errorf("SelectedTrack() idx = %d, want 0 (first item)", idx)
+	}
+	if track.Title != "First" {
+		t.Errorf("SelectedTrack().Title = %q, want %q", track.Title, "First")
+	}
+}
