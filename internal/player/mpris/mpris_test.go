@@ -286,7 +286,19 @@ metadata:       map[string]dbus.Variant{},
 
 // Export root and player objects.
 conn.Export(f, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2")
-conn.Export(f, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player")
+// Use ExportMethodTable to avoid go vet's stdmethods check on "Seek"
+// which expects io.Seeker's signature (offset int64, whence int) (int64, error).
+conn.ExportMethodTable(map[string]any{ //nolint:errcheck
+"Next":        f.Next,
+"Previous":    f.Previous,
+"Pause":       f.Pause,
+"Stop":        f.Stop,
+"Play":        f.Play,
+"PlayPause":   f.PlayPause,
+"Seek":        f.seekRelative,
+"SetPosition": f.SetPosition,
+"OpenUri":     f.OpenUri,
+}, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player")
 
 // Export the properties interface.
 conn.Export(f, "/org/mpris/MediaPlayer2", "org.freedesktop.DBus.Properties")
@@ -369,7 +381,7 @@ func (f *fakeMPRIS) GetAll(_ string) (map[string]dbus.Variant, *dbus.Error) {
 return map[string]dbus.Variant{}, nil
 }
 
-func (f *fakeMPRIS) Seek(_ int64) *dbus.Error {
+func (f *fakeMPRIS) seekRelative(_ int64) *dbus.Error {
 f.mu.Lock()
 defer f.mu.Unlock()
 f.calls = append(f.calls, "Seek")
