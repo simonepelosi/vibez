@@ -7,6 +7,9 @@ coverage.out
 coverage.html
 *.test
 
+# Release
+release_notes.md
+
 # Config (personal credentials must not be committed)
 .env
 *.p8
