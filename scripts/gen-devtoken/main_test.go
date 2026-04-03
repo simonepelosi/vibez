@@ -169,3 +169,13 @@ func TestPemDecode_InvalidInput(t *testing.T) {
 	}
 	_ = rest
 }
+
+// --- mustEnv ---
+
+func TestMustEnv_ReturnsValue(t *testing.T) {
+t.Setenv("TEST_GEN_DEVTOKEN_VAR", "test-value-123")
+got := mustEnv("TEST_GEN_DEVTOKEN_VAR")
+if got != "test-value-123" {
+t.Errorf("mustEnv = %q, want %q", got, "test-value-123")
+}
+}

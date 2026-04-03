@@ -274,3 +274,86 @@ func TestSearch_ErrorState_View_ContainsError(t *testing.T) {
 		t.Errorf("View() with error should contain error text, got %q", v)
 	}
 }
+
+// --- Results, Loading, Focus, SetCursor, Cursor, PlaybackID ---
+
+func TestSearch_Results_Empty(t *testing.T) {
+s := NewSearch(nil)
+if s.Results() != nil {
+t.Error("Results() on fresh SearchModel should be nil")
+}
+}
+
+func TestSearch_Results_AfterSetState(t *testing.T) {
+s := NewSearch(nil)
+tracks := []provider.Track{
+{Title: "Track X", CatalogID: "x"},
+{Title: "Track Y", CatalogID: "y"},
+}
+s.SetState(tracks, false, nil)
+got := s.Results()
+if len(got) != 2 {
+t.Errorf("Results() = %d items, want 2", len(got))
+}
+}
+
+func TestSearch_Loading_False(t *testing.T) {
+s := NewSearch(nil)
+if s.Loading() {
+t.Error("Loading() should be false on new SearchModel")
+}
+}
+
+func TestSearch_Loading_True(t *testing.T) {
+s := NewSearch(nil)
+s.SetState(nil, true, nil)
+if !s.Loading() {
+t.Error("Loading() should be true after SetState(loading=true)")
+}
+}
+
+func TestSearch_Focus_NoPanic(t *testing.T) {
+s := NewSearch(nil)
+s.Focus() // no-op, should not panic
+}
+
+func TestSearch_Focused_AlwaysFalse(t *testing.T) {
+s := NewSearch(nil)
+s.Focus()
+if s.Focused() {
+t.Error("Focused() should always return false")
+}
+}
+
+func TestSearch_SetCursor_NoPanic(t *testing.T) {
+s := NewSearch(nil)
+s.SetCursor(5) // no-op, should not panic
+}
+
+func TestSearch_Cursor_ReturnsListIndex(t *testing.T) {
+s := NewSearch(nil)
+s.SetSize(80, 20)
+s.SetState([]provider.Track{
+{Title: "A", CatalogID: "a"},
+{Title: "B", CatalogID: "b"},
+}, false, nil)
+if s.Cursor() != 0 {
+t.Errorf("Cursor() = %d, want 0 initially", s.Cursor())
+}
+}
+
+func TestPlaybackID_CatalogID(t *testing.T) {
+track := provider.Track{ID: "library-id", CatalogID: "catalog-id"}
+got := PlaybackID(track)
+if got != "catalog-id" {
+t.Errorf("PlaybackID(with catalogID) = %q, want %q", got, "catalog-id")
+}
+}
+
+func TestPlaybackID_LibraryID(t *testing.T) {
+track := provider.Track{ID: "i.library-id", CatalogID: ""}
+got := PlaybackID(track)
+if got != "i.library-id" {
+t.Errorf("PlaybackID(no catalogID) = %q, want %q", got, "i.library-id")
+}
+}

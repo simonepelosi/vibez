@@ -673,3 +673,253 @@ func TestSearch_NoResultsKey(t *testing.T) {
 		t.Errorf("expected empty result, got %+v", result)
 	}
 }
+
+// --- CreatePlaylist ---
+
+func TestCreatePlaylist_Success(t *testing.T) {
+	resp := map[string]any{
+		"data": []any{
+			map[string]any{
+				"id": "p.NewPlaylist123",
+				"attributes": map[string]any{
+					"name":       "My New Playlist",
+					"trackCount": 2,
+					"artwork":    map[string]any{"url": "", "width": 300, "height": 300},
+				},
+			},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if !strings.Contains(r.URL.Path, "library/playlists") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(t, w, resp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	pl, err := p.CreatePlaylist(context.Background(), "My New Playlist", []string{"111", "222"})
+	if err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if pl.ID != "p.NewPlaylist123" {
+		t.Errorf("ID = %q, want %q", pl.ID, "p.NewPlaylist123")
+	}
+	if pl.Name != "My New Playlist" {
+		t.Errorf("Name = %q, want %q", pl.Name, "My New Playlist")
+	}
+}
+
+func TestCreatePlaylist_EmptyResponse(t *testing.T) {
+	// API returns 201 with empty data array — should succeed with Name only.
+	resp := map[string]any{"data": []any{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(t, w, resp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	pl, err := p.CreatePlaylist(context.Background(), "Empty Body Playlist", []string{})
+	if err != nil {
+		t.Fatalf("CreatePlaylist(empty body): %v", err)
+	}
+	if pl.Name != "Empty Body Playlist" {
+		t.Errorf("Name = %q, want %q", pl.Name, "Empty Body Playlist")
+	}
+}
+
+func TestCreatePlaylist_LibraryTrackIDs(t *testing.T) {
+	// Library IDs (i. prefix) should use "library-songs" type.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(t, w, map[string]any{"data": []any{}})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.CreatePlaylist(context.Background(), "Library Playlist", []string{"i.Abc123", "456"})
+	if err != nil {
+		t.Fatalf("CreatePlaylist(library IDs): %v", err)
+	}
+}
+
+func TestCreatePlaylist_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.CreatePlaylist(context.Background(), "Failing Playlist", []string{})
+	if err == nil {
+		t.Error("CreatePlaylist: expected error for 500 response, got nil")
+	}
+}
+
+// --- LoveSong ---
+
+func TestLoveSong_LoveSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Add to library request.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodPut {
+			// Rating PUT request.
+			if !strings.Contains(r.URL.Path, "ratings/songs") {
+				t.Errorf("unexpected PUT path: %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+			writeJSON(t, w, map[string]any{})
+			return
+		}
+		t.Errorf("unexpected method: %s", r.Method)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.LoveSong(context.Background(), "123456", true); err != nil {
+		t.Fatalf("LoveSong(loved=true): %v", err)
+	}
+}
+
+func TestLoveSong_UnloveSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected method: %s", r.Method)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.LoveSong(context.Background(), "123456", false); err != nil {
+		t.Fatalf("LoveSong(loved=false): %v", err)
+	}
+}
+
+func TestLoveSong_ContinuesAfterAddFailure(t *testing.T) {
+	// Even if add-to-library fails (non-fatal), the rating PUT should proceed.
+	callCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusConflict) // already in library — non-fatal
+			return
+		}
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusOK)
+			writeJSON(t, w, map[string]any{})
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.LoveSong(context.Background(), "abc", true); err != nil {
+		t.Fatalf("LoveSong: %v", err)
+	}
+	if callCount < 2 {
+		t.Errorf("expected >= 2 HTTP calls (add+rate), got %d", callCount)
+	}
+}
+
+// --- GetSongRating ---
+
+func TestGetSongRating_Loved(t *testing.T) {
+	resp := map[string]any{
+		"data": []any{
+			map[string]any{
+				"attributes": map[string]any{"value": 1},
+			},
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "ratings/songs") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		writeJSON(t, w, resp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if !loved {
+		t.Error("GetSongRating = false, want true (value=1)")
+	}
+}
+
+func TestGetSongRating_NotRated_404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if loved {
+		t.Error("GetSongRating = true for 404, want false")
+	}
+}
+
+func TestGetSongRating_NoContent_204(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if loved {
+		t.Error("GetSongRating = true for 204 NoContent, want false")
+	}
+}
+
+func TestGetSongRating_ServerError_ReturnsFalse(t *testing.T) {
+	// 500 errors are treated as "not rated" — non-fatal.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if loved {
+		t.Error("GetSongRating = true for 500, want false")
+	}
+}
+
+func TestGetSongRating_InvalidJSON_ReturnsFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if loved {
+		t.Error("GetSongRating = true for invalid JSON, want false")
+	}
+}
