@@ -245,131 +245,131 @@ func TestLibrary_LoadTracks_Executes(t *testing.T) {
 // --- loadPlaylistTracks ---
 
 func TestLibrary_LoadPlaylistTracks_Executes(t *testing.T) {
-prov := &mockProvider{} // returns nil tracks, nil error by default
-lib := NewLibrary(prov)
-pl := provider.Playlist{ID: "pl-123", Name: "Test Playlist"}
-cmd := lib.loadPlaylistTracks(pl)
-if cmd == nil {
-t.Fatal("loadPlaylistTracks() should return non-nil cmd")
-}
-msg := cmd()
-ptm, ok := msg.(playlistTracksMsg)
-if !ok {
-t.Fatalf("loadPlaylistTracks returned %T, want playlistTracksMsg", msg)
-}
-if ptm.playlist.ID != "pl-123" {
-t.Errorf("playlistTracksMsg.playlist.ID = %q, want %q", ptm.playlist.ID, "pl-123")
-}
+	prov := &mockProvider{} // returns nil tracks, nil error by default
+	lib := NewLibrary(prov)
+	pl := provider.Playlist{ID: "pl-123", Name: "Test Playlist"}
+	cmd := lib.loadPlaylistTracks(pl)
+	if cmd == nil {
+		t.Fatal("loadPlaylistTracks() should return non-nil cmd")
+	}
+	msg := cmd()
+	ptm, ok := msg.(playlistTracksMsg)
+	if !ok {
+		t.Fatalf("loadPlaylistTracks returned %T, want playlistTracksMsg", msg)
+	}
+	if ptm.playlist.ID != "pl-123" {
+		t.Errorf("playlistTracksMsg.playlist.ID = %q, want %q", ptm.playlist.ID, "pl-123")
+	}
 }
 
 // --- renderDrillView ---
 
 func TestLibrary_RenderDrillView_Loading(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillLoading = true
-lib.drillPlaylist = provider.Playlist{Name: "My Playlist"}
-view := lib.renderDrillView()
-if view == "" {
-t.Error("renderDrillView() while loading should return non-empty string")
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillLoading = true
+	lib.drillPlaylist = provider.Playlist{Name: "My Playlist"}
+	view := lib.renderDrillView()
+	if view == "" {
+		t.Error("renderDrillView() while loading should return non-empty string")
+	}
 }
 
 func TestLibrary_RenderDrillView_EmptyTracks(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillLoading = false
-lib.drillPlaylist = provider.Playlist{Name: "Empty Playlist"}
-lib.drillTracks = nil
-view := lib.renderDrillView()
-if view == "" {
-t.Error("renderDrillView() with empty tracks should return non-empty string")
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillLoading = false
+	lib.drillPlaylist = provider.Playlist{Name: "Empty Playlist"}
+	lib.drillTracks = nil
+	view := lib.renderDrillView()
+	if view == "" {
+		t.Error("renderDrillView() with empty tracks should return non-empty string")
+	}
 }
 
 func TestLibrary_RenderDrillView_WithTracks(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillLoading = false
-lib.drillPlaylist = provider.Playlist{Name: "Full Playlist", ID: "pl1"}
-lib.drillTracks = []provider.Track{
-{Title: "Track 1", Artist: "Artist 1"},
-{Title: "Track 2", Artist: "Artist 2"},
-}
-// Set drill list items.
-lib.Update(playlistTracksMsg{
-playlist: lib.drillPlaylist,
-tracks:   lib.drillTracks,
-})
-view := lib.renderDrillView()
-if view == "" {
-t.Error("renderDrillView() with tracks should return non-empty string")
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillLoading = false
+	lib.drillPlaylist = provider.Playlist{Name: "Full Playlist", ID: "pl1"}
+	lib.drillTracks = []provider.Track{
+		{Title: "Track 1", Artist: "Artist 1"},
+		{Title: "Track 2", Artist: "Artist 2"},
+	}
+	// Set drill list items.
+	lib.Update(playlistTracksMsg{
+		playlist: lib.drillPlaylist,
+		tracks:   lib.drillTracks,
+	})
+	view := lib.renderDrillView()
+	if view == "" {
+		t.Error("renderDrillView() with tracks should return non-empty string")
+	}
 }
 
 // --- Library.View() selecting drill pane ---
 
 func TestLibrary_View_DrillPane(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillPlaylist = provider.Playlist{Name: "Drill Playlist"}
-view := lib.View()
-if view == "" {
-t.Error("View() in drill pane should return non-empty string")
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillPlaylist = provider.Playlist{Name: "Drill Playlist"}
+	view := lib.View()
+	if view == "" {
+		t.Error("View() in drill pane should return non-empty string")
+	}
 }
 
 // --- Library.Update with playlistTracksMsg (drill pane) ---
 
 func TestLibrary_Update_PlaylistTracksMsg_Success(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
-tracks := []provider.Track{{Title: "Song", Artist: "Artist"}}
-updated, _ := lib.Update(playlistTracksMsg{playlist: pl, tracks: tracks})
-if len(updated.drillTracks) != 1 {
-t.Errorf("drillTracks after playlistTracksMsg = %d, want 1", len(updated.drillTracks))
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
+	tracks := []provider.Track{{Title: "Song", Artist: "Artist"}}
+	updated, _ := lib.Update(playlistTracksMsg{playlist: pl, tracks: tracks})
+	if len(updated.drillTracks) != 1 {
+		t.Errorf("drillTracks after playlistTracksMsg = %d, want 1", len(updated.drillTracks))
+	}
 }
 
 func TestLibrary_Update_PlaylistTracksMsg_Error(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-updated, _ := lib.Update(playlistTracksMsg{err: errors.New("load error")})
-if updated.drillLoading {
-t.Error("drillLoading should be false after error")
-}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	updated, _ := lib.Update(playlistTracksMsg{err: errors.New("load error")})
+	if updated.drillLoading {
+		t.Error("drillLoading should be false after error")
+	}
 }
 
 // --- Library.Update: drill pane key handling ---
 
 func TestLibrary_Update_DrillPane_Esc_ReturnsToList(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillTracks = []provider.Track{{Title: "T1"}}
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillTracks = []provider.Track{{Title: "T1"}}
 
-updated, _ := lib.Update(tea.KeyMsg{Type: tea.KeyEsc})
-if updated.pane != paneList {
-t.Error("esc in drill pane should return to list pane")
-}
+	updated, _ := lib.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.pane != paneList {
+		t.Error("esc in drill pane should return to list pane")
+	}
 }
 
 func TestLibrary_Update_DrillPane_Enter_NoSelection(t *testing.T) {
-lib := NewLibrary(&mockProvider{})
-lib.SetSize(80, 20)
-lib.pane = paneTracks
-lib.drillTracks = nil
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillTracks = nil
 
-updated, cmd := lib.Update(tea.KeyMsg{Type: tea.KeyEnter})
-_ = cmd
-if updated.pane != paneTracks {
-t.Error("enter with no selection in drill pane should stay in paneTracks")
-}
+	updated, cmd := lib.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_ = cmd
+	if updated.pane != paneTracks {
+		t.Error("enter with no selection in drill pane should stay in paneTracks")
+	}
 }
 
 // --- Library.Update: tab cycling ---

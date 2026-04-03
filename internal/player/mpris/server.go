@@ -15,6 +15,7 @@ package mpris
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,17 @@ type Server struct {
 
 	mu  sync.Mutex
 	pos time.Duration
+}
+
+// sanitizePathElement replaces any character that is not a valid D-Bus object
+// path element character ([A-Za-z0-9_]) with an underscore.
+func sanitizePathElement(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return '_'
+	}, s)
 }
 
 // ── D-Bus method objects ──────────────────────────────────────────────────
@@ -234,7 +246,7 @@ func (s *Server) Update(st player.State) {
 		"mpris:trackid": dbus.MakeVariant(noTrackPath),
 	}
 	if t := st.Track; t != nil {
-		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/vibez/track/" + t.ID))
+		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/vibez/track/" + sanitizePathElement(t.ID)))
 		meta["xesam:title"] = dbus.MakeVariant(t.Title)
 		meta["xesam:artist"] = dbus.MakeVariant([]string{t.Artist})
 		meta["xesam:album"] = dbus.MakeVariant(t.Album)

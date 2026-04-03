@@ -298,7 +298,7 @@ func TestVibe_Lines_PadsToHeight(t *testing.T) {
 
 func TestVibe_Lines_AnimationSteps(t *testing.T) {
 	v := NewVibe()
-	for step := 0; step < 50; step++ {
+	for step := range 50 {
 		lines := v.Lines(40, 8, step)
 		if len(lines) != 8 {
 			t.Errorf("Lines(step=%d) returned %d lines, want 8", step, len(lines))
