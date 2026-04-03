@@ -343,10 +343,21 @@ func TestSearch_Cursor_ReturnsListIndex(t *testing.T) {
 }
 
 func TestPlaybackID_CatalogID(t *testing.T) {
+	// Non-library track with a CatalogID set: return catalog ID.
 	track := provider.Track{ID: "library-id", CatalogID: "catalog-id"}
 	got := PlaybackID(track)
 	if got != "catalog-id" {
 		t.Errorf("PlaybackID(with catalogID) = %q, want %q", got, "catalog-id")
+	}
+}
+
+func TestPlaybackID_LibraryTrackWithCatalogMatch(t *testing.T) {
+	// Library track (i. prefix) that has been matched to a catalog entry:
+	// must return the library ID to avoid CONTENT_RESTRICTED on the catalog copy.
+	track := provider.Track{ID: "i.library-id", CatalogID: "catalog-id"}
+	got := PlaybackID(track)
+	if got != "i.library-id" {
+		t.Errorf("PlaybackID(library+catalogID) = %q, want %q", got, "i.library-id")
 	}
 }
 

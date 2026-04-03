@@ -74,6 +74,7 @@ func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.Selecte
 type playerStateMsg player.State
 type searchResultMsg struct {
 	result *provider.SearchResult
+	query  string
 	err    error
 }
 
@@ -395,7 +396,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
+			m.appendLog("[player] playing")
 			cmds = append(cmds, glowTick())
+		} else if wasPlaying && !m.playerState.Playing && !m.playerState.Loading {
+			m.appendLog("[player] paused")
 		}
 		cmds = append(cmds, waitForState(m.stateCh))
 
@@ -504,17 +508,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchDebounceMsg:
 		// Drop stale debounce ticks — only the latest keystroke wins.
-		if msg.gen != m.searchGen {
+		if msg.gen != m.searchGen || m.provider == nil {
 			return m, nil
 		}
+		m.appendLog(fmt.Sprintf("[search] %q…", msg.query))
 		prov := m.provider
 		query := msg.query
 		return m, func() tea.Msg {
 			result, err := prov.Search(context.Background(), query)
-			return searchResultMsg{result: result, err: err}
+			return searchResultMsg{result: result, query: query, err: err}
 		}
 
 	case searchResultMsg:
+		if msg.err != nil {
+			m.appendLog(fmt.Sprintf("[search] error: %v", msg.err))
+		} else if msg.result != nil {
+			m.appendLog(fmt.Sprintf("[search] %d track(s), %d album(s), %d playlist(s)",
+				len(msg.result.Tracks), len(msg.result.Albums), len(msg.result.Playlists)))
+		}
 		m.search.SetState(
 			func() []provider.Track {
 				if msg.result != nil {

@@ -35,6 +35,15 @@
       // MusicKit derives the correct storefront from the user token automatically.
       const music = await MusicKit.configure(configOpts);
 
+      // Allow explicit content. MusicKit.js enforces content restrictions
+      // client-side; setting this property lifts the app-level filter so
+      // explicit tracks are not blocked before the request even reaches
+      // Apple's servers. Account-level Screen Time / Family Sharing
+      // restrictions are enforced server-side and cannot be overridden here.
+      if ('isExplicitContentAllowed' in music) {
+        try { music.isExplicitContentAllowed = true; } catch(_) {}
+      }
+
       const savedToken = '{{.UserToken}}';
       if (savedToken !== '') {
         music.musicUserToken = savedToken;
@@ -157,6 +166,13 @@
         // Shorthand: send a debug-only log entry (never shown in status bar).
         const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed'];
         const _log = (msg) => goLog(msg).catch(() => {});
+
+        // Log track changes with ID so we can correlate with doPlay logs.
+        music.addEventListener('nowPlayingItemDidChange', () => {
+          const item = _m().nowPlayingItem;
+          if (item) _log(`[js:track] "${item.attributes?.name||'?'}" (${item.id})`);
+          else       _log('[js:track] — none');
+        });
 
         // ─── Chrome-mode queue tracker ───────────────────────────────────────
         // _q[]  = source of truth for all queued songs
@@ -417,10 +433,11 @@
           else _log(`[js:next] already at end of queue`);
         };
         window.vibezPrev  = () => { _log(`[js:prev] _qi=${_qi}`); _playAt(_qi > 0 ? _qi - 1 : 0); };
-        window.vibezSeek      = (t) => _m().seekToTime(t);
-        window.vibezSetVolume = (v) => { _m().volume = v; };
-        window.vibezSetRepeat  = (mode) => { _m().repeatMode  = mode; };
-        window.vibezSetShuffle = (on)   => { _m().shuffleMode = on ? 1 : 0; };
+        const _repeatName = ['off', 'one', 'all'];
+        window.vibezSeek      = (t) => { _log(`[js:seek] → ${t.toFixed(1)}s`); _m().seekToTime(t); };
+        window.vibezSetVolume = (v) => { _log(`[js:volume] → ${Math.round(v*100)}%`); _m().volume = v; };
+        window.vibezSetRepeat  = (mode) => { _log(`[js:repeat] → ${_repeatName[mode]||mode}`); _m().repeatMode  = mode; };
+        window.vibezSetShuffle = (on)   => { _log(`[js:shuffle] → ${on ? 'on' : 'off'}`); _m().shuffleMode = on ? 1 : 0; };
 
         // Wire OS media keys / MPRIS back to our own functions.
         navigator.mediaSession.setActionHandler('play',          () => window.vibezPlay());
@@ -432,8 +449,10 @@
         window.vibezSetQueue = async function(idsJSON) {
           try {
             const ids = (JSON.parse(idsJSON) || []).filter(Boolean);
+            _log(`[js:setQueue] resolving ${ids.length} id(s)`);
             const items = await _resolveItems(ids);
             if (items.length === 0) { goError('setQueue: no items resolved').catch(()=>{}); return; }
+            _log(`[js:setQueue] → ${items.length} item(s) queued`);
             _q  = items;
             _qi = -1;
             _playAt(0);
@@ -442,6 +461,7 @@
 
         window.vibezSetPlaylist = async function(playlistID, startIdx) {
           try {
+            _log(`[js:setPlaylist] loading ${playlistID} startIdx=${startIdx||0}`);
             const m   = _m();
             const sf  = m.storefrontId || 'us';
             const url = playlistID.startsWith('p.')
@@ -453,6 +473,7 @@
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
+            _log(`[js:setPlaylist] ${items.length} track(s) → _playAt(${startIdx||0})`);
             _q  = items;
             _qi = -1;
             _playAt(startIdx || 0);
@@ -475,6 +496,8 @@
         window.vibezQueueRemove = function(idxStr) {
           const idx = parseInt(idxStr);
           if (idx < 0 || idx >= _q.length) return;
+          const name = _q[idx]?.attributes?.name || '?';
+          _log(`[js:remove] #${idx} "${name}" (len=${_q.length} _qi=${_qi})`);
           if (idx === _qi) {
             _q.splice(idx, 1);
             if (_q.length === 0) { _qi = -1; _m().stop().catch(()=>{}); return; }
@@ -490,6 +513,8 @@
           const from = parseInt(fromStr);
           const to   = parseInt(toStr);
           if (from < 0 || from >= _q.length || to < 0 || to >= _q.length || from === to) return;
+          const name = _q[from]?.attributes?.name || '?';
+          _log(`[js:move] #${from} → #${to} "${name}"`);
           const item = _q.splice(from, 1)[0];
           _q.splice(to, 0, item);
           if (_qi === from)                 _qi = to;
@@ -498,6 +523,7 @@
         };
 
         window.vibezQueueClear = function() {
+          _log(`[js:clear] queue (${_q.length} item(s))`);
           _q  = [];
           _qi = -1;
           _m().stop().catch(()=>{});

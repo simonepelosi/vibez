@@ -223,8 +223,11 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 		},
 		"goStorefrontChanged": func(args ...any) any {
 			if len(args) > 0 {
-				if sf, ok := args[0].(string); ok && sf != "" && p.OnStorefront != nil {
-					p.OnStorefront(sf)
+				if sf, ok := args[0].(string); ok && sf != "" {
+					p.sendLog("[storefront] " + sf)
+					if p.OnStorefront != nil {
+						p.OnStorefront(sf)
+					}
 				}
 			}
 			return nil

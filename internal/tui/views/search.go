@@ -3,6 +3,7 @@ package views
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -24,11 +25,15 @@ type PlayTracksMsg struct {
 }
 
 // PlaybackID returns the best ID to use for MusicKit queue descriptors.
-// Catalog IDs (numeric, e.g. "1622205917") are preferred because MusicKit
-// resolves them against the configured storefront and streams full tracks.
-// Library IDs (i.XXXXX) are a fallback for songs without a catalog match
-// (e.g. iCloud Music Library uploads that were never matched to the catalog).
+// Library tracks (IDs prefixed with "i.") must use their library ID directly
+// so MusicKit never encounters a CONTENT_RESTRICTED error — the catalog copy
+// of a track may be region-locked even when the user already owns it in their
+// library. Catalog IDs are used for tracks not present in the user's library.
 func PlaybackID(t provider.Track) string {
+	// Library tracks must use their library ID directly — never CONTENT_RESTRICTED.
+	if strings.HasPrefix(t.ID, "i.") {
+		return t.ID
+	}
 	if t.CatalogID != "" {
 		return t.CatalogID
 	}
