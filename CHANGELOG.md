@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Discovery: library tracks queued with library ID** — `PlaybackID` now returns
+  the library ID (`i.XXXXX`) for tracks the user owns, instead of the catalog ID.
+  The catalog copy of a track may be CONTENT_RESTRICTED (e.g. due to regional
+  restrictions or explicit-content settings) even when the user already has the
+  track in their library; using the library ID avoids the restriction entirely.
+
+### Improved
+- **Debug log coverage** — the debug-log view now surfaces many previously silent
+  operations:
+  - JS: track changes (`nowPlayingItemDidChange`), `setQueue`/`setPlaylist` resolved
+    counts, queue `remove`/`move`/`clear`, seek target, volume %, repeat mode
+    (off/one/all), and shuffle on/off.
+  - Go (CDP): storefront detected from MusicKit is now logged as `[storefront] <id>`.
+  - Go (model): `[search] "query"…` on debounce fire and `[search] N track(s), M
+    album(s), P playlist(s)` on result; `[player] playing` / `[player] paused` on
+    playback state transitions.
+
 ---
 
 ## [0.0.3] — 2026-04-09
