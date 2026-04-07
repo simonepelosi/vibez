@@ -79,7 +79,7 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 ### ⌨️ Terminal UI
 
 - **Fully keyboard-driven** — every action reachable without touching the mouse
-- **Vim-style command mode** — press `:` to run commands like `:save <name>` to save the queue as a playlist, or `:q` / `:quit` to exit
+- **Vim-style command mode** — press `:` to run commands like `:save <name>`, `:vol 80`, `:mute`, or `:q` / `:quit` to exit
 - **Vim-style navigation** — `gg` to jump to top, `G` to jump to bottom, `j`/`k` for list scrolling in panels
 - **Animated bear mascot** 🐻 — sleeps when idle, dances when music is playing
 - **Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)** — a modern, composable TUI framework
@@ -190,6 +190,11 @@ Vim-style command mode — press `:` from anywhere to open the command prompt.
 | Command | Description |
 |---------|-------------|
 | `:save <name>` | Save the current queue as an Apple Music playlist |
+| `:discover <n>\|auto` | Queue *n* discovered songs now, or keep auto-discovering |
+| `:vol <0-100>` | Set volume to an absolute level (e.g. `:vol 80`) |
+| `:vol +n` / `:vol -n` | Raise or lower volume by *n* percent (e.g. `:vol +10`) |
+| `:vol` | Show current volume in the status bar |
+| `:mute` | Toggle mute (run again to restore the previous volume) |
 | `:debug-logs` | Toggle the debug log panel |
 | `:q` / `:quit` | Quit vibez |
 

@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Press **`Enter`** on a highlighted item to play it immediately (replaces the
     current queue); press **`Tab`** to append its tracks to the queue instead.
   - Both albums and catalog playlists are supported.
+- **Volume commands** — new command-palette entries for fine-grained volume control:
+  - `:vol <0-100>` — set volume to an absolute level.
+  - `:vol +n` / `:vol -n` — raise or lower volume by *n* percent.
+  - `:vol` — show the current volume level in the status bar.
+  - `:mute` — mute audio (run again to restore the previous volume). The header
+    shows `🔇 muted` in place of the volume percentage while muted.
 
 ### Changed
 - **Discovery mode: two-step activation flow** — discovery is now configured and
