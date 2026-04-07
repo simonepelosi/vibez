@@ -26,8 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Recommendations are grouped by curated category (e.g. *Recommended Albums*,
     *New Releases for You*) and loaded on first open.
   - Navigate with `j`/`k`; press `r` to refresh the feed at any time.
-  - Pressing `Enter` or `Tab` on a highlighted item will eventually play it or add
-    its tracks to the queue (track resolution coming in a future release).
+  - Press **`Enter`** on a highlighted item to play it immediately (replaces the
+    current queue); press **`Tab`** to append its tracks to the queue instead.
+  - Both albums and catalog playlists are supported.
 
 ### Changed
 - **Discovery mode: two-step activation flow** — discovery is now configured and
