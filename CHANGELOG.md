@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Lyrics panel (`y`)** — press `y` to open a full-width lyrics panel for the
+  currently playing track. Lyrics are fetched automatically from
+  [LRCLIB](https://lrclib.net), a free community-maintained database that requires
+  no API key or account.
+  - **Synced lyrics**: when timing data is available the current line is highlighted
+    and the view auto-scrolls to keep it centred as the song progresses.
+  - **Plain lyrics** fallback for tracks where timing data is unavailable.
+  - Instrumental tracks are recognised and displayed as such.
+  - Manual scroll with `j`/`k`; jump to top/bottom with `g`/`G`.
+  - Fetching is non-blocking and stale results (e.g. from a quickly skipped track)
+    are silently discarded.
+
 ### Changed
 - **Discovery mode: two-step activation flow** — discovery is now configured and
   started separately, giving finer control over what gets queued:

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
@@ -70,6 +71,15 @@ func (p *queuePanel) View() string                          { return p.m.View() 
 func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
 func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
 
+// lyricsPanel wraps views.LyricsModel to satisfy ContentView.
+type lyricsPanel struct{ m *views.LyricsModel }
+
+func (p *lyricsPanel) NavKey() string                { return "y" }
+func (p *lyricsPanel) NavLabel() string              { return "lyrics" }
+func (p *lyricsPanel) SetSize(w, h int)              { p.m.SetSize(w, h) }
+func (p *lyricsPanel) Update(msg tea.KeyMsg) tea.Cmd { return p.m.Update(msg) }
+func (p *lyricsPanel) View() string                  { return p.m.View() }
+
 // ── Messages ──────────────────────────────────────────────────────────────
 
 type playerStateMsg player.State
@@ -108,6 +118,11 @@ type errMsg struct{ err error }
 type playlistCreatedMsg struct{ name string }
 type SessionExpiredMsg struct{}
 type SessionRestoredMsg struct{}
+type lyricsResultMsg struct {
+	trackID string
+	result  *lyrics.Result
+	err     error
+}
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
 var introFrames = func() []string {
@@ -171,6 +186,11 @@ type Model struct {
 	activePanel int           // index into panels; -1 = none active
 	library     *libraryPanel
 	queue       *queuePanel
+	lyricsP     *lyricsPanel
+
+	// Lyrics
+	lyricsClient      *lyrics.Client
+	lastLyricsTrackID string // ID of the track for which lyrics were last fetched
 
 	// Vibe panel (always visible, right split)
 	vibe *views.VibeModel
@@ -228,10 +248,12 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	}
 	m.library = &libraryPanel{m: views.NewLibrary(prov)}
 	m.queue = &queuePanel{m: views.NewQueue()}
+	m.lyricsP = &lyricsPanel{m: views.NewLyrics()}
+	m.lyricsClient = lyrics.NewClient()
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	m.panels = []ContentView{m.library, m.queue}
+	m.panels = []ContentView{m.library, m.queue, m.lyricsP}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
@@ -292,6 +314,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		panelH := m.panelHeight()
 		m.library.SetSize(contentW, panelH)
 		m.search.SetSize(contentW, panelH)
+		m.lyricsP.SetSize(contentW, panelH)
 
 	case tickMsg:
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
@@ -382,6 +405,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(pp)
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
+			// Fetch lyrics for the new track.
+			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
+				m.lastLyricsTrackID = id
+				m.lyricsP.m.SetLoading()
+				cmds = append(cmds, m.fetchLyricsCmd(s.Track))
+			}
+		}
+		// Always sync playback position so the current lyrics line stays highlighted.
+		if s.Track != nil {
+			m.lyricsP.m.SetPosition(s.Position)
 		}
 		// Discovery: in auto mode, fire as soon as the last track in the queue
 		// starts playing. Triggering at the start of the last track gives the
@@ -410,6 +443,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update favorite state to match what Apple Music reports.
 		if msg.trackID != "" {
 			m.favorites[msg.trackID] = msg.loved
+		}
+
+	case lyricsResultMsg:
+		// Discard stale results if the user skipped to a different track.
+		if msg.trackID == m.lastLyricsTrackID {
+			m.lyricsP.m.SetLyrics(msg.result, msg.err)
+			if msg.err != nil {
+				m.appendLog(fmt.Sprintf("[lyrics] not found: %v", msg.err))
+			} else {
+				m.appendLog("[lyrics] loaded")
+			}
 		}
 
 	case views.VibeQueryMsg:
@@ -830,8 +874,20 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	}
 }
 
+// fetchLyricsCmd fetches lyrics for t from LRCLIB asynchronously.
+func (m *Model) fetchLyricsCmd(t *provider.Track) tea.Cmd {
+	trackID := views.PlaybackID(*t)
+	artist, title, album, dur := t.Artist, t.Title, t.Album, t.Duration
+	client := m.lyricsClient
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		res, err := client.Fetch(ctx, artist, title, album, dur)
+		return lyricsResultMsg{trackID: trackID, result: res, err: err}
+	}
+}
+
 // startDiscovery activates discovery mode with the configured similarity metric.
-// autoMode=true keeps refilling whenever the last queued song starts playing.
 // autoMode=false is a one-shot: n songs are queued immediately, then discovery stops.
 func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	if m.playerState.Track == nil {
@@ -1494,7 +1550,8 @@ func (m *Model) renderBoxLayout() string {
 
 	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
 	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
-	fullWidth := libraryActive || queueActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
+	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
+	fullWidth := libraryActive || queueActive || lyricsActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -1540,6 +1597,11 @@ func (m *Model) renderBoxLayout() string {
 	case queueActive:
 		m.queue.m.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.queue.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case lyricsActive:
+		m.lyricsP.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.lyricsP.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
@@ -1851,6 +1913,13 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("Tab") + muted.Render(" add to queue"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
+			parts = []string{
+				styles.ModeNormal.Render("LYRICS"),
+				accent.Render("j/k") + muted.Render(" scroll"),
+				accent.Render("g/G") + muted.Render(" top/bottom"),
+				accent.Render("esc") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
@@ -1858,6 +1927,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("/") + muted.Render(" search"),
 				accent.Render("l") + muted.Render(" library"),
 				accent.Render("q") + muted.Render(" queue"),
+				accent.Render("y") + muted.Render(" lyrics"),
 				accent.Render("v") + muted.Render(" vibe"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}
