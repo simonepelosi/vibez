@@ -2202,7 +2202,16 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 
 // queuePanelLines returns the Queue panel lines for the left split.
 func (m *Model) queuePanelLines(w, h int) []string {
-	header := styles.Header.Render("Queue")
+	total := len(m.queue.m.Tracks())
+
+	// Header: "Queue  12 tracks"
+	var headerLabel string
+	if total > 0 {
+		countStr := styles.QueueItemMuted.Render(fmt.Sprintf("  %d tracks", total))
+		headerLabel = styles.Header.Render("Queue") + countStr
+	} else {
+		headerLabel = styles.Header.Render("Queue")
+	}
 	sep := styles.QueueItemMuted.Render(strings.Repeat("─", 5))
 
 	currentTitle := ""
@@ -2210,17 +2219,20 @@ func (m *Model) queuePanelLines(w, h int) []string {
 		currentTitle = m.playerState.Track.Title
 	}
 
+	indexW := len(fmt.Sprintf("%d", total)) // digit width for index numbers
 	tracks := m.queue.m.Tracks()
 	var trackLines []string
-	for _, t := range tracks {
+	for i, t := range tracks {
+		idx := fmt.Sprintf("%*d. ", indexW, i+1)
 		label := t.Artist + " — " + t.Title
 		if t.Title == currentTitle {
-			prefix := styles.ControlActive.Render("▶ ")
-			line := truncateStr(label, w-3)
-			trackLines = append(trackLines, prefix+styles.ControlActive.Render(line))
+			numStr := styles.ControlActive.Render(idx)
+			line := truncateStr(label, w-2-indexW-2)
+			trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
 		} else {
-			line := truncateStr(label, w-3)
-			trackLines = append(trackLines, "  "+styles.QueueItem.Render(line))
+			numStr := styles.QueueItemMuted.Render(idx)
+			line := truncateStr(label, w-2-indexW-2)
+			trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
 		}
 	}
 	if len(trackLines) == 0 {
@@ -2239,7 +2251,7 @@ func (m *Model) queuePanelLines(w, h int) []string {
 		visible = visible[:visibleRows]
 	}
 
-	result := append([]string{header, sep}, visible...)
+	result := append([]string{headerLabel, sep}, visible...)
 	for len(result) < h {
 		result = append(result, "")
 	}
