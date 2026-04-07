@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,13 +128,15 @@ const introDone = -1
 // ── Discovery mode ─────────────────────────────────────────────────────────
 
 // discoveryMode holds state for the continuous-discovery feature.
-// When enabled, one song is queued 30 seconds before the current track ends.
+// When enabled, songs are queued according to autoMode and refillCap.
 // The similarity value (0=very different, 1=very similar) controls how
-// adventurous the search is.
+// adventurous the search is and is set via the metric picker (d key).
 type discoveryMode struct {
 	enabled        bool
+	autoMode       bool // true = auto-refill on last song; false = one-shot
+	refillCap      int  // songs to add per cycle
 	seed           *provider.Track
-	similarity     float64         // 0.0–1.0
+	similarity     float64         // 0.0–1.0; persists across stop/start
 	refilling      bool            // background search in progress
 	triggeredForID string          // ID of track for which we already fired a search
 	skipped        map[string]bool // IDs/keys of tracks skipped due to unavailability
@@ -380,13 +383,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
 		}
-		// Discovery: fire as soon as the last track in the queue starts playing.
-		// Triggering at the start of the last track gives the search the maximum
-		// possible time to complete before the queue runs dry.
+		// Discovery: in auto mode, fire as soon as the last track in the queue
+		// starts playing. Triggering at the start of the last track gives the
+		// search the maximum possible time to complete before the queue runs dry.
 		// triggeredForID ensures we fire exactly once per track.
 		isLastQueued := len(m.queueTracks) > 0 && s.Track != nil &&
 			views.PlaybackID(*s.Track) == views.PlaybackID(m.queueTracks[len(m.queueTracks)-1])
-		if m.discovery.enabled && !m.discovery.refilling &&
+		if m.discovery.enabled && m.discovery.autoMode && !m.discovery.refilling &&
 			isLastQueued &&
 			m.discovery.triggeredForID != s.Track.ID {
 			m.discovery.triggeredForID = s.Track.ID
@@ -413,6 +416,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// User submitted a vibe description — start async provider search.
 		m.vibe.SetSearching()
 		cmds = append(cmds, m.runVibeSearch(msg.Query))
+
+	case views.DiscoveryMetricSelectedMsg:
+		// User selected a similarity metric in the picker — store it for the
+		// next :discover command. Discovery does not start automatically.
+		m.discovery.similarity = msg.Similarity
+		m.appendLog(fmt.Sprintf("[discovery] metric set: %.0f%% similarity", msg.Similarity*100))
 
 	case vibeResultMsg:
 		if msg.err != nil {
@@ -488,6 +497,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.discovery {
 			m.discovery.refilling = false
 			m.discovery.retries = 0 // successful refill — reset circuit breaker
+			if !m.discovery.autoMode {
+				// One-shot: disable discovery after this successful refill.
+				m.discovery.enabled = false
+				m.discovery.seed = nil
+			}
 			m.syncDiscoveryView()
 			m.appendLog(fmt.Sprintf("[discovery] refilled %d tracks", len(tracks)))
 		} else {
@@ -694,6 +708,7 @@ type cmdEntry struct {
 // allCommands is the master list shown in the command palette.
 var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
+	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
@@ -770,6 +785,18 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.debugView = !m.debugView
 		m.debugScroll = 0
 		return nil
+	case strings.HasPrefix(cmd, "discover"):
+		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "discover"))
+		if arg == "" || arg == "auto" {
+			return m.startDiscovery(true, 1)
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n <= 0 {
+			m.errMsg = ":discover requires a positive number or 'auto'"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		return m.startDiscovery(false, n)
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
 		for _, prefix := range []string{"save-playlist ", "save "} {
@@ -803,6 +830,36 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	}
 }
 
+// startDiscovery activates discovery mode with the configured similarity metric.
+// autoMode=true keeps refilling whenever the last queued song starts playing.
+// autoMode=false is a one-shot: n songs are queued immediately, then discovery stops.
+func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
+	if m.playerState.Track == nil {
+		m.errMsg = "nothing is playing"
+		m.errExpiry = time.Now().Add(3 * time.Second)
+		return nil
+	}
+	sim := m.discovery.similarity
+	if sim == 0 {
+		sim = 0.7 // default if no metric was selected yet
+	}
+	m.discovery.enabled = true
+	m.discovery.autoMode = autoMode
+	m.discovery.refillCap = n
+	m.discovery.seed = m.playerState.Track
+	m.discovery.similarity = sim
+	m.discovery.refilling = false
+	m.discovery.triggeredForID = ""
+	m.syncDiscoveryView()
+	mode := "auto"
+	if !autoMode {
+		mode = fmt.Sprintf("%d songs", n)
+	}
+	m.appendLog(fmt.Sprintf("[discovery] started from %q (similarity %.0f%%, mode=%s)",
+		m.playerState.Track.Title, sim*100, mode))
+	return m.runDiscoverySearch()
+}
+
 func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 	// When debug log is open, j/k/G scroll it; esc closes it.
 	if m.debugView {
@@ -824,8 +881,8 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		}
 	}
 
-	// When vibe panel has text-input focus, route all keys to it.
-	if m.vibe.IsFocused() {
+	// When vibe panel has text-input focus or picker is open, route all keys to it.
+	if m.vibe.IsFocused() || m.vibe.PickerActive() {
 		return m.vibe.Update(msg)
 	}
 
@@ -995,16 +1052,14 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 			m.discovery.triggeredForID = ""
 			m.syncDiscoveryView()
 			m.appendLog("[discovery] stopped")
-		} else if m.playerState.Track != nil {
-			// Activate with current song as seed; default similarity = 0.7.
-			m.discovery.enabled = true
-			m.discovery.seed = m.playerState.Track
-			m.discovery.similarity = 0.7
-			m.discovery.refilling = false
-			m.discovery.triggeredForID = ""
-			m.syncDiscoveryView()
-			m.appendLog(fmt.Sprintf("[discovery] started from %q (similarity %.0f%%)",
-				m.playerState.Track.Title, m.discovery.similarity*100))
+		} else if m.playerState.Track != nil && !m.vibe.PickerActive() {
+			// Open the metric picker; pre-select the closest option to the
+			// current similarity (defaults to 0.7 on first use).
+			sim := m.discovery.similarity
+			if sim == 0 {
+				sim = 0.7
+			}
+			m.vibe.ShowPicker(sim)
 		}
 		return nil
 
@@ -1211,6 +1266,8 @@ func (m *Model) syncDiscoveryView() {
 		info.SeedTitle = m.discovery.seed.Title
 		info.Similarity = m.discovery.similarity
 		info.Refilling = m.discovery.refilling
+		info.AutoMode = m.discovery.autoMode
+		info.Count = m.discovery.refillCap
 	}
 	m.vibe.SetDiscovery(info)
 }
@@ -1253,6 +1310,10 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 	seed := m.discovery.seed
 	similarity := m.discovery.similarity
 	prov := m.provider
+	refillCap := m.discovery.refillCap
+	if refillCap <= 0 {
+		refillCap = 1
+	}
 	queries := discoveryQueries(seed, similarity)
 	m.appendLog(fmt.Sprintf("[discovery] queries (sim=%.0f%%): %v", similarity*100, queries))
 
@@ -1310,7 +1371,6 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		rand.Shuffle(len(merged), func(i, j int) { //nolint:gosec
 			merged[i], merged[j] = merged[j], merged[i]
 		})
-		const refillCap = 1
 		if len(merged) > refillCap {
 			merged = merged[:refillCap]
 		}
@@ -1812,9 +1872,11 @@ func (m *Model) statusPlayContent(_ int) string {
 	accent := styles.KeyName
 	dot := muted.Render("  ·  ")
 
-	discoverHint := accent.Render("d") + muted.Render(" discovery")
+	discoverHint := accent.Render("d") + muted.Render(" metric")
 	if m.discovery.enabled {
 		discoverHint = accent.Render("d") + styles.Playing.Render(" ● discovery")
+	} else if m.vibe.PickerActive() {
+		discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
 	}
 
 	parts := []string{

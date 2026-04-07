@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Discovery mode: two-step activation flow** — discovery is now configured and
+  started separately, giving finer control over what gets queued:
+  - Press **`d`** to open a metric picker in the Vibe panel. Use **`↑`/`↓`** (or
+    `k`/`j`) to choose a similarity level — *same artist*, *similar artists*, *same
+    genre*, *exploring*, or *pure discovery* — then **`Enter`** to confirm. The
+    selected metric is stored and persists until changed; pressing `d` or `esc`
+    cancels without changing the current setting.
+  - Use the command palette (**`:`**) to actually start discovery:
+    - `:discover <n>` — one-shot mode: queues exactly *n* songs based on the selected
+      metric, then stops. Useful for a quick burst of new tracks.
+    - `:discover auto` — continuous mode: keeps refilling the queue with one song
+      whenever the last queued track starts playing (the previous default behaviour).
+  - The Vibe panel now shows the active mode (*n songs* or *auto*) alongside the
+    similarity bar when discovery is running.
+  - The `+`/`-` keys still adjust the similarity level while discovery is active.
+
 ### Fixed
 - **Discovery: library tracks queued with library ID** — `PlaybackID` now returns
   the library ID (`i.XXXXX`) for tracks the user owns, instead of the catalog ID.

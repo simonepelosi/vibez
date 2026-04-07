@@ -1179,15 +1179,35 @@ func TestHandleNormalKey_F_NoTrack_NoOp(t *testing.T) {
 	_ = cmd // no-op
 }
 
-func TestHandleNormalKey_D_StartDiscovery(t *testing.T) {
+func TestHandleNormalKey_D_OpensPicker(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed"}
 	m.playerState.Track = track
 	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
 	_ = cmd
-	if !m.discovery.enabled {
-		t.Error("d key with track should start discovery mode")
+	if !m.vibe.PickerActive() {
+		t.Error("d key with track should open the metric picker")
+	}
+	if m.discovery.enabled {
+		t.Error("d key should not immediately start discovery; picker must be confirmed first")
+	}
+}
+
+func TestHandleNormalKey_D_ClosesPickerIfOpen(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed"}
+	m.playerState.Track = track
+	// First d → opens picker.
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	if !m.vibe.PickerActive() {
+		t.Fatal("expected picker to be active after first d")
+	}
+	// Second d → closes picker.
+	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	if m.vibe.PickerActive() {
+		t.Error("second d should close the picker")
 	}
 }
 

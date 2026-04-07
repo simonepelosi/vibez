@@ -18,12 +18,13 @@ type VibeQueryMsg struct{ Query string }
 type vibeState int
 
 const (
-	vibeIdle      vibeState = iota // waiting for user to press v
-	vibeInputting                  // text input active
-	vibeSearching                  // search in progress
-	vibeDone                       // tracks added to queue
-	vibeError                      // search returned no results / error
-	vibeDiscovery                  // discovery mode is active
+	vibeIdle            vibeState = iota // waiting for user to press v
+	vibeInputting                        // text input active
+	vibeSearching                        // search in progress
+	vibeDone                             // tracks added to queue
+	vibeError                            // search returned no results / error
+	vibeDiscovery                        // discovery mode is active
+	vibeDiscoveryPicker                  // metric selection picker is open
 )
 
 // DiscoveryInfo carries the discovery-mode display data set by the model.
@@ -33,6 +34,43 @@ type DiscoveryInfo struct {
 	SeedTitle  string
 	Similarity float64 // 0.0=very different, 1.0=very similar
 	Refilling  bool    // background search in progress
+	AutoMode   bool    // true = continuous auto-refill; false = one-shot
+	Count      int     // songs per discovery cycle
+}
+
+// DiscoveryMetricSelectedMsg is dispatched when the user picks a similarity
+// level in the discovery picker. The model handles it to store the selection.
+type DiscoveryMetricSelectedMsg struct{ Similarity float64 }
+
+// discoveryOption is one entry in the metric picker.
+type discoveryOption struct {
+	label      string
+	similarity float64
+}
+
+var discoveryOptions = []discoveryOption{
+	{"same artist", 0.95},
+	{"similar artists", 0.75},
+	{"same genre", 0.50},
+	{"exploring", 0.30},
+	{"pure discovery", 0.10},
+}
+
+// closestOptionIdx returns the index of the option whose similarity is nearest
+// to the given value — used to pre-select the right row when opening the picker.
+func closestOptionIdx(similarity float64) int {
+	best, bestDiff := 0, 1.0
+	for i, opt := range discoveryOptions {
+		d := opt.similarity - similarity
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDiff {
+			bestDiff = d
+			best = i
+		}
+	}
+	return best
 }
 
 // VibeModel drives the interactive vibe panel (right split of the bottom area).
@@ -43,6 +81,7 @@ type VibeModel struct {
 	added     int    // tracks added on last successful search
 	errStr    string // error message from last search
 	discovery DiscoveryInfo
+	pickerIdx int // selected row in the metric picker
 }
 
 func NewVibe() *VibeModel {
@@ -63,6 +102,27 @@ func (v *VibeModel) Focus() {
 	v.input.SetValue("")
 	v.input.Focus()
 }
+
+// ShowPicker opens the similarity metric picker, pre-selecting the option
+// closest to currentSimilarity. No-op while a search is in progress.
+func (v *VibeModel) ShowPicker(currentSimilarity float64) {
+	if v.state == vibeSearching {
+		return
+	}
+	v.pickerIdx = closestOptionIdx(currentSimilarity)
+	v.state = vibeDiscoveryPicker
+	v.input.Blur()
+}
+
+// HidePicker closes the picker and returns to idle. No-op if not in picker state.
+func (v *VibeModel) HidePicker() {
+	if v.state == vibeDiscoveryPicker {
+		v.state = vibeIdle
+	}
+}
+
+// PickerActive reports whether the metric picker is currently open.
+func (v *VibeModel) PickerActive() bool { return v.state == vibeDiscoveryPicker }
 
 // IsFocused reports whether the vibe panel is capturing keyboard input.
 func (v *VibeModel) IsFocused() bool { return v.state == vibeInputting }
@@ -94,7 +154,7 @@ func (v *VibeModel) SetResult(n int, err error) {
 func (v *VibeModel) SetDiscovery(info DiscoveryInfo) {
 	v.discovery = info
 	if info.Active {
-		if v.state != vibeSearching {
+		if v.state != vibeSearching && v.state != vibeDiscoveryPicker {
 			v.state = vibeDiscovery
 		}
 		v.input.Blur()
@@ -106,36 +166,56 @@ func (v *VibeModel) SetDiscovery(info DiscoveryInfo) {
 // DiscoveryActive reports whether discovery mode is currently active.
 func (v *VibeModel) DiscoveryActive() bool { return v.discovery.Active }
 
-// Update processes keyboard input when the vibe panel is focused (vibeInputting).
-// Returns a Cmd that dispatches VibeQueryMsg when the user presses Enter.
+// Update processes keyboard input when the vibe panel is focused (vibeInputting)
+// or when the metric picker is open (vibeDiscoveryPicker).
+// Returns a Cmd that dispatches VibeQueryMsg or DiscoveryMetricSelectedMsg.
 // All other key events are forwarded to the bubbles textinput.
 func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
-	if v.state != vibeInputting {
-		return nil
-	}
 	km, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return nil
 	}
-	switch km.String() {
-	case "enter":
-		q := strings.TrimSpace(v.input.Value())
-		if q == "" {
+	switch v.state {
+	case vibeInputting:
+		switch km.String() {
+		case "enter":
+			q := strings.TrimSpace(v.input.Value())
+			if q == "" {
+				return nil
+			}
+			v.lastQ = q
+			v.state = vibeSearching
+			v.input.Blur()
+			return func() tea.Msg { return VibeQueryMsg{Query: q} }
+		case "esc":
+			v.state = vibeIdle
+			v.input.Blur()
+			v.input.SetValue("")
 			return nil
 		}
-		v.lastQ = q
-		v.state = vibeSearching
-		v.input.Blur()
-		return func() tea.Msg { return VibeQueryMsg{Query: q} }
-	case "esc":
-		v.state = vibeIdle
-		v.input.Blur()
-		v.input.SetValue("")
-		return nil
+		var cmd tea.Cmd
+		v.input, cmd = v.input.Update(msg)
+		return cmd
+
+	case vibeDiscoveryPicker:
+		switch km.String() {
+		case "up", "k":
+			if v.pickerIdx > 0 {
+				v.pickerIdx--
+			}
+		case "down", "j":
+			if v.pickerIdx < len(discoveryOptions)-1 {
+				v.pickerIdx++
+			}
+		case "enter":
+			opt := discoveryOptions[v.pickerIdx]
+			v.state = vibeIdle
+			return func() tea.Msg { return DiscoveryMetricSelectedMsg{Similarity: opt.similarity} }
+		case "d", "esc":
+			v.state = vibeIdle
+		}
 	}
-	var cmd tea.Cmd
-	v.input, cmd = v.input.Update(msg)
-	return cmd
+	return nil
 }
 
 // similarityBar returns a styled block-progress bar and a label for the similarity value.
@@ -190,7 +270,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	}
 
 	labelTitle := "Vibe"
-	if v.state == vibeDiscovery {
+	if v.state == vibeDiscovery || v.state == vibeDiscoveryPicker {
 		labelTitle = "Discovery"
 	}
 	label := styles.TabActive.Render(labelTitle)
@@ -198,6 +278,24 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 
 	var lines []string
 	switch v.state {
+	case vibeDiscoveryPicker:
+		lines = []string{label, sep, accent.Render("select metric:"), ""}
+		for i, opt := range discoveryOptions {
+			prefix := "  "
+			nameStyle := muted
+			if i == v.pickerIdx {
+				prefix = accent.Render("▶ ")
+				nameStyle = primary
+			}
+			lines = append(lines, prefix+nameStyle.Render(opt.label))
+		}
+		lines = append(lines,
+			"",
+			accent.Render("↑↓")+muted.Render(" navigate")+
+				"  "+accent.Render("Enter")+muted.Render(" select")+
+				"  "+accent.Render("esc")+muted.Render(" cancel"),
+		)
+
 	case vibeDiscovery:
 		d := v.discovery
 		barW := max(w-20, 6)
@@ -215,13 +313,24 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			bearStatus += muted.Render("listening…")
 		}
 
+		var modeStr string
+		if d.AutoMode {
+			modeStr = muted.Render("Mode  ") + accent.Render("auto")
+		} else {
+			modeStr = muted.Render("Mode  ") + accent.Render(fmt.Sprintf("%d song", d.Count))
+			if d.Count != 1 {
+				modeStr += accent.Render("s")
+			}
+		}
+
 		lines = []string{
 			label, sep,
 			accent.Render(clip(d.SeedArtist, w-4)),
 			muted.Render(clip(d.SeedTitle, w-4)),
 			"",
-			muted.Render("Similarity") + "  " + bar + "  " + labelStyle.Render(pct),
-			muted.Render("           ") + labelStyle.Render(simLabel),
+			muted.Render("Metric") + "  " + bar + "  " + labelStyle.Render(pct),
+			muted.Render("       ") + labelStyle.Render(simLabel),
+			modeStr,
 			"",
 			bearStatus,
 			"",
@@ -238,7 +347,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			"",
 			bear + " " + muted.Render("press v to start"),
 			"",
-			muted.Render("or ") + accent.Render("d") + muted.Render(" discovery mode"),
+			accent.Render("d") + muted.Render(" set metric  ") + accent.Render(":discover") + muted.Render(" start"),
 		}
 
 	case vibeInputting:
@@ -275,7 +384,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
 			"",
 			accent.Render("v") + muted.Render(" new vibe") +
-				"  " + accent.Render("d") + muted.Render(" discovery"),
+				"  " + accent.Render("d") + muted.Render(" set metric"),
 		}
 
 	case vibeError:
@@ -286,7 +395,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			bearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
 			"",
 			accent.Render("v") + muted.Render(" try again") +
-				"  " + accent.Render("d") + muted.Render(" discovery"),
+				"  " + accent.Render("d") + muted.Render(" set metric"),
 		}
 	}
 
