@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Progress bar: animated gradient zigzag** — replaced the flat `━●─` bar with a
+  `╱╱╲╲` zigzag wave that spans the full width. The elapsed portion is coloured with
+  a per-character blue → lavender → rose-pink gradient; the remaining portion uses
+  the same zigzag in muted grey so the waveform reads as one continuous line. The
+  wave scrolls forward every 200 ms while music is playing (driven by the existing
+  glowTick animation clock).
+
 ---
 
 ## [0.0.6] — 2026-04-07
