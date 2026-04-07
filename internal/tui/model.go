@@ -1561,37 +1561,224 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 
 // discoveryQueries returns search terms based on seed + similarity.
 // similarity 1.0 = same artist; 0.0 = completely random genre exploration.
+//
+// Apple Music's catalog search is artist/title indexed; bare genre strings
+// ("indie", "r&b playlist") rarely match songs. Instead we always build
+// queries from artist names — either the seed artist or curated artists that
+// are representative of the seed's genre or adjacent genres.
 func discoveryQueries(seed *provider.Track, similarity float64) []string {
-	// Determine the seed's primary genre.
-	genre := "indie"
-	if len(seed.Genres) > 0 {
-		genre = seed.Genres[0]
+	artist := seed.Artist
+	album := seed.Album
+
+	// Resolve the primary genre from the track metadata.  Apple Music often
+	// appends the catch-all "Music" genre; skip it when a more specific tag
+	// is available.
+	genre := ""
+	for _, g := range seed.Genres {
+		if g != "Music" && g != "" {
+			genre = g
+			break
+		}
 	}
 
-	explorationGenres := []string{
-		"electronic", "indie pop", "r&b", "jazz", "folk", "hip-hop",
-		"ambient", "soul", "funk", "alternative", "dream pop", "lofi",
+	// genrePool returns a randomised slice of artist names that are
+	// representative of the given Apple Music genre string (case-insensitive
+	// prefix match).  Falls back to a broad alternative/indie pool.
+	pool := discoveryArtistPool(genre)
+
+	// pick selects n distinct random elements from pool, avoiding `exclude`.
+	pick := func(n int, exclude ...string) []string {
+		excl := make(map[string]bool, len(exclude))
+		for _, e := range exclude {
+			excl[strings.ToLower(e)] = true
+		}
+		// Shuffle a copy so each call produces different results.
+		shuffled := make([]string, len(pool))
+		copy(shuffled, pool)
+		rand.Shuffle(len(shuffled), func(i, j int) { //nolint:gosec
+			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+		})
+		var out []string
+		for _, a := range shuffled {
+			if !excl[strings.ToLower(a)] {
+				out = append(out, a)
+				if len(out) == n {
+					break
+				}
+			}
+		}
+		return out
 	}
 
 	switch {
 	case similarity >= 0.85:
-		return []string{seed.Artist, seed.Artist + " similar artists"}
-	case similarity >= 0.65:
-		return []string{seed.Artist, genre}
-	case similarity >= 0.45:
-		return []string{genre, genre + " playlist"}
-	case similarity >= 0.20:
-		// Mix seed genre with a random exploration genre.
-		other := explorationGenres[rand.Intn(len(explorationGenres))] //nolint:gosec
-		return []string{genre, other}
-	default:
-		// Pure discovery: two random unrelated genres.
-		i := rand.Intn(len(explorationGenres))     //nolint:gosec
-		j := rand.Intn(len(explorationGenres) - 1) //nolint:gosec
-		if j >= i {
-			j++
+		// Same-artist focus: search the artist directly, plus a specific album
+		// when available for breadth across their catalogue.
+		qs := []string{artist}
+		if album != "" {
+			qs = append(qs, artist+" "+album)
 		}
-		return []string{explorationGenres[i], explorationGenres[j]}
+		// Add one more artist from the same genre pool for slight variety.
+		qs = append(qs, pick(1, artist)...)
+		return qs
+
+	case similarity >= 0.65:
+		// Seed artist + a couple of related artists from the same genre.
+		qs := []string{artist}
+		qs = append(qs, pick(2, artist)...)
+		return qs
+
+	case similarity >= 0.45:
+		// Genre-focused: seed artist as anchor + 2–3 artists from same pool.
+		qs := []string{artist}
+		qs = append(qs, pick(3, artist)...)
+		return qs
+
+	case similarity >= 0.20:
+		// Exploration: seed genre pool + one artist from an adjacent genre.
+		adj := discoveryArtistPool(discoveryAdjacentGenre(genre))
+		qs := pick(2, artist)
+		// Pick one from adjacent pool.
+		rand.Shuffle(len(adj), func(i, j int) { adj[i], adj[j] = adj[j], adj[i] }) //nolint:gosec
+		if len(adj) > 0 {
+			qs = append(qs, adj[0])
+		}
+		return qs
+
+	default:
+		// Pure discovery: three artists from two completely random genre pools.
+		genres := []string{
+			"Electronic", "Jazz", "Hip-Hop/Rap", "R&B/Soul",
+			"Folk", "Classical", "Country", "Reggae",
+		}
+		rand.Shuffle(len(genres), func(i, j int) { genres[i], genres[j] = genres[j], genres[i] }) //nolint:gosec
+		p1 := discoveryArtistPool(genres[0])
+		p2 := discoveryArtistPool(genres[1])
+		rand.Shuffle(len(p1), func(i, j int) { p1[i], p1[j] = p1[j], p1[i] }) //nolint:gosec
+		rand.Shuffle(len(p2), func(i, j int) { p2[i], p2[j] = p2[j], p2[i] }) //nolint:gosec
+		var qs []string
+		if len(p1) > 0 {
+			qs = append(qs, p1[0])
+		}
+		if len(p2) > 0 {
+			qs = append(qs, p2[0])
+		}
+		if len(p1) > 1 {
+			qs = append(qs, p1[1])
+		}
+		return qs
+	}
+}
+
+// discoveryAdjacentGenre returns a genre that is stylistically adjacent to g.
+func discoveryAdjacentGenre(g string) string {
+	adjacency := map[string]string{
+		"alternative": "Electronic",
+		"indie":       "Folk",
+		"electronic":  "Alternative",
+		"pop":         "R&B/Soul",
+		"hip-hop":     "R&B/Soul",
+		"r&b":         "Hip-Hop/Rap",
+		"folk":        "Alternative",
+		"jazz":        "Soul",
+		"soul":        "Jazz",
+		"rock":        "Alternative",
+		"metal":       "Rock",
+		"classical":   "Jazz",
+		"country":     "Folk",
+	}
+	low := strings.ToLower(g)
+	for k, v := range adjacency {
+		if strings.Contains(low, k) {
+			return v
+		}
+	}
+	return "Electronic" // safe fallback
+}
+
+// discoveryArtistPool returns a curated list of artist names that are
+// representative of g (matched by case-insensitive substring).
+// Apple Music search resolves artist names to tracks reliably.
+func discoveryArtistPool(g string) []string {
+	low := strings.ToLower(g)
+
+	type genreEntry struct {
+		key     string
+		artists []string
+	}
+	entries := []genreEntry{
+		{"alternative", []string{
+			"Radiohead", "The National", "Pixies", "Sonic Youth", "Pavement",
+			"Dinosaur Jr", "Built to Spill", "Guided by Voices", "Yo La Tengo",
+			"My Bloody Valentine", "Slowdive", "Ride", "Mazzy Star", "Neutral Milk Hotel",
+		}},
+		{"indie", []string{
+			"Bon Iver", "Fleet Foxes", "Arcade Fire", "Modest Mouse", "Death Cab for Cutie",
+			"Sufjan Stevens", "Bright Eyes", "Phosphorescent", "Big Thief", "Phoebe Bridgers",
+			"Waxahatchee", "Angel Olsen", "Sharon Van Etten", "Hand Habits", "Hazel English",
+		}},
+		{"electronic", []string{
+			"Four Tet", "Burial", "Aphex Twin", "Caribou", "James Blake",
+			"Boards of Canada", "Massive Attack", "Portishead", "Thom Yorke",
+			"Floating Points", "Jon Hopkins", "Nils Frahm", "Nicolas Jaar", "Arca",
+		}},
+		{"pop", []string{
+			"Lorde", "Lana Del Rey", "Grimes", "FKA twigs", "Charli XCX",
+			"Caroline Polachek", "Carly Rae Jepsen", "Perfume Genius", "Weyes Blood", "Aldous Harding",
+		}},
+		{"hip-hop", []string{
+			"Kendrick Lamar", "Frank Ocean", "Tyler the Creator", "Danny Brown", "Vince Staples",
+			"JPEGMAFIA", "Denzel Curry", "Little Simz", "Injury Reserve", "billy woods",
+		}},
+		{"r&b", []string{
+			"Frank Ocean", "SZA", "Blood Orange", "Solange", "Kelela",
+			"Syd", "Moses Sumney", "Sampha", "NAO", "Tirzah",
+		}},
+		{"folk", []string{
+			"Iron & Wine", "Gillian Welch", "Jason Isbell", "Phosphorescent", "Gregory Alan Isakov",
+			"Josh Ritter", "Anaïs Mitchell", "The Tallest Man on Earth", "Nick Drake", "John Martyn",
+		}},
+		{"jazz", []string{
+			"Brad Mehldau", "Nubya Garcia", "Kamasi Washington", "Snarky Puppy", "Thundercat",
+			"Makaya McCraven", "Sons of Kemet", "Shabaka Hutchings", "Charles Mingus", "Bill Evans",
+		}},
+		{"soul", []string{
+			"Leon Bridges", "Nathaniel Rateliff", "Anderson Paak", "Charles Bradley",
+			"Sharon Jones", "Michael Kiwanuka", "Lianne La Havas", "Durand Jones",
+		}},
+		{"rock", []string{
+			"Wilco", "The War on Drugs", "Kurt Vile", "Spoon", "Parquet Courts",
+			"Drive-By Truckers", "Steve Gunn", "Jeff Tweedy", "Ty Segall", "Thee Oh Sees",
+		}},
+		{"metal", []string{
+			"Mastodon", "Baroness", "Converge", "Neurosis", "Pallbearer",
+			"Inter Arma", "Bell Witch", "Deafheaven", "Wolves in the Throne Room",
+		}},
+		{"classical", []string{
+			"Nils Frahm", "Max Richter", "Johann Johannsson", "Ólafur Arnalds",
+			"Lubomyr Melnyk", "Dustin O'Halloran", "Ryuichi Sakamoto",
+		}},
+		{"country", []string{
+			"Sturgill Simpson", "Chris Stapleton", "Jason Isbell", "Colter Wall",
+			"Tyler Childers", "Charley Crockett", "Nikki Lane", "Margo Price",
+		}},
+		{"reggae", []string{
+			"Bob Marley", "Toots and the Maytals", "Peter Tosh", "Lee Scratch Perry",
+			"Burning Spear", "Steel Pulse", "The Congos",
+		}},
+	}
+
+	for _, e := range entries {
+		if strings.Contains(low, e.key) {
+			return e.artists
+		}
+	}
+
+	// Broad fallback used when the genre is unknown.
+	return []string{
+		"Radiohead", "Bon Iver", "The National", "Fleet Foxes", "Arcade Fire",
+		"Sufjan Stevens", "Bright Eyes", "James Blake", "Four Tet", "Caribou",
+		"Big Thief", "Phoebe Bridgers", "Angel Olsen", "Weyes Blood", "Wilco",
 	}
 }
 
