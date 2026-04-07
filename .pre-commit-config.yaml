@@ -4,28 +4,28 @@ repos:
     hooks:
       - id: go-build
         name: go build
-        language: golang
+        language: system
         entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go build ./...'
         types: [go]
         pass_filenames: false
 
       - id: go-vet
         name: go vet
-        language: golang
+        language: system
         entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go vet ./...'
         types: [go]
         pass_filenames: false
 
       - id: go-test
         name: go test
-        language: golang
+        language: system
         entry: bash -c 'PKG_CONFIG_PATH=./pkg-config go test ./...'
         types: [go]
         pass_filenames: false
 
       - id: go-mod-tidy
         name: go mod tidy
-        language: golang
+        language: system
         entry: bash -c 'go mod tidy && git diff --exit-code go.sum go.mod'
         types: [go]
         pass_filenames: false
