@@ -44,9 +44,39 @@ func FormatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", mins, secs)
 }
 
-// RenderProgressBar renders a flat progress bar: filled portion uses ━, a ●
-// marker sits at the playhead, and the remaining portion uses ─.
-// step is accepted for API compatibility but not used (no animation needed).
+// wavePattern is the repeating 4-char zigzag used for the progress bar wave.
+// Two chars per slope give a smooth rolling animation (800 ms full cycle at
+// 200 ms / glowTick step).
+var wavePattern = []rune{'╱', '╱', '╲', '╲'}
+
+// gradStops are the colour stops for the filled-portion gradient
+// (cornflower blue → lavender → rose pink).
+var gradStops = []lipgloss.Color{
+	styles.ColorProgress,      // #89b4fa — blue
+	lipgloss.Color("#cba6f7"), // lavender
+	styles.ColorLove,          // #f38ba8 — rose pink
+}
+
+// progressGradient returns the gradient colour for position i out of total
+// cells, interpolating across gradStops.
+func progressGradient(i, total int) lipgloss.Color {
+	if total <= 1 || len(gradStops) < 2 {
+		return gradStops[0]
+	}
+	segments := len(gradStops) - 1
+	t := float64(i) / float64(total-1) // 0.0 … 1.0
+	seg := int(t * float64(segments))
+	if seg >= segments {
+		return gradStops[len(gradStops)-1]
+	}
+	local := t*float64(segments) - float64(seg)
+	return styles.LerpColor(gradStops[seg], gradStops[seg+1], local)
+}
+
+// RenderProgressBar renders an animated flat zigzag (╱╱╲╲) progress bar.
+// The filled portion is coloured with a blue→lavender→pink gradient that
+// shifts with each glowTick step; the remaining portion uses the muted surface
+// colour with the same zigzag so the wave reads as one continuous line.
 func RenderProgressBar(pos, dur time.Duration, width, step int) string {
 	if width <= 0 {
 		return ""
@@ -60,13 +90,20 @@ func RenderProgressBar(pos, dur time.Duration, width, step int) string {
 	}
 	filled := int(ratio * float64(width))
 
-	// Reserve one cell for the playhead marker (●) unless at the very edges.
-	if filled > 0 && filled < width {
-		return styles.ProgressBar.Render(strings.Repeat("━", filled-1)+"●") +
-			styles.ProgressBg.Render(strings.Repeat("─", width-filled))
+	n := len(wavePattern)
+	off := step % n
+
+	var sb strings.Builder
+	for i := range width {
+		ch := string(wavePattern[(i+off)%n])
+		if i < filled {
+			color := progressGradient(i, filled)
+			sb.WriteString(lipgloss.NewStyle().Foreground(color).Render(ch))
+		} else {
+			sb.WriteString(styles.ProgressBg.Render(ch))
+		}
 	}
-	return styles.ProgressBar.Render(strings.Repeat("━", filled)) +
-		styles.ProgressBg.Render(strings.Repeat("─", width-filled))
+	return sb.String()
 }
 
 func centerLine(s string, width int) string {

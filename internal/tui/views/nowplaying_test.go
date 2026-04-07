@@ -122,21 +122,18 @@ func TestRenderProgressBar_ZeroDuration(t *testing.T) {
 }
 
 func TestRenderProgressBar_FullyFilled(t *testing.T) {
-	// position == duration → ratio 1.0 → all filled with ━
+	// position == duration → all filled with gradient zigzag chars
 	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10, 0)
-	if !strings.Contains(got, "━") {
-		t.Errorf("RenderProgressBar(full) should contain ━, got %q", got)
+	if !strings.ContainsRune(got, '╱') && !strings.ContainsRune(got, '╲') {
+		t.Errorf("RenderProgressBar(full) should contain zigzag chars, got %q", got)
 	}
 }
 
 func TestRenderProgressBar_PartlyFilled(t *testing.T) {
-	// 50% → filled (━/●) + empty (─)
+	// 50% → filled (gradient zigzag) + empty (muted zigzag)
 	got := RenderProgressBar(30*time.Second, 60*time.Second, 10, 0)
-	if !strings.Contains(got, "●") && !strings.Contains(got, "━") {
-		t.Errorf("RenderProgressBar(50%%) should contain ━ or ●, got %q", got)
-	}
-	if !strings.Contains(got, "─") {
-		t.Errorf("RenderProgressBar(50%%) should contain ─, got %q", got)
+	if !strings.ContainsRune(got, '╱') && !strings.ContainsRune(got, '╲') {
+		t.Errorf("RenderProgressBar(50%%) should contain zigzag chars, got %q", got)
 	}
 }
 
@@ -149,10 +146,10 @@ func TestRenderProgressBar_PositionBeyondDuration(t *testing.T) {
 }
 
 func TestRenderProgressBar_AnimationShifts(t *testing.T) {
-	// step param is unused for flat bar — both calls must be non-empty and not panic.
+	// Different steps shift the wave phase — frames should differ.
 	a := RenderProgressBar(30*time.Second, 60*time.Second, 20, 0)
-	b := RenderProgressBar(30*time.Second, 60*time.Second, 20, 5)
-	if a == "" || b == "" {
-		t.Error("RenderProgressBar: should return non-empty output")
+	b := RenderProgressBar(30*time.Second, 60*time.Second, 20, 1)
+	if a == b {
+		t.Error("RenderProgressBar: adjacent steps should produce different wave output")
 	}
 }
