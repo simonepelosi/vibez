@@ -101,21 +101,21 @@ func TestRenderGlowTitle_CyclesNoPanic(t *testing.T) {
 // --- RenderProgressBar ---
 
 func TestRenderProgressBar_ZeroWidth(t *testing.T) {
-	got := RenderProgressBar(30*time.Second, 3*time.Minute, 0, 0)
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, 0)
 	if got != "" {
 		t.Errorf("RenderProgressBar(width=0) = %q, want empty", got)
 	}
 }
 
 func TestRenderProgressBar_NegativeWidth(t *testing.T) {
-	got := RenderProgressBar(30*time.Second, 3*time.Minute, -1, 0)
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, -1)
 	if got != "" {
 		t.Errorf("RenderProgressBar(width=-1) = %q, want empty", got)
 	}
 }
 
 func TestRenderProgressBar_ZeroDuration(t *testing.T) {
-	got := RenderProgressBar(0, 0, 40, 0)
+	got := RenderProgressBar(0, 0, 40)
 	if got == "" {
 		t.Error("RenderProgressBar(dur=0) returned empty for non-zero width")
 	}
@@ -123,7 +123,7 @@ func TestRenderProgressBar_ZeroDuration(t *testing.T) {
 
 func TestRenderProgressBar_FullyFilled(t *testing.T) {
 	// position == duration → all filled with gradient zigzag chars
-	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10, 0)
+	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10)
 	if !strings.ContainsRune(got, '╱') && !strings.ContainsRune(got, '╲') {
 		t.Errorf("RenderProgressBar(full) should contain zigzag chars, got %q", got)
 	}
@@ -131,7 +131,7 @@ func TestRenderProgressBar_FullyFilled(t *testing.T) {
 
 func TestRenderProgressBar_PartlyFilled(t *testing.T) {
 	// 50% → filled (gradient zigzag) + empty (muted zigzag)
-	got := RenderProgressBar(30*time.Second, 60*time.Second, 10, 0)
+	got := RenderProgressBar(30*time.Second, 60*time.Second, 10)
 	if !strings.ContainsRune(got, '╱') && !strings.ContainsRune(got, '╲') {
 		t.Errorf("RenderProgressBar(50%%) should contain zigzag chars, got %q", got)
 	}
@@ -139,17 +139,17 @@ func TestRenderProgressBar_PartlyFilled(t *testing.T) {
 
 func TestRenderProgressBar_PositionBeyondDuration(t *testing.T) {
 	// position > duration: ratio capped at 1.0 — must not panic.
-	got := RenderProgressBar(5*time.Minute, 3*time.Minute, 10, 0)
+	got := RenderProgressBar(5*time.Minute, 3*time.Minute, 10)
 	if got == "" {
 		t.Error("RenderProgressBar(pos>dur) returned empty string")
 	}
 }
 
-func TestRenderProgressBar_AnimationShifts(t *testing.T) {
-	// Different steps shift the wave phase — frames should differ.
-	a := RenderProgressBar(30*time.Second, 60*time.Second, 20, 0)
-	b := RenderProgressBar(30*time.Second, 60*time.Second, 20, 1)
-	if a == b {
-		t.Error("RenderProgressBar: adjacent steps should produce different wave output")
+func TestRenderProgressBar_StaticPattern(t *testing.T) {
+	// The pattern is static — repeated calls with the same args must be identical.
+	a := RenderProgressBar(30*time.Second, 60*time.Second, 20)
+	b := RenderProgressBar(30*time.Second, 60*time.Second, 20)
+	if a != b {
+		t.Error("RenderProgressBar: pattern should be static across calls")
 	}
 }

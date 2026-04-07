@@ -9,13 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.0.7] — 2026-04-07
+
 ### Changed
-- **Progress bar: animated gradient zigzag** — replaced the flat `━●─` bar with a
+- **Progress bar: static gradient zigzag** — replaced the flat `━●─` bar with a
   `╱╱╲╲` zigzag wave that spans the full width. The elapsed portion is coloured with
   a per-character blue → lavender → rose-pink gradient; the remaining portion uses
   the same zigzag in muted grey so the waveform reads as one continuous line. The
-  wave scrolls forward every 200 ms while music is playing (driven by the existing
-  glowTick animation clock).
+  pattern is static (no scrolling).
+- **Slower bear & title glow animation** — the glow tick interval increased from
+  200 ms to 500 ms, giving the bear mascot and the now-playing title a more relaxed
+  breathing cadence.
 
 ---
 
@@ -263,5 +269,11 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/simonepelosi/vibez/compare/v0.0.6...v0.0.7
+[0.0.6]: https://github.com/simonepelosi/vibez/compare/v0.0.5...v0.0.6
+[0.0.5]: https://github.com/simonepelosi/vibez/compare/v0.0.4...v0.0.5
+[0.0.4]: https://github.com/simonepelosi/vibez/compare/v0.0.3...v0.0.4
+[0.0.3]: https://github.com/simonepelosi/vibez/compare/v0.0.2...v0.0.3
+[0.0.2]: https://github.com/simonepelosi/vibez/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/simonepelosi/vibez/releases/tag/v0.0.1

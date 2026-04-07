@@ -45,8 +45,6 @@ func FormatDuration(d time.Duration) string {
 }
 
 // wavePattern is the repeating 4-char zigzag used for the progress bar wave.
-// Two chars per slope give a smooth rolling animation (800 ms full cycle at
-// 200 ms / glowTick step).
 var wavePattern = []rune{'╱', '╱', '╲', '╲'}
 
 // gradStops are the colour stops for the filled-portion gradient
@@ -73,11 +71,11 @@ func progressGradient(i, total int) lipgloss.Color {
 	return styles.LerpColor(gradStops[seg], gradStops[seg+1], local)
 }
 
-// RenderProgressBar renders an animated flat zigzag (╱╱╲╲) progress bar.
-// The filled portion is coloured with a blue→lavender→pink gradient that
-// shifts with each glowTick step; the remaining portion uses the muted surface
-// colour with the same zigzag so the wave reads as one continuous line.
-func RenderProgressBar(pos, dur time.Duration, width, step int) string {
+// RenderProgressBar renders a static flat zigzag (╱╱╲╲) progress bar.
+// The filled portion is coloured with a blue→lavender→pink gradient;
+// the remaining portion uses the muted surface colour with the same zigzag
+// so the pattern reads as one continuous line.
+func RenderProgressBar(pos, dur time.Duration, width int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -91,11 +89,10 @@ func RenderProgressBar(pos, dur time.Duration, width, step int) string {
 	filled := int(ratio * float64(width))
 
 	n := len(wavePattern)
-	off := step % n
 
 	var sb strings.Builder
 	for i := range width {
-		ch := string(wavePattern[(i+off)%n])
+		ch := string(wavePattern[i%n])
 		if i < filled {
 			color := progressGradient(i, filled)
 			sb.WriteString(lipgloss.NewStyle().Foreground(color).Render(ch))
