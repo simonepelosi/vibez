@@ -253,6 +253,10 @@ type Model struct {
 	memProfiling bool
 	memStats     string
 	helperPaths  []string
+
+	// Mute: preMuteVol holds the volume before mute so it can be restored.
+	// -1 means not muted.
+	preMuteVol float64
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
@@ -262,6 +266,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		player:       plyr,
 		activePanel:  -1,
 		memProfiling: opts.MemProfiling,
+		preMuteVol:   -1,
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -820,6 +825,8 @@ type cmdEntry struct {
 var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
+	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
+	{"mute", "mute", "Toggle mute"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
@@ -908,6 +915,57 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			return nil
 		}
 		return m.startDiscovery(false, n)
+	case cmd == "mute":
+		if m.preMuteVol >= 0 {
+			// Currently muted — restore previous volume.
+			vol := m.preMuteVol
+			m.preMuteVol = -1
+			m.appendLog(fmt.Sprintf("[vol] unmuted → %.0f%%", vol*100))
+			return m.playerCmd(func() error { return m.player.SetVolume(vol) })
+		}
+		// Mute: save current volume and set to 0.
+		m.preMuteVol = m.playerState.Volume
+		m.appendLog("[vol] muted")
+		return m.playerCmd(func() error { return m.player.SetVolume(0) })
+
+	case strings.HasPrefix(cmd, "vol"):
+		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "vol"))
+		if arg == "" {
+			m.errMsg = fmt.Sprintf("volume: %d%%", int(m.playerState.Volume*100))
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		var newVol float64
+		switch {
+		case strings.HasPrefix(arg, "+"):
+			delta, err := strconv.Atoi(arg[1:])
+			if err != nil || delta < 0 {
+				m.errMsg = ":vol +n requires a positive number"
+				m.errExpiry = time.Now().Add(3 * time.Second)
+				return nil
+			}
+			newVol = clamp(m.playerState.Volume+float64(delta)/100, 0, 1)
+		case strings.HasPrefix(arg, "-"):
+			delta, err := strconv.Atoi(arg[1:])
+			if err != nil || delta < 0 {
+				m.errMsg = ":vol -n requires a positive number"
+				m.errExpiry = time.Now().Add(3 * time.Second)
+				return nil
+			}
+			newVol = clamp(m.playerState.Volume-float64(delta)/100, 0, 1)
+		default:
+			n, err := strconv.Atoi(arg)
+			if err != nil || n < 0 || n > 100 {
+				m.errMsg = ":vol requires 0-100, +n, or -n"
+				m.errExpiry = time.Now().Add(3 * time.Second)
+				return nil
+			}
+			newVol = float64(n) / 100
+		}
+		m.preMuteVol = -1 // clear mute state on explicit vol change
+		m.appendLog(fmt.Sprintf("[vol] → %.0f%%", newVol*100))
+		return m.playerCmd(func() error { return m.player.SetVolume(newVol) })
+
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
 		for _, prefix := range []string{"save-playlist ", "save "} {
@@ -1989,7 +2047,12 @@ func (m *Model) renderBoxHeader(inner int) string {
 	title := views.RenderGlowTitle("vibez ♪", m.glowStep)
 
 	vol := int(m.playerState.Volume * 100)
-	volStr := styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
+	var volStr string
+	if m.preMuteVol >= 0 {
+		volStr = styles.Playing.Render("🔇 muted")
+	} else {
+		volStr = styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
+	}
 
 	rightStr := volStr
 	if m.memStats != "" {
