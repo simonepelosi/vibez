@@ -292,29 +292,32 @@ test('play() CONTENT_EQUIVALENT is silently ignored', () => {
 });
 
 test('playbackStateDidChange: ignored for states other than completed(9)', () => {
-  // Simulate listener guard
+  // Simulate listener guard — completed state may be 9 (old MusicKit) or 10 (new).
+  const completedState = 10; // match what newer MusicKit reports
   const advance = (state, busy) => {
-    if (state !== 9) return false;
+    if (state !== completedState) return false;
     if (busy) return false;
     return true;
   };
-  eq(advance(4, false), false, 'state=stopped must not advance');
-  eq(advance(3, false), false, 'state=paused must not advance');
-  eq(advance(2, false), false, 'state=playing must not advance');
-  eq(advance(9, true),  false, '_busy must suppress even state=9');
-  eq(advance(9, false), true,  'state=9 + not busy must advance');
+  eq(advance(4, false),  false, 'state=stopped must not advance');
+  eq(advance(3, false),  false, 'state=paused must not advance');
+  eq(advance(2, false),  false, 'state=playing must not advance');
+  eq(advance(9, false),  false, 'state=9 (old completed) must not advance when completedState=10');
+  eq(advance(10, true),  false, '_busy must suppress even state=10');
+  eq(advance(10, false), true,  'state=10 + not busy must advance');
 });
 
 test('_busy guard: auto-advance suppressed while busy', () => {
+  const completedState = 10;
   const advance = (state, busy, qi, qlen) => {
-    if (state !== 9) return false;
+    if (state !== completedState) return false;
     if (busy || qi < 0 || qlen === 0) return false;
     return true;
   };
-  eq(advance(9, true,  0, 2), false, 'busy=true suppresses');
-  eq(advance(9, false, 0, 2), true,  'busy=false allows');
-  eq(advance(9, false, -1, 2), false, 'qi<0 suppresses');
-  eq(advance(9, false, 0, 0), false,  'empty queue suppresses');
+  eq(advance(10, true,  0, 2), false, 'busy=true suppresses');
+  eq(advance(10, false, 0, 2), true,  'busy=false allows');
+  eq(advance(10, false, -1, 2), false, 'qi<0 suppresses');
+  eq(advance(10, false, 0, 0), false,  'empty queue suppresses');
 });
 
 test('_doPlayAt: try/finally always releases _busy even on unexpected throw', async () => {

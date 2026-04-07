@@ -164,7 +164,7 @@
         setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
 
         // Shorthand: send a debug-only log entry (never shown in status bar).
-        const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed'];
+        const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed','completed'];
         const _log = (msg) => goLog(msg).catch(() => {});
 
         // Log track changes with ID so we can correlate with doPlay logs.
@@ -384,14 +384,20 @@
         }
 
         // Auto-advance when a track ends naturally.
-        // Uses playbackStateDidChange(completed=9) instead of nowPlayingItemDidChange:
+        // Uses playbackStateDidChange(completed) instead of nowPlayingItemDidChange:
         //   stop() → state=stopped(4)  — NOT caught here → no spurious advance
-        //   track ends naturally → state=ended(5) → state=completed(9) — caught here
+        //   track ends naturally → state=ended(5) → state=completed — caught here
         // _busy covers any edge-case fires during our own transitions.
+        //
+        // MusicKit.PlaybackStates.completed was 9 in older versions and moved to 10
+        // in newer builds. Use the enum directly with a fallback to cover both.
+        const _completedState = (MusicKit.PlaybackStates && MusicKit.PlaybackStates.completed != null)
+          ? MusicKit.PlaybackStates.completed
+          : 9;
         music.addEventListener('playbackStateDidChange', () => {
           const m = _m();
           _log(`[js:state] ${_stateN[m.playbackState]||m.playbackState}`);
-          if (m.playbackState !== 9 /* completed */) return;
+          if (m.playbackState !== _completedState) return;
           _log(`[js:auto] completed _qi=${_qi} next=${_qi+1} len=${_q.length} busy=${_busy}`);
           if (_busy || _qi < 0 || _q.length === 0) return;
           if (m.repeatMode === 1 /* repeat-one */) { _playAt(_qi); return; }
