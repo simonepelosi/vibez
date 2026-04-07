@@ -2,12 +2,17 @@ package views
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
+
+// waveChars are the block-height runes used to draw the sine-wave progress bar,
+// from shortest (▁) to tallest (█).
+var waveChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // RenderGlowTitle renders each rune with a colour based on how far the
 // "bright spot" has swept past it. The spot starts before the first char,
@@ -44,8 +49,10 @@ func FormatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", mins, secs)
 }
 
-// RenderProgressBar renders a progress bar using █ (filled) and ░ (empty) chars.
-func RenderProgressBar(pos, dur time.Duration, width int) string {
+// RenderProgressBar renders an animated sine-wave ("wiggle") progress bar.
+// The filled portion is drawn as a scrolling wave using block characters; the
+// remaining portion is a flat ─ line. step is the animation tick (glowStep).
+func RenderProgressBar(pos, dur time.Duration, width, step int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -57,8 +64,18 @@ func RenderProgressBar(pos, dur time.Duration, width int) string {
 		}
 	}
 	filled := int(ratio * float64(width))
-	return styles.ProgressBar.Render(strings.Repeat("█", filled)) +
-		styles.ProgressBg.Render(strings.Repeat("░", width-filled))
+
+	// Sine wave: phase shifts each tick to animate the wiggle.
+	phase := float64(step) * 0.5
+	var sb strings.Builder
+	for i := range filled {
+		h := int(3.5 + 3.5*math.Sin(float64(i)*0.5+phase))
+		h = max(0, min(7, h))
+		sb.WriteRune(waveChars[h])
+	}
+
+	return styles.ProgressBar.Render(sb.String()) +
+		styles.ProgressBg.Render(strings.Repeat("─", width-filled))
 }
 
 func centerLine(s string, width int) string {

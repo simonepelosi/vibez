@@ -2128,7 +2128,7 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 
 	// Progress bar — centred, slightly narrower than full width
 	barW := max(10, contentW-8)
-	progressLine := centerStr(views.RenderProgressBar(m.playerState.Position, t.Duration, barW), contentW)
+	progressLine := centerStr(views.RenderProgressBar(m.playerState.Position, t.Duration, barW, m.glowStep), contentW)
 
 	// Controls: ↺  ⇄  ▶/⏸  ♡/♥
 	var playIcon string

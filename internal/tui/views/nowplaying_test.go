@@ -101,49 +101,72 @@ func TestRenderGlowTitle_CyclesNoPanic(t *testing.T) {
 // --- RenderProgressBar ---
 
 func TestRenderProgressBar_ZeroWidth(t *testing.T) {
-	got := RenderProgressBar(30*time.Second, 3*time.Minute, 0)
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, 0, 0)
 	if got != "" {
 		t.Errorf("RenderProgressBar(width=0) = %q, want empty", got)
 	}
 }
 
 func TestRenderProgressBar_NegativeWidth(t *testing.T) {
-	got := RenderProgressBar(30*time.Second, 3*time.Minute, -1)
+	got := RenderProgressBar(30*time.Second, 3*time.Minute, -1, 0)
 	if got != "" {
 		t.Errorf("RenderProgressBar(width=-1) = %q, want empty", got)
 	}
 }
 
 func TestRenderProgressBar_ZeroDuration(t *testing.T) {
-	got := RenderProgressBar(0, 0, 40)
+	got := RenderProgressBar(0, 0, 40, 0)
 	if got == "" {
 		t.Error("RenderProgressBar(dur=0) returned empty for non-zero width")
 	}
 }
 
 func TestRenderProgressBar_FullyFilled(t *testing.T) {
-	// position == duration → ratio 1.0 → all filled
-	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10)
-	if !strings.Contains(got, "█") {
-		t.Errorf("RenderProgressBar(full) should contain filled chars, got %q", got)
+	// position == duration → ratio 1.0 → all filled with wave chars
+	got := RenderProgressBar(3*time.Minute, 3*time.Minute, 10, 0)
+	hasWave := false
+	for _, r := range waveChars {
+		if strings.ContainsRune(got, r) {
+			hasWave = true
+			break
+		}
+	}
+	if !hasWave {
+		t.Errorf("RenderProgressBar(full) should contain wave chars, got %q", got)
 	}
 }
 
 func TestRenderProgressBar_PartlyFilled(t *testing.T) {
-	// 50% → half filled, half empty
-	got := RenderProgressBar(30*time.Second, 60*time.Second, 10)
-	if !strings.Contains(got, "█") {
-		t.Errorf("RenderProgressBar(50%%) should contain filled chars, got %q", got)
+	// 50% → half filled (wave), half empty (─)
+	got := RenderProgressBar(30*time.Second, 60*time.Second, 10, 0)
+	hasWave := false
+	for _, r := range waveChars {
+		if strings.ContainsRune(got, r) {
+			hasWave = true
+			break
+		}
 	}
-	if !strings.Contains(got, "░") {
-		t.Errorf("RenderProgressBar(50%%) should contain empty chars, got %q", got)
+	if !hasWave {
+		t.Errorf("RenderProgressBar(50%%) should contain wave chars, got %q", got)
+	}
+	if !strings.Contains(got, "─") {
+		t.Errorf("RenderProgressBar(50%%) should contain empty chars (─), got %q", got)
 	}
 }
 
 func TestRenderProgressBar_PositionBeyondDuration(t *testing.T) {
 	// position > duration: ratio capped at 1.0 — must not panic.
-	got := RenderProgressBar(5*time.Minute, 3*time.Minute, 10)
+	got := RenderProgressBar(5*time.Minute, 3*time.Minute, 10, 0)
 	if got == "" {
 		t.Error("RenderProgressBar(pos>dur) returned empty string")
+	}
+}
+
+func TestRenderProgressBar_AnimationShifts(t *testing.T) {
+	// Different steps should produce different wave patterns.
+	a := RenderProgressBar(30*time.Second, 60*time.Second, 20, 0)
+	b := RenderProgressBar(30*time.Second, 60*time.Second, 20, 5)
+	if a == b {
+		t.Error("RenderProgressBar: different steps should produce different wave output")
 	}
 }
