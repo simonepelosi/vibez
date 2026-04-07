@@ -19,9 +19,10 @@ import (
 // MusicKit resolves the playlist natively without per-song catalog ID lookups.
 type PlayTracksMsg struct {
 	IDs        []string
-	Track      *provider.Track // first track, for instant UI update (may be nil)
-	PlaylistID string          // non-empty → use SetPlaylist
-	StartIdx   int             // start position within the playlist
+	Tracks     []provider.Track // all tracks in the queue, parallel to IDs
+	Track      *provider.Track  // first track, for instant UI update (may be nil)
+	PlaylistID string           // non-empty → use SetPlaylist
+	StartIdx   int              // start position within the playlist
 }
 
 // PlaybackID returns the best ID to use for MusicKit queue descriptors.

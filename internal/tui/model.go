@@ -661,6 +661,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
+		}
+		if len(msg.Tracks) > 0 {
+			m.queueTracks = msg.Tracks
+		} else if msg.Track != nil {
 			m.queueTracks = []provider.Track{*msg.Track}
 		}
 		m.queueIDs = msg.IDs

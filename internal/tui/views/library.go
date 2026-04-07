@@ -173,13 +173,15 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 					if _, ok := selected.(trackListItem); ok {
 						// Play from the selected track to end of playlist.
 						idx := m.drillList.Index()
-						ids := make([]string, 0, len(m.drillTracks)-idx)
-						for i := idx; i < len(m.drillTracks); i++ {
-							ids = append(ids, PlaybackID(m.drillTracks[i]))
+						allTracks := m.drillTracks[idx:]
+						ids := make([]string, len(allTracks))
+						for i, t := range allTracks {
+							ids[i] = PlaybackID(t)
 						}
-						first := m.drillTracks[idx]
+						first := allTracks[0]
+						tracks := append([]provider.Track{}, allTracks...)
 						return m, func() tea.Msg {
-							return PlayTracksMsg{IDs: ids, Track: &first}
+							return PlayTracksMsg{IDs: ids, Tracks: tracks, Track: &first}
 						}
 					}
 				}
@@ -205,9 +207,16 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 				switch m.activeTab {
 				case tabTracks:
 					if item, ok := selected.(trackListItem); ok {
+						idx := m.list.Index()
+						allTracks := m.tracks[idx:]
+						ids := make([]string, len(allTracks))
+						for i, t := range allTracks {
+							ids[i] = PlaybackID(t)
+						}
 						t := item.t
+						tracks := append([]provider.Track{}, allTracks...)
 						return m, func() tea.Msg {
-							return PlayTracksMsg{IDs: []string{PlaybackID(item.t)}, Track: &t}
+							return PlayTracksMsg{IDs: ids, Tracks: tracks, Track: &t}
 						}
 					}
 				case tabPlaylists:
