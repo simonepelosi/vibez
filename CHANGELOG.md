@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.0.5] — 2026-04-07
+
 ### Added
 - **Lyrics panel (`y`)** — press `y` to open a full-width lyrics panel for the
   currently playing track. Lyrics are fetched automatically from
