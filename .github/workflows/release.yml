@@ -14,8 +14,6 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,86 +67,3 @@ jobs:
           # Prevent Go from downloading a different toolchain into GOMODCACHE,
           # which garble cannot patch (overlay restrictions on GOMODCACHE).
           GOTOOLCHAIN: local
-
-      - name: Extract tag name
-        id: tag
-        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload binary artifact for Flatpak job
-        uses: actions/upload-artifact@v4
-        with:
-          name: vibez-binary
-          path: dist/vibez_linux_amd64.tar.gz
-
-  flatpak-prep:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download binary artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: vibez-binary
-          path: .
-
-      - name: Patch Flatpak manifest
-        env:
-          TAG: ${{ needs.release.outputs.tag }}
-        run: |
-          echo "=== Archive contents ==="
-          tar -tzf vibez_linux_amd64.tar.gz
-
-          # Extract everything, then locate the binary regardless of structure.
-          tar -xzf vibez_linux_amd64.tar.gz
-          if [ ! -f vibez ]; then
-            find . -maxdepth 3 -name 'vibez' -type f | head -1 | xargs -I{} mv {} vibez
-          fi
-
-          chmod +x vibez
-          sha=$(sha256sum vibez | awk '{print $1}')
-          sed -i "s|sha256: 0000.*|sha256: ${sha}|" flatpak/io.github.simonepelosi.vibez.yml
-          cp vibez flatpak/
-          cp assets/logo.png flatpak/logo.png
-
-      - name: Upload patched manifest and tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: flatpak-sources
-          path: |
-            flatpak/io.github.simonepelosi.vibez.yml
-            flatpak/io.github.simonepelosi.vibez.desktop
-            flatpak/vibez
-            flatpak/logo.png
-
-  flatpak:
-    needs: [release, flatpak-prep]
-    runs-on: ubuntu-latest
-    container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-46
-      options: --privileged
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download sources
-        uses: actions/download-artifact@v4
-        with:
-          name: flatpak-sources
-          path: flatpak/
-
-      - name: Build Flatpak bundle
-        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: vibez.flatpak
-          manifest-path: flatpak/io.github.simonepelosi.vibez.yml
-          cache-key: flatpak-builder-${{ github.sha }}
-
-      - name: Upload Flatpak bundle to release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.release.outputs.tag }}
-          files: vibez.flatpak
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
