@@ -11,6 +11,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.6] — 2026-04-07
+
+### Added
+- **Scrollable mini-queue** — the queue panel on the main screen (left split) now
+  scrolls with `j`/`k` (or arrow keys). Previously tracks beyond the visible area
+  were silently clipped with no way to reach them.
+- **Auto-scroll to current track** — when the playing track changes the mini-queue
+  view automatically scrolls to centre the new track in the visible area.
+- **Queue index and count** — each row in the mini-queue now shows its 1-based
+  position (right-aligned to the digit width of the total, e.g. ` 3.`/`12.`). The
+  panel header shows the total number of queued tracks (e.g. `Queue  12 tracks`).
+
+### Fixed
+- **Shuffle: actual queue reordering** — `s` now shuffles vibez's own `_q` array
+  instead of setting MusicKit's internal `shuffleMode` flag. Because vibez calls
+  `setQueue({songs:[id]})` one track at a time, MusicKit's native shuffle had nothing
+  to operate on. The fix implements a Fisher-Yates shuffle over all tracks after the
+  current index so playback is not interrupted.
+  - Toggling shuffle **off** restores the original track order and resyncs the current
+    position so next/prev history stays coherent.
+  - Loading a new queue or playlist clears the shuffle snapshot so a fresh queue
+    always starts in natural order.
+- **Shuffle UI toggle** — the `⇄` control in the player was immediately reverting to
+  its muted (inactive) style after being activated. The state poll emits
+  `shuffleMode: m.shuffleMode`, so the MusicKit property now stays in sync with the
+  toggle to keep the indicator correctly lit.
+
+### Changed
+- **CI: Flatpak jobs removed** — the `flatpak-prep` and `flatpak` pipeline jobs are
+  disabled for now (deployment not active). The release workflow is a single lean job.
+
+---
+
 ## [0.0.5] — 2026-04-07
 
 ### Added
