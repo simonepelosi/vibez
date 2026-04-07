@@ -192,10 +192,11 @@ type Model struct {
 
 	width, height int
 
-	playerState player.State
-	stateCh     <-chan player.State
-	queueIDs    []string         // current playback queue (for "add to queue")
-	queueTracks []provider.Track // full track objects parallel to queueIDs
+	playerState     player.State
+	stateCh         <-chan player.State
+	queueIDs        []string         // current playback queue (for "add to queue")
+	queueTracks     []provider.Track // full track objects parallel to queueIDs
+	queueMiniOffset int              // scroll offset for the mini-queue in the split view
 
 	// Discovery mode
 	discovery discoveryMode
@@ -437,6 +438,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastLyricsTrackID = id
 				m.lyricsP.m.SetLoading()
 				cmds = append(cmds, m.fetchLyricsCmd(s.Track))
+			}
+			// Auto-scroll mini-queue to keep the current track visible.
+			for i, t := range m.queueTracks {
+				if t.Title == s.Track.Title {
+					visibleRows := max(0, m.panelHeight()-2)
+					if visibleRows > 0 && (i < m.queueMiniOffset || i >= m.queueMiniOffset+visibleRows) {
+						m.queueMiniOffset = max(0, i-visibleRows/2)
+					}
+					break
+				}
 			}
 		}
 		// Always sync playback position so the current lyrics line stays highlighted.
@@ -1328,9 +1339,15 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	case "j", "down":
 		m.lastKey = ""
+		if len(m.queueTracks) > 0 {
+			m.queueMiniOffset++
+		}
 
 	case "k", "up":
 		m.lastKey = ""
+		if m.queueMiniOffset > 0 {
+			m.queueMiniOffset--
+		}
 
 	case "g":
 		if m.lastKey == "g" {
@@ -2210,11 +2227,23 @@ func (m *Model) queuePanelLines(w, h int) []string {
 		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
 	}
 
-	result := append([]string{header, sep}, trackLines...)
+	// header + sep occupy 2 lines; remaining rows hold track entries.
+	visibleRows := max(0, h-2)
+	// Clamp offset so we never scroll past the end.
+	maxOffset := max(0, len(trackLines)-visibleRows)
+	if m.queueMiniOffset > maxOffset {
+		m.queueMiniOffset = maxOffset
+	}
+	visible := trackLines[m.queueMiniOffset:]
+	if len(visible) > visibleRows {
+		visible = visible[:visibleRows]
+	}
+
+	result := append([]string{header, sep}, visible...)
 	for len(result) < h {
 		result = append(result, "")
 	}
-	return result[:h]
+	return result
 }
 
 // searchLines renders the search popup inline (full-width in the split area).
