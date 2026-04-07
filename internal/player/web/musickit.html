@@ -445,6 +445,8 @@
         window.vibezSetRepeat  = (mode) => { _log(`[js:repeat] → ${_repeatName[mode]||mode}`); _m().repeatMode  = mode; };
         window.vibezSetShuffle = (on) => {
           _log(`[js:shuffle] → ${on ? 'on' : 'off'}`);
+          // Keep MusicKit's own flag in sync so the state poll reflects the toggle.
+          _m().shuffleMode = on ? 1 : 0;
           if (on) {
             // Shuffle all tracks after the current one in-place; keep current
             // at _qi so playback is not interrupted.
