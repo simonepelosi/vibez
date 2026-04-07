@@ -694,3 +694,74 @@ func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bo
 	}
 	return len(rating.Data) > 0 && rating.Data[0].Attributes.Value == 1, nil
 }
+
+// ── Recommendations ────────────────────────────────────────────────────────
+
+type recommendationContent struct {
+	ID         string `json:"id"`
+	Type       string `json:"type"` // "albums" or "playlists"
+	Attributes struct {
+		Name        string       `json:"name"`
+		ArtistName  string       `json:"artistName"`
+		CuratorName string       `json:"curatorName"`
+		Artwork     artworkAttrs `json:"artwork"`
+	} `json:"attributes"`
+}
+
+type recommendationResource struct {
+	Attributes struct {
+		Title struct {
+			StringForDisplay string `json:"stringForDisplay"`
+		} `json:"title"`
+	} `json:"attributes"`
+	Relationships struct {
+		Contents struct {
+			Data []recommendationContent `json:"data"`
+		} `json:"contents"`
+	} `json:"relationships"`
+}
+
+type recommendationsResponse struct {
+	Data []recommendationResource `json:"data"`
+}
+
+// GetRecommendations fetches personalised recommendation groups from
+// GET /v1/me/recommendations and returns them as provider-level structs.
+func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.RecommendationGroup, error) {
+	req, err := a.newRequest(ctx, http.MethodGet, "/me/recommendations?limit=10")
+	if err != nil {
+		return nil, fmt.Errorf("GetRecommendations: %w", err)
+	}
+	var resp recommendationsResponse
+	if err := a.do(req, &resp); err != nil {
+		return nil, fmt.Errorf("GetRecommendations: %w", err)
+	}
+
+	var groups []provider.RecommendationGroup
+	for _, r := range resp.Data {
+		title := r.Attributes.Title.StringForDisplay
+		if title == "" {
+			continue
+		}
+		var items []provider.RecommendationItem
+		for _, c := range r.Relationships.Contents.Data {
+			item := provider.RecommendationItem{ID: c.ID, Title: c.Attributes.Name}
+			switch c.Type {
+			case "albums":
+				item.Kind = "album"
+				item.Subtitle = c.Attributes.ArtistName
+			case "playlists":
+				item.Kind = "playlist"
+				item.Subtitle = c.Attributes.CuratorName
+			default:
+				continue
+			}
+			items = append(items, item)
+		}
+		if len(items) == 0 {
+			continue
+		}
+		groups = append(groups, provider.RecommendationGroup{Title: title, Items: items})
+	}
+	return groups, nil
+}

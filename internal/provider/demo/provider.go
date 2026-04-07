@@ -104,3 +104,21 @@ func (Provider) CreatePlaylist(_ context.Context, name string, _ []string) (prov
 func (Provider) LoveSong(_ context.Context, _ string, _ bool) error { return nil }
 
 func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
+
+func (Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
+	return []provider.RecommendationGroup{
+		{
+			Title: "Recommended for You",
+			Items: []provider.RecommendationItem{
+				{ID: "demo-album-1", Kind: "album", Title: "A Colours Trilogy", Subtitle: "Jon Hopkins"},
+				{ID: "demo-album-2", Kind: "album", Title: "Immunity", Subtitle: "Jon Hopkins"},
+			},
+		},
+		{
+			Title: "New Releases",
+			Items: []provider.RecommendationItem{
+				{ID: "demo-pl-1", Kind: "playlist", Title: "New Music Mix", Subtitle: "Apple Music"},
+			},
+		},
+	}, nil
+}

@@ -80,6 +80,15 @@ func (p *lyricsPanel) SetSize(w, h int)              { p.m.SetSize(w, h) }
 func (p *lyricsPanel) Update(msg tea.KeyMsg) tea.Cmd { return p.m.Update(msg) }
 func (p *lyricsPanel) View() string                  { return p.m.View() }
 
+// feedPanel wraps views.FeedModel to satisfy ContentView.
+type feedPanel struct{ m *views.FeedModel }
+
+func (p *feedPanel) NavKey() string                { return "F" }
+func (p *feedPanel) NavLabel() string              { return "feed" }
+func (p *feedPanel) SetSize(w, h int)              { p.m.SetSize(w, h) }
+func (p *feedPanel) Update(msg tea.KeyMsg) tea.Cmd { return p.m.Update(msg) }
+func (p *feedPanel) View() string                  { return p.m.View() }
+
 // ── Messages ──────────────────────────────────────────────────────────────
 
 type playerStateMsg player.State
@@ -122,6 +131,10 @@ type lyricsResultMsg struct {
 	trackID string
 	result  *lyrics.Result
 	err     error
+}
+type feedResultMsg struct {
+	groups []provider.RecommendationGroup
+	err    error
 }
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
@@ -187,6 +200,7 @@ type Model struct {
 	library     *libraryPanel
 	queue       *queuePanel
 	lyricsP     *lyricsPanel
+	feedP       *feedPanel
 
 	// Lyrics
 	lyricsClient      *lyrics.Client
@@ -250,10 +264,11 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.queue = &queuePanel{m: views.NewQueue()}
 	m.lyricsP = &lyricsPanel{m: views.NewLyrics()}
 	m.lyricsClient = lyrics.NewClient()
+	m.feedP = &feedPanel{m: views.NewFeed()}
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	m.panels = []ContentView{m.library, m.queue, m.lyricsP}
+	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
@@ -315,6 +330,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.library.SetSize(contentW, panelH)
 		m.search.SetSize(contentW, panelH)
 		m.lyricsP.SetSize(contentW, panelH)
+		m.feedP.SetSize(contentW, panelH)
 
 	case tickMsg:
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
@@ -456,16 +472,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case feedResultMsg:
+		if msg.err != nil {
+			m.feedP.m.SetError(msg.err)
+			m.appendLog(fmt.Sprintf("[feed] error: %v", msg.err))
+		} else {
+			m.feedP.m.SetRecommendations(msg.groups)
+			m.appendLog(fmt.Sprintf("[feed] loaded %d groups", len(msg.groups)))
+		}
+
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
 		m.vibe.SetSearching()
 		cmds = append(cmds, m.runVibeSearch(msg.Query))
 
 	case views.DiscoveryMetricSelectedMsg:
-		// User selected a similarity metric in the picker — store it for the
-		// next :discover command. Discovery does not start automatically.
+		// User confirmed a metric in the picker — store it and immediately start
+		// discovery in continuous auto mode (mirrors the old single-key behaviour).
 		m.discovery.similarity = msg.Similarity
 		m.appendLog(fmt.Sprintf("[discovery] metric set: %.0f%% similarity", msg.Similarity*100))
+		if m.playerState.Track != nil {
+			cmds = append(cmds, m.startDiscovery(true, 1))
+		}
 
 	case vibeResultMsg:
 		if msg.err != nil {
@@ -887,6 +915,29 @@ func (m *Model) fetchLyricsCmd(t *provider.Track) tea.Cmd {
 	}
 }
 
+// fetchFeedCmd fetches personalised recommendations from the provider asynchronously.
+func (m *Model) fetchFeedCmd() tea.Cmd {
+	prov := m.provider
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		groups, err := prov.GetRecommendations(ctx)
+		return feedResultMsg{groups: groups, err: err}
+	}
+}
+
+// fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
+// plays them (play=true) or appends them to the queue.
+func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool) tea.Cmd {
+	_ = item
+	_ = play
+	// TODO: resolve item tracks via provider (requires provider method for album/playlist tracks)
+	m.appendLog(fmt.Sprintf("[feed] selected: %s (%s)", item.Title, item.Kind))
+	m.errMsg = "playing feed items not yet supported"
+	m.errExpiry = time.Now().Add(3 * time.Second)
+	return nil
+}
+
 // startDiscovery activates discovery mode with the configured similarity metric.
 // autoMode=false is a one-shot: n songs are queued immediately, then discovery stops.
 func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
@@ -904,7 +955,7 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	m.discovery.refillCap = n
 	m.discovery.seed = m.playerState.Track
 	m.discovery.similarity = sim
-	m.discovery.refilling = false
+	m.discovery.refilling = true // guard against double-trigger while search is in flight
 	m.discovery.triggeredForID = ""
 	m.syncDiscoveryView()
 	mode := "auto"
@@ -949,6 +1000,12 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 				m.activePanel = -1 // toggle off
 			} else {
 				m.activePanel = i
+				// Trigger a feed load when opening the feed panel for the first time.
+				if p == m.feedP && m.feedP.m.NeedsLoad() {
+					m.feedP.m.SetLoading()
+					m.lastKey = ""
+					return m.fetchFeedCmd()
+				}
 			}
 			m.lastKey = ""
 			return nil
@@ -1130,6 +1187,25 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		if k == "esc" {
 			m.activePanel = -1
 			m.lastKey = ""
+			return nil
+		}
+		// Feed panel special keys.
+		if m.panels[m.activePanel] == m.feedP {
+			switch k {
+			case "r":
+				m.feedP.m.SetLoading()
+				return m.fetchFeedCmd()
+			case "enter":
+				if item := m.feedP.m.SelectedItem(); item != nil {
+					return m.fetchFeedItemTracksCmd(item, true)
+				}
+			case "tab":
+				if item := m.feedP.m.SelectedItem(); item != nil {
+					return m.fetchFeedItemTracksCmd(item, false)
+				}
+			default:
+				return m.feedP.m.Update(msg)
+			}
 			return nil
 		}
 		return m.panels[m.activePanel].Update(msg)
@@ -1551,7 +1627,8 @@ func (m *Model) renderBoxLayout() string {
 	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
 	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
 	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
-	fullWidth := libraryActive || queueActive || lyricsActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
+	feedActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP
+	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -1602,6 +1679,11 @@ func (m *Model) renderBoxLayout() string {
 	case lyricsActive:
 		m.lyricsP.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.lyricsP.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case feedActive:
+		m.feedP.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.feedP.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
@@ -1920,6 +2002,15 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("g/G") + muted.Render(" top/bottom"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP:
+			parts = []string{
+				styles.ModeNormal.Render("FEED"),
+				accent.Render("Enter") + muted.Render(" play"),
+				accent.Render("Tab") + muted.Render(" add to queue"),
+				accent.Render("j/k") + muted.Render(" navigate"),
+				accent.Render("r") + muted.Render(" refresh"),
+				accent.Render("esc") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
@@ -1928,6 +2019,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("l") + muted.Render(" library"),
 				accent.Render("q") + muted.Render(" queue"),
 				accent.Render("y") + muted.Render(" lyrics"),
+				accent.Render("F") + muted.Render(" feed"),
 				accent.Render("v") + muted.Render(" vibe"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}

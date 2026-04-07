@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Manual scroll with `j`/`k`; jump to top/bottom with `g`/`G`.
   - Fetching is non-blocking and stale results (e.g. from a quickly skipped track)
     are silently discarded.
+- **Recommendations feed panel (`F`)** — press `F` to open a full-width feed panel
+  showing personalised album and playlist recommendations from Apple Music.
+  - Recommendations are grouped by curated category (e.g. *Recommended Albums*,
+    *New Releases for You*) and loaded on first open.
+  - Navigate with `j`/`k`; press `r` to refresh the feed at any time.
+  - Pressing `Enter` or `Tab` on a highlighted item will eventually play it or add
+    its tracks to the queue (track resolution coming in a future release).
 
 ### Changed
 - **Discovery mode: two-step activation flow** — discovery is now configured and
