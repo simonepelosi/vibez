@@ -443,7 +443,36 @@
         window.vibezSeek      = (t) => { _log(`[js:seek] → ${t.toFixed(1)}s`); _m().seekToTime(t); };
         window.vibezSetVolume = (v) => { _log(`[js:volume] → ${Math.round(v*100)}%`); _m().volume = v; };
         window.vibezSetRepeat  = (mode) => { _log(`[js:repeat] → ${_repeatName[mode]||mode}`); _m().repeatMode  = mode; };
-        window.vibezSetShuffle = (on)   => { _log(`[js:shuffle] → ${on ? 'on' : 'off'}`); _m().shuffleMode = on ? 1 : 0; };
+        window.vibezSetShuffle = (on) => {
+          _log(`[js:shuffle] → ${on ? 'on' : 'off'}`);
+          if (on) {
+            // Shuffle all tracks after the current one in-place; keep current
+            // at _qi so playback is not interrupted.
+            _qUnshuffled = _q.slice(); // snapshot original order
+            const tail = _q.splice(_qi + 1);
+            for (let i = tail.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [tail[i], tail[j]] = [tail[j], tail[i]];
+            }
+            _q = _q.concat(tail);
+            _log(`[js:shuffle] shuffled ${tail.length} remaining tracks`);
+          } else {
+            // Restore original order, keeping the current item at its correct
+            // position so the next/prev history stays coherent.
+            if (_qUnshuffled.length > 0) {
+              const currentId = _q[_qi]?.id;
+              _q = _qUnshuffled.slice();
+              _qUnshuffled = [];
+              // Resync _qi to where the current track sits in the restored order.
+              if (currentId) {
+                const idx = _q.findIndex(item => item.id === currentId);
+                if (idx >= 0) _qi = idx;
+              }
+              _log(`[js:shuffle] restored original order, _qi=${_qi}`);
+            }
+          }
+        };
+        let _qUnshuffled = []; // original order snapshot while shuffle is on
 
         // Wire OS media keys / MPRIS back to our own functions.
         navigator.mediaSession.setActionHandler('play',          () => window.vibezPlay());
@@ -461,6 +490,7 @@
             _log(`[js:setQueue] → ${items.length} item(s) queued`);
             _q  = items;
             _qi = -1;
+            _qUnshuffled = []; // clear any prior shuffle snapshot
             _playAt(0);
           } catch(e) { goError('setQueue failed: '+errName(e)).catch(()=>{}); }
         };
@@ -482,6 +512,7 @@
             _log(`[js:setPlaylist] ${items.length} track(s) → _playAt(${startIdx||0})`);
             _q  = items;
             _qi = -1;
+            _qUnshuffled = []; // clear any prior shuffle snapshot
             _playAt(startIdx || 0);
           } catch(e) { goError('setPlaylist failed: '+errName(e)).catch(()=>{}); }
         };

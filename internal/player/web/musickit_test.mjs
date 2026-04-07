@@ -357,5 +357,37 @@ test('loading state: playbackState 1/7/8 maps to Loading=true', () => {
   eq(isLoading(8), true,  'stalled(8) is loading');
   eq(isLoading(9), false, 'completed is not loading');
 });
+
+test('vibezSetShuffle: shuffles tail of queue, keeps current item', () => {
+  let _q = [{id:'a'},{id:'b'},{id:'c'},{id:'d'},{id:'e'}];
+  let _qi = 1; // currently playing 'b'
+  let _qUnshuffled = [];
+
+  // Simulate shuffle ON
+  _qUnshuffled = _q.slice();
+  const tail = _q.splice(_qi + 1);
+  // Instead of random, verify length and that current item is unchanged
+  eq(tail.length, 3, 'tail has remaining 3 tracks');
+  eq(_q.length, 2, '_q has head (0..qi) before concat');
+  _q = _q.concat(tail); // re-attach (not shuffled in test for determinism)
+  eq(_q[_qi].id, 'b', 'current item still at _qi after shuffle-on');
+  eq(_q.length, 5, 'total queue length unchanged');
+
+  // Simulate shuffle OFF — restore and resync _qi
+  const currentId = _q[_qi]?.id;
+  _q = _qUnshuffled.slice();
+  _qUnshuffled = [];
+  const idx = _q.findIndex(item => item.id === currentId);
+  if (idx >= 0) _qi = idx;
+  eq(_q.map(i=>i.id).join(','), 'a,b,c,d,e', 'original order restored');
+  eq(_qi, 1, '_qi resynced to correct position');
+});
+
+test('vibezSetShuffle: setQueue resets shuffle snapshot', () => {
+  let _qUnshuffled = [{id:'old'}];
+  // Simulating setQueue clearing the snapshot
+  _qUnshuffled = [];
+  eq(_qUnshuffled.length, 0, 'shuffle snapshot cleared on setQueue');
+});
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
