@@ -59,6 +59,10 @@ type Provider interface {
 	GetLibraryPlaylists(ctx context.Context) ([]Playlist, error)
 	GetPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error)
 	GetAlbumTracks(ctx context.Context, albumID string) ([]Track, error)
+	// GetCatalogPlaylistTracks fetches tracks for a catalog playlist (e.g. from
+	// the recommendations feed). Unlike GetPlaylistTracks, this targets the
+	// catalog endpoint and does not require a library playlist ID.
+	GetCatalogPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error)
 	// CreatePlaylist creates a new playlist in the user's library with the given
 	// name and the supplied track IDs (library or catalog IDs). It returns the
 	// newly created Playlist on success.

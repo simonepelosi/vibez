@@ -136,6 +136,12 @@ type feedResultMsg struct {
 	groups []provider.RecommendationGroup
 	err    error
 }
+type feedTracksMsg struct {
+	item   provider.RecommendationItem
+	tracks []provider.Track
+	play   bool // true = replace queue & play; false = append
+	err    error
+}
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
 var introFrames = func() []string {
@@ -480,6 +486,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.feedP.m.SetRecommendations(msg.groups)
 			m.appendLog(fmt.Sprintf("[feed] loaded %d groups", len(msg.groups)))
 		}
+
+	case feedTracksMsg:
+		if msg.err != nil {
+			m.errMsg = fmt.Sprintf("feed: %v", msg.err)
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			m.appendLog(fmt.Sprintf("[feed] track fetch error: %v", msg.err))
+			break
+		}
+		if len(msg.tracks) == 0 {
+			m.errMsg = "feed: no playable tracks"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			break
+		}
+		ids := make([]string, len(msg.tracks))
+		for i, t := range msg.tracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		if msg.play {
+			m.queueTracks = msg.tracks
+			m.queueIDs = ids
+			m.queue.SetTracks(m.queueTracks)
+			m.appendLog(fmt.Sprintf("[feed] playing %q (%d tracks)", msg.item.Title, len(ids)))
+			return m, m.playerCmd(func() error { return m.player.SetQueue(ids) })
+		}
+		m.queueTracks = append(m.queueTracks, msg.tracks...)
+		m.queueIDs = append(m.queueIDs, ids...)
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[feed] queued %q (%d tracks)", msg.item.Title, len(ids)))
+		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
 
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
@@ -929,13 +964,24 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 // fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
 // plays them (play=true) or appends them to the queue.
 func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool) tea.Cmd {
-	_ = item
-	_ = play
-	// TODO: resolve item tracks via provider (requires provider method for album/playlist tracks)
-	m.appendLog(fmt.Sprintf("[feed] selected: %s (%s)", item.Title, item.Kind))
-	m.errMsg = "playing feed items not yet supported"
-	m.errExpiry = time.Now().Add(3 * time.Second)
-	return nil
+	snap := *item
+	prov := m.provider
+	m.appendLog(fmt.Sprintf("[feed] loading %q (%s)…", snap.Title, snap.Kind))
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		var tracks []provider.Track
+		var err error
+		switch snap.Kind {
+		case "album":
+			tracks, err = prov.GetAlbumTracks(ctx, snap.ID)
+		case "playlist":
+			tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
+		default:
+			err = fmt.Errorf("unknown kind %q", snap.Kind)
+		}
+		return feedTracksMsg{item: snap, tracks: tracks, play: play, err: err}
+	}
 }
 
 // startDiscovery activates discovery mode with the configured similarity metric.

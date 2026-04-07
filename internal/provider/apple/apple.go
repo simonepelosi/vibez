@@ -527,6 +527,30 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 	return tracks, nil
 }
 
+func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
+	sf, err := a.storefront(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
+	}
+	var tracks []provider.Track
+	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, playlistID)
+	for endpoint != "" {
+		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		var page paginatedSongs
+		if err := a.do(req, &page); err != nil {
+			return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
+		}
+		for _, s := range page.Data {
+			tracks = append(tracks, toTrack(s))
+		}
+		endpoint = page.Next
+	}
+	return tracks, nil
+}
+
 // createPlaylistRequest is the JSON body for POST /v1/me/library/playlists.
 type createPlaylistRequest struct {
 	Attributes    createPlaylistAttributes     `json:"attributes"`

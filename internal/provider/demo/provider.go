@@ -97,6 +97,12 @@ func (Provider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, e
 	return out, nil
 }
 
+func (Provider) GetCatalogPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	out := make([]provider.Track, len(Tracks))
+	copy(out, Tracks)
+	return out, nil
+}
+
 func (Provider) CreatePlaylist(_ context.Context, name string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{ID: "dp-new-" + name, Name: name}, nil
 }
