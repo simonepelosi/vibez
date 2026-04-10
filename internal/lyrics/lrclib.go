@@ -53,7 +53,7 @@ func (c *Client) Fetch(ctx context.Context, artist, title, album string, duratio
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil) //nolint:gosec // G107: URL is constructed from a parsed constant base with safe query params
 	if err != nil {
 		return nil, err
 	}

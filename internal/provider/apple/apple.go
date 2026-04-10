@@ -84,7 +84,7 @@ func (a *AppleProvider) IsAuthenticated() bool {
 }
 
 func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+endpoint, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string)
 // unlike the standard API it returns extendedAssetUrls in search responses,
 // which lets us reliably detect purchase-only / region-locked tracks.
 func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, a.catalogBaseURL+endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, method, a.catalogBaseURL+endpoint, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -603,7 +603,7 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 		return provider.Playlist{}, fmt.Errorf("CreatePlaylist: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/me/library/playlists", bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/me/library/playlists", bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return provider.Playlist{}, err
 	}
@@ -639,7 +639,7 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 	// Add to library first (idempotent — safe to call even if already in library).
 	if loved {
 		libURL := fmt.Sprintf("%s/me/library?ids[songs]=%s", a.baseURL, url.QueryEscape(catalogID))
-		addReq, err := http.NewRequestWithContext(ctx, http.MethodPost, libURL, http.NoBody)
+		addReq, err := http.NewRequestWithContext(ctx, http.MethodPost, libURL, http.NoBody) //nolint:gosec // G107: URL is constructed from config, not user input
 		if err != nil {
 			return fmt.Errorf("LoveSong: add to library: %w", err)
 		}
@@ -655,7 +655,7 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 
 	if !loved {
 		// Remove rating (un-love).
-		delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, ratingURL, http.NoBody)
+		delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, ratingURL, http.NoBody) //nolint:gosec // G107: URL is constructed from config, not user input
 		if err != nil {
 			return fmt.Errorf("LoveSong: delete rating: %w", err)
 		}
@@ -672,7 +672,7 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 	if err != nil {
 		return fmt.Errorf("LoveSong: marshal: %w", err)
 	}
-	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, ratingURL, bytes.NewReader(raw))
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, ratingURL, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return fmt.Errorf("LoveSong: %w", err)
 	}
@@ -700,7 +700,7 @@ func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bo
 		return false, fmt.Errorf("GetSongRating: %w", err)
 	}
 	// Use the raw client so we can distinguish 404 (not rated) from real errors.
-	resp, err := a.client.Do(req) //nolint:gosec
+	resp, err := a.client.Do(req) //nolint:gosec // G704: URL is constructed from config, not user input
 	if err != nil {
 		return false, fmt.Errorf("GetSongRating: http: %w", err)
 	}
