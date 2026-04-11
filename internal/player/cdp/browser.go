@@ -142,7 +142,7 @@ func extractDeb(debPath, destDir string) error {
 				return fmt.Errorf("create temp: %w", err)
 			}
 			tmpPath := tmp.Name()
-			defer os.Remove(tmpPath) //nolint:errcheck
+			defer os.Remove(tmpPath) //nolint:errcheck,gocritic // deferInLoop: function always returns before next iteration
 
 			if _, err := io.CopyN(tmp, f, size); err != nil {
 				_ = tmp.Close()
