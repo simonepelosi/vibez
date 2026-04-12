@@ -41,6 +41,10 @@ func (m *mockProvider) GetPlaylistTracks(_ context.Context, _ string) ([]provide
 func (m *mockProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
 	return nil, nil
 }
+
+func (m *mockProvider) GetLibraryAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}
 func (m *mockProvider) GetCatalogPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
 	return nil, nil
 }

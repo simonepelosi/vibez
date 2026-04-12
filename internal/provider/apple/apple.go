@@ -191,6 +191,7 @@ type albumAttributes struct {
 	ArtistName string       `json:"artistName"`
 	Artwork    artworkAttrs `json:"artwork"`
 	TrackCount int          `json:"trackCount"`
+	PlayParams *playParams  `json:"playParams"`
 }
 
 type albumResource struct {
@@ -278,13 +279,17 @@ func toTrack(s songResource) provider.Track {
 }
 
 func toAlbum(r albumResource) provider.Album {
-	return provider.Album{
+	a := provider.Album{
 		ID:         r.ID,
 		Title:      r.Attributes.Name,
 		Artist:     r.Attributes.ArtistName,
 		ArtworkURL: r.Attributes.Artwork.formatted(300),
 		TrackCount: r.Attributes.TrackCount,
 	}
+	if r.Attributes.PlayParams != nil && r.Attributes.PlayParams.CatalogID != "" {
+		a.CatalogID = r.Attributes.PlayParams.CatalogID
+	}
+	return a
 }
 
 func toPlaylist(r playlistResource) provider.Playlist {
@@ -305,23 +310,29 @@ func toPlaylist(r playlistResource) provider.Playlist {
 func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.SearchResult, error) {
 	type libOut struct {
 		songs     []songResource
-		albums    []albumResource
 		playlists []playlistResource
 		err       error
 	}
-	type catOut struct {
-		songs     []songResource
+	type catSongsOut struct {
+		songs []songResource
+		err   error
+	}
+	type catCollOut struct {
 		albums    []albumResource
 		playlists []playlistResource
 		err       error
 	}
 
 	libCh := make(chan libOut, 1)
-	catCh := make(chan catOut, 1)
+	catSongsCh := make(chan catSongsOut, 1)
+	catCollCh := make(chan catCollOut, 1)
 
-	// Library: songs the user owns — always playable.
+	// Library: songs the user owns (guaranteed playable) + user playlists.
+	// Library albums are intentionally excluded: a library album only contains
+	// tracks the user has added, which may be a subset of the full release.
+	// Albums come exclusively from the catalog search below.
 	go func() {
-		ep := fmt.Sprintf("/me/library/search?term=%s&types=library-songs,library-albums,library-playlists&limit=25",
+		ep := fmt.Sprintf("/me/library/search?term=%s&types=library-songs,library-playlists&limit=25",
 			url.QueryEscape(query))
 		req, err := a.newRequest(ctx, http.MethodGet, ep)
 		if err != nil {
@@ -335,45 +346,67 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 		}
 		libCh <- libOut{
 			songs:     resp.Results.Songs.Data,
-			albums:    resp.Results.Albums.Data,
 			playlists: resp.Results.Playlists.Data,
 		}
 	}()
 
-	// Catalog: songs + albums + playlists. Library songs take priority;
-	// catalog songs fill in tracks not already owned by the user.
-	// amp-api.music.apple.com returns extendedAssetUrls in search results,
-	// which we use to filter purchase-only / region-locked songs.
+	// Catalog songs via amp-api: returns extendedAssetUrls so we can filter
+	// purchase-only / region-locked tracks before they reach the queue.
 	go func() {
 		sf, err := a.storefront(ctx)
 		if err != nil {
-			catCh <- catOut{err: err}
+			catSongsCh <- catSongsOut{err: err}
 			return
 		}
-		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs,albums,playlists&limit=25&extend=extendedAssetUrls",
+		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs&limit=25&extend=extendedAssetUrls",
 			sf, url.QueryEscape(query))
 		req, err := a.newCatalogRequest(ctx, http.MethodGet, ep)
 		if err != nil {
-			catCh <- catOut{err: err}
+			catSongsCh <- catSongsOut{err: err}
 			return
 		}
 		var resp searchResponse
 		if err := a.do(req, &resp); err != nil {
-			catCh <- catOut{err: err}
+			catSongsCh <- catSongsOut{err: err}
 			return
 		}
-		catCh <- catOut{
-			songs:     resp.Results.Songs.Data,
+		catSongsCh <- catSongsOut{songs: resp.Results.Songs.Data}
+	}()
+
+	// Catalog albums + playlists via the standard API.
+	// amp-api.music.apple.com is a web-player endpoint that only reliably
+	// returns songs; albums and playlists must be fetched from the standard
+	// api.music.apple.com catalog endpoint.
+	go func() {
+		sf, err := a.storefront(ctx)
+		if err != nil {
+			catCollCh <- catCollOut{err: err}
+			return
+		}
+		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=albums,playlists&limit=10",
+			sf, url.QueryEscape(query))
+		req, err := a.newRequest(ctx, http.MethodGet, ep)
+		if err != nil {
+			catCollCh <- catCollOut{err: err}
+			return
+		}
+		var resp searchResponse
+		if err := a.do(req, &resp); err != nil {
+			catCollCh <- catCollOut{err: err}
+			return
+		}
+		catCollCh <- catCollOut{
 			albums:    resp.Results.Albums.Data,
 			playlists: resp.Results.Playlists.Data,
 		}
 	}()
 
 	lib := <-libCh
-	cat := <-catCh
+	catSongs := <-catSongsCh
+	catColl := <-catCollCh
 
-	if lib.err != nil && cat.err != nil {
-		return nil, cat.err
+	if lib.err != nil && catSongs.err != nil && catColl.err != nil {
+		return nil, fmt.Errorf("search: lib=%v cat=%v coll=%v", lib.err, catSongs.err, catColl.err)
 	}
 
 	result := &provider.SearchResult{}
@@ -386,23 +419,20 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 			result.Tracks = append(result.Tracks, t)
 			seen[strings.ToLower(t.Artist)+"§"+strings.ToLower(t.Title)] = true
 		}
-		for _, r := range lib.albums {
-			result.Albums = append(result.Albums, toAlbum(r))
-		}
 		for _, r := range lib.playlists {
 			result.Playlists = append(result.Playlists, toPlaylist(r))
 		}
 	}
 
-	// Catalog songs after — skip duplicates already covered by library.
+	// Catalog songs — skip duplicates already covered by library.
 	// Songs without PlayParams are radio-only / unavailable and will always fail
 	// in MusicKit, so we drop them here before they can pollute the queue.
 	// We also require kind == "song" to exclude music videos, radio episodes, etc.
 	// Finally, we require extendedAssetUrls to be present and non-empty: songs
 	// that lack streaming URLs are purchase-only or unavailable in the user's
 	// storefront, so they would fail on playback too.
-	if cat.err == nil {
-		for _, s := range cat.songs {
+	if catSongs.err == nil {
+		for _, s := range catSongs.songs {
 			if s.Attributes.PlayParams == nil {
 				continue
 			}
@@ -419,21 +449,19 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 				seen[key] = true
 			}
 		}
-		seenAlbums := make(map[string]bool, len(result.Albums))
-		for _, al := range result.Albums {
-			seenAlbums[al.ID] = true
-		}
-		for _, r := range cat.albums {
-			if !seenAlbums[r.ID] {
-				result.Albums = append(result.Albums, toAlbum(r))
-			}
+	}
+
+	// Catalog albums + playlists — deduplicate against library playlists.
+	if catColl.err == nil {
+		for _, r := range catColl.albums {
+			result.Albums = append(result.Albums, toAlbum(r))
 		}
 
 		seenPlaylists := make(map[string]bool, len(result.Playlists))
 		for _, pl := range result.Playlists {
 			seenPlaylists[pl.ID] = true
 		}
-		for _, r := range cat.playlists {
+		for _, r := range catColl.playlists {
 			if !seenPlaylists[r.ID] {
 				result.Playlists = append(result.Playlists, toPlaylist(r))
 			}
@@ -487,7 +515,7 @@ func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Pla
 
 func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", playlistID)
+	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=300", playlistID)
 
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
@@ -511,18 +539,41 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 	if err != nil {
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
-	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, albumID)
-	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-	if err != nil {
-		return nil, err
+	var tracks []provider.Track
+	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=300", sf, albumID)
+	for endpoint != "" {
+		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		var page paginatedSongs
+		if err := a.do(req, &page); err != nil {
+			return nil, fmt.Errorf("GetAlbumTracks: %w", err)
+		}
+		for _, s := range page.Data {
+			tracks = append(tracks, toTrack(s))
+		}
+		endpoint = page.Next
 	}
-	var page paginatedSongs
-	if err := a.do(req, &page); err != nil {
-		return nil, err
-	}
-	tracks := make([]provider.Track, 0, len(page.Data))
-	for _, s := range page.Data {
-		tracks = append(tracks, toTrack(s))
+	return tracks, nil
+}
+
+func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
+	var tracks []provider.Track
+	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=300", albumID)
+	for endpoint != "" {
+		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		var page paginatedSongs
+		if err := a.do(req, &page); err != nil {
+			return nil, fmt.Errorf("GetLibraryAlbumTracks: %w", err)
+		}
+		for _, s := range page.Data {
+			tracks = append(tracks, toTrack(s))
+		}
+		endpoint = page.Next
 	}
 	return tracks, nil
 }
@@ -533,7 +584,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, playlistID)
+	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=300", sf, playlistID)
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {

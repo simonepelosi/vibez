@@ -97,6 +97,12 @@ func (Provider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, e
 	return out, nil
 }
 
+func (Provider) GetLibraryAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	out := make([]provider.Track, len(Tracks))
+	copy(out, Tracks)
+	return out, nil
+}
+
 func (Provider) GetCatalogPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
 	out := make([]provider.Track, len(Tracks))
 	copy(out, Tracks)

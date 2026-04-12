@@ -33,6 +33,7 @@ type RecommendationGroup struct {
 
 type Album struct {
 	ID         string
+	CatalogID  string // non-empty for library albums (l. prefix): catalog ID to fetch full track list
 	Title      string
 	Artist     string
 	ArtworkURL string
@@ -59,6 +60,10 @@ type Provider interface {
 	GetLibraryPlaylists(ctx context.Context) ([]Playlist, error)
 	GetPlaylistTracks(ctx context.Context, playlistID string) ([]Track, error)
 	GetAlbumTracks(ctx context.Context, albumID string) ([]Track, error)
+	// GetLibraryAlbumTracks fetches tracks for an album in the user's library.
+	// Use this when the album ID starts with "l." (library album); catalog album
+	// IDs (numeric) should use GetAlbumTracks instead.
+	GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]Track, error)
 	// GetCatalogPlaylistTracks fetches tracks for a catalog playlist (e.g. from
 	// the recommendations feed). Unlike GetPlaylistTracks, this targets the
 	// catalog endpoint and does not require a library playlist ID.

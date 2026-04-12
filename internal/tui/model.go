@@ -142,6 +142,12 @@ type feedTracksMsg struct {
 	play   bool // true = replace queue & play; false = append
 	err    error
 }
+type searchCollectionTracksMsg struct {
+	label  string // album/playlist name for log messages
+	tracks []provider.Track
+	play   bool // true = replace queue & play; false = append
+	err    error
+}
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
 var introFrames = func() []string {
@@ -659,20 +665,44 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case searchResultMsg:
 		if msg.err != nil {
 			m.appendLog(fmt.Sprintf("[search] error: %v", msg.err))
-		} else if msg.result != nil {
-			m.appendLog(fmt.Sprintf("[search] %d track(s), %d album(s), %d playlist(s)",
-				len(msg.result.Tracks), len(msg.result.Albums), len(msg.result.Playlists)))
+			m.search.SetResults(nil, false, msg.err)
+		} else {
+			if msg.result != nil {
+				m.appendLog(fmt.Sprintf("[search] %d track(s), %d album(s), %d playlist(s)",
+					len(msg.result.Tracks), len(msg.result.Albums), len(msg.result.Playlists)))
+			}
+			m.search.SetResults(msg.result, false, nil)
 		}
-		m.search.SetState(
-			func() []provider.Track {
-				if msg.result != nil {
-					return msg.result.Tracks
-				}
-				return nil
-			}(),
-			false,
-			msg.err,
-		)
+
+	case searchCollectionTracksMsg:
+		if msg.err != nil {
+			m.errMsg = fmt.Sprintf("search: %v", msg.err)
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			m.appendLog(fmt.Sprintf("[search] collection fetch error: %v", msg.err))
+			break
+		}
+		if len(msg.tracks) == 0 {
+			m.errMsg = "no playable tracks found"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			break
+		}
+		ids := make([]string, len(msg.tracks))
+		for i, t := range msg.tracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		if msg.play {
+			m.queueTracks = msg.tracks
+			m.queueIDs = ids
+			m.queue.SetTracks(m.queueTracks)
+			m.appendLog(fmt.Sprintf("[search] playing %q (%d tracks)", msg.label, len(ids)))
+			m.mode = modeNormal
+			return m, m.playerCmd(func() error { return m.player.SetQueue(ids) })
+		}
+		m.queueTracks = append(m.queueTracks, msg.tracks...)
+		m.queueIDs = append(m.queueIDs, ids...)
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[search] queued %q (%d tracks)", msg.label, len(ids)))
+		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
 
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
@@ -781,7 +811,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 		m.searchQuery = ""
 		return nil
 	case "enter":
-		// Play now — replaces queue and starts immediately.
+		// Track: play now — replaces queue and starts immediately.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
 			m.appendLog(fmt.Sprintf("[queue] play now: %s — %s", tc.Artist, tc.Title))
@@ -792,9 +822,17 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 			m.mode = modeNormal
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
+		// Album: fetch all tracks then play.
+		if a := m.search.SelectedAlbum(); a != nil {
+			return m.fetchSearchCollectionCmd(a, nil, true)
+		}
+		// Playlist: fetch all tracks then play.
+		if p := m.search.SelectedPlaylist(); p != nil {
+			return m.fetchSearchCollectionCmd(nil, p, true)
+		}
 		return nil
 	case "tab":
-		// Add to queue — appends without interrupting playback.
+		// Track: add to queue — appends without interrupting playback.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
 			m.appendLog(fmt.Sprintf("[queue] append: %s — %s", tc.Artist, tc.Title))
@@ -802,6 +840,14 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
 			return m.playerCmd(func() error { return m.player.AppendQueue([]string{views.PlaybackID(tc)}) })
+		}
+		// Album: fetch all tracks then add to queue.
+		if a := m.search.SelectedAlbum(); a != nil {
+			return m.fetchSearchCollectionCmd(a, nil, false)
+		}
+		// Playlist: fetch all tracks then add to queue.
+		if p := m.search.SelectedPlaylist(); p != nil {
+			return m.fetchSearchCollectionCmd(nil, p, false)
 		}
 		return nil
 	case "up", "down", "pgup", "pgdown":
@@ -1032,6 +1078,47 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 		groups, err := prov.GetRecommendations(ctx)
 		return feedResultMsg{groups: groups, err: err}
 	}
+}
+
+// fetchSearchCollectionCmd loads all tracks for a search result album or playlist,
+// then either replaces the queue (play=true) or appends to it (play=false).
+//
+// Album routing: search results only contain catalog albums (library albums are
+// excluded from Search to avoid returning a subset of the full release), so
+// GetAlbumTracks is always used directly with the album's catalog ID.
+//
+// Playlist routing: IDs starting with "p." are library playlists; everything else
+// uses the catalog endpoint.
+func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool) tea.Cmd {
+	prov := m.provider
+	if album != nil {
+		snap := *album
+		m.appendLog(fmt.Sprintf("[search] loading album %q (id=%s)…", snap.Title, snap.ID))
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			tracks, err := prov.GetAlbumTracks(ctx, snap.ID)
+			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, err: err}
+		}
+	}
+	if playlist != nil {
+		snap := *playlist
+		isLibrary := strings.HasPrefix(snap.ID, "p.")
+		m.appendLog(fmt.Sprintf("[search] loading playlist %q…", snap.Name))
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var tracks []provider.Track
+			var err error
+			if isLibrary {
+				tracks, err = prov.GetPlaylistTracks(ctx, snap.ID)
+			} else {
+				tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
+			}
+			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, err: err}
+		}
+	}
+	return nil
 }
 
 // fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
@@ -1389,12 +1476,12 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 func (m *Model) scheduleSearch(query string) tea.Cmd {
 	if query == "" {
-		m.search.SetState(nil, false, nil)
+		m.search.SetResults(nil, false, nil)
 		return nil
 	}
 	m.searchGen++
 	gen := m.searchGen
-	m.search.SetState(nil, true, nil)
+	m.search.SetResults(nil, true, nil)
 	return func() tea.Msg {
 		time.Sleep(400 * time.Millisecond)
 		return searchDebounceMsg{query: query, gen: gen}
@@ -2278,8 +2365,16 @@ func (m *Model) searchLines(contentW, h int) []string {
 
 	listLines := toLines(listView, listH)
 	footerSep := muted.Render(strings.Repeat("─", contentW))
-	footer := "  " + accent.Render("Enter") + muted.Render(" play now") +
-		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
+
+	// Make the footer hints context-sensitive to the selected item kind.
+	kind := "track"
+	if m.search.SelectedAlbum() != nil {
+		kind = "album"
+	} else if m.search.SelectedPlaylist() != nil {
+		kind = "playlist"
+	}
+	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
+		"  ·  " + accent.Render("Tab") + muted.Render(" add "+kind+" to queue") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
 	result := append([]string{inputLine, sep}, listLines...)

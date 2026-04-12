@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Search: albums and playlists** — the search popup (`/`) now returns all three
+  result types in a unified scrollable list, grouped into **Tracks**, **Albums**,
+  and **Playlists** sections. Each section only appears when the provider returns
+  results for it.
+  - Album rows show `[album]` tag, artist name, and track count (when available).
+  - Playlist rows show `[playlist]` tag and track count (when available).
+  - Press **`Enter`** on an album or playlist to fetch its tracks and play them
+    immediately (replaces the current queue), identical behaviour to tracks.
+  - Press **`Tab`** on an album or playlist to fetch its tracks and append them
+    to the queue without interrupting playback.
+  - Library playlists (`p.` IDs) are fetched via the library endpoint;
+    catalog playlists use the catalog endpoint — the correct path is resolved
+    automatically.
+  - Library albums (`l.` IDs) are fetched via `/me/library/albums/{id}/tracks`;
+    catalog albums (numeric IDs) use the catalog endpoint. This fixes the 404
+    *"No related resources"* error that occurred when playing albums returned
+    from the user's library by the search.
+  - The footer hint line is context-sensitive: it reads *"play track / album /
+    playlist"* and *"add track / album / playlist to queue"* depending on what
+    is currently highlighted.
+  - Navigation (`↑` / `↓` / `PgUp` / `PgDn`) moves through all sections
+    continuously, skipping non-selectable section headers automatically.
+  - Section headers are colour-coded: **Tracks** in blue, **Albums** in purple,
+    **Playlists** in green, making each section immediately distinguishable at
+    a glance.
+- **Provider: `GetLibraryAlbumTracks`** — new method on the `Provider` interface
+  for fetching tracks of a library album by its library ID. Supports pagination
+  (follows `next` cursors) like the other library track endpoints.
+
+### Fixed
+- **Search: 404 on library album playback** — selecting an album whose ID starts
+  with `l.` (i.e. present in the user's library) no longer hits the catalog
+  endpoint and returns a 404. `fetchSearchCollectionCmd` now routes `l.` IDs to
+  `GetLibraryAlbumTracks` and numeric IDs to `GetAlbumTracks`.
+- **Albums and playlists now sourced from the correct API endpoint** — the
+  catalog search was previously sent entirely to `amp-api.music.apple.com`, a
+  web-player endpoint that reliably returns songs with `extendedAssetUrls` but
+  does not return albums or playlists. As a result albums were silently sourced
+  from the *library* search (`l.` IDs), which only contains tracks the user has
+  explicitly added — a potentially incomplete subset of the full release.
+  The search is now split into three concurrent requests:
+  - **Library songs + playlists** — `api.music.apple.com/v1/me/library/search`
+    (unchanged; library songs play guaranteed and user playlists are fully owned).
+  - **Catalog songs** — `amp-api.music.apple.com` with `extend=extendedAssetUrls`
+    so purchase-only / region-locked tracks can be filtered before reaching the
+    queue (unchanged behaviour).
+  - **Catalog albums + playlists** — new request to the standard
+    `api.music.apple.com/v1/catalog/{sf}/search?types=albums,playlists` endpoint,
+    which reliably returns full-catalogue albums with correct numeric IDs.
+  Library albums are intentionally excluded from all search results: selecting an
+  album in the search popup now always fetches every track on the release.
+- **`GetAlbumTracks` now paginates** — previously only the first page was fetched,
+  silently truncating albums whose track list spans multiple API pages. The
+  function now follows `page.Next` cursors like the playlist fetchers. Page limit
+  raised to 300 (API maximum) across all four track-fetching helpers to minimise
+  round-trips for long releases.
+
 ---
 
 ## [0.0.7] — 2026-04-07
