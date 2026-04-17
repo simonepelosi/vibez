@@ -489,6 +489,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.favorites[msg.trackID] = msg.loved
 		}
 
+	case DebugLogMsg:
+		m.appendLog(string(msg))
+
 	case lyricsResultMsg:
 		// Discard stale results if the user skipped to a different track.
 		if msg.trackID == m.lastLyricsTrackID {

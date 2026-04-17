@@ -16,6 +16,12 @@ type Config struct {
 	AuthPort            int    `json:"auth_port"`
 	Provider            string `json:"provider"`
 	Theme               string `json:"theme"`
+	// Last.fm scrobbling. LastfmAPIKey and LastfmAPISecret are typically
+	// embedded in the binary at build time via ldflags; set them manually here
+	// only when building from source without the embedded keys.
+	LastfmAPIKey     string `json:"lastfm_api_key,omitempty"`
+	LastfmAPISecret  string `json:"lastfm_api_secret,omitempty"`
+	LastfmSessionKey string `json:"lastfm_session_key,omitempty"`
 }
 
 func defaults() *Config {

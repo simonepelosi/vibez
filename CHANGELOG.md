@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Last.fm scrobbling** — optionally connect your Last.fm account with
+  `vibez auth lastfm login` and vibez will scrobble your plays automatically.
+  Now Playing updates are sent when a track starts; a scrobble is submitted
+  once you've listened to at least half the track (or 4 minutes, whichever
+  comes first). Tracks under 30 seconds are ignored, pauses don't count.
+
 - **Search: albums and playlists** — the search popup (`/`) now returns all three
   result types in a unified scrollable list, grouped into **Tracks**, **Albums**,
   and **Playlists** sections. Each section only appears when the provider returns
