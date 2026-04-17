@@ -61,6 +61,7 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 - **MPRIS D-Bus** — your desktop media keys (play, pause, next, previous) work out of the box
 - **Desktop notifications** — see the current track in your notification area
 - **No external player needed** — vibez is fully self-contained, no Cider, no VLC
+- **Last.fm scrobbling** — optional integration; connect with `vibez auth lastfm login` and your listening history is tracked automatically
 
 ### 🌀 Vibe Mode
 
@@ -120,12 +121,15 @@ make build-with-token   # requires APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KE
 ## Usage
 
 ```bash
-vibez                   # launch the TUI
-vibez --demo            # try vibez with built-in fake tracks — no account needed
-vibez auth login        # open Apple ID login (Chrome window)
-vibez auth status       # check current auth state
-vibez auth logout       # clear saved tokens
-vibez version           # print version
+vibez                       # launch the TUI
+vibez --demo                # try vibez with built-in fake tracks — no account needed
+vibez auth login            # open Apple ID login (Chrome window)
+vibez auth status           # check current auth state
+vibez auth logout           # clear saved tokens
+vibez auth lastfm login     # connect your Last.fm account (optional)
+vibez auth lastfm status    # check Last.fm connection status
+vibez auth lastfm logout    # disconnect Last.fm
+vibez version               # print version
 ```
 
 ---
@@ -229,6 +233,7 @@ vibez/
 ├── internal/
 │   ├── config/             # Config file management
 │   ├── auth/               # MusicKit OAuth flow
+│   ├── lastfm/             # Last.fm scrobbling (optional)
 │   ├── provider/           # Provider interface + Apple Music implementation
 │   ├── player/
 │   │   ├── cdp/            # Chrome CDP player (Widevine, full tracks)
@@ -249,11 +254,11 @@ vibez/
 ## Roadmap
 
 - [x] Queue management (add, navigate, auto-advance)
+- [x] Last.fm scrobbling
 - [ ] **Spotify** provider
 - [ ] **YouTube Music** provider
 - [ ] LLM-powered vibe agent (OpenAI / Ollama)
 - [ ] Lyrics display
-- [ ] Last.fm scrobbling
 - [ ] Desktop notifications on track change
 
 ---

@@ -51,9 +51,7 @@ Full-track streaming via Tidal's API.
 
 ## Ideas / not yet scoped
 
-- **Last.fm scrobbling** — submit plays to Last.fm in the background
 - **mpd protocol bridge** — let `ncmpcpp` and other mpd clients control vibez
-- **Lyrics panel** — fetch and display synced lyrics in a side pane
 - **Keyboard macro recorder** — record and replay complex key sequences
 
 ---

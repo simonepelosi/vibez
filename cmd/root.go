@@ -11,6 +11,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/assets"
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/lastfm"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
 	demoPlayer "github.com/simone-vibes/vibez/internal/player/demo"
 	"github.com/simone-vibes/vibez/internal/player/mpris"
@@ -68,6 +69,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 
 	auth.ApplyEmbedded(cfg)
+	lastfm.ApplyEmbedded(cfg)
 
 	if cfg.AppleDeveloperToken == "" {
 		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
@@ -188,6 +190,17 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			}()
 		}
 
+		if cfg.LastfmAPIKey != "" && cfg.LastfmAPISecret != "" && cfg.LastfmSessionKey != "" {
+			lfmClient := lastfm.NewClient(cfg.LastfmAPIKey, cfg.LastfmAPISecret, cfg.LastfmSessionKey)
+			scrobbler := lastfm.NewScrobbler(lfmClient)
+			scrobbler.SetLogger(func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+			go func() {
+				for st := range cdpPlayer.Subscribe() {
+					scrobbler.Update(st)
+				}
+			}()
+		}
+
 		prog.Send(tui.EngineReadyMsg{
 			Player:      cdpPlayer,
 			Provider:    apple.New(cfg),
@@ -256,6 +269,18 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 		opts.Backend = "WebKit/GStreamer · 30s preview · provider: Apple Music"
 		m := tui.New(cfg, prov, wkPlayer, opts)
 		p := tea.NewProgram(m, tea.WithAltScreen())
+
+		if cfg.LastfmAPIKey != "" && cfg.LastfmAPISecret != "" && cfg.LastfmSessionKey != "" {
+			lfmClient := lastfm.NewClient(cfg.LastfmAPIKey, cfg.LastfmAPISecret, cfg.LastfmSessionKey)
+			scrobbler := lastfm.NewScrobbler(lfmClient)
+			scrobbler.SetLogger(func(msg string) { p.Send(tui.DebugLogMsg(msg)) })
+			go func() {
+				for st := range wkPlayer.Subscribe() {
+					scrobbler.Update(st)
+				}
+			}()
+		}
+
 		_, runErr := p.Run()
 		tuiErr <- runErr
 		wkPlayer.Terminate()

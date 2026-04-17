@@ -31,3 +31,8 @@ type EngineReadyMsg struct {
 
 // InitErrMsg is sent when initialization fails fatally.
 type InitErrMsg struct{ Err error }
+
+// DebugLogMsg appends a line to the TUI debug log (visible via :debug-logs).
+// Use this to surface background-goroutine events (e.g. scrobbling) without
+// printing to stderr.
+type DebugLogMsg string
