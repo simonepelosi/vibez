@@ -40,7 +40,7 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 - **Full-track streaming** via headless Chrome + Widevine DRM — the real deal, not 30-second clips
 - **Automatic fallback** to WebKit + GStreamer (30 s previews) when Chrome is unavailable
-- **Playback controls** — play/pause, next, previous, volume up/down
+- **Playback controls** — play/pause, next, previous, seek ±10 s, volume up/down
 - **Repeat modes** — cycle through off, repeat-all, and repeat-one
 - **Shuffle** — randomise your queue with a single keypress
 
@@ -143,6 +143,7 @@ vibez version               # print version
 | `space` | Play / Pause |
 | `n` | Next track |
 | `p` | Previous track |
+| `←` / `→` | Seek backward / forward 10 s |
 | `+` / `=` | Volume up |
 | `-` | Volume down |
 | `r` | Cycle repeat (off → all → one) |
@@ -199,6 +200,7 @@ Vim-style command mode — press `:` from anywhere to open the command prompt.
 | `:vol +n` / `:vol -n` | Raise or lower volume by *n* percent (e.g. `:vol +10`) |
 | `:vol` | Show current volume in the status bar |
 | `:mute` | Toggle mute (run again to restore the previous volume) |
+| `:seek <seconds>` | Jump to an absolute position in the current song |
 | `:debug-logs` | Toggle the debug log panel |
 | `:q` / `:quit` | Quit vibez |
 

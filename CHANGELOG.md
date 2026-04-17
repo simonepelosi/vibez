@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Now Playing updates are sent when a track starts; a scrobble is submitted
   once you've listened to at least half the track (or 4 minutes, whichever
   comes first). Tracks under 30 seconds are ignored, pauses don't count.
+- **Seek** — press `←` / `→` to jump backward or forward 10 seconds in the
+  current track. Use `:seek <seconds>` to jump to an absolute position.
+  Closes #9.
 
 - **Search: albums and playlists** — the search popup (`/`) now returns all three
   result types in a unified scrollable list, grouped into **Tracks**, **Albums**,

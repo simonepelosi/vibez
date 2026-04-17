@@ -884,6 +884,7 @@ type cmdEntry struct {
 // allCommands is the master list shown in the command palette.
 var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
+	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"mute", "mute", "Toggle mute"},
@@ -1025,6 +1026,27 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.preMuteVol = -1 // clear mute state on explicit vol change
 		m.appendLog(fmt.Sprintf("[vol] → %.0f%%", newVol*100))
 		return m.playerCmd(func() error { return m.player.SetVolume(newVol) })
+
+	case strings.HasPrefix(cmd, "seek"):
+		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "seek"))
+		if arg == "" {
+			if m.playerState.Track != nil {
+				m.errMsg = fmt.Sprintf("position: %s / %s",
+					views.FormatDuration(m.playerState.Position),
+					views.FormatDuration(m.playerState.Track.Duration))
+				m.errExpiry = time.Now().Add(3 * time.Second)
+			}
+			return nil
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 0 {
+			m.errMsg = ":seek requires a non-negative number of seconds"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		pos := time.Duration(n) * time.Second
+		m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(pos)))
+		return m.playerCmd(func() error { return m.player.Seek(pos) })
 
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
@@ -1389,6 +1411,27 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		m.lastKey = ""
 		m.vibe.Focus()
 		return nil
+
+	case "left":
+		m.lastKey = ""
+		if m.playerState.Track != nil {
+			newPos := max(0, m.playerState.Position-10*time.Second)
+			m.appendLog(fmt.Sprintf("[player] seek ← %s", views.FormatDuration(newPos)))
+			pos := newPos
+			return m.playerCmd(func() error { return m.player.Seek(pos) })
+		}
+
+	case "right":
+		m.lastKey = ""
+		if m.playerState.Track != nil {
+			newPos := m.playerState.Position + 10*time.Second
+			if dur := m.playerState.Track.Duration; dur > 0 && newPos > dur {
+				newPos = dur
+			}
+			m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(newPos)))
+			pos := newPos
+			return m.playerCmd(func() error { return m.player.Seek(pos) })
+		}
 	}
 
 	// Forward remaining keys to other active panels (e.g. library).
@@ -2483,6 +2526,7 @@ func (m *Model) statusPlayContent(_ int) string {
 	parts := []string{
 		accent.Render("spc") + muted.Render(" play/pause"),
 		accent.Render("n/p") + muted.Render(" next/prev"),
+		accent.Render("←/→") + muted.Render(" seek ±10s"),
 		accent.Render("f") + muted.Render(" fav"),
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
