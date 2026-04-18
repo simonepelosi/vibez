@@ -104,6 +104,8 @@ curl --proto '=https' --tlsv1.2 -sSf \
 Installs the latest release binary to `~/.local/bin/` and updates your shell profile if needed.  
 You can also inspect the script before running it — that's always a good idea.
 
+> **Update:** re-running the same command updates vibez to the latest release.
+
 > **Custom install dir:** `VIBEZ_INSTALL_DIR=/usr/local/bin curl ... | sh`
 
 ### From source
