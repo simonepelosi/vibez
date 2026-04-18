@@ -23,6 +23,8 @@ type mockPlayer struct {
 	nextCalled     bool
 	prevCalled     bool
 	closeCalled    bool
+	seekCalled     bool
+	seekPos        time.Duration
 	setQueueIDs    []string   // last IDs passed to SetQueue
 	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
 	err            error
@@ -33,12 +35,16 @@ func newMockPlayer() *mockPlayer {
 	return &mockPlayer{stateCh: make(chan player.State, 4)}
 }
 
-func (m *mockPlayer) Play() error                       { m.playCalled = true; return m.err }
-func (m *mockPlayer) Pause() error                      { m.pauseCalled = true; return m.err }
-func (m *mockPlayer) Stop() error                       { return m.err }
-func (m *mockPlayer) Next() error                       { m.nextCalled = true; return m.err }
-func (m *mockPlayer) Previous() error                   { m.prevCalled = true; return m.err }
-func (m *mockPlayer) Seek(_ time.Duration) error        { return m.err }
+func (m *mockPlayer) Play() error     { m.playCalled = true; return m.err }
+func (m *mockPlayer) Pause() error    { m.pauseCalled = true; return m.err }
+func (m *mockPlayer) Stop() error     { return m.err }
+func (m *mockPlayer) Next() error     { m.nextCalled = true; return m.err }
+func (m *mockPlayer) Previous() error { m.prevCalled = true; return m.err }
+func (m *mockPlayer) Seek(pos time.Duration) error {
+	m.seekCalled = true
+	m.seekPos = pos
+	return m.err
+}
 func (m *mockPlayer) SetVolume(_ float64) error         { return m.err }
 func (m *mockPlayer) SetRepeat(_ int) error             { return m.err }
 func (m *mockPlayer) SetShuffle(_ bool) error           { return m.err }
@@ -763,6 +769,7 @@ func TestHandleSearchKey_Backspace_DeletesLastChar(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
 	m.searchQuery = "abc"
+	m.searchCursor = 3 // cursor at end
 
 	m.handleSearchKey("backspace", tea.KeyMsg{Type: tea.KeyBackspace})
 
@@ -775,6 +782,7 @@ func TestHandleSearchKey_Typing_AppendsToQuery(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
 	m.searchQuery = "hel"
+	m.searchCursor = 3 // cursor at end
 
 	m.handleSearchKey("l", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
 
@@ -797,7 +805,175 @@ func TestHandleSearchKey_Enter_SwitchesToNormalMode(t *testing.T) {
 	}
 }
 
-// ─── Update message handlers ────────────────────────────────────────────────
+// --- Search cursor navigation ---
+
+func TestHandleSearchKey_Left_MovesCursorBack(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 5
+
+	m.handleSearchKey("left", tea.KeyMsg{Type: tea.KeyLeft})
+
+	if m.searchCursor != 4 {
+		t.Errorf("searchCursor after left = %d, want 4", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Left_ClampAtZero(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 0
+
+	m.handleSearchKey("left", tea.KeyMsg{Type: tea.KeyLeft})
+
+	if m.searchCursor != 0 {
+		t.Errorf("searchCursor after left at 0 = %d, want 0", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Right_MovesCursorForward(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 2
+
+	m.handleSearchKey("right", tea.KeyMsg{Type: tea.KeyRight})
+
+	if m.searchCursor != 3 {
+		t.Errorf("searchCursor after right = %d, want 3", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Right_ClampAtEnd(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 5
+
+	m.handleSearchKey("right", tea.KeyMsg{Type: tea.KeyRight})
+
+	if m.searchCursor != 5 {
+		t.Errorf("searchCursor after right at end = %d, want 5", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Home_MovesCursorToStart(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 3
+
+	m.handleSearchKey("home", tea.KeyMsg{Type: tea.KeyHome})
+
+	if m.searchCursor != 0 {
+		t.Errorf("searchCursor after home = %d, want 0", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_End_MovesCursorToEnd(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 0
+
+	m.handleSearchKey("end", tea.KeyMsg{Type: tea.KeyEnd})
+
+	if m.searchCursor != 5 {
+		t.Errorf("searchCursor after end = %d, want 5", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Backspace_DeletesAtCursor(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 3 // cursor after "hel", before "lo"
+
+	m.handleSearchKey("backspace", tea.KeyMsg{Type: tea.KeyBackspace})
+
+	if m.searchQuery != "helo" {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "helo")
+	}
+	if m.searchCursor != 2 {
+		t.Errorf("searchCursor = %d, want 2", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Delete_DeletesAfterCursor(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello"
+	m.searchCursor = 2 // cursor after "he", before "llo"
+
+	m.handleSearchKey("delete", tea.KeyMsg{Type: tea.KeyDelete})
+
+	if m.searchQuery != "helo" {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "helo")
+	}
+	if m.searchCursor != 2 {
+		t.Errorf("searchCursor = %d, want 2 (unchanged)", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Typing_InsertsAtCursor(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hllo"
+	m.searchCursor = 1 // cursor after "h", before "llo"
+
+	m.handleSearchKey("e", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+
+	if m.searchQuery != "hello" {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "hello")
+	}
+	if m.searchCursor != 2 {
+		t.Errorf("searchCursor = %d, want 2", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_CtrlW_DeletesWordBefore(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "foo bar"
+	m.searchCursor = 7
+
+	m.handleSearchKey("ctrl+w", tea.KeyMsg{Type: tea.KeyRunes})
+
+	if m.searchQuery != "foo " {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "foo ")
+	}
+}
+
+func TestHandleSearchKey_CtrlU_ClearsBeforeCursor(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "hello world"
+	m.searchCursor = 5
+
+	m.handleSearchKey("ctrl+u", tea.KeyMsg{Type: tea.KeyRunes})
+
+	if m.searchQuery != " world" {
+		t.Errorf("searchQuery = %q, want %q", m.searchQuery, " world")
+	}
+	if m.searchCursor != 0 {
+		t.Errorf("searchCursor = %d, want 0", m.searchCursor)
+	}
+}
+
+func TestHandleSearchKey_Esc_ResetsCursor(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.searchQuery = "test"
+	m.searchCursor = 4
+
+	m.handleSearchKey("esc", tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.searchCursor != 0 {
+		t.Errorf("searchCursor after esc = %d, want 0", m.searchCursor)
+	}
+}
 
 func TestModel_Update_VibeQueryMsg(t *testing.T) {
 	m := newModel(newMockPlayer())

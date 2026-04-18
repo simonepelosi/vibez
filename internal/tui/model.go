@@ -229,8 +229,9 @@ type Model struct {
 	mode viewMode
 
 	// Search accumulation (mode == modeSearch)
-	searchQuery string
-	searchGen   int // incremented on every keystroke; used to discard stale results
+	searchQuery  string
+	searchCursor int // rune index of the cursor within searchQuery
+	searchGen    int // incremented on every keystroke; used to discard stale results
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf     string
@@ -812,6 +813,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.mode = modeNormal
 		m.searchQuery = ""
+		m.searchCursor = 0
 		return nil
 	case "enter":
 		// Track: play now — replaces queue and starts immediately.
@@ -856,16 +858,65 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	case "up", "down", "pgup", "pgdown":
 		_, cmd := m.search.Update(msg)
 		return cmd
+	case "left":
+		if m.searchCursor > 0 {
+			m.searchCursor--
+		}
+		return nil
+	case "right":
+		if m.searchCursor < len([]rune(m.searchQuery)) {
+			m.searchCursor++
+		}
+		return nil
+	case "home", "ctrl+a":
+		m.searchCursor = 0
+		return nil
+	case "end", "ctrl+e":
+		m.searchCursor = len([]rune(m.searchQuery))
+		return nil
 	case "backspace":
-		if len(m.searchQuery) > 0 {
+		if m.searchCursor > 0 {
 			runes := []rune(m.searchQuery)
-			m.searchQuery = string(runes[:len(runes)-1])
+			runes = append(runes[:m.searchCursor-1], runes[m.searchCursor:]...)
+			m.searchQuery = string(runes)
+			m.searchCursor--
 			return m.scheduleSearch(m.searchQuery)
 		}
 		return nil
+	case "delete":
+		runes := []rune(m.searchQuery)
+		if m.searchCursor < len(runes) {
+			runes = append(runes[:m.searchCursor], runes[m.searchCursor+1:]...)
+			m.searchQuery = string(runes)
+			return m.scheduleSearch(m.searchQuery)
+		}
+		return nil
+	case "ctrl+w":
+		// Delete word before cursor.
+		if m.searchCursor > 0 {
+			runes := []rune(m.searchQuery)
+			i := m.searchCursor - 1
+			for i > 0 && runes[i-1] != ' ' {
+				i--
+			}
+			runes = append(runes[:i], runes[m.searchCursor:]...)
+			m.searchQuery = string(runes)
+			m.searchCursor = i
+			return m.scheduleSearch(m.searchQuery)
+		}
+		return nil
+	case "ctrl+u":
+		// Delete everything before cursor.
+		runes := []rune(m.searchQuery)
+		m.searchQuery = string(runes[m.searchCursor:])
+		m.searchCursor = 0
+		return m.scheduleSearch(m.searchQuery)
 	default:
 		if len(k) == 1 && k[0] >= 32 {
-			m.searchQuery += k
+			runes := []rune(m.searchQuery)
+			runes = append(runes[:m.searchCursor], append([]rune{rune(k[0])}, runes[m.searchCursor:]...)...)
+			m.searchQuery = string(runes)
+			m.searchCursor++
 			return m.scheduleSearch(m.searchQuery)
 		}
 	}
@@ -884,6 +935,7 @@ type cmdEntry struct {
 // allCommands is the master list shown in the command palette.
 var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
+	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"mute", "mute", "Toggle mute"},
@@ -1025,6 +1077,27 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.preMuteVol = -1 // clear mute state on explicit vol change
 		m.appendLog(fmt.Sprintf("[vol] → %.0f%%", newVol*100))
 		return m.playerCmd(func() error { return m.player.SetVolume(newVol) })
+
+	case strings.HasPrefix(cmd, "seek"):
+		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "seek"))
+		if arg == "" {
+			if m.playerState.Track != nil {
+				m.errMsg = fmt.Sprintf("position: %s / %s",
+					views.FormatDuration(m.playerState.Position),
+					views.FormatDuration(m.playerState.Track.Duration))
+				m.errExpiry = time.Now().Add(3 * time.Second)
+			}
+			return nil
+		}
+		n, err := strconv.Atoi(arg)
+		if err != nil || n < 0 {
+			m.errMsg = ":seek requires a non-negative number of seconds"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		pos := time.Duration(n) * time.Second
+		m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(pos)))
+		return m.playerCmd(func() error { return m.player.Seek(pos) })
 
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
@@ -1389,6 +1462,27 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 		m.lastKey = ""
 		m.vibe.Focus()
 		return nil
+
+	case "left":
+		m.lastKey = ""
+		if m.playerState.Track != nil {
+			newPos := max(0, m.playerState.Position-10*time.Second)
+			m.appendLog(fmt.Sprintf("[player] seek ← %s", views.FormatDuration(newPos)))
+			pos := newPos
+			return m.playerCmd(func() error { return m.player.Seek(pos) })
+		}
+
+	case "right":
+		m.lastKey = ""
+		if m.playerState.Track != nil {
+			newPos := m.playerState.Position + 10*time.Second
+			if dur := m.playerState.Track.Duration; dur > 0 && newPos > dur {
+				newPos = dur
+			}
+			m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(newPos)))
+			pos := newPos
+			return m.playerCmd(func() error { return m.player.Seek(pos) })
+		}
 	}
 
 	// Forward remaining keys to other active panels (e.g. library).
@@ -1425,6 +1519,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 	case "/":
 		m.mode = modeSearch
 		m.searchQuery = ""
+		m.searchCursor = 0
 		m.search.SetState(nil, false, nil)
 
 	case "j", "down":
@@ -2352,10 +2447,15 @@ func (m *Model) queuePanelLines(w, h int) []string {
 func (m *Model) searchLines(contentW, h int) []string {
 	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
 	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
+	textStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
 	cursor := accent.Render("█")
 
-	inputLine := accent.Render("/") + "  " +
-		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) + cursor
+	runes := []rune(m.searchQuery)
+	cur := min(m.searchCursor, len(runes))
+	before := textStyle.Render(string(runes[:cur]))
+	after := textStyle.Render(string(runes[cur:]))
+
+	inputLine := accent.Render("/") + "  " + before + cursor + after
 	sep := muted.Render(strings.Repeat("─", contentW))
 
 	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
@@ -2396,8 +2496,12 @@ func (m *Model) statusNavContent(_ int) string {
 
 	switch m.mode {
 	case modeSearch:
+		runes := []rune(m.searchQuery)
+		cur := min(m.searchCursor, len(runes))
+		before := styles.Header.Render(string(runes[:cur]))
+		after := styles.Header.Render(string(runes[cur:]))
 		return styles.ModeSearch.Render("SEARCH") + "  " +
-			accent.Render("/") + styles.Header.Render(m.searchQuery) + accent.Render("_")
+			accent.Render("/") + before + accent.Render("█") + after
 	case modeCommand:
 		return styles.ModeCommand.Render("CMD") + "  " +
 			muted.Render(":") + m.cmdBuf + accent.Render("_") +
@@ -2483,6 +2587,7 @@ func (m *Model) statusPlayContent(_ int) string {
 	parts := []string{
 		accent.Render("spc") + muted.Render(" play/pause"),
 		accent.Render("n/p") + muted.Render(" next/prev"),
+		accent.Render("←/→") + muted.Render(" seek ±10s"),
 		accent.Render("f") + muted.Render(" fav"),
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
