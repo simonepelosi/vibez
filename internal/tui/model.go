@@ -229,8 +229,9 @@ type Model struct {
 	mode viewMode
 
 	// Search accumulation (mode == modeSearch)
-	searchQuery string
-	searchGen   int // incremented on every keystroke; used to discard stale results
+	searchQuery  string
+	searchCursor int // rune index of the cursor within searchQuery
+	searchGen    int // incremented on every keystroke; used to discard stale results
 
 	// Command accumulation (mode == modeCommand)
 	cmdBuf     string
@@ -812,6 +813,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.mode = modeNormal
 		m.searchQuery = ""
+		m.searchCursor = 0
 		return nil
 	case "enter":
 		// Track: play now — replaces queue and starts immediately.
@@ -856,16 +858,65 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 	case "up", "down", "pgup", "pgdown":
 		_, cmd := m.search.Update(msg)
 		return cmd
+	case "left":
+		if m.searchCursor > 0 {
+			m.searchCursor--
+		}
+		return nil
+	case "right":
+		if m.searchCursor < len([]rune(m.searchQuery)) {
+			m.searchCursor++
+		}
+		return nil
+	case "home", "ctrl+a":
+		m.searchCursor = 0
+		return nil
+	case "end", "ctrl+e":
+		m.searchCursor = len([]rune(m.searchQuery))
+		return nil
 	case "backspace":
-		if len(m.searchQuery) > 0 {
+		if m.searchCursor > 0 {
 			runes := []rune(m.searchQuery)
-			m.searchQuery = string(runes[:len(runes)-1])
+			runes = append(runes[:m.searchCursor-1], runes[m.searchCursor:]...)
+			m.searchQuery = string(runes)
+			m.searchCursor--
 			return m.scheduleSearch(m.searchQuery)
 		}
 		return nil
+	case "delete":
+		runes := []rune(m.searchQuery)
+		if m.searchCursor < len(runes) {
+			runes = append(runes[:m.searchCursor], runes[m.searchCursor+1:]...)
+			m.searchQuery = string(runes)
+			return m.scheduleSearch(m.searchQuery)
+		}
+		return nil
+	case "ctrl+w":
+		// Delete word before cursor.
+		if m.searchCursor > 0 {
+			runes := []rune(m.searchQuery)
+			i := m.searchCursor - 1
+			for i > 0 && runes[i-1] != ' ' {
+				i--
+			}
+			runes = append(runes[:i], runes[m.searchCursor:]...)
+			m.searchQuery = string(runes)
+			m.searchCursor = i
+			return m.scheduleSearch(m.searchQuery)
+		}
+		return nil
+	case "ctrl+u":
+		// Delete everything before cursor.
+		runes := []rune(m.searchQuery)
+		m.searchQuery = string(runes[m.searchCursor:])
+		m.searchCursor = 0
+		return m.scheduleSearch(m.searchQuery)
 	default:
 		if len(k) == 1 && k[0] >= 32 {
-			m.searchQuery += k
+			runes := []rune(m.searchQuery)
+			runes = append(runes[:m.searchCursor], append([]rune{rune(k[0])}, runes[m.searchCursor:]...)...)
+			m.searchQuery = string(runes)
+			m.searchCursor++
 			return m.scheduleSearch(m.searchQuery)
 		}
 	}
@@ -1468,6 +1519,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 	case "/":
 		m.mode = modeSearch
 		m.searchQuery = ""
+		m.searchCursor = 0
 		m.search.SetState(nil, false, nil)
 
 	case "j", "down":
@@ -2395,10 +2447,15 @@ func (m *Model) queuePanelLines(w, h int) []string {
 func (m *Model) searchLines(contentW, h int) []string {
 	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
 	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
+	textStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
 	cursor := accent.Render("█")
 
-	inputLine := accent.Render("/") + "  " +
-		lipgloss.NewStyle().Foreground(styles.ColorFg).Render(m.searchQuery) + cursor
+	runes := []rune(m.searchQuery)
+	cur := min(m.searchCursor, len(runes))
+	before := textStyle.Render(string(runes[:cur]))
+	after := textStyle.Render(string(runes[cur:]))
+
+	inputLine := accent.Render("/") + "  " + before + cursor + after
 	sep := muted.Render(strings.Repeat("─", contentW))
 
 	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
@@ -2439,8 +2496,12 @@ func (m *Model) statusNavContent(_ int) string {
 
 	switch m.mode {
 	case modeSearch:
+		runes := []rune(m.searchQuery)
+		cur := min(m.searchCursor, len(runes))
+		before := styles.Header.Render(string(runes[:cur]))
+		after := styles.Header.Render(string(runes[cur:]))
 		return styles.ModeSearch.Render("SEARCH") + "  " +
-			accent.Render("/") + styles.Header.Render(m.searchQuery) + accent.Render("_")
+			accent.Render("/") + before + accent.Render("█") + after
 	case modeCommand:
 		return styles.ModeCommand.Render("CMD") + "  " +
 			muted.Render(":") + m.cmdBuf + accent.Render("_") +
