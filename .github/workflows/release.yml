@@ -30,7 +30,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Install garble
-        run: go install mvdan.cc/garble@latest
+        run: go install mvdan.cc/garble@v0.15.0
 
       - name: Generate Apple Developer Token
         id: devtoken
