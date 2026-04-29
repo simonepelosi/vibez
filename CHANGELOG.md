@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.9] — 2026-04-30
+
+### Fixed
+- **Library panel (`l`) not activating** — reopening the library panel after the
+  music engine was ready replaced the internal model pointer instead of updating it
+  in-place, causing the active-panel check to always fail silently. The panel state
+  is now updated in-place so the pointer identity is preserved.
+- **Library panel rendering blank** — the `WindowSizeMsg` sized the original inner
+  model before the engine was ready; when the engine started a new model was created
+  with zero dimensions. The panel now re-applies the current window dimensions after
+  the engine is ready, and also re-sizes lazily on every render (consistent with the
+  queue panel).
+- **Apple Music API 400 on track loading** — all four track-fetching endpoints sent
+  `limit=300`, which exceeds the Apple Music API maximum of 100. Corrected to
+  `limit=100` across `GetPlaylistTracks`, `GetAlbumTracks`, `GetLibraryAlbumTracks`,
+  and `GetCatalogPlaylistTracks`.
+
+### Changed
+- **Library view simplified to Playlists only** — the Albums and Tracks tabs have
+  been removed. The library panel now shows only the user's playlists, keeping the
+  interface focused and reducing unnecessary API calls.
+- **Library and drill-down errors go to debug log** — playlist load errors and
+  track-fetch errors are no longer shown as inline messages in the library panel;
+  they are written to the debug-logs view (`d` key) so the UI stays clean.
+
+---
+
 ## [0.0.8] — 2026-04-18
 
 ### Added

@@ -515,7 +515,7 @@ func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Pla
 
 func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=300", playlistID)
+	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", playlistID)
 
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
@@ -540,7 +540,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=300", sf, albumID)
+	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, albumID)
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -560,7 +560,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 
 func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=300", albumID)
+	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=100", albumID)
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -584,7 +584,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=300", sf, playlistID)
+	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, playlistID)
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
