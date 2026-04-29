@@ -1209,6 +1209,10 @@ func TestModel_Update_PlayerStateMsg_GenericError(t *testing.T) {
 func TestModel_Update_EngineReadyMsg(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(nil)
+
+	// Simulate a window size arriving before the engine is ready (normal startup).
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+
 	_, cmd := m.Update(EngineReadyMsg{
 		Player:      mp,
 		Provider:    &mockProvider{},
@@ -1221,6 +1225,15 @@ func TestModel_Update_EngineReadyMsg(t *testing.T) {
 	}
 	if m.provider == nil {
 		t.Error("EngineReadyMsg should set m.provider")
+	}
+	// panels[0] must still point to m.library so the 'l' key works after EngineReadyMsg.
+	if m.panels[0] != m.library {
+		t.Error("EngineReadyMsg must not replace m.library pointer; panels[0] would become stale")
+	}
+	// The new inner LibraryModel must have non-zero dimensions so items are visible.
+	if m.library.m.Width() == 0 || m.library.m.Height() == 0 {
+		t.Errorf("library inner model has zero dimensions (%dx%d) after EngineReadyMsg; window size was not re-applied",
+			m.library.m.Width(), m.library.m.Height())
 	}
 }
 

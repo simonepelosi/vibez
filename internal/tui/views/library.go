@@ -13,14 +13,6 @@ import (
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
-type libraryTab int
-
-const (
-	tabPlaylists libraryTab = iota
-	tabAlbums
-	tabTracks
-)
-
 // libraryPane controls which level of the drill-down is visible.
 type libraryPane int
 
@@ -30,8 +22,6 @@ const (
 )
 
 type libraryLoadedMsg struct {
-	tab       libraryTab
-	tracks    []provider.Track
 	playlists []provider.Playlist
 	err       error
 }
@@ -43,20 +33,20 @@ type playlistTracksMsg struct {
 }
 
 type LibraryModel struct {
-	provider  provider.Provider
-	activeTab libraryTab
-	loading   bool
-	list      list.Model
-	spinner   spinner.Model
+	provider provider.Provider
+	loading  bool
+	loadErr  error
+	list     list.Model
+	spinner  spinner.Model
 
 	playlists []provider.Playlist
-	tracks    []provider.Track
 
 	// Drill-down into a playlist's tracks.
 	pane          libraryPane
 	drillPlaylist provider.Playlist
 	drillTracks   []provider.Track
 	drillLoading  bool
+	drillErr      error
 	drillList     list.Model
 
 	width  int
@@ -92,6 +82,11 @@ func (m *LibraryModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, m.loadPlaylists())
 }
 
+func (m *LibraryModel) Width() int      { return m.width }
+func (m *LibraryModel) Height() int     { return m.height }
+func (m *LibraryModel) DrillErr() error { return m.drillErr }
+func (m *LibraryModel) LoadErr() error  { return m.loadErr }
+
 func (m *LibraryModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
@@ -105,16 +100,7 @@ func (m *LibraryModel) loadPlaylists() tea.Cmd {
 	prov := m.provider
 	return func() tea.Msg {
 		playlists, err := prov.GetLibraryPlaylists(context.Background())
-		return libraryLoadedMsg{tab: tabPlaylists, playlists: playlists, err: err}
-	}
-}
-
-func (m *LibraryModel) loadTracks() tea.Cmd {
-	m.loading = true
-	prov := m.provider
-	return func() tea.Msg {
-		tracks, err := prov.GetLibraryTracks(context.Background())
-		return libraryLoadedMsg{tab: tabTracks, tracks: tracks, err: err}
+		return libraryLoadedMsg{playlists: playlists, err: err}
 	}
 }
 
@@ -131,19 +117,16 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case libraryLoadedMsg:
 		m.loading = false
+		m.loadErr = msg.err
 		if msg.err == nil {
-			switch msg.tab {
-			case tabPlaylists:
-				m.playlists = msg.playlists
-			case tabTracks:
-				m.tracks = msg.tracks
-			}
+			m.playlists = msg.playlists
 			m.refreshList()
 		}
 		return m, nil
 
 	case playlistTracksMsg:
 		m.drillLoading = false
+		m.drillErr = msg.err
 		if msg.err == nil {
 			m.drillTracks = msg.tracks
 			items := make([]list.Item, len(msg.tracks))
@@ -195,39 +178,16 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 
 		// Top-level pane.
 		switch msg.String() {
-		case "tab":
-			m.activeTab = (m.activeTab + 1) % 3
-			if m.activeTab == tabTracks && m.tracks == nil {
-				return m, m.loadTracks()
-			}
-			m.refreshList()
-			return m, nil
 		case "enter":
 			if selected := m.list.SelectedItem(); selected != nil {
-				switch m.activeTab {
-				case tabTracks:
-					if item, ok := selected.(trackListItem); ok {
-						idx := m.list.Index()
-						allTracks := m.tracks[idx:]
-						ids := make([]string, len(allTracks))
-						for i, t := range allTracks {
-							ids[i] = PlaybackID(t)
-						}
-						t := item.t
-						tracks := append([]provider.Track{}, allTracks...)
-						return m, func() tea.Msg {
-							return PlayTracksMsg{IDs: ids, Tracks: tracks, Track: &t}
-						}
-					}
-				case tabPlaylists:
-					if item, ok := selected.(playlistItem); ok {
-						pl := provider.Playlist(item)
-						m.drillPlaylist = pl
-						m.pane = paneTracks
-						m.drillTracks = nil
-						m.drillList.SetItems(nil)
-						return m, tea.Batch(m.spinner.Tick, m.loadPlaylistTracks(pl))
-					}
+				if item, ok := selected.(playlistItem); ok {
+					pl := provider.Playlist(item)
+					m.drillPlaylist = pl
+					m.pane = paneTracks
+					m.drillTracks = nil
+					m.drillErr = nil
+					m.drillList.SetItems(nil)
+					return m, tea.Batch(m.spinner.Tick, m.loadPlaylistTracks(pl))
 				}
 			}
 			return m, nil
@@ -250,15 +210,8 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 
 func (m *LibraryModel) refreshList() {
 	var items []list.Item
-	switch m.activeTab {
-	case tabPlaylists:
-		for _, pl := range m.playlists {
-			items = append(items, playlistItem(pl))
-		}
-	case tabTracks:
-		for _, t := range m.tracks {
-			items = append(items, trackListItem{t})
-		}
+	for _, pl := range m.playlists {
+		items = append(items, playlistItem(pl))
 	}
 	m.list.SetItems(items)
 }
@@ -267,11 +220,14 @@ func (m *LibraryModel) View() string {
 	if m.pane == paneTracks {
 		return m.renderDrillView()
 	}
-	tabs := m.renderTabs()
+	header := m.renderHeader()
 	if m.loading {
-		return tabs + "\n\n  " + m.spinner.View() + " Loading…"
+		return header + "\n\n  " + m.spinner.View() + " Loading…"
 	}
-	return tabs + "\n" + m.list.View()
+	if len(m.playlists) == 0 {
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("No playlists found"), m.width)
+	}
+	return header + "\n" + m.list.View()
 }
 
 func (m *LibraryModel) renderDrillView() string {
@@ -285,20 +241,14 @@ func (m *LibraryModel) renderDrillView() string {
 	if len(m.drillTracks) == 0 {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("No tracks found"), m.width)
 	}
+	listH := max(0, m.height-3)
+	m.drillList.SetSize(m.width, listH)
 	return header + "\n" + m.drillList.View()
 }
 
-func (m *LibraryModel) renderTabs() string {
-	tabLabels := []string{"Playlists", "Albums", "Tracks"}
-	rendered := make([]string, len(tabLabels))
-	for i, label := range tabLabels {
-		if libraryTab(i) == m.activeTab {
-			rendered[i] = styles.TabActive.Render(label)
-		} else {
-			rendered[i] = styles.TabInactive.Render(label)
-		}
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, rendered...) +
+func (m *LibraryModel) renderHeader() string {
+	title := styles.TabActive.Render("Playlists")
+	return title +
 		"\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render("─────────────────────────")
 }
 

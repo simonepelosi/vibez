@@ -735,7 +735,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.player = msg.Player
 		m.provider = msg.Provider
 		m.stateCh = msg.Player.Subscribe()
-		m.library = &libraryPanel{m: views.NewLibrary(msg.Provider)}
+		m.library.m = views.NewLibrary(msg.Provider)
+		// Re-apply the window size that was stored from the earlier WindowSizeMsg,
+		// since the new inner LibraryModel starts with zero dimensions.
+		if m.width > 0 {
+			inner := max(0, m.width-2)
+			m.library.SetSize(max(0, inner-2), m.panelHeight())
+		}
 		m.search = views.NewSearch(msg.Provider)
 		m.helperPaths = msg.HelperPaths
 		m.appendLog("[engine] backend: " + msg.Backend)
@@ -780,6 +786,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	default:
 		// Forward library background loads
 		updated, libCmd := m.library.m.Update(msg)
+		if err := updated.DrillErr(); err != nil && m.library.m.DrillErr() == nil {
+			m.appendLog("[library] playlist tracks error: " + err.Error())
+		}
+		if err := updated.LoadErr(); err != nil && m.library.m.LoadErr() == nil {
+			m.appendLog("[library] playlists load error: " + err.Error())
+		}
 		m.library.m = updated
 		cmds = append(cmds, libCmd)
 	}
@@ -2165,6 +2177,7 @@ func (m *Model) renderBoxLayout() string {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	case libraryActive:
+		m.library.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.library.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}

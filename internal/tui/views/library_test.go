@@ -111,7 +111,6 @@ func TestLibrary_Update_LibraryLoadedMsg_Playlists(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 24)
 	msg := libraryLoadedMsg{
-		tab: tabPlaylists,
 		playlists: []provider.Playlist{
 			{ID: "p1", Name: "Playlist One", TrackCount: 10},
 			{ID: "p2", Name: "Playlist Two", TrackCount: 20},
@@ -120,21 +119,6 @@ func TestLibrary_Update_LibraryLoadedMsg_Playlists(t *testing.T) {
 	lib, _ = lib.Update(msg)
 	if len(lib.playlists) != 2 {
 		t.Errorf("playlists not set: got %d, want 2", len(lib.playlists))
-	}
-}
-
-func TestLibrary_Update_LibraryLoadedMsg_Tracks(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 24)
-	msg := libraryLoadedMsg{
-		tab: tabTracks,
-		tracks: []provider.Track{
-			{ID: "t1", Title: "Track One"},
-		},
-	}
-	lib, _ = lib.Update(msg)
-	if len(lib.tracks) != 1 {
-		t.Errorf("tracks not set: got %d, want 1", len(lib.tracks))
 	}
 }
 
@@ -153,19 +137,8 @@ func TestLibrary_Update_LibraryLoadedMsg_Error(t *testing.T) {
 func TestLibrary_Update_TabKey(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 24)
-	// Just verify it doesn't panic; tab assertion is in TestLibrary_Update_TabString.
+	// Tab key has no effect with single-tab library; just verify no panic.
 	_, _ = lib.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\t")})
-}
-
-func TestLibrary_Update_TabString(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 24)
-	lib.activeTab = tabPlaylists
-	// Send "tab" key (the string "tab" matches msg.String() == "tab")
-	lib, _ = lib.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if lib.activeTab != tabAlbums {
-		t.Errorf("after tab key: activeTab = %d, want %d (tabAlbums)", lib.activeTab, tabAlbums)
-	}
 }
 
 func TestLibrary_Update_SpinnerTick_WhenLoading(t *testing.T) {
@@ -180,16 +153,13 @@ func TestLibrary_Update_SpinnerTick_WhenLoading(t *testing.T) {
 func TestLibrary_RefreshList_Indirect(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 24)
-	// Load playlists and then switch to tracks tab to exercise refreshList
+	// Load playlists and verify no panic.
 	lib, _ = lib.Update(libraryLoadedMsg{
-		tab:       tabPlaylists,
 		playlists: []provider.Playlist{{Name: "PL", TrackCount: 5}},
 	})
-	// Switch to albums tab
-	lib, _ = lib.Update(tea.KeyMsg{Type: tea.KeyTab})
-	// Switch to tracks tab — final result unused, test verifies no panic
-	_, _ = lib.Update(tea.KeyMsg{Type: tea.KeyTab})
-	// No panic = success
+	if lib.list.Items() == nil {
+		t.Error("expected non-nil items after loading playlists")
+	}
 }
 
 func TestLibrary_Init_NoPanic(t *testing.T) {
@@ -220,29 +190,6 @@ func TestLibrary_LoadPlaylists_Executes(t *testing.T) {
 		t.Errorf("got %d playlists, want 1", len(loaded.playlists))
 	}
 }
-
-func TestLibrary_LoadTracks_Executes(t *testing.T) {
-	prov := &mockProvider{
-		libraryTracks: []provider.Track{
-			{ID: "t1", Title: "Track One", Artist: "Artist One"},
-		},
-	}
-	lib := NewLibrary(prov)
-	cmd := lib.loadTracks()
-	if cmd == nil {
-		t.Fatal("loadTracks() should return non-nil cmd")
-	}
-	msg := cmd() // execute the cmd
-	loaded, ok := msg.(libraryLoadedMsg)
-	if !ok {
-		t.Fatalf("loadTracks cmd returned %T, want libraryLoadedMsg", msg)
-	}
-	if len(loaded.tracks) != 1 {
-		t.Errorf("got %d tracks, want 1", len(loaded.tracks))
-	}
-}
-
-// --- loadPlaylistTracks ---
 
 func TestLibrary_LoadPlaylistTracks_Executes(t *testing.T) {
 	prov := &mockProvider{} // returns nil tracks, nil error by default
@@ -377,10 +324,8 @@ func TestLibrary_Update_DrillPane_Enter_NoSelection(t *testing.T) {
 func TestLibrary_Update_Tab_CyclesTabs(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 20)
-	lib.activeTab = tabPlaylists
-
-	updated, _ := lib.Update(tea.KeyMsg{Type: tea.KeyTab})
-	_ = updated
+	// Tab key has no effect (single tab); verify no panic.
+	_, _ = lib.Update(tea.KeyMsg{Type: tea.KeyTab})
 }
 
 // --- Library: playlistItem.Description no TrackCount ---
