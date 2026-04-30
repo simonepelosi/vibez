@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ncurses-style cell diffing for significantly faster and flicker-free screen
   updates. `View()` is now declarative (`tea.View` struct); alt-screen is declared
   there instead of via program options.
+- **Migrated to Go 1.26** — updated minimum Go version in `go.mod` and all CI/CD
+  workflows. Bumped direct dependencies: `godbus/dbus/v5` v5.1.0 → v5.2.2,
+  `spf13/cobra` v1.8.0 → v1.10.2. Closes #22.
 
 ---
 
