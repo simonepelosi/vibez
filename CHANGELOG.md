@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Custom themes** — set `"theme"` in `~/.config/vibez/config.json` to switch palette.
+  Four built-in themes ship out of the box: `default` (Tokyo Night / Catppuccin Mocha),
+  `dracula`, `gruvbox`, and `nord`. Custom palettes can be created as JSON files in
+  `~/.config/vibez/themes/<name>.json`; any missing or invalid color fields fall back to
+  the default theme automatically. All 20+ color roles are themeable: core palette,
+  semantic accents, bear mascot, progress-bar gradient, glow animation, and mode chips.
+  Closes #14.
+
+---
+
 ## [0.0.9] — 2026-04-30
 
 ### Fixed

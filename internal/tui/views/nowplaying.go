@@ -47,28 +47,21 @@ func FormatDuration(d time.Duration) string {
 // wavePattern is the repeating 4-char zigzag used for the progress bar wave.
 var wavePattern = []rune{'╱', '╱', '╲', '╲'}
 
-// gradStops are the colour stops for the filled-portion gradient
-// (cornflower blue → lavender → rose pink).
-var gradStops = []lipgloss.Color{
-	styles.ColorProgress,      // #89b4fa — blue
-	lipgloss.Color("#cba6f7"), // lavender
-	styles.ColorLove,          // #f38ba8 — rose pink
-}
-
 // progressGradient returns the gradient colour for position i out of total
-// cells, interpolating across gradStops.
+// cells, interpolating across styles.ProgressGradStops.
 func progressGradient(i, total int) lipgloss.Color {
-	if total <= 1 || len(gradStops) < 2 {
-		return gradStops[0]
+	stops := styles.ProgressGradStops
+	if total <= 1 || len(stops) < 2 {
+		return stops[0]
 	}
-	segments := len(gradStops) - 1
+	segments := len(stops) - 1
 	t := float64(i) / float64(total-1) // 0.0 … 1.0
 	seg := int(t * float64(segments))
 	if seg >= segments {
-		return gradStops[len(gradStops)-1]
+		return stops[len(stops)-1]
 	}
 	local := t*float64(segments) - float64(seg)
-	return styles.LerpColor(gradStops[seg], gradStops[seg+1], local)
+	return styles.LerpColor(stops[seg], stops[seg+1], local)
 }
 
 // RenderProgressBar renders a static flat zigzag (╱╱╲╲) progress bar.

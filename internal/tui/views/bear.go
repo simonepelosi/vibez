@@ -36,12 +36,6 @@ var danceFrames = []bearFrame{
 	{above: "♪", expr: "ʕ•ᴥ•ʔゝ☆"},
 }
 
-var (
-	bearStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#C4A265"))
-	noteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5C07B"))
-	sleepStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Faint(true)
-)
-
 // RenderBearLine returns a single animated line: bear kaomoji + note/z + status text.
 // Used in the Now Playing section.
 func RenderBearLine(step int, playing bool) string {
@@ -54,14 +48,14 @@ func RenderBearLine(step int, playing bool) string {
 			note = f.below
 		}
 		status := styles.VibingStatus.Render("vibing...")
-		return bearStyle.Render(f.expr) + noteStyle.Render(note) + " " + status
+		return styles.BearStyle.Render(f.expr) + styles.NoteStyle.Render(note) + " " + status
 	}
 	f := sleepFrames[(step/12)%len(sleepFrames)]
 	zz := ""
 	if f.above != "" {
-		zz = sleepStyle.Render(f.above) + " "
+		zz = styles.SleepStyle.Render(f.above) + " "
 	}
-	return zz + bearStyle.Render(f.expr) + " " + sleepStyle.Render("zZz...")
+	return zz + styles.BearStyle.Render(f.expr) + " " + styles.SleepStyle.Render("zZz...")
 }
 
 // BearExpr returns just the styled bear kaomoji for the current animation step.
@@ -69,10 +63,10 @@ func RenderBearLine(step int, playing bool) string {
 func BearExpr(step int, playing bool) string {
 	if playing {
 		f := danceFrames[(step/6)%len(danceFrames)]
-		return bearStyle.Render(f.expr)
+		return styles.BearStyle.Render(f.expr)
 	}
 	f := sleepFrames[(step/12)%len(sleepFrames)]
-	return bearStyle.Render(f.expr)
+	return styles.BearStyle.Render(f.expr)
 }
 
 // RenderBear returns exactly BearLines centred lines.
@@ -83,17 +77,17 @@ func RenderBear(step int, playing bool, width int) string {
 
 	if playing {
 		f = danceFrames[(step/6)%len(danceFrames)]
-		annot = noteStyle
+		annot = styles.NoteStyle
 	} else {
 		f = sleepFrames[(step/12)%len(sleepFrames)] // slower: ≈960 ms/frame
-		annot = sleepStyle
+		annot = styles.SleepStyle
 	}
 
 	above := ""
 	if f.above != "" {
 		above = centerLine(annot.Render(f.above), width)
 	}
-	bear := centerLine(bearStyle.Render(f.expr), width)
+	bear := centerLine(styles.BearStyle.Render(f.expr), width)
 	below := ""
 	if f.below != "" {
 		below = centerLine(annot.Render(f.below), width)

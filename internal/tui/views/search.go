@@ -282,7 +282,7 @@ func sectionColor(label string) lipgloss.Color {
 	case "Playlists":
 		return styles.ColorSecondary // green  #98C379
 	default: // "Tracks"
-		return lipgloss.Color("#E5C07B") // warm amber — same as NowPlayingLabel
+		return styles.ColorAccentWarm // warm amber
 	}
 }
 
