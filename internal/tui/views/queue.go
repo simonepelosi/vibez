@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
@@ -69,7 +69,7 @@ func (m *QueueModel) SetSize(w, h int) {
 	m.list.SetSize(w, h)
 }
 
-func (m *QueueModel) Update(msg tea.KeyMsg) {
+func (m *QueueModel) Update(msg tea.KeyPressMsg) {
 	m.list, _ = m.list.Update(msg)
 }
 

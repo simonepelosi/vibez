@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantic accents, bear mascot, progress-bar gradient, glow animation, and mode chips.
   Closes #14.
 
+### Fixed
+- **Title glow and bear animation speed up on each track change** — a redundant
+  `glowTick()` was spawned every time playback started, stacking on top of the
+  one already running from `Init()`. After N track changes the glow step counter
+  advanced N times per tick, making both effects progressively faster. Removed the
+  duplicate spawn; the single ticker started at init is sufficient. The ticker
+  interval was also reduced from 500 ms to 100 ms for a smoother animation rate.
+  Playback controls (`n`, `p`, `space`, play-from-queue, play-from-library) now
+  immediately set a loading state so the spinner appears without waiting for the
+  player to report back. `waitForState` now drains any burst of rapid state
+  transitions (pause → buffer → play) into a single event-loop update, preventing
+  the animation ticker from being starved during track changes. Upgrades
+  `bubbletea` v0.26.1→v1.3.10, `lipgloss` v0.10.0→v1.1.0, `bubbles`
+  v0.18.0→v0.21.1.
+  Closes #15.
+
 ---
 
 ## [0.0.9] — 2026-04-30

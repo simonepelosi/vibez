@@ -2,10 +2,11 @@ package views
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
@@ -25,13 +26,13 @@ func RenderGlowTitle(title string, glowStep int) string {
 	var sb strings.Builder
 	for i, r := range runes {
 		dist := pos - i // positive = spot has passed char i
-		var color lipgloss.Color
+		var c color.Color
 		if dist >= 0 && dist < pLen {
-			color = palette[pLen-1-dist] // brightest when dist==0
+			c = palette[pLen-1-dist] // brightest when dist==0
 		} else {
-			color = palette[0] // dim outside the sweep window
+			c = palette[0] // dim outside the sweep window
 		}
-		sb.WriteString(lipgloss.NewStyle().Foreground(color).Italic(true).Render(string(r)))
+		sb.WriteString(lipgloss.NewStyle().Foreground(c).Italic(true).Render(string(r)))
 	}
 	return sb.String()
 }
@@ -49,7 +50,7 @@ var wavePattern = []rune{'╱', '╱', '╲', '╲'}
 
 // progressGradient returns the gradient colour for position i out of total
 // cells, interpolating across styles.ProgressGradStops.
-func progressGradient(i, total int) lipgloss.Color {
+func progressGradient(i, total int) color.Color {
 	stops := styles.ProgressGradStops
 	if total <= 1 || len(stops) < 2 {
 		return stops[0]

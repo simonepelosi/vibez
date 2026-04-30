@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
@@ -85,7 +85,7 @@ func (l *LyricsModel) SetSize(w, h int) {
 }
 
 // Update handles j/k scroll input when the lyrics panel is active.
-func (l *LyricsModel) Update(msg tea.KeyMsg) tea.Cmd {
+func (l *LyricsModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	maxScroll := max(0, len(l.lines)-l.height)
 	switch msg.String() {
 	case "j", "down":
@@ -117,7 +117,13 @@ func (l *LyricsModel) View() string {
 			muted.Render("fetching lyrics…")
 	}
 
-	if l.errMsg != "" || len(l.lines) == 0 {
+	if l.errMsg != "" {
+		return header.Render("Lyrics") + "\n" +
+			strings.Repeat("─", 5) + "\n\n" +
+			muted.Render("You cannot sing this song :(")
+	}
+
+	if len(l.lines) == 0 {
 		return header.Render("Lyrics") + "\n" +
 			strings.Repeat("─", 5) + "\n\n" +
 			muted.Render("no lyrics found")

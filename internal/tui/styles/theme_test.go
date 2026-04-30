@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/simone-vibes/vibez/internal/tui/styles"
@@ -146,22 +147,22 @@ func TestApply_ChangesColors(t *testing.T) {
 	if styles.ColorPrimary == orig {
 		t.Error("expected ColorPrimary to change after Apply(DraculaTheme)")
 	}
-	if string(styles.ColorPrimary) != styles.DraculaTheme().Primary {
-		t.Errorf("expected ColorPrimary %q, got %q", styles.DraculaTheme().Primary, styles.ColorPrimary)
+	if !strings.EqualFold(styles.ColorHex(styles.ColorPrimary), styles.DraculaTheme().Primary) {
+		t.Errorf("expected ColorPrimary %q, got %q", styles.DraculaTheme().Primary, styles.ColorHex(styles.ColorPrimary))
 	}
 
 	// Restore.
 	styles.Apply(styles.DefaultTheme())
 	if styles.ColorPrimary != orig {
-		t.Errorf("expected ColorPrimary restored to %q, got %q", orig, styles.ColorPrimary)
+		t.Errorf("expected ColorPrimary restored to %q, got %q", styles.ColorHex(orig), styles.ColorHex(styles.ColorPrimary))
 	}
 }
 
 func TestApply_UpdatesProgressGradStops(t *testing.T) {
 	styles.Apply(styles.DraculaTheme())
 	d := styles.DraculaTheme()
-	if string(styles.ProgressGradStops[0]) != d.Progress {
-		t.Errorf("ProgressGradStops[0] = %q, want %q", styles.ProgressGradStops[0], d.Progress)
+	if !strings.EqualFold(styles.ColorHex(styles.ProgressGradStops[0]), d.Progress) {
+		t.Errorf("ProgressGradStops[0] = %q, want %q", styles.ColorHex(styles.ProgressGradStops[0]), d.Progress)
 	}
 	styles.Apply(styles.DefaultTheme())
 }
@@ -169,8 +170,8 @@ func TestApply_UpdatesProgressGradStops(t *testing.T) {
 func TestApply_UpdatesGlowPalette(t *testing.T) {
 	styles.Apply(styles.NordTheme())
 	n := styles.NordTheme()
-	if string(styles.GlowPalette[0]) != n.GlowPalette[0] {
-		t.Errorf("GlowPalette[0] = %q, want %q", styles.GlowPalette[0], n.GlowPalette[0])
+	if !strings.EqualFold(styles.ColorHex(styles.GlowPalette[0]), n.GlowPalette[0]) {
+		t.Errorf("GlowPalette[0] = %q, want %q", styles.ColorHex(styles.GlowPalette[0]), n.GlowPalette[0])
 	}
 	styles.Apply(styles.DefaultTheme())
 }

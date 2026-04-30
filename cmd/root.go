@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/assets"
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
@@ -76,7 +76,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		dp := demoProvider.Provider{}
 		opts.IconPath = iconPath
 		opts.Backend = "Demo mode · built-in fake tracks, no credentials required"
-		prog := tea.NewProgram(tui.New(cfg, dp, p, opts), tea.WithAltScreen())
+		prog := tea.NewProgram(tui.New(cfg, dp, p, opts))
 		_, err = prog.Run()
 		return err
 	}
@@ -125,7 +125,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 // auth and engine init in a background goroutine, sending progress messages
 // to the running TUI. Chrome runs headless throughout.
 func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string)) error {
-	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts), tea.WithAltScreen())
+	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
 
 	// playerCh receives the player once it is started so we can terminate it
 	// cleanly when the TUI exits.  Capacity 1 so the sender never blocks.
@@ -281,7 +281,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 
 		opts.Backend = "WebKit/GStreamer · 30s preview · provider: Apple Music"
 		m := tui.New(cfg, prov, wkPlayer, opts)
-		p := tea.NewProgram(m, tea.WithAltScreen())
+		p := tea.NewProgram(m)
 
 		if cfg.LastfmAPIKey != "" && cfg.LastfmAPISecret != "" && cfg.LastfmSessionKey != "" {
 			lfmClient := lastfm.NewClient(cfg.LastfmAPIKey, cfg.LastfmAPISecret, cfg.LastfmSessionKey)

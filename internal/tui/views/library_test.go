@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -138,7 +138,7 @@ func TestLibrary_Update_TabKey(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 24)
 	// Tab key has no effect with single-tab library; just verify no panic.
-	_, _ = lib.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("\t")})
+	_, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 }
 
 func TestLibrary_Update_SpinnerTick_WhenLoading(t *testing.T) {
@@ -300,7 +300,7 @@ func TestLibrary_Update_DrillPane_Esc_ReturnsToList(t *testing.T) {
 	lib.pane = paneTracks
 	lib.drillTracks = []provider.Track{{Title: "T1"}}
 
-	updated, _ := lib.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, _ := lib.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if updated.pane != paneList {
 		t.Error("esc in drill pane should return to list pane")
 	}
@@ -312,7 +312,7 @@ func TestLibrary_Update_DrillPane_Enter_NoSelection(t *testing.T) {
 	lib.pane = paneTracks
 	lib.drillTracks = nil
 
-	updated, cmd := lib.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := lib.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	_ = cmd
 	if updated.pane != paneTracks {
 		t.Error("enter with no selection in drill pane should stay in paneTracks")
@@ -325,7 +325,7 @@ func TestLibrary_Update_Tab_CyclesTabs(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 20)
 	// Tab key has no effect (single tab); verify no panic.
-	_, _ = lib.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 }
 
 // --- Library: playlistItem.Description no TrackCount ---
