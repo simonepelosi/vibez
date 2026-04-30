@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 	demoProvider "github.com/simone-vibes/vibez/internal/provider/demo"
 	"github.com/simone-vibes/vibez/internal/tui"
+	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/spf13/cobra"
 )
 
@@ -49,12 +51,23 @@ func init() {
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
+	cfgPath, err := config.ConfigPath(cfgFile)
+	if err != nil {
+		return fmt.Errorf("resolving config path: %w", err)
+	}
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
 	opts := tui.Options{MemProfiling: memProfiling}
+
+	// Apply theme before creating any TUI model so all panels pick up the palette.
+	theme, themeErr := styles.LoadTheme(cfg.Theme, filepath.Dir(cfgPath))
+	if themeErr != nil && debug {
+		fmt.Fprintf(os.Stderr, "debug: theme: %v (falling back to default)\n", themeErr)
+	}
+	styles.Apply(theme)
 
 	if demo {
 		iconPath := assets.InstallIcon()

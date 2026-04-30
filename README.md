@@ -90,6 +90,11 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 - **Provider architecture** — the player core is decoupled from the music source
 - **More services coming** — Spotify, YouTube Music, Deezer, and Tidal are on the roadmap
 
+### 🎨 Themes
+
+- **Built-in themes** — `default` (Tokyo Night / Catppuccin), `dracula`, `gruvbox`, `nord`
+- **Custom themes** — create your own palette as a JSON file in `~/.config/vibez/themes/<name>.json`
+
 ---
 
 ## Installation
@@ -133,6 +138,50 @@ vibez auth lastfm status    # check Last.fm connection status
 vibez auth lastfm logout    # disconnect Last.fm
 vibez version               # print version
 ```
+
+---
+
+## Theming
+
+Set the `theme` key in `~/.config/vibez/config.json`:
+
+```json
+{
+  "theme": "dracula"
+}
+```
+
+**Built-in themes:** `default`, `dracula`, `gruvbox`, `nord`
+
+### Custom themes
+
+Create `~/.config/vibez/themes/<name>.json` with any subset of fields — missing or invalid values fall back to `default`:
+
+```json
+{
+  "primary":      "#ff79c6",
+  "secondary":    "#50fa7b",
+  "muted":        "#6272a4",
+  "error":        "#ff5555",
+  "fg":           "#f8f8f2",
+  "subtle":       "#8be9fd",
+  "bg":           "#282a36",
+  "love":         "#ff6e6e",
+  "active":       "#50fa7b",
+  "progress":     "#8be9fd",
+  "surface":      "#44475a",
+  "accent":       "#bd93f9",
+  "accent_warm":  "#f1fa8c",
+  "bear":         "#ffb86c",
+  "glow_palette": ["#282a36","#383a52","#44475a","#6272a4","#9580ff","#bd93f9","#caa9fa","#e9e0ff"],
+  "mode_normal_bg":  "#50fa7b",
+  "mode_search_bg":  "#8be9fd",
+  "mode_command_bg": "#f1fa8c",
+  "mode_chip_fg":    "#282a36"
+}
+```
+
+Then set `"theme": "<name>"` in `config.json` and restart vibez.
 
 ---
 

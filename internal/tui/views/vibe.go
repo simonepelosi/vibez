@@ -255,7 +255,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	errSt := lipgloss.NewStyle().Foreground(styles.ColorError)
 
 	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ•̀ᴥ•́ʔ"}
-	bear := bearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
+	bear := styles.BearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
 
 	v.input.Width = max(w-4, 10)
 
@@ -392,7 +392,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
-			bearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
+			styles.BearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
 			"",
 			accent.Render("v") + muted.Render(" try again") +
 				"  " + accent.Render("d") + muted.Render(" set metric"),
