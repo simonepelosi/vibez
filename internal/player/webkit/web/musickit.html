@@ -66,6 +66,7 @@
           volume:        1.0,
           nowPlaying: {
             id:         item.id,
+            catalogId:  item.attributes.playParams?.catalogId || '',
             title:      item.attributes.name,
             artist:     item.attributes.artistName,
             album:      item.attributes.albumName,
@@ -123,6 +124,7 @@
             shuffleMode:   m.shuffleMode || 0,
             nowPlaying: item ? {
               id:         item.id,
+              catalogId:  item.attributes.playParams?.catalogId || '',
               title:      item.attributes.name,
               artist:     item.attributes.artistName,
               album:      item.attributes.albumName,
