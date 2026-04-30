@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // --- NewVibe ---
@@ -127,12 +127,12 @@ func TestVibe_Update_EnterSubmitsQuery(t *testing.T) {
 	v.Focus()
 
 	// Type some text first (simulated via direct model manipulation using Update).
-	_ = v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	_ = v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
-	_ = v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	_ = v.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	_ = v.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
+	_ = v.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
 
 	var got tea.Msg
-	cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		got = cmd()
 	}
@@ -151,7 +151,7 @@ func TestVibe_Update_EnterSubmitsQuery(t *testing.T) {
 func TestVibe_Update_EscCancels(t *testing.T) {
 	v := NewVibe()
 	v.Focus()
-	v.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	v.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if v.IsFocused() {
 		t.Error("IsFocused() = true after Esc; want false")
 	}
@@ -161,7 +161,7 @@ func TestVibe_Update_EnterWithEmptyInput_NoCmd(t *testing.T) {
 	v := NewVibe()
 	v.Focus()
 	// Press Enter without typing anything — should return nil cmd.
-	cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Error("Update(Enter, empty input) returned non-nil cmd; want nil")
 	}
@@ -170,7 +170,7 @@ func TestVibe_Update_EnterWithEmptyInput_NoCmd(t *testing.T) {
 func TestVibe_Update_NotFocused_ReturnsNil(t *testing.T) {
 	v := NewVibe()
 	// Not focused — all messages should return nil cmd.
-	cmd := v.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		t.Error("Update when not focused should return nil cmd")
 	}
@@ -207,7 +207,7 @@ func TestVibe_Lines_InputtingState(t *testing.T) {
 func TestVibe_Lines_SearchingState(t *testing.T) {
 	v := NewVibe()
 	v.Focus()
-	_ = v.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	_ = v.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	v.SetSearching()
 	lines := v.Lines(40, 8, 0)
 	if len(lines) != 8 {

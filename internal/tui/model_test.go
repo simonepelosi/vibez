@@ -3,11 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -206,8 +207,8 @@ func TestModel_View_WidthZero(t *testing.T) {
 	m := newModel(nil)
 	got := m.View()
 	// With width=0 the intro animation hasn't started yet — expect empty string.
-	if got != "" {
-		t.Errorf("View() with width=0 should return empty string, got %q", got)
+	if got.Content != "" {
+		t.Errorf("View() with width=0 should return empty string, got %q", got.Content)
 	}
 }
 
@@ -216,7 +217,7 @@ func TestModel_View_WithDimensions(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	got := m.View()
-	if got == "" {
+	if got.Content == "" {
 		t.Error("View() with dimensions should return non-empty string")
 	}
 }
@@ -265,7 +266,7 @@ func TestModel_Update_ErrMsg(t *testing.T) {
 
 func TestModel_Update_KeySearch(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	if m.mode != modeSearch {
 		t.Errorf("mode = %d, want modeSearch(%d)", m.mode, modeSearch)
 	}
@@ -273,7 +274,7 @@ func TestModel_Update_KeySearch(t *testing.T) {
 
 func TestModel_Update_KeyCommand(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	m.Update(tea.KeyPressMsg{Code: ':', Text: ":"})
 	if m.mode != modeCommand {
 		t.Errorf("mode = %d, want modeCommand(%d)", m.mode, modeCommand)
 	}
@@ -281,7 +282,7 @@ func TestModel_Update_KeyCommand(t *testing.T) {
 
 func TestModel_Update_KeyLibrary(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
 	if m.activePanel < 0 {
 		t.Errorf("activePanel = %d, want >= 0 (library panel active)", m.activePanel)
 	}
@@ -292,7 +293,7 @@ func TestModel_Update_KeyLibrary(t *testing.T) {
 
 func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 	m := newModel(nil)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	if m.mode != modeSearch {
 		t.Errorf("mode = %d, want modeSearch(%d)", m.mode, modeSearch)
 	}
@@ -301,7 +302,7 @@ func TestModel_Update_KeySearchSetsContent(t *testing.T) {
 func TestModel_Update_KeyQuit_NilPlayer(t *testing.T) {
 	m := newModel(nil)
 	// 'q' now opens the queue panel (not quit)
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
 	if m.activePanel < 0 {
 		t.Error("q key should activate the queue panel")
 	}
@@ -313,7 +314,7 @@ func TestModel_Update_KeyQuit_WithPlayer(t *testing.T) {
 	// ':q' quits and closes the player
 	m.mode = modeCommand
 	m.cmdBuf = "q"
-	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if !mp.closeCalled {
 		t.Error("player.Close() should be called when quitting with :q")
 	}
@@ -435,7 +436,7 @@ func TestAdjustVolume_ClampLo(t *testing.T) {
 
 func TestModel_KeySpace_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
 	if cmd == nil {
 		t.Fatal("space key should return non-nil cmd")
 	}
@@ -448,7 +449,7 @@ func TestModel_KeySpace_NilPlayer(t *testing.T) {
 func TestModel_KeyNext_WithPlayer(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
 	if cmd != nil {
 		cmd() // execute to trigger Next()
 	}
@@ -460,7 +461,7 @@ func TestModel_KeyNext_WithPlayer(t *testing.T) {
 func TestModel_KeyPrevious_WithPlayer(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
 	if cmd != nil {
 		cmd() // execute to trigger Previous()
 	}
@@ -473,7 +474,7 @@ func TestModel_KeyVolumeUp(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.Volume = 0.5
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: '+', Text: "+"})
 	if cmd != nil {
 		cmd()
 	}
@@ -483,7 +484,7 @@ func TestModel_KeyVolumeDown(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.Volume = 0.5
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: '-', Text: "-"})
 	if cmd != nil {
 		cmd()
 	}
@@ -536,7 +537,8 @@ func TestModel_RenderHeader_ContainsVibez(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
 	got := m.renderBoxHeader(m.width - 2)
-	if !strings.Contains(got, "vibez") {
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(got, "")
+	if !strings.Contains(plain, "vibez") {
 		t.Errorf("renderBoxHeader() should contain 'vibez', got %q", got)
 	}
 }
@@ -562,8 +564,8 @@ func TestModel_View_WithErrMsg(t *testing.T) {
 	m.errMsg = "something went wrong"
 	m.errExpiry = time.Now().Add(10 * time.Second)
 	got := m.View()
-	if !strings.Contains(got, "something went wrong") {
-		t.Errorf("View() should contain error message, got %q", got)
+	if !strings.Contains(got.Content, "something went wrong") {
+		t.Errorf("View() should contain error message, got %q", got.Content)
 	}
 }
 
@@ -577,7 +579,7 @@ func TestModel_UpdateActiveView_Library(t *testing.T) {
 	m.height = 24
 	m.library.SetSize(80, 22)
 	// Should not panic
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 }
 
 func TestModel_UpdateActiveView_Search(t *testing.T) {
@@ -586,19 +588,19 @@ func TestModel_UpdateActiveView_Search(t *testing.T) {
 	m.height = 24
 	m.search.SetSize(80, 22)
 	// Should not panic
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 }
 
 func TestModel_UpdateActiveView_Queue(t *testing.T) {
 	m := newModel(nil)
 	// Should not panic with any panel state
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 }
 
 func TestModel_UpdateActiveView_NowPlaying(t *testing.T) {
 	m := newModel(nil)
 	// Should not panic
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 }
 
 // --- Search mode: keys go to search handling ---
@@ -607,7 +609,7 @@ func TestModel_SearchFocused_KeyGoesToSearch(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
 	// When in search mode, key messages should be handled without panic
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
 	_ = cmd // just verify no panic
 }
 
@@ -649,7 +651,7 @@ func TestHandleSearchKey_Enter_CallsSetQueue(t *testing.T) {
 	track := provider.Track{Title: "Hi", Artist: "There", CatalogID: "99999"}
 	seedSearchResults(m, track)
 
-	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	msg := tea.KeyPressMsg{Code: tea.KeyEnter}
 	cmd := m.handleSearchKey("enter", msg)
 	if cmd == nil {
 		t.Fatal("handleSearchKey(enter) returned nil cmd — expected SetQueue call")
@@ -670,7 +672,7 @@ func TestHandleSearchKey_Enter_UsesLibraryID_WhenNoCatalogID(t *testing.T) {
 	track := provider.Track{Title: "Library Song", ID: "i.LibraryAbc123"}
 	seedSearchResults(m, track)
 
-	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		cmd()
 	}
@@ -686,7 +688,7 @@ func TestHandleSearchKey_Enter_NoResults_NoCall(t *testing.T) {
 	m.search.SetSize(80, 20)
 	// No results set → SelectedTrack() is nil.
 
-	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 	// cmd may be nil or return no player call — SetQueue must NOT be called.
 	if cmd != nil {
 		cmd()
@@ -702,7 +704,7 @@ func TestHandleSearchKey_Tab_CallsAppendQueue(t *testing.T) {
 	track := provider.Track{Title: "Queued", Artist: "Band", CatalogID: "12345"}
 	seedSearchResults(m, track)
 
-	cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+	cmd := m.handleSearchKey("tab", tea.KeyPressMsg{Code: tea.KeyTab})
 	if cmd == nil {
 		t.Fatal("handleSearchKey(tab) returned nil cmd — expected AppendQueue call")
 	}
@@ -721,7 +723,7 @@ func TestHandleSearchKey_Tab_DoesNotCallSetQueue(t *testing.T) {
 	m := newModel(mp)
 	seedSearchResults(m, provider.Track{Title: "T", CatalogID: "x"})
 
-	cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+	cmd := m.handleSearchKey("tab", tea.KeyPressMsg{Code: tea.KeyTab})
 	if cmd != nil {
 		cmd()
 	}
@@ -740,7 +742,7 @@ func TestHandleSearchKey_Tab_MultipleTabsAccumulate(t *testing.T) {
 	seedSearchResults(m, tracks...)
 
 	for range 2 {
-		cmd := m.handleSearchKey("tab", tea.KeyMsg{Type: tea.KeyTab})
+		cmd := m.handleSearchKey("tab", tea.KeyPressMsg{Code: tea.KeyTab})
 		if cmd != nil {
 			cmd()
 		}
@@ -755,7 +757,7 @@ func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
 	m.mode = modeSearch
 	m.searchQuery = "test query"
 
-	m.handleSearchKey("esc", tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	if m.mode != modeNormal {
 		t.Errorf("mode after esc = %v, want modeNormal", m.mode)
@@ -771,7 +773,7 @@ func TestHandleSearchKey_Backspace_DeletesLastChar(t *testing.T) {
 	m.searchQuery = "abc"
 	m.searchCursor = 3 // cursor at end
 
-	m.handleSearchKey("backspace", tea.KeyMsg{Type: tea.KeyBackspace})
+	m.handleSearchKey("backspace", tea.KeyPressMsg{Code: tea.KeyBackspace})
 
 	if m.searchQuery != "ab" {
 		t.Errorf("searchQuery after backspace = %q, want %q", m.searchQuery, "ab")
@@ -784,7 +786,7 @@ func TestHandleSearchKey_Typing_AppendsToQuery(t *testing.T) {
 	m.searchQuery = "hel"
 	m.searchCursor = 3 // cursor at end
 
-	m.handleSearchKey("l", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")})
+	m.handleSearchKey("l", tea.KeyPressMsg{Code: 'l', Text: "l"})
 
 	if m.searchQuery != "hell" {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "hell")
@@ -796,7 +798,7 @@ func TestHandleSearchKey_Enter_SwitchesToNormalMode(t *testing.T) {
 	m := newModel(mp)
 	seedSearchResults(m, provider.Track{Title: "T", CatalogID: "x"})
 
-	cmd := m.handleSearchKey("enter", tea.KeyMsg{Type: tea.KeyEnter})
+	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil {
 		cmd()
 	}
@@ -813,7 +815,7 @@ func TestHandleSearchKey_Left_MovesCursorBack(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 5
 
-	m.handleSearchKey("left", tea.KeyMsg{Type: tea.KeyLeft})
+	m.handleSearchKey("left", tea.KeyPressMsg{Code: tea.KeyLeft})
 
 	if m.searchCursor != 4 {
 		t.Errorf("searchCursor after left = %d, want 4", m.searchCursor)
@@ -826,7 +828,7 @@ func TestHandleSearchKey_Left_ClampAtZero(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 0
 
-	m.handleSearchKey("left", tea.KeyMsg{Type: tea.KeyLeft})
+	m.handleSearchKey("left", tea.KeyPressMsg{Code: tea.KeyLeft})
 
 	if m.searchCursor != 0 {
 		t.Errorf("searchCursor after left at 0 = %d, want 0", m.searchCursor)
@@ -839,7 +841,7 @@ func TestHandleSearchKey_Right_MovesCursorForward(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 2
 
-	m.handleSearchKey("right", tea.KeyMsg{Type: tea.KeyRight})
+	m.handleSearchKey("right", tea.KeyPressMsg{Code: tea.KeyRight})
 
 	if m.searchCursor != 3 {
 		t.Errorf("searchCursor after right = %d, want 3", m.searchCursor)
@@ -852,7 +854,7 @@ func TestHandleSearchKey_Right_ClampAtEnd(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 5
 
-	m.handleSearchKey("right", tea.KeyMsg{Type: tea.KeyRight})
+	m.handleSearchKey("right", tea.KeyPressMsg{Code: tea.KeyRight})
 
 	if m.searchCursor != 5 {
 		t.Errorf("searchCursor after right at end = %d, want 5", m.searchCursor)
@@ -865,7 +867,7 @@ func TestHandleSearchKey_Home_MovesCursorToStart(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 3
 
-	m.handleSearchKey("home", tea.KeyMsg{Type: tea.KeyHome})
+	m.handleSearchKey("home", tea.KeyPressMsg{Code: tea.KeyHome})
 
 	if m.searchCursor != 0 {
 		t.Errorf("searchCursor after home = %d, want 0", m.searchCursor)
@@ -878,7 +880,7 @@ func TestHandleSearchKey_End_MovesCursorToEnd(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 0
 
-	m.handleSearchKey("end", tea.KeyMsg{Type: tea.KeyEnd})
+	m.handleSearchKey("end", tea.KeyPressMsg{Code: tea.KeyEnd})
 
 	if m.searchCursor != 5 {
 		t.Errorf("searchCursor after end = %d, want 5", m.searchCursor)
@@ -891,7 +893,7 @@ func TestHandleSearchKey_Backspace_DeletesAtCursor(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 3 // cursor after "hel", before "lo"
 
-	m.handleSearchKey("backspace", tea.KeyMsg{Type: tea.KeyBackspace})
+	m.handleSearchKey("backspace", tea.KeyPressMsg{Code: tea.KeyBackspace})
 
 	if m.searchQuery != "helo" {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "helo")
@@ -907,7 +909,7 @@ func TestHandleSearchKey_Delete_DeletesAfterCursor(t *testing.T) {
 	m.searchQuery = "hello"
 	m.searchCursor = 2 // cursor after "he", before "llo"
 
-	m.handleSearchKey("delete", tea.KeyMsg{Type: tea.KeyDelete})
+	m.handleSearchKey("delete", tea.KeyPressMsg{Code: tea.KeyDelete})
 
 	if m.searchQuery != "helo" {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "helo")
@@ -923,7 +925,7 @@ func TestHandleSearchKey_Typing_InsertsAtCursor(t *testing.T) {
 	m.searchQuery = "hllo"
 	m.searchCursor = 1 // cursor after "h", before "llo"
 
-	m.handleSearchKey("e", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m.handleSearchKey("e", tea.KeyPressMsg{Code: 'e', Text: "e"})
 
 	if m.searchQuery != "hello" {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "hello")
@@ -939,7 +941,7 @@ func TestHandleSearchKey_CtrlW_DeletesWordBefore(t *testing.T) {
 	m.searchQuery = "foo bar"
 	m.searchCursor = 7
 
-	m.handleSearchKey("ctrl+w", tea.KeyMsg{Type: tea.KeyRunes})
+	m.handleSearchKey("ctrl+w", tea.KeyPressMsg{})
 
 	if m.searchQuery != "foo " {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, "foo ")
@@ -952,7 +954,7 @@ func TestHandleSearchKey_CtrlU_ClearsBeforeCursor(t *testing.T) {
 	m.searchQuery = "hello world"
 	m.searchCursor = 5
 
-	m.handleSearchKey("ctrl+u", tea.KeyMsg{Type: tea.KeyRunes})
+	m.handleSearchKey("ctrl+u", tea.KeyPressMsg{})
 
 	if m.searchQuery != " world" {
 		t.Errorf("searchQuery = %q, want %q", m.searchQuery, " world")
@@ -968,7 +970,7 @@ func TestHandleSearchKey_Esc_ResetsCursor(t *testing.T) {
 	m.searchQuery = "test"
 	m.searchCursor = 4
 
-	m.handleSearchKey("esc", tea.KeyMsg{Type: tea.KeyEsc})
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
 
 	if m.searchCursor != 0 {
 		t.Errorf("searchCursor after esc = %d, want 0", m.searchCursor)
@@ -1243,7 +1245,7 @@ func TestHandleNormalKey_Space_TogglePlayPause(t *testing.T) {
 	mp := newMockPlayer()
 	mp.state.Playing = false
 	m := newModel(mp)
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeySpace}, " ")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeySpace}, "space")
 	if cmd == nil {
 		t.Fatal("space key should return a cmd")
 	}
@@ -1256,7 +1258,7 @@ func TestHandleNormalKey_Space_TogglePlayPause(t *testing.T) {
 func TestHandleNormalKey_N_Next(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")}, "n")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'n', Text: "n"}, "n")
 	if cmd != nil {
 		cmd()
 	}
@@ -1268,7 +1270,7 @@ func TestHandleNormalKey_N_Next(t *testing.T) {
 func TestHandleNormalKey_P_Previous(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("p")}, "p")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'p', Text: "p"}, "p")
 	if cmd != nil {
 		cmd()
 	}
@@ -1281,7 +1283,7 @@ func TestHandleNormalKey_Plus_VolumeUp(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.Volume = 0.5
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")}, "+")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: '+', Text: "+"}, "+")
 	if cmd != nil {
 		cmd()
 	}
@@ -1291,7 +1293,7 @@ func TestHandleNormalKey_Minus_VolumeDown(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.Volume = 0.5
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-")}, "-")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: '-', Text: "-"}, "-")
 	if cmd != nil {
 		cmd()
 	}
@@ -1302,7 +1304,7 @@ func TestHandleNormalKey_Plus_Discovery_IncreaseSimilarity(t *testing.T) {
 	m := newModel(mp)
 	m.discovery.enabled = true
 	m.discovery.similarity = 0.5
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("+")}, "+")
+	m.handleNormalKey(tea.KeyPressMsg{Code: '+', Text: "+"}, "+")
 	if m.discovery.similarity <= 0.5 {
 		t.Error("+ key in discovery mode should increase similarity")
 	}
@@ -1313,7 +1315,7 @@ func TestHandleNormalKey_Minus_Discovery_DecreaseSimilarity(t *testing.T) {
 	m := newModel(mp)
 	m.discovery.enabled = true
 	m.discovery.similarity = 0.7
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("-")}, "-")
+	m.handleNormalKey(tea.KeyPressMsg{Code: '-', Text: "-"}, "-")
 	if m.discovery.similarity >= 0.7 {
 		t.Error("- key in discovery mode should decrease similarity")
 	}
@@ -1323,7 +1325,7 @@ func TestHandleNormalKey_R_CycleRepeat(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.RepeatMode = player.RepeatModeOff
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "r")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'r', Text: "r"}, "r")
 	if cmd != nil {
 		cmd()
 	}
@@ -1336,7 +1338,7 @@ func TestHandleNormalKey_R_CycleRepeatAll_To_One(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.RepeatMode = player.RepeatModeAll
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")}, "r")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'r', Text: "r"}, "r")
 	if cmd != nil {
 		cmd()
 	}
@@ -1349,7 +1351,7 @@ func TestHandleNormalKey_S_ToggleShuffle(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.ShuffleMode = false
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, "s")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 's', Text: "s"}, "s")
 	if cmd != nil {
 		cmd()
 	}
@@ -1363,7 +1365,7 @@ func TestHandleNormalKey_F_LoveSong(t *testing.T) {
 	m := newModel(mp)
 	track := &provider.Track{Title: "Song", Artist: "Artist", ID: "fav-id"}
 	m.playerState.Track = track
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")}, "f")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'f', Text: "f"}, "f")
 	_ = cmd
 	if !m.favorites["fav-id"] {
 		t.Error("f key should toggle favorite on")
@@ -1374,7 +1376,7 @@ func TestHandleNormalKey_F_NoTrack_NoOp(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.playerState.Track = nil
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")}, "f")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'f', Text: "f"}, "f")
 	_ = cmd // no-op
 }
 
@@ -1383,7 +1385,7 @@ func TestHandleNormalKey_D_OpensPicker(t *testing.T) {
 	m := newModel(mp)
 	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed"}
 	m.playerState.Track = track
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'd', Text: "d"}, "d")
 	_ = cmd
 	if !m.vibe.PickerActive() {
 		t.Error("d key with track should open the metric picker")
@@ -1399,12 +1401,12 @@ func TestHandleNormalKey_D_ClosesPickerIfOpen(t *testing.T) {
 	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed"}
 	m.playerState.Track = track
 	// First d → opens picker.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'd', Text: "d"}, "d")
 	if !m.vibe.PickerActive() {
 		t.Fatal("expected picker to be active after first d")
 	}
 	// Second d → closes picker.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'd', Text: "d"}, "d")
 	if m.vibe.PickerActive() {
 		t.Error("second d should close the picker")
 	}
@@ -1415,7 +1417,7 @@ func TestHandleNormalKey_D_StopDiscovery(t *testing.T) {
 	m := newModel(mp)
 	m.discovery.enabled = true
 	m.discovery.seed = &provider.Track{ID: "seed"}
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'd', Text: "d"}, "d")
 	_ = cmd
 	if m.discovery.enabled {
 		t.Error("d key when discovery is on should stop discovery")
@@ -1424,7 +1426,7 @@ func TestHandleNormalKey_D_StopDiscovery(t *testing.T) {
 
 func TestHandleNormalKey_V_FocusVibe(t *testing.T) {
 	m := newModel(nil)
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")}, "v")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'v', Text: "v"}, "v")
 	if !m.vibe.IsFocused() {
 		t.Error("v key should focus the vibe panel")
 	}
@@ -1432,7 +1434,7 @@ func TestHandleNormalKey_V_FocusVibe(t *testing.T) {
 
 func TestHandleNormalKey_Colon_OpenCommandMode(t *testing.T) {
 	m := newModel(nil)
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")}, ":")
+	m.handleNormalKey(tea.KeyPressMsg{Code: ':', Text: ":"}, ":")
 	if m.mode != modeCommand {
 		t.Error(": key should switch to command mode")
 	}
@@ -1440,7 +1442,7 @@ func TestHandleNormalKey_Colon_OpenCommandMode(t *testing.T) {
 
 func TestHandleNormalKey_Slash_OpenSearch(t *testing.T) {
 	m := newModel(nil)
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")}, "/")
+	m.handleNormalKey(tea.KeyPressMsg{Code: '/', Text: "/"}, "/")
 	if m.mode != modeSearch {
 		t.Error("/ key should switch to search mode")
 	}
@@ -1448,7 +1450,7 @@ func TestHandleNormalKey_Slash_OpenSearch(t *testing.T) {
 
 func TestHandleNormalKey_L_ToggleLibraryPanel(t *testing.T) {
 	m := newModel(nil)
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}, "l")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'l', Text: "l"}, "l")
 	// Library panel should be activated.
 	if m.activePanel < 0 {
 		t.Error("l key should open library panel")
@@ -1458,8 +1460,8 @@ func TestHandleNormalKey_L_ToggleLibraryPanel(t *testing.T) {
 func TestHandleNormalKey_L_ToggleOff(t *testing.T) {
 	m := newModel(nil)
 	// Press l twice — second press closes.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}, "l")
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("l")}, "l")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'l', Text: "l"}, "l")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'l', Text: "l"}, "l")
 	if m.activePanel >= 0 {
 		t.Error("l key pressed twice should close library panel")
 	}
@@ -1467,7 +1469,7 @@ func TestHandleNormalKey_L_ToggleOff(t *testing.T) {
 
 func TestHandleNormalKey_Q_ToggleQueuePanel(t *testing.T) {
 	m := newModel(newMockPlayer())
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
 	if m.activePanel < 0 {
 		t.Error("q key should open queue panel")
 	}
@@ -1477,7 +1479,7 @@ func TestHandleNormalKey_DebugView_J_ScrollDown(t *testing.T) {
 	m := newModel(nil)
 	m.debugView = true
 	m.debugScroll = 5
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 	if m.debugScroll != 4 {
 		t.Errorf("j in debug view should decrement scroll, got %d", m.debugScroll)
 	}
@@ -1487,7 +1489,7 @@ func TestHandleNormalKey_DebugView_K_ScrollUp(t *testing.T) {
 	m := newModel(nil)
 	m.debugView = true
 	m.debugScroll = 2
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")}, "k")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'k', Text: "k"}, "k")
 	if m.debugScroll != 3 {
 		t.Errorf("k in debug view should increment scroll, got %d", m.debugScroll)
 	}
@@ -1497,7 +1499,7 @@ func TestHandleNormalKey_DebugView_BigG_ResetScroll(t *testing.T) {
 	m := newModel(nil)
 	m.debugView = true
 	m.debugScroll = 10
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")}, "G")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'G', Text: "G"}, "G")
 	if m.debugScroll != 0 {
 		t.Errorf("G in debug view should reset scroll to 0, got %d", m.debugScroll)
 	}
@@ -1506,7 +1508,7 @@ func TestHandleNormalKey_DebugView_BigG_ResetScroll(t *testing.T) {
 func TestHandleNormalKey_DebugView_Esc_CloseView(t *testing.T) {
 	m := newModel(nil)
 	m.debugView = true
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyEsc}, "esc")
+	m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
 	if m.debugView {
 		t.Error("esc in debug view should close it")
 	}
@@ -1514,12 +1516,12 @@ func TestHandleNormalKey_DebugView_Esc_CloseView(t *testing.T) {
 
 func TestHandleNormalKey_QueuePanel_Esc_ClosePanel(t *testing.T) {
 	m := newModel(newMockPlayer())
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q") // open queue
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q") // open queue
 	idx := m.activePanel
 	if idx < 0 {
 		t.Skip("queue panel not available")
 	}
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyEsc}, "esc")
+	m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
 	if m.activePanel >= 0 {
 		t.Error("esc should close queue panel")
 	}
@@ -1530,8 +1532,8 @@ func TestHandleNormalKey_QueuePanel_C_ClearQueue(t *testing.T) {
 	m := newModel(mp)
 	m.queueTracks = []provider.Track{{Title: "T", ID: "1"}}
 	m.queueIDs = []string{"1"}
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q") // open queue
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")}, "c")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q") // open queue
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'c', Text: "c"}, "c")
 	if cmd != nil {
 		cmd()
 	}
@@ -1542,8 +1544,8 @@ func TestHandleNormalKey_QueuePanel_C_ClearQueue(t *testing.T) {
 
 func TestHandleNormalKey_QueuePanel_S_OpenSaveCommand(t *testing.T) {
 	m := newModel(newMockPlayer())
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q")
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")}, "s")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 's', Text: "s"}, "s")
 	if m.mode != modeCommand || !strings.HasPrefix(m.cmdBuf, "save ") {
 		t.Error("s in queue panel should open command mode with 'save ' prefilled")
 	}
@@ -2028,7 +2030,7 @@ func TestLibraryPanel_Update(t *testing.T) {
 	m := newModel(nil)
 	for _, p := range m.panels {
 		if p.NavKey() == "l" {
-			cmd := p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			cmd := p.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 			_ = cmd // should not panic
 			break
 		}
@@ -2072,7 +2074,7 @@ func TestQueuePanel_Update(t *testing.T) {
 	m := newModel(newMockPlayer())
 	for _, p := range m.panels {
 		if p.NavKey() == "q" {
-			cmd := p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+			cmd := p.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 			_ = cmd // should not panic
 			break
 		}
@@ -2243,8 +2245,8 @@ func TestModel_View_NormalMode(t *testing.T) {
 	m.width = 120
 	m.height = 30
 	view := m.View()
-	if view == "" {
-		t.Error("View() should return non-empty string")
+	if view.Content == "" {
+		t.Error("View() in normal mode should return non-empty string")
 	}
 }
 
@@ -2338,9 +2340,9 @@ func TestHandleNormalKey_QueuePanel_Enter_WithSelection(t *testing.T) {
 	m.queueIDs = []string{"cat1", "cat2"}
 
 	// Open queue panel.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
 
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyEnter}, "enter")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEnter}, "enter")
 	if cmd != nil {
 		cmd()
 	}
@@ -2357,9 +2359,9 @@ func TestHandleNormalKey_QueuePanel_D_RemoveTrack(t *testing.T) {
 	m.queue.SetTracks(m.queueTracks)
 
 	// Open queue panel.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
 
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")}, "d")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'd', Text: "d"}, "d")
 	if cmd != nil {
 		cmd()
 	}
@@ -2371,12 +2373,12 @@ func TestHandleNormalKey_QueuePanel_D_RemoveTrack(t *testing.T) {
 func TestHandleNormalKey_G_DoubleTap(t *testing.T) {
 	m := newModel(nil)
 	// First g — sets lastKey.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}, "g")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'g', Text: "g"}, "g")
 	if m.lastKey != "g" {
 		t.Errorf("after first g, lastKey = %q, want %q", m.lastKey, "g")
 	}
 	// Second g — resets lastKey.
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")}, "g")
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'g', Text: "g"}, "g")
 	if m.lastKey != "" {
 		t.Errorf("after second g, lastKey = %q, want %q", m.lastKey, "")
 	}
@@ -2385,7 +2387,7 @@ func TestHandleNormalKey_G_DoubleTap(t *testing.T) {
 func TestHandleNormalKey_ActivePanel_Esc(t *testing.T) {
 	m := newModel(nil)
 	m.activePanel = 0
-	m.handleNormalKey(tea.KeyMsg{Type: tea.KeyEsc}, "esc")
+	m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
 	if m.activePanel >= 0 {
 		t.Error("esc with activePanel should close it")
 	}
@@ -2401,7 +2403,7 @@ func TestHandleNormalKey_ActivePanel_ForwardKey(t *testing.T) {
 		}
 	}
 	// Forward a key to library panel — should not panic.
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}, "j")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'j', Text: "j"}, "j")
 	_ = cmd
 }
 
@@ -2409,6 +2411,6 @@ func TestHandleNormalKey_VibeFocused_RoutesToVibe(t *testing.T) {
 	m := newModel(nil)
 	m.vibe.Focus()
 	// Keys should go to vibe panel when it's focused.
-	cmd := m.handleNormalKey(tea.KeyMsg{Type: tea.KeyEsc}, "esc")
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
 	_ = cmd
 }

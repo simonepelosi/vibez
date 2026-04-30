@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
@@ -99,7 +99,7 @@ func (f *FeedModel) advance(from, dir int) int {
 
 func (f *FeedModel) SetSize(w, h int) { f.width = w; f.height = h }
 
-func (f *FeedModel) Update(msg tea.KeyMsg) tea.Cmd {
+func (f *FeedModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	if f.state != feedStateLoaded {
 		return nil
 	}

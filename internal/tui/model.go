@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/player"
@@ -39,7 +39,7 @@ type ContentView interface {
 	NavKey() string   // normal-mode key to activate this panel
 	NavLabel() string // short label shown in the status bar
 	SetSize(w, h int)
-	Update(msg tea.KeyMsg) tea.Cmd
+	Update(msg tea.KeyPressMsg) tea.Cmd
 	View() string
 }
 
@@ -49,7 +49,7 @@ type libraryPanel struct{ m *views.LibraryModel }
 func (p *libraryPanel) NavKey() string   { return "l" }
 func (p *libraryPanel) NavLabel() string { return "library" }
 func (p *libraryPanel) SetSize(w, h int) { p.m.SetSize(w, h) }
-func (p *libraryPanel) Update(msg tea.KeyMsg) tea.Cmd {
+func (p *libraryPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	updated, cmd := p.m.Update(msg)
 	p.m = updated
 	return cmd
@@ -63,7 +63,7 @@ type queuePanel struct{ m *views.QueueModel }
 func (p *queuePanel) NavKey() string   { return "q" }
 func (p *queuePanel) NavLabel() string { return "queue" }
 func (p *queuePanel) SetSize(w, h int) { p.m.SetSize(w, h) }
-func (p *queuePanel) Update(msg tea.KeyMsg) tea.Cmd {
+func (p *queuePanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	p.m.Update(msg)
 	return nil
 }
@@ -74,20 +74,20 @@ func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.Selecte
 // lyricsPanel wraps views.LyricsModel to satisfy ContentView.
 type lyricsPanel struct{ m *views.LyricsModel }
 
-func (p *lyricsPanel) NavKey() string                { return "y" }
-func (p *lyricsPanel) NavLabel() string              { return "lyrics" }
-func (p *lyricsPanel) SetSize(w, h int)              { p.m.SetSize(w, h) }
-func (p *lyricsPanel) Update(msg tea.KeyMsg) tea.Cmd { return p.m.Update(msg) }
-func (p *lyricsPanel) View() string                  { return p.m.View() }
+func (p *lyricsPanel) NavKey() string                     { return "y" }
+func (p *lyricsPanel) NavLabel() string                   { return "lyrics" }
+func (p *lyricsPanel) SetSize(w, h int)                   { p.m.SetSize(w, h) }
+func (p *lyricsPanel) Update(msg tea.KeyPressMsg) tea.Cmd { return p.m.Update(msg) }
+func (p *lyricsPanel) View() string                       { return p.m.View() }
 
 // feedPanel wraps views.FeedModel to satisfy ContentView.
 type feedPanel struct{ m *views.FeedModel }
 
-func (p *feedPanel) NavKey() string                { return "F" }
-func (p *feedPanel) NavLabel() string              { return "feed" }
-func (p *feedPanel) SetSize(w, h int)              { p.m.SetSize(w, h) }
-func (p *feedPanel) Update(msg tea.KeyMsg) tea.Cmd { return p.m.Update(msg) }
-func (p *feedPanel) View() string                  { return p.m.View() }
+func (p *feedPanel) NavKey() string                     { return "F" }
+func (p *feedPanel) NavLabel() string                   { return "feed" }
+func (p *feedPanel) SetSize(w, h int)                   { p.m.SetSize(w, h) }
+func (p *feedPanel) Update(msg tea.KeyPressMsg) tea.Cmd { return p.m.Update(msg) }
+func (p *feedPanel) View() string                       { return p.m.View() }
 
 // ── Messages ──────────────────────────────────────────────────────────────
 
@@ -316,7 +316,7 @@ func tick() tea.Cmd {
 }
 
 func glowTick() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg { return glowTickMsg(t) })
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return glowTickMsg(t) })
 }
 
 func introTick() tea.Cmd {
@@ -330,7 +330,22 @@ func memTick(helperPaths []string) tea.Cmd {
 }
 
 func waitForState(ch <-chan player.State) tea.Cmd {
-	return func() tea.Msg { return playerStateMsg(<-ch) }
+	return func() tea.Msg {
+		s := <-ch
+		// Drain any additional buffered states, keeping only the most recent.
+		// During a track transition the player fires a rapid burst of events
+		// (paused → buffering → playing). Processing each one floods the event
+		// loop and starves glowTick, causing the animation to freeze. Collapsing
+		// the burst into a single Update cycle keeps the UI responsive.
+		for {
+			select {
+			case newer := <-ch:
+				s = newer
+			default:
+				return playerStateMsg(s)
+			}
+		}
+	}
 }
 
 // ── Update ────────────────────────────────────────────────────────────────
@@ -440,11 +455,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(pp)
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
-			// Fetch lyrics for the new track.
+			// Fetch lyrics for the new track: immediately if the panel is
+			// visible, otherwise mark stale so the fetch is deferred until
+			// the user opens the panel (lazy loading).
 			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
-				m.lastLyricsTrackID = id
-				m.lyricsP.m.SetLoading()
-				cmds = append(cmds, m.fetchLyricsCmd(s.Track))
+				lyricsOpen := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
+				if lyricsOpen {
+					m.lastLyricsTrackID = id
+					m.lyricsP.m.SetLoading()
+					cmds = append(cmds, m.fetchLyricsCmd(s.Track))
+				} else {
+					m.lastLyricsTrackID = "" // stale; will fetch on panel open
+				}
 			}
 			// Auto-scroll mini-queue to keep the current track visible.
 			for i, t := range m.queueTracks {
@@ -478,7 +500,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
 			m.appendLog("[player] playing")
-			cmds = append(cmds, glowTick())
 		} else if wasPlaying && !m.playerState.Playing && !m.playerState.Loading {
 			m.appendLog("[player] paused")
 		}
@@ -662,7 +683,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		prov := m.provider
 		query := msg.query
 		return m, func() tea.Msg {
-			result, err := prov.Search(context.Background(), query)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			result, err := prov.Search(ctx, query)
 			return searchResultMsg{result: result, query: query, err: err}
 		}
 
@@ -700,6 +723,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queue.SetTracks(m.queueTracks)
 			m.appendLog(fmt.Sprintf("[search] playing %q (%d tracks)", msg.label, len(ids)))
 			m.mode = modeNormal
+			m.playerState.Loading = true
+			m.playerState.Playing = false
+			m.playerState.Position = 0
 			return m, m.playerCmd(func() error { return m.player.SetQueue(ids) })
 		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
@@ -712,6 +738,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
 		}
+		m.playerState.Loading = true
+		m.playerState.Playing = false
+		m.playerState.Position = 0
 		if len(msg.Tracks) > 0 {
 			m.queueTracks = msg.Tracks
 		} else if msg.Track != nil {
@@ -779,7 +808,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = "✓ Re-authenticated with Apple Music"
 		m.errExpiry = time.Now().Add(5 * time.Second)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		cmd := m.handleKey(msg)
 		cmds = append(cmds, cmd)
 
@@ -799,7 +828,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	k := msg.String()
 
 	// ctrl+c always quits
@@ -820,7 +849,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	}
 }
 
-func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
+func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 	switch k {
 	case "esc":
 		m.mode = modeNormal
@@ -835,16 +864,21 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyMsg) tea.Cmd {
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
+			m.playerState.Loading = true
+			m.playerState.Playing = false
+			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
 			m.mode = modeNormal
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
 		// Album: fetch all tracks then play.
 		if a := m.search.SelectedAlbum(); a != nil {
+			m.playerState.Loading = true
 			return m.fetchSearchCollectionCmd(a, nil, true)
 		}
 		// Playlist: fetch all tracks then play.
 		if p := m.search.SelectedPlaylist(); p != nil {
+			m.playerState.Loading = true
 			return m.fetchSearchCollectionCmd(nil, p, true)
 		}
 		return nil
@@ -1261,7 +1295,7 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	return m.runDiscoverySearch()
 }
 
-func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
+func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	// When debug log is open, j/k/G scroll it; esc closes it.
 	if m.debugView {
 		switch k {
@@ -1300,6 +1334,15 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 					m.lastKey = ""
 					return m.fetchFeedCmd()
 				}
+				// Lazy-load lyrics when the panel is opened and the current
+				// track hasn't been fetched yet.
+				if p == m.lyricsP && m.lastLyricsTrackID == "" && m.playerState.Track != nil {
+					id := views.PlaybackID(*m.playerState.Track)
+					m.lastLyricsTrackID = id
+					m.lyricsP.m.SetLoading()
+					m.lastKey = ""
+					return m.fetchLyricsCmd(m.playerState.Track)
+				}
 			}
 			m.lastKey = ""
 			return nil
@@ -1328,6 +1371,9 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 				m.queueIDs = ids
 				m.queue.SetTracks(m.queueTracks)
 				m.appendLog(fmt.Sprintf("[queue] playing from position %d: %s — %s", idx+1, t.Artist, t.Title))
+				m.playerState.Loading = true
+				m.playerState.Playing = false
+				m.playerState.Position = 0
 				return m.playerCmd(func() error { return m.player.SetQueue(ids) })
 			}
 		case "d":
@@ -1379,17 +1425,19 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 
 	// Player control keys always work, even when other panels are active.
 	switch k {
-	case " ":
+	case "space":
 		return m.togglePlayPause()
 
 	case "n":
 		m.lastKey = ""
 		m.appendLog("[player] next")
+		m.playerState.Loading = true
 		return m.playerCmd(func() error { return m.player.Next() })
 
 	case "p":
 		m.lastKey = ""
 		m.appendLog("[player] previous")
+		m.playerState.Loading = true
 		return m.playerCmd(func() error { return m.player.Previous() })
 
 	case "+", "=":
@@ -1512,6 +1560,7 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 				return m.fetchFeedCmd()
 			case "enter":
 				if item := m.feedP.m.SelectedItem(); item != nil {
+					m.playerState.Loading = true
 					return m.fetchFeedItemTracksCmd(item, true)
 				}
 			case "tab":
@@ -1563,6 +1612,9 @@ func (m *Model) handleNormalKey(msg tea.KeyMsg, k string) tea.Cmd {
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
+			m.playerState.Loading = true
+			m.playerState.Playing = false
+			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
 			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
 		}
@@ -2103,14 +2155,21 @@ func (m *Model) adjustVolume(delta float64) tea.Cmd {
 
 // ── View ──────────────────────────────────────────────────────────────────
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	if m.width == 0 {
-		return ""
+		v := tea.NewView("")
+		v.AltScreen = true
+		return v
 	}
+	var content string
 	if m.introStep != introDone {
-		return m.renderIntro()
+		content = m.renderIntro()
+	} else {
+		content = m.renderBoxLayout()
 	}
-	return m.renderBoxLayout()
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
 }
 
 // renderBoxLayout renders the full boxed UI.

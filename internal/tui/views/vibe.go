@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
@@ -171,7 +171,7 @@ func (v *VibeModel) DiscoveryActive() bool { return v.discovery.Active }
 // Returns a Cmd that dispatches VibeQueryMsg or DiscoveryMetricSelectedMsg.
 // All other key events are forwarded to the bubbles textinput.
 func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
-	km, ok := msg.(tea.KeyMsg)
+	km, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return nil
 	}
@@ -257,7 +257,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ•̀ᴥ•́ʔ"}
 	bear := styles.BearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
 
-	v.input.Width = max(w-4, 10)
+	v.input.SetWidth(max(w-4, 10))
 
 	clip := func(s string, maxLen int) string {
 		if maxLen <= 0 {

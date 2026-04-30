@@ -18,6 +18,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   semantic accents, bear mascot, progress-bar gradient, glow animation, and mode chips.
   Closes #14.
 
+### Fixed
+- **Title glow and bear animation speed up on each track change** — a redundant
+  `glowTick()` was spawned every time playback started, stacking on top of the
+  one already running from `Init()`. After N track changes the glow step counter
+  advanced N times per tick, making both effects progressively faster. Removed the
+  duplicate spawn; the single ticker started at init is sufficient. The ticker
+  interval was also reduced from 500 ms to 100 ms for a smoother animation rate.
+  Playback controls (`n`, `p`, `space`, play-from-queue, play-from-library) now
+  immediately set a loading state so the spinner appears without waiting for the
+  player to report back. `waitForState` now drains any burst of rapid state
+  transitions (pause → buffer → play) into a single event-loop update, preventing
+  the animation ticker from being starved during track changes.
+  Closes #15.
+- **Lyrics fetched eagerly on every track change** — lyrics are now loaded lazily:
+  only when the lyrics panel (`y`) is opened. If the panel is already visible when
+  the track changes the fetch happens immediately as before. Failed fetches are
+  logged to the debug log and the panel shows "You cannot sing this song :(" instead
+  of a raw error string.
+- **Missing loading indicators on collection actions** — selecting an album or
+  playlist from search results / the feed now immediately shows the player spinner
+  while tracks are being fetched. The search API call now carries a 15 s timeout
+  (previously unbounded).
+
+### Changed
+- **Upgraded to Bubbletea / Lip Gloss / Bubbles v2** — migrated from
+  `github.com/charmbracelet/*` to `charm.land/*/v2`. The new Cursed Renderer uses
+  ncurses-style cell diffing for significantly faster and flicker-free screen
+  updates. `View()` is now declarative (`tea.View` struct); alt-screen is declared
+  there instead of via program options.
+
 ---
 
 ## [0.0.9] — 2026-04-30

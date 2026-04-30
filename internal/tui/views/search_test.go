@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -143,7 +143,7 @@ func TestSearch_Update_EscBlursInput(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
 	// Esc is now handled by the model; search model Update ignores key msgs
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	// Focused() always returns false in new design
 	if s.Focused() {
 		t.Error("Focused() should always return false")
@@ -153,7 +153,7 @@ func TestSearch_Update_EscBlursInput(t *testing.T) {
 func TestSearch_Update_NonSearchMsg_NoPanic(t *testing.T) {
 	s := NewSearch(&mockProvider{})
 	s.SetSize(80, 24)
-	_, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown}) // should not panic
+	_, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // should not panic
 }
 
 func TestSearch_ScheduleSearch_NonEmpty(t *testing.T) {
@@ -177,7 +177,7 @@ func TestSearch_Update_TypeWhileFocused(t *testing.T) {
 	s.SetSize(80, 24)
 	// In the new design, typing is handled by the model, not search.
 	// Verify Update handles non-searchResultMsg gracefully (no-op, no panic).
-	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	s, cmd := s.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
 	_ = cmd // cmd may be nil — that is correct in the new design
 	_ = s
 }
@@ -221,7 +221,7 @@ func TestSearch_SelectedTrack_ChangesAfterNavigation(t *testing.T) {
 	s.SetState(tracks, false, nil)
 
 	// Move down once — should select "Beta".
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 
 	got := s.SelectedTrack()
 	if got == nil {
@@ -243,7 +243,7 @@ func TestSearch_SelectedIndex_TracksCursorPosition(t *testing.T) {
 	if s.SelectedIndex() != 0 {
 		t.Errorf("initial SelectedIndex() = %d, want 0", s.SelectedIndex())
 	}
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedIndex() != 1 {
 		t.Errorf("SelectedIndex() after Down = %d, want 1", s.SelectedIndex())
 	}
@@ -258,7 +258,7 @@ func TestSearch_SetState_ResetsSelection(t *testing.T) {
 	}, false, nil)
 
 	// Navigate to second item.
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 
 	// Replace results — cursor should reset to 0.
 	s.SetState([]provider.Track{{Title: "New", CatalogID: "n"}}, false, nil)
@@ -467,7 +467,7 @@ func TestSearch_SetResults_ResetsSelectionToFirstItem(t *testing.T) {
 			{Title: "B", CatalogID: "b"},
 		},
 	}, false, nil)
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedIndex() != 1 {
 		t.Fatalf("expected index 1 before reset, got %d", s.SelectedIndex())
 	}
@@ -527,7 +527,7 @@ func TestSearch_SelectedAlbum_NavigateDown(t *testing.T) {
 		},
 	}, false, nil)
 
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	got := s.SelectedAlbum()
 	if got == nil {
 		t.Fatal("SelectedAlbum() returned nil after navigating down")
@@ -592,7 +592,7 @@ func TestSearch_Navigation_CrossesSectionBoundary(t *testing.T) {
 	}
 
 	// One down: should move to the album (crosses the Albums header).
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedAlbum() == nil {
 		t.Fatalf("expected album to be selected after navigating down past the Tracks section")
 	}
@@ -601,7 +601,7 @@ func TestSearch_Navigation_CrossesSectionBoundary(t *testing.T) {
 	}
 
 	// One up: should go back to the track.
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyUp})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	if s.SelectedTrack() == nil {
 		t.Fatalf("expected track to be re-selected after navigating up")
 	}
@@ -631,19 +631,19 @@ func TestSearch_Navigation_AllThreeSections(t *testing.T) {
 	}
 
 	// Step 1: album.
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedAlbum() == nil {
 		t.Fatal("step 1: expected album")
 	}
 
 	// Step 2: playlist.
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedPlaylist() == nil {
 		t.Fatal("step 2: expected playlist")
 	}
 
 	// Step 3: no further — stays on playlist.
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedPlaylist() == nil {
 		t.Fatal("step 3: expected still playlist at end of list")
 	}
@@ -659,7 +659,7 @@ func TestSearch_Navigation_PgDown_SkipsMultipleItems(t *testing.T) {
 	s.SetResults(&provider.SearchResult{Tracks: tracks}, false, nil)
 
 	startIdx := s.SelectedIndex()
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyPgDown})
 	if s.SelectedIndex() <= startIdx {
 		t.Errorf("PgDown should advance cursor; got index %d (was %d)", s.SelectedIndex(), startIdx)
 	}
@@ -732,11 +732,11 @@ func TestSearch_ScrollUp_SectionHeaderRemainsVisible(t *testing.T) {
 
 	// Navigate down far enough that the Tracks header scrolls out of view.
 	for range 3 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	// Now navigate back up to the first item.
 	for range 3 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyUp})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
 
 	// The scroll position must be 0 so the "Tracks" header is visible.
@@ -765,11 +765,11 @@ func TestSearch_ScrollUp_AlbumSectionHeaderRemainsVisible(t *testing.T) {
 
 	// Navigate into the Albums section and then scroll down a bit.
 	for range 4 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 	// Navigate back up to the first album (index just after the Albums header).
 	for range 2 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyUp})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	}
 
 	v := s.View()
@@ -795,7 +795,7 @@ func TestSearch_ColorSeeding_PlaylistsWhenHeaderScrolledPast(t *testing.T) {
 
 	// Navigate all the way down to the playlist.
 	for range 4 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 
 	// The selected item must be the playlist.
@@ -829,7 +829,7 @@ func TestSearch_ColorSeeding_AlbumsWhenHeaderScrolledPast(t *testing.T) {
 
 	// Navigate to the album (past all tracks and their header).
 	for range 4 {
-		s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+		s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	}
 
 	if s.SelectedAlbum() == nil {
@@ -861,12 +861,12 @@ func TestSearch_SelectedIndex_MixedSections(t *testing.T) {
 		t.Errorf("initial SelectedIndex = %d, want 0", s.SelectedIndex())
 	}
 	// Item 1 = T2
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedIndex() != 1 {
 		t.Errorf("after 1 down SelectedIndex = %d, want 1", s.SelectedIndex())
 	}
 	// Item 2 = A1 (crosses the Albums header)
-	s, _ = s.Update(tea.KeyMsg{Type: tea.KeyDown})
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	if s.SelectedIndex() != 2 {
 		t.Errorf("after 2 down SelectedIndex = %d, want 2", s.SelectedIndex())
 	}

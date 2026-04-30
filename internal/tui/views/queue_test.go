@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -93,7 +93,7 @@ func TestQueue_View_WithTracks(t *testing.T) {
 func TestQueue_Update_NoPanic(t *testing.T) {
 	q := NewQueue()
 	q.SetSize(80, 24)
-	q.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")}) // should not panic
+	q.Update(tea.KeyPressMsg{Code: 'j', Text: "j"}) // should not panic
 }
 
 // --- queueTrackLine ---

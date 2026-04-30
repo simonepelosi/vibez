@@ -1,6 +1,10 @@
 package styles
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"image/color"
+
+	"charm.land/lipgloss/v2"
+)
 
 // Color variables — all mutable so Apply(Theme) can swap the palette at startup.
 // Initial values match DefaultTheme (Tokyo Night / Catppuccin Mocha blend).
@@ -157,7 +161,7 @@ var (
 )
 
 // GlowPalette drives the "now playing" breathing animation, from dark to bright.
-var GlowPalette = []lipgloss.Color{
+var GlowPalette = []color.Color{
 	ColorGlow0, // 0 — darkest
 	ColorGlow1,
 	ColorGlow2,
@@ -170,7 +174,7 @@ var GlowPalette = []lipgloss.Color{
 
 // ProgressGradStops are the colour stops for the progress-bar filled gradient
 // (left → right: blue → lavender → rose pink). Updated by Apply().
-var ProgressGradStops = []lipgloss.Color{
+var ProgressGradStops = []color.Color{
 	ColorProgress, // blue
 	ColorGlow6,    // lavender
 	ColorLove,     // rose pink
@@ -204,11 +208,11 @@ func Apply(t Theme) {
 	ColorGlow7 = lipgloss.Color(t.GlowPalette[7])
 
 	// Update glow slices.
-	GlowPalette = []lipgloss.Color{
+	GlowPalette = []color.Color{
 		ColorGlow0, ColorGlow1, ColorGlow2, ColorGlow3,
 		ColorGlow4, ColorGlow5, ColorGlow6, ColorGlow7,
 	}
-	ProgressGradStops = []lipgloss.Color{ColorProgress, ColorGlow6, ColorLove}
+	ProgressGradStops = []color.Color{ColorProgress, ColorGlow6, ColorLove}
 
 	// Recreate style vars.
 	TitleBar = lipgloss.NewStyle().Italic(true).Foreground(ColorPrimary).PaddingLeft(1).PaddingRight(1)
@@ -251,41 +255,29 @@ func Apply(t Theme) {
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)
 }
 
-// LerpColor linearly interpolates between two hex colours by factor t ∈ [0,1].
+// LerpColor linearly interpolates between two colours by factor t ∈ [0,1].
 // Used to compute gradient colours for dynamic indicators like the similarity bar.
-func LerpColor(a, b lipgloss.Color, t float64) lipgloss.Color {
+func LerpColor(a, b color.Color, t float64) color.Color {
 	if t <= 0 {
 		return a
 	}
 	if t >= 1 {
 		return b
 	}
-	ar, ag, ab := hexRGB(string(a))
-	br, bg, bb := hexRGB(string(b))
-	r := uint8(float64(ar) + t*(float64(br)-float64(ar)))
-	g := uint8(float64(ag) + t*(float64(bg)-float64(ag)))
-	bl := uint8(float64(ab) + t*(float64(bb)-float64(ab)))
-	return lipgloss.Color(lipgloss.Color("#" + hex2(r) + hex2(g) + hex2(bl)))
+	ar, ag, ab, _ := a.RGBA()
+	br, bg, bb, _ := b.RGBA()
+	r := uint8(float64(ar>>8) + t*(float64(br>>8)-float64(ar>>8)))
+	g := uint8(float64(ag>>8) + t*(float64(bg>>8)-float64(ag>>8)))
+	bl := uint8(float64(ab>>8) + t*(float64(bb>>8)-float64(ab>>8)))
+	return lipgloss.Color("#" + hex2(r) + hex2(g) + hex2(bl))
 }
 
-func hexRGB(c string) (r, g, b uint8) {
-	c = c[1:] // strip '#'
-	if len(c) == 3 {
-		c = string([]byte{c[0], c[0], c[1], c[1], c[2], c[2]})
-	}
-	var v uint32
-	for _, ch := range []byte(c) {
-		v <<= 4
-		switch {
-		case ch >= '0' && ch <= '9':
-			v |= uint32(ch - '0')
-		case ch >= 'a' && ch <= 'f':
-			v |= uint32(ch-'a') + 10
-		case ch >= 'A' && ch <= 'F':
-			v |= uint32(ch-'A') + 10
-		}
-	}
-	return uint8(v >> 16), uint8(v >> 8), uint8(v)
+// ColorHex returns the "#rrggbb" lowercase hex representation of a color.Color.
+// Useful for comparing color values against theme hex strings.
+func ColorHex(c color.Color) string {
+	r, g, b, _ := c.RGBA()
+	// RGBA() returns 16-bit alpha-premultiplied values (0-65535); >>8 maps to [0,255]. //nolint:gosec
+	return "#" + hex2(uint8(r>>8)) + hex2(uint8(g>>8)) + hex2(uint8(b>>8)) //nolint:gosec
 }
 
 func hex2(v uint8) string {

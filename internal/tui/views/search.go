@@ -3,11 +3,12 @@ package views
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
@@ -238,7 +239,7 @@ func (m *SearchModel) SelectedIndex() int {
 }
 
 // Update handles key navigation (↑ ↓ PgUp PgDn).
-func (m *SearchModel) Update(msg tea.KeyMsg) (*SearchModel, tea.Cmd) {
+func (m *SearchModel) Update(msg tea.KeyPressMsg) (*SearchModel, tea.Cmd) {
 	switch msg.String() {
 	case "up":
 		if prev := m.advance(m.cursor, -1); prev != m.cursor {
@@ -275,7 +276,7 @@ func (m *SearchModel) Update(msg tea.KeyMsg) (*SearchModel, tea.Cmd) {
 // sectionColor returns the accent colour for a given section label.
 // Each section uses a distinct warm/cool hue so the three groups are
 // immediately distinguishable at a glance.
-func sectionColor(label string) lipgloss.Color {
+func sectionColor(label string) color.Color {
 	switch label {
 	case "Albums":
 		return styles.ColorPrimary // violet  #C678DD
