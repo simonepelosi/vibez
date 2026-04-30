@@ -3,7 +3,7 @@ version: 2
 before:
   hooks:
     - go mod tidy
-    - go install mvdan.cc/garble@v0.15.0
+    - go install mvdan.cc/garble@v0.16.0
 
 builds:
   - id: vibez

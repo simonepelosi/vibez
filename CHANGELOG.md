@@ -78,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there instead of via program options.
 - **Migrated to Go 1.26** — updated minimum Go version in `go.mod` and all CI/CD
   workflows. Bumped direct dependencies: `godbus/dbus/v5` v5.1.0 → v5.2.2,
-  `spf13/cobra` v1.8.0 → v1.10.2. Closes #22.
+  `spf13/cobra` v1.8.0 → v1.10.2. Garble bumped to v0.16.0 (first release with
+  Go 1.26 support). Closes #22.
 - **Library view simplified to Playlists only** — the Albums and Tracks tabs have
   been removed. The library panel now shows only the user's playlists, keeping the
   interface focused and reducing unnecessary API calls.
