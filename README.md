@@ -143,6 +143,29 @@ vibez version               # print version
 
 ## Theming
 
+<table>
+  <tr>
+    <td align="center">
+      <img src="assets/default-vibez.png" alt="default theme"/><br>
+      <sub><b>default</b> (Tokyo Night / Catppuccin)</sub>
+    </td>
+    <td align="center">
+      <img src="assets/dracula-vibez.png" alt="dracula theme"/><br>
+      <sub><b>dracula</b></sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="assets/gruvbox-vibez.png" alt="gruvbox theme"/><br>
+      <sub><b>gruvbox</b></sub>
+    </td>
+    <td align="center">
+      <img src="assets/nord-vibez.png" alt="nord theme"/><br>
+      <sub><b>nord</b></sub>
+    </td>
+  </tr>
+</table>
+
 Set the `theme` key in `~/.config/vibez/config.json`:
 
 ```json
