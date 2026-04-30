@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Closes #14.
 
 ### Fixed
+- **TUI freezes ~500 ms on every track change** — `_stopAndWait` used
+  `stable = {none, stopped}` as its exit condition. After natural auto-advance
+  MusicKit enters state 9/10 (completed), which is never in that set, so every
+  transition hit the full 500 ms timeout before `setQueue` was called. During
+  this window no state events reached Go and the position poll was gated on
+  `isPlaying`, so the TUI appeared frozen even though audio played immediately.
+  `_stopAndWait` now only blocks when the player is mid-seek (seekFwd=6 /
+  seekBwd=7) — the only states that cause spurious `CONTENT_EQUIVALENT` errors —
+  and resolves instantly for all other states. The fallback timeout was reduced
+  from 500 ms to 200 ms. The `setInterval` position poll was changed from
+  "every 1 s while playing" to unconditional every 200 ms so transition states
+  reach Go without delay. Closes #23.
 - **Title glow and bear animation speed up on each track change** — a redundant
   `glowTick()` was spawned every time playback started, stacking on top of the
   one already running from `Init()`. After N track changes the glow step counter
