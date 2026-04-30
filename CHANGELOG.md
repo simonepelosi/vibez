@@ -29,10 +29,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   immediately set a loading state so the spinner appears without waiting for the
   player to report back. `waitForState` now drains any burst of rapid state
   transitions (pause → buffer → play) into a single event-loop update, preventing
-  the animation ticker from being starved during track changes. Upgrades
-  `bubbletea` v0.26.1→v1.3.10, `lipgloss` v0.10.0→v1.1.0, `bubbles`
-  v0.18.0→v0.21.1.
+  the animation ticker from being starved during track changes.
   Closes #15.
+- **Lyrics fetched eagerly on every track change** — lyrics are now loaded lazily:
+  only when the lyrics panel (`y`) is opened. If the panel is already visible when
+  the track changes the fetch happens immediately as before. Failed fetches are
+  logged to the debug log and the panel shows "You cannot sing this song :(" instead
+  of a raw error string.
+- **Missing loading indicators on collection actions** — selecting an album or
+  playlist from search results / the feed now immediately shows the player spinner
+  while tracks are being fetched. The search API call now carries a 15 s timeout
+  (previously unbounded).
+
+### Changed
+- **Upgraded to Bubbletea / Lip Gloss / Bubbles v2** — migrated from
+  `github.com/charmbracelet/*` to `charm.land/*/v2`. The new Cursed Renderer uses
+  ncurses-style cell diffing for significantly faster and flicker-free screen
+  updates. `View()` is now declarative (`tea.View` struct); alt-screen is declared
+  there instead of via program options.
 
 ---
 
