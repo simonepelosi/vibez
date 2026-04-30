@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.0.9] — 2026-04-30
+
 ### Added
 - **Custom themes** — set `"theme"` in `~/.config/vibez/config.json` to switch palette.
   Four built-in themes ship out of the box: `default` (Tokyo Night / Catppuccin Mocha),
@@ -52,22 +56,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   playlist from search results / the feed now immediately shows the player spinner
   while tracks are being fetched. The search API call now carries a 15 s timeout
   (previously unbounded).
-
-### Changed
-- **Upgraded to Bubbletea / Lip Gloss / Bubbles v2** — migrated from
-  `github.com/charmbracelet/*` to `charm.land/*/v2`. The new Cursed Renderer uses
-  ncurses-style cell diffing for significantly faster and flicker-free screen
-  updates. `View()` is now declarative (`tea.View` struct); alt-screen is declared
-  there instead of via program options.
-- **Migrated to Go 1.26** — updated minimum Go version in `go.mod` and all CI/CD
-  workflows. Bumped direct dependencies: `godbus/dbus/v5` v5.1.0 → v5.2.2,
-  `spf13/cobra` v1.8.0 → v1.10.2. Closes #22.
-
----
-
-## [0.0.9] — 2026-04-30
-
-### Fixed
 - **Library panel (`l`) not activating** — reopening the library panel after the
   music engine was ready replaced the internal model pointer instead of updating it
   in-place, causing the active-panel check to always fail silently. The panel state
@@ -83,6 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `GetCatalogPlaylistTracks`.
 
 ### Changed
+- **Upgraded to Bubbletea / Lip Gloss / Bubbles v2** — migrated from
+  `github.com/charmbracelet/*` to `charm.land/*/v2`. The new Cursed Renderer uses
+  ncurses-style cell diffing for significantly faster and flicker-free screen
+  updates. `View()` is now declarative (`tea.View` struct); alt-screen is declared
+  there instead of via program options.
+- **Migrated to Go 1.26** — updated minimum Go version in `go.mod` and all CI/CD
+  workflows. Bumped direct dependencies: `godbus/dbus/v5` v5.1.0 → v5.2.2,
+  `spf13/cobra` v1.8.0 → v1.10.2. Closes #22.
 - **Library view simplified to Playlists only** — the Albums and Tracks tabs have
   been removed. The library panel now shows only the user's playlists, keeping the
   interface focused and reducing unnecessary API calls.
