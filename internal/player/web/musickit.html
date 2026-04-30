@@ -162,8 +162,9 @@
         music.addEventListener('playbackStateDidChange',  notifyState);
         music.addEventListener('nowPlayingItemDidChange', notifyState);
 
-        // Poll position every second so the TUI timer advances while playing.
-        setInterval(function() { if (_m().isPlaying) notifyState(); }, 1000);
+        // Poll position every 200 ms so the TUI timer advances and transitions
+        // (completed → loading → playing) reach Go without delay.
+        setInterval(notifyState, 200);
 
         // Shorthand: send a debug-only log entry (never shown in status bar).
         const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed','completed'];
@@ -234,18 +235,17 @@
           return items;
         }
 
-        // Stop playback and wait (event-driven) for MusicKit to fully settle in
-        // stopped(4) or none(0) state before returning.  m.stop() resolves its
-        // Promise as soon as the command is sent, but MusicKit still goes through
-        // intermediate states (paused→seekFwd→paused→stopped).  Calling setQueue
-        // during that transition triggers CONTENT_EQUIVALENT even for unrelated
-        // songs.  500 ms cap prevents hanging if the event never fires.
+        // Wait (event-driven) for MusicKit to leave a mid-seek state before
+        // calling setQueue.  Only seekFwd(6) and seekBwd(7) cause spurious
+        // CONTENT_EQUIVALENT errors on setQueue; all other states (playing,
+        // paused, completed, none, stopped) are safe to proceed immediately.
+        // 200 ms cap prevents hanging if the event never fires.
         function _stopAndWait(m) {
-          const stable = [0, 4]; // none, stopped
-          if (stable.includes(m.playbackState)) return Promise.resolve();
+          const seeking = [6, 7]; // seekFwd, seekBwd
+          if (!seeking.includes(m.playbackState)) return Promise.resolve();
           return new Promise(resolve => {
             const handler = () => {
-              if (stable.includes(m.playbackState)) {
+              if (!seeking.includes(m.playbackState)) {
                 m.removeEventListener('playbackStateDidChange', handler);
                 clearTimeout(t);
                 resolve();
@@ -254,9 +254,8 @@
             const t = setTimeout(() => {
               m.removeEventListener('playbackStateDidChange', handler);
               resolve();
-            }, 500);
+            }, 200);
             m.addEventListener('playbackStateDidChange', handler);
-            m.stop().catch(() => {});
           });
         }
 
@@ -294,8 +293,8 @@
         }
 
         // Play the item at idx in _q.
-        // Waits for MusicKit to fully settle in stopped state before setQueue so
-        // mid-transition states (seekFwd etc.) don't trigger spurious CE errors.
+        // Waits only if mid-seek (seekFwd/seekBwd) before setQueue to avoid
+        // spurious CONTENT_EQUIVALENT errors; all other states proceed instantly.
         // CONTENT_EQUIVALENT / CONTENT_UNAVAILABLE → library fallback then skip.
         // _busy + _wantIdx ensure only one call runs at a time; latest index wins.
         async function _doPlayAt(idx) {
