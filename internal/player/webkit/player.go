@@ -41,6 +41,7 @@ type jsState struct {
 
 type jsTrack struct {
 	ID         string `json:"id"`
+	CatalogID  string `json:"catalogId"`
 	Title      string `json:"title"`
 	Artist     string `json:"artist"`
 	Album      string `json:"album"`
@@ -320,6 +321,7 @@ func (p *Player) applyState(js jsState) {
 	if js.NowPlaying != nil {
 		s.Track = &provider.Track{
 			ID:         js.NowPlaying.ID,
+			CatalogID:  js.NowPlaying.CatalogID,
 			Title:      js.NowPlaying.Title,
 			Artist:     js.NowPlaying.Artist,
 			Album:      js.NowPlaying.Album,
