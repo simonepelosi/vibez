@@ -151,7 +151,17 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			return
 		}
 
-		// Step 2: Ensure Chrome is installed — may download ~130 MB on first run.
+		// Step 2: Validate stored token — avoids launching Chrome with a stale token.
+		if cfg.AppleUserToken != "" {
+			prog.Send(tui.InitStatusMsg("Checking Apple Music session…"))
+			if !auth.ValidateToken(cfg.AppleDeveloperToken, cfg.AppleUserToken) {
+				prog.Send(tui.InitStatusMsg("Session expired — re-authenticating…"))
+				cfg.AppleUserToken = ""
+				_ = cfg.Save("")
+			}
+		}
+
+		// Step 3: Ensure Chrome is installed — may download ~130 MB on first run.
 		prog.Send(tui.InitStatusMsg("Initializing vibez…"))
 		if err := cdp.EnsureBrowser(func(msg string) {
 			prog.Send(tui.InitStatusMsg(msg))
@@ -160,7 +170,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			return
 		}
 
-		// Step 3: Auth — opens the system browser; TUI shows status.
+		// Step 4: Auth — opens the system browser; TUI shows status.
 		if cfg.AppleUserToken == "" {
 			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music…"))
 			if err := auth.Login(cfg); err != nil {
@@ -169,7 +179,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			}
 		}
 
-		// Step 4: Start engine — Chrome launches headless because token is already set.
+		// Step 5: Start engine — Chrome launches headless because token is already set.
 		prog.Send(tui.InitStatusMsg("Starting audio engine…"))
 		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 		if err != nil {
@@ -269,6 +279,14 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 	fmt.Fprintln(os.Stderr, "Engine: WebKit + GStreamer (30 s preview)")
 
 	// Auth before engine creation (no loading TUI in WebKit path).
+	if cfg.AppleUserToken != "" {
+		fmt.Fprintln(os.Stderr, "Checking Apple Music session…")
+		if !auth.ValidateToken(cfg.AppleDeveloperToken, cfg.AppleUserToken) {
+			fmt.Fprintln(os.Stderr, "Session expired — re-authenticating…")
+			cfg.AppleUserToken = ""
+			_ = cfg.Save("")
+		}
+	}
 	if cfg.AppleUserToken == "" {
 		if err := auth.Login(cfg); err != nil {
 			return fmt.Errorf("authentication: %w", err)

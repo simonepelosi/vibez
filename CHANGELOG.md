@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the published `checksums.txt`, the binary is atomically replaced, the TUI quits
   cleanly, and the process re-execs the new binary transparently.
   Pass `--no-update` to skip the check. Closes #26.
+- **Expired-auth detection** — before starting the audio engine, vibez probes
+  `/v1/me/storefront` with the stored user token. A 401/403 response clears the
+  cached token and triggers a fresh login, preventing a silent failure loop after
+  the Apple Music session expires. Closes #10.
 
 ---
 
