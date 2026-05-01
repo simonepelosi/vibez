@@ -11,6 +11,7 @@ builds:
     gobinary: ./scripts/garble-go
     ldflags:
       - -s -w
+      - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
     env:
       - CGO_ENABLED=1

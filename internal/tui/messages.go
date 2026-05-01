@@ -32,6 +32,10 @@ type EngineReadyMsg struct {
 // InitErrMsg is sent when initialization fails fatally.
 type InitErrMsg struct{ Err error }
 
+// RestartMsg is sent when vibez has self-updated and needs to re-exec.
+// The model handles it by quitting cleanly so the caller can exec the new binary.
+type RestartMsg struct{}
+
 // DebugLogMsg appends a line to the TUI debug log (visible via :debug-logs).
 // Use this to surface background-goroutine events (e.g. scrobbling) without
 // printing to stderr.

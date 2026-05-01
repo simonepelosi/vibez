@@ -808,6 +808,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = "✓ Re-authenticated with Apple Music"
 		m.errExpiry = time.Now().Add(5 * time.Second)
 
+	case RestartMsg:
+		return m, tea.Quit
+
 	case tea.KeyPressMsg:
 		cmd := m.handleKey(msg)
 		cmds = append(cmds, cmd)

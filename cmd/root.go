@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -21,6 +22,8 @@ import (
 	demoProvider "github.com/simone-vibes/vibez/internal/provider/demo"
 	"github.com/simone-vibes/vibez/internal/tui"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
+	"github.com/simone-vibes/vibez/internal/updater"
+	"github.com/simone-vibes/vibez/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +31,7 @@ var cfgFile string
 var debug bool
 var memProfiling bool
 var demo bool
+var noUpdate bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -48,6 +52,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
 	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
 	rootCmd.PersistentFlags().BoolVar(&demo, "demo", false, "run with built-in fake data — no Apple account or internet required")
+	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
@@ -132,9 +137,21 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 	playerCh := make(chan *cdp.Player, 1)
 	// runDone is closed after cdpPlayer.Run() returns (browser + pw shutdown).
 	runDone := make(chan struct{})
+	// restartExe is set when an update has been installed; non-empty means we
+	// should re-exec after the TUI exits cleanly.
+	restartExe := make(chan string, 1)
 
 	go func() {
-		// Step 1: Ensure Chrome is installed — may download ~130 MB on first run.
+		// Step 1: Check for updates — shows on the loading screen.
+		if exe := updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
+			prog.Send(tui.InitStatusMsg(msg))
+		}); exe != "" {
+			restartExe <- exe
+			prog.Send(tui.RestartMsg{})
+			return
+		}
+
+		// Step 2: Ensure Chrome is installed — may download ~130 MB on first run.
 		prog.Send(tui.InitStatusMsg("Initializing vibez…"))
 		if err := cdp.EnsureBrowser(func(msg string) {
 			prog.Send(tui.InitStatusMsg(msg))
@@ -143,7 +160,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			return
 		}
 
-		// Step 2: Auth — opens the system browser; TUI shows status.
+		// Step 3: Auth — opens the system browser; TUI shows status.
 		if cfg.AppleUserToken == "" {
 			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music…"))
 			if err := auth.Login(cfg); err != nil {
@@ -152,7 +169,7 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 			}
 		}
 
-		// Step 3: Start engine — Chrome launches headless because token is already set.
+		// Step 4: Start engine — Chrome launches headless because token is already set.
 		prog.Send(tui.InitStatusMsg("Starting audio engine…"))
 		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
 		if err != nil {
@@ -233,6 +250,14 @@ func runCDPFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserTok
 		<-runDone     // wait for browser.Close() + pw.Stop() to finish
 	default:
 		// Player was never started (init failed); nothing to clean up.
+	}
+
+	// If an update was installed, re-exec now that the TUI has exited cleanly
+	// and the terminal is restored to its normal state.
+	select {
+	case exe := <-restartExe:
+		_ = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec // intentional self-re-exec after update
+	default:
 	}
 
 	return err
