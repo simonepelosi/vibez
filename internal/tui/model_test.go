@@ -2439,3 +2439,26 @@ func TestHandleCommandKey_Space_AppendsSpace(t *testing.T) {
 		t.Errorf("cmdBuf after space = %q, want %q", m.cmdBuf, "save ")
 	}
 }
+
+func TestQualityLabel(t *testing.T) {
+	cases := []struct {
+		kbps int
+		want string
+	}{
+		{0, ""},
+		{-1, ""},
+		{64, "64 kbps"},
+		{256, "256 kbps"},
+		{320, "320 kbps"},
+		{321, "Lossless"},
+		{1411, "Lossless"},
+		{2000, "Lossless"},
+		{2001, "Hi-Res"},
+		{6000, "Hi-Res"},
+	}
+	for _, tc := range cases {
+		if got := qualityLabel(tc.kbps); got != tc.want {
+			t.Errorf("qualityLabel(%d) = %q, want %q", tc.kbps, got, tc.want)
+		}
+	}
+}

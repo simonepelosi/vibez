@@ -19,6 +19,7 @@ type State struct {
 	Loading     bool // true when MusicKit playbackState is loading/buffering
 	Position    time.Duration
 	Volume      float64 // 0.0–1.0
+	Bitrate     int     // streaming bitrate in kbps; 0 = unknown
 	RepeatMode  int     // RepeatModeOff / RepeatModeOne / RepeatModeAll
 	ShuffleMode bool    // true = shuffle on
 	Error       string  // non-empty when JS reports a playback error

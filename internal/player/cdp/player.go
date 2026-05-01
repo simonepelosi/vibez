@@ -346,6 +346,7 @@ type jsState struct {
 	CurrentTime   float64  `json:"currentTime"`
 	Duration      float64  `json:"duration"`
 	Volume        float64  `json:"volume"`
+	Bitrate       int      `json:"bitrate"`
 	RepeatMode    int      `json:"repeatMode"`
 	ShuffleMode   int      `json:"shuffleMode"`
 	NowPlaying    *jsTrack `json:"nowPlaying"`
@@ -367,6 +368,7 @@ func (p *Player) applyState(js jsState) {
 		Loading:     js.PlaybackState == 1 || js.PlaybackState == 7 || js.PlaybackState == 8,
 		Position:    time.Duration(js.CurrentTime * float64(time.Second)),
 		Volume:      js.Volume,
+		Bitrate:     js.Bitrate,
 		RepeatMode:  js.RepeatMode,
 		ShuffleMode: js.ShuffleMode != 0,
 	}

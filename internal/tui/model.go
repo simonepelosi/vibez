@@ -2340,6 +2340,10 @@ func (m *Model) renderBoxHeader(inner int) string {
 		volStr = styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
 	}
 
+	if q := qualityLabel(m.playerState.Bitrate); q != "" {
+		volStr = styles.QueueItemMuted.Render(q+" ·") + " " + volStr
+	}
+
 	rightStr := volStr
 	if m.memStats != "" {
 		rightStr = styles.QueueItemMuted.Render(m.memStats) + "  " + volStr
@@ -2824,6 +2828,22 @@ func centerStr(s string, width int) string {
 	w := lipgloss.Width(s)
 	pad := max(0, (width-w)/2)
 	return strings.Repeat(" ", pad) + s
+}
+
+// qualityLabel converts a streaming bitrate (kbps) to a human-readable label.
+// Apple Music tiers: AAC ≤ 320 kbps, Lossless ~1411 kbps, Hi-Res > 2000 kbps.
+// Returns "" when bitrate is 0 (unknown / nothing playing).
+func qualityLabel(kbps int) string {
+	switch {
+	case kbps <= 0:
+		return ""
+	case kbps > 2000:
+		return "Hi-Res"
+	case kbps > 320:
+		return "Lossless"
+	default:
+		return fmt.Sprintf("%d kbps", kbps)
+	}
 }
 
 func clamp(v, lo, hi float64) float64 {

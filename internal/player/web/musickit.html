@@ -44,6 +44,13 @@
         try { music.isExplicitContentAllowed = true; } catch(_) {}
       }
 
+      // Request highest available streaming quality (256 kbps AAC — the ceiling
+      // for MusicKit JS on web). Falls back to the numeric value if the enum is
+      // not present in this build of MusicKit.
+      try {
+        music.bitrate = (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.HIGH) || 256;
+      } catch(_) {}
+
       const savedToken = '{{.UserToken}}';
       if (savedToken !== '') {
         music.musicUserToken = savedToken;
@@ -143,6 +150,7 @@
             currentTime:   m.currentPlaybackTime,
             duration:      m.currentPlaybackDuration,
             volume:        m.volume,
+            bitrate:       m.bitrate || 0,
             repeatMode:    m.repeatMode  || 0,
             shuffleMode:   m.shuffleMode || 0,
             nowPlaying: item ? {
