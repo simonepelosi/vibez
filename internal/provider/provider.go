@@ -87,5 +87,11 @@ type Provider interface {
 	// playlistID must be a library playlist ID (e.g. "p.XXXXX").
 	// trackID should be a catalog song ID or a library song ID ("i.XXXXX").
 	AddToPlaylist(ctx context.Context, playlistID, trackID string) error
+	// GetStationTracks fetches tracks for an Apple Music radio station seeded by
+	// a catalog song. seedCatalogID must be a numeric catalog song ID (not an
+	// "i." library ID). cursor is the continuation token from a previous response
+	// (empty string on first call). Returns up to ~10 tracks and an optional
+	// nextCursor for subsequent calls.
+	GetStationTracks(ctx context.Context, seedCatalogID, cursor string) (tracks []Track, nextCursor string, err error)
 	IsAuthenticated() bool
 }

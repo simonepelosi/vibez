@@ -826,6 +826,72 @@ type recommendationsResponse struct {
 	Data []recommendationResource `json:"data"`
 }
 
+// ── Radio / stations ────────────────────────────────────────────────────────
+
+// stationNextTracksReq is the body for POST /v1/me/stations/next-tracks.
+type stationNextTracksReq struct {
+	StationSeed stationSeedBody `json:"stationSeed"`
+	Limit       int             `json:"limit,omitempty"`
+	// NextCursor is the continuation token from a previous response.
+	// Omit on the first call. The field name matches meta.nextCursor in the
+	// response; adjust if the live API uses a different key.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
+type stationSeedBody struct {
+	SeedType string `json:"seedType"` // "songs"
+	SongID   string `json:"songId"`
+}
+
+type stationNextTracksResp struct {
+	Data []songResource `json:"data"`
+	Meta struct {
+		NextCursor string `json:"nextCursor"`
+	} `json:"meta"`
+}
+
+// GetStationTracks fetches tracks for an Apple Music radio station seeded by the
+// given catalog song ID. cursor is the continuation token from a previous
+// response (pass "" on the first call). Returns tracks and an optional
+// nextCursor for the following request.
+//
+// The endpoint lives under /v1/catalog/{storefront}/stations/next-tracks on
+// amp-api.music.apple.com — not under /me/ and not on api.music.apple.com.
+func (a *AppleProvider) GetStationTracks(ctx context.Context, seedCatalogID, cursor string) ([]provider.Track, string, error) {
+	sf, err := a.storefront(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("GetStationTracks: storefront: %w", err)
+	}
+	body := stationNextTracksReq{
+		StationSeed: stationSeedBody{SeedType: "songs", SongID: seedCatalogID},
+		Limit:       10,
+		NextCursor:  cursor,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, "", fmt.Errorf("GetStationTracks: marshal: %w", err)
+	}
+	ep := fmt.Sprintf("/catalog/%s/stations/next-tracks", sf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.catalogBaseURL+ep, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
+	if err != nil {
+		return nil, "", fmt.Errorf("GetStationTracks: request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://music.apple.com")
+
+	var resp stationNextTracksResp
+	if err := a.do(req, &resp); err != nil {
+		return nil, "", fmt.Errorf("GetStationTracks: %w", err)
+	}
+	tracks := make([]provider.Track, 0, len(resp.Data))
+	for _, s := range resp.Data {
+		tracks = append(tracks, toTrack(s))
+	}
+	return tracks, resp.Meta.NextCursor, nil
+}
+
 // GetRecommendations fetches personalised recommendation groups from
 // GET /v1/me/recommendations and returns them as provider-level structs.
 func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.RecommendationGroup, error) {

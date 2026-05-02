@@ -99,6 +99,9 @@ func (m *mockProvider) LoveSong(_ context.Context, _ string, _ bool) error      
 func (m *mockProvider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
 func (m *mockProvider) IsAuthenticated() bool                                   { return true }
 func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
+func (m *mockProvider) GetStationTracks(_ context.Context, _, _ string) ([]provider.Track, string, error) {
+	return nil, "", nil
+}
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }
@@ -2703,6 +2706,7 @@ func TestPlaylistPicker_TrackIDResolution(t *testing.T) {
 type captureProvider struct {
 	mockProvider
 	addToPlaylistFn func(playlistID, trackID string) error
+	getStationFn    func(seedID, cursor string) ([]provider.Track, string, error)
 }
 
 func (p *captureProvider) AddToPlaylist(_ context.Context, playlistID, trackID string) error {
@@ -2710,4 +2714,251 @@ func (p *captureProvider) AddToPlaylist(_ context.Context, playlistID, trackID s
 		return p.addToPlaylistFn(playlistID, trackID)
 	}
 	return nil
+}
+
+func (p *captureProvider) GetStationTracks(_ context.Context, seedID, cursor string) ([]provider.Track, string, error) {
+	if p.getStationFn != nil {
+		return p.getStationFn(seedID, cursor)
+	}
+	return nil, "", nil
+}
+
+// ─── Radio mode ──────────────────────────────────────────────────────────────
+
+// TestRadio_StartFromNormalMode verifies that pressing 'R' in normal mode when
+// a track is playing activates radio mode and fires GetStationTracks.
+func TestRadio_StartFromNormalMode(t *testing.T) {
+	track := provider.Track{ID: "cat1", CatalogID: "", Title: "Test", Artist: "Artist"}
+	var calledSeedID string
+	prov := &captureProvider{getStationFn: func(seedID, _ string) ([]provider.Track, string, error) {
+		calledSeedID = seedID
+		return []provider.Track{{ID: "s1", Title: "Station Track 1", Artist: "A"}}, "cursor1", nil
+	}}
+	m := New(testCfg(), prov, newMockPlayer(), Options{})
+	m.width, m.height = 120, 40
+	m.playerState.Track = &track
+	m.playerState.Playing = true
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m = m2.(*Model)
+
+	if !m.radio.enabled {
+		t.Fatal("expected radio.enabled=true after pressing R")
+	}
+	if m.radio.seedID != "cat1" {
+		t.Errorf("expected seedID cat1, got %q", m.radio.seedID)
+	}
+	if !m.radio.fetching {
+		t.Error("expected radio.fetching=true after start")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command to be returned")
+	}
+	// Execute the command and deliver the result.
+	msg := cmd()
+	m3, _ := m.Update(msg)
+	m = m3.(*Model)
+
+	if calledSeedID != "cat1" {
+		t.Errorf("GetStationTracks called with %q, want cat1", calledSeedID)
+	}
+	if len(m.queueTracks) == 0 {
+		t.Error("expected tracks appended to queue after stationTracksMsg")
+	}
+	if m.radio.fetching {
+		t.Error("expected radio.fetching=false after receiving tracks")
+	}
+}
+
+// TestRadio_StartFromQueuePanel verifies that pressing 'R' in the queue panel
+// starts radio from the selected track.
+func TestRadio_StartFromQueuePanel(t *testing.T) {
+	track := provider.Track{ID: "cat42", Title: "Queue Track", Artist: "QA"}
+	prov := &captureProvider{getStationFn: func(_, _ string) ([]provider.Track, string, error) {
+		return []provider.Track{{ID: "st1", Title: "S1", Artist: "A"}}, "", nil
+	}}
+	m := New(testCfg(), prov, newMockPlayer(), Options{})
+	m.width, m.height = 120, 40
+	m.queueTracks = []provider.Track{track}
+	m.queueIDs = []string{"cat42"}
+	m.queue.m.SetTracks(m.queueTracks)
+
+	// Activate queue panel.
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	m = m2.(*Model)
+
+	// Press 'R' in queue panel.
+	m3, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m = m3.(*Model)
+
+	if !m.radio.enabled {
+		t.Fatal("expected radio.enabled=true")
+	}
+	if m.radio.seedID != "cat42" {
+		t.Errorf("expected seedID cat42, got %q", m.radio.seedID)
+	}
+	if cmd == nil {
+		t.Error("expected a command from startRadio")
+	}
+}
+
+// TestRadio_ToggleOff verifies that pressing 'R' again with the same seed stops radio.
+func TestRadio_ToggleOff(t *testing.T) {
+	track := provider.Track{ID: "cat1", Title: "T", Artist: "A"}
+	m := newModel(newMockPlayer())
+	m.playerState.Track = &track
+	m.radio = radioMode{enabled: true, seedID: "cat1", gen: 1}
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m = m2.(*Model)
+
+	if m.radio.enabled {
+		t.Error("expected radio to be stopped after toggle")
+	}
+	if cmd != nil {
+		t.Error("expected no command when toggling off")
+	}
+}
+
+// TestRadio_StaleResponseDiscarded verifies that a stationTracksMsg with a
+// mismatched gen is ignored.
+func TestRadio_StaleResponseDiscarded(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.radio = radioMode{enabled: true, seedID: "cat1", gen: 5, fetching: true}
+
+	stale := stationTracksMsg{
+		tracks:     []provider.Track{{ID: "stale1", Title: "Stale", Artist: "A"}},
+		nextCursor: "c",
+		gen:        3, // wrong gen
+	}
+	m2, _ := m.Update(stale)
+	m = m2.(*Model)
+
+	if len(m.queueTracks) != 0 {
+		t.Error("stale stationTracksMsg should not append tracks")
+	}
+	if !m.radio.fetching {
+		t.Error("radio.fetching should remain true after stale response")
+	}
+}
+
+// TestRadio_AutoRefill verifies that when a track matching the last queued
+// track starts playing and radio is active, a new fetch is triggered.
+func TestRadio_AutoRefill(t *testing.T) {
+	track := provider.Track{ID: "t1", Title: "Track 1", Artist: "A"}
+	m := newModel(newMockPlayer())
+	m.queueTracks = []provider.Track{track}
+	m.queueIDs = []string{"t1"}
+	m.radio = radioMode{enabled: true, seedID: "cat1", gen: 1, fetching: false}
+
+	// Deliver a player state update where the current track is the last queued one.
+	state := player.State{
+		Track:   &track,
+		Playing: true,
+		Volume:  1.0,
+	}
+	m2, cmd := m.Update(playerStateMsg(state))
+	m = m2.(*Model)
+
+	if m.radio.triggeredForID != "t1" {
+		t.Errorf("expected triggeredForID=t1, got %q", m.radio.triggeredForID)
+	}
+	if !m.radio.fetching {
+		t.Error("expected radio.fetching=true after auto-refill trigger")
+	}
+	if cmd == nil {
+		t.Error("expected a command for refill fetch")
+	}
+}
+
+// TestRadio_ClearQueueStopsRadio verifies that pressing 'c' in the queue panel
+// stops radio mode.
+func TestRadio_ClearQueueStopsRadio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio = radioMode{enabled: true, seedID: "cat1", gen: 1}
+	m.queueTracks = []provider.Track{{ID: "t1", Title: "T", Artist: "A"}}
+	m.queueIDs = []string{"t1"}
+	m.queue.m.SetTracks(m.queueTracks)
+
+	// Activate queue panel.
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	m = m2.(*Model)
+
+	// Press 'c' to clear.
+	m3, _ := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	m = m3.(*Model)
+
+	if m.radio.enabled {
+		t.Error("expected radio to be stopped after clearing queue")
+	}
+}
+
+// TestRadio_MutualExclusivity verifies that starting discovery stops radio and
+// starting radio stops discovery.
+func TestRadio_MutualExclusivity(t *testing.T) {
+	track := provider.Track{ID: "cat1", Title: "T", Artist: "A"}
+	prov := &captureProvider{getStationFn: func(_, _ string) ([]provider.Track, string, error) {
+		return []provider.Track{{ID: "s1", Title: "S1", Artist: "A"}}, "", nil
+	}}
+	m := New(testCfg(), prov, newMockPlayer(), Options{})
+	m.playerState.Track = &track
+	m.playerState.Playing = true
+
+	// Start radio.
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m = m2.(*Model)
+	if !m.radio.enabled {
+		t.Fatal("expected radio enabled")
+	}
+
+	// Start discovery via 'd' (opens picker) — we call startDiscovery directly.
+	_ = m.startDiscovery(false, 3)
+	if m.radio.enabled {
+		t.Error("expected radio to be stopped when discovery starts")
+	}
+}
+
+// TestRadio_NoCatalogID verifies that trying to start radio for a library-only
+// track with no catalog ID shows an error.
+func TestRadio_NoCatalogID(t *testing.T) {
+	track := provider.Track{ID: "i.libonly", CatalogID: "", Title: "Library Only", Artist: "A"}
+	m := newModel(newMockPlayer())
+	m.playerState.Track = &track
+	m.playerState.Playing = true
+
+	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	m = m2.(*Model)
+
+	if m.radio.enabled {
+		t.Error("expected radio NOT to start for library-only track")
+	}
+	if m.errMsg == "" {
+		t.Error("expected an error message for missing catalog ID")
+	}
+	if cmd != nil {
+		t.Error("expected no command when radio cannot start")
+	}
+}
+
+// TestRadio_ErrorCircuitBreaker verifies that repeated fetch errors stop radio
+// after radioMaxRetries failures.
+func TestRadio_ErrorCircuitBreaker(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.radio = radioMode{enabled: true, seedID: "cat1", gen: 7, fetching: true}
+
+	errMsg := stationTracksMsg{err: errors.New("server error"), gen: 7}
+	for i := range radioMaxRetries {
+		m2, _ := m.Update(errMsg)
+		m = m2.(*Model)
+		if i < radioMaxRetries-1 && !m.radio.enabled {
+			t.Errorf("radio should still be enabled after %d/%d failures", i+1, radioMaxRetries)
+		}
+		// Reset fetching for next iteration (simulate the retry trigger).
+		m.radio.fetching = true
+	}
+
+	if m.radio.enabled {
+		t.Errorf("expected radio disabled after %d consecutive errors", radioMaxRetries)
+	}
 }

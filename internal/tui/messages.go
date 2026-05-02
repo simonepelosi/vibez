@@ -54,3 +54,11 @@ type trackAddedToPlaylistMsg struct {
 	playlistName string
 	err          error
 }
+
+// stationTracksMsg is the response to a GetStationTracks call for radio mode.
+type stationTracksMsg struct {
+	tracks     []provider.Track
+	nextCursor string
+	err        error
+	gen        int // must match m.radio.gen to avoid applying stale responses
+}

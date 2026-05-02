@@ -119,6 +119,13 @@ func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { retur
 
 func (Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
 
+func (Provider) GetStationTracks(_ context.Context, _, _ string) ([]provider.Track, string, error) {
+	// Return a subset of demo tracks as a simulated radio station.
+	out := make([]provider.Track, len(Tracks))
+	copy(out, Tracks)
+	return out, "", nil
+}
+
 func (Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return []provider.RecommendationGroup{
 		{

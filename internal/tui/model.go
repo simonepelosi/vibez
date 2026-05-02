@@ -184,6 +184,24 @@ type discoveryMode struct {
 	retries        int             // consecutive failed refill attempts (circuit breaker)
 }
 
+// ── Radio mode ──────────────────────────────────────────────────────────────
+
+// radioMode holds state for the radio feature.
+// When enabled, tracks are fetched from Apple Music's stations API seeded by
+// a catalog song and continuously appended to the queue as it drains.
+type radioMode struct {
+	enabled        bool
+	seedID         string // catalog ID of the seed track
+	seedTitle      string // title shown in logs
+	cursor         string // nextCursor from last API response; empty string on first fetch
+	fetching       bool   // background fetch in progress
+	triggeredForID string // stale-guard: track ID that already triggered the last refill
+	gen            int    // incremented on each startRadio call; stale-response guard
+	retries        int    // consecutive failed fetches (circuit breaker)
+}
+
+const radioMaxRetries = 3
+
 const discoveryMaxRetries = 5 // give up re-arming after this many consecutive failures
 
 const (
@@ -207,6 +225,9 @@ type Model struct {
 
 	// Discovery mode
 	discovery discoveryMode
+
+	// Radio mode
+	radio radioMode
 
 	// Panels
 	panels      []ContentView // registered content panels; add new ones in New()
@@ -506,6 +527,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncDiscoveryView()
 			cmds = append(cmds, m.runDiscoverySearch())
 		}
+		// Radio: auto-refill when the last queued track starts playing.
+		if m.radio.enabled && !m.radio.fetching &&
+			isLastQueued &&
+			m.radio.triggeredForID != s.Track.ID {
+			m.radio.triggeredForID = s.Track.ID
+			m.radio.fetching = true
+			cmds = append(cmds, m.getStationTracksCmd())
+		}
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
 			m.appendLog("[player] playing")
@@ -560,6 +589,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ids[i] = views.PlaybackID(t)
 		}
 		if msg.play {
+			m.stopRadio()
 			m.queueTracks = msg.tracks
 			m.queueIDs = ids
 			m.queue.SetTracks(m.queueTracks)
@@ -727,6 +757,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ids[i] = views.PlaybackID(t)
 		}
 		if msg.play {
+			m.stopRadio()
 			m.queueTracks = msg.tracks
 			m.queueIDs = ids
 			m.queue.SetTracks(m.queueTracks)
@@ -744,6 +775,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
 
 	case views.PlayTracksMsg:
+		m.stopRadio()
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
 		}
@@ -836,6 +868,39 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
+	case stationTracksMsg:
+		// Discard responses from a superseded radio session.
+		if msg.gen != m.radio.gen {
+			break
+		}
+		m.radio.fetching = false
+		if msg.err != nil {
+			m.radio.retries++
+			m.appendLog(fmt.Sprintf("[radio] fetch error (%d/%d): %v", m.radio.retries, radioMaxRetries, msg.err))
+			if m.radio.retries >= radioMaxRetries {
+				m.radio = radioMode{}
+				m.appendLog("[radio] stopped after repeated failures")
+			}
+			m.errMsg = fmt.Sprintf("radio: %v", msg.err)
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			break
+		}
+		m.radio.retries = 0
+		if len(msg.tracks) == 0 {
+			m.appendLog("[radio] no tracks returned")
+			break
+		}
+		m.radio.cursor = msg.nextCursor
+		ids := make([]string, len(msg.tracks))
+		for i, t := range msg.tracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		m.queueTracks = append(m.queueTracks, msg.tracks...)
+		m.queueIDs = append(m.queueIDs, ids...)
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[radio] appended %d tracks", len(msg.tracks)))
+		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
+
 	case SessionExpiredMsg:
 		m.errMsg = "Session expired — opening browser to re-authenticate…"
 		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persists until restored
@@ -901,6 +966,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		// Track: play now — replaces queue and starts immediately.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
+			m.stopRadio()
 			m.appendLog(fmt.Sprintf("[queue] play now: %s — %s", tc.Artist, tc.Title))
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
@@ -1330,6 +1396,8 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 		m.errExpiry = time.Now().Add(3 * time.Second)
 		return nil
 	}
+	// Mutual exclusivity: starting discovery stops radio.
+	m.stopRadio()
 	sim := m.discovery.similarity
 	if sim == 0 {
 		sim = 0.7 // default if no metric was selected yet
@@ -1349,6 +1417,64 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	m.appendLog(fmt.Sprintf("[discovery] started from %q (similarity %.0f%%, mode=%s)",
 		m.playerState.Track.Title, sim*100, mode))
 	return m.runDiscoverySearch()
+}
+
+// stopRadio stops radio mode by zeroing out the radio state.
+func (m *Model) stopRadio() {
+	m.radio = radioMode{}
+}
+
+// startRadio activates radio mode seeded by track t.
+// If radio is already active with the same seed, it toggles off.
+// Mutual exclusivity: starting radio stops discovery.
+func (m *Model) startRadio(t *provider.Track) tea.Cmd {
+	seedID := t.CatalogID
+	if seedID == "" {
+		seedID = t.ID
+	}
+	if strings.HasPrefix(seedID, "i.") {
+		m.errMsg = "radio: no catalog ID for this track"
+		m.errExpiry = time.Now().Add(3 * time.Second)
+		return nil
+	}
+	// Toggle off if the same seed is already active.
+	if m.radio.enabled && m.radio.seedID == seedID {
+		m.stopRadio()
+		m.appendLog("[radio] stopped")
+		return nil
+	}
+	// Stop discovery (mutual exclusivity).
+	m.discovery.enabled = false
+	m.discovery.seed = nil
+	m.discovery.refilling = false
+	m.discovery.triggeredForID = ""
+	m.syncDiscoveryView()
+
+	newGen := m.radio.gen + 1
+	m.radio = radioMode{
+		enabled:   true,
+		seedID:    seedID,
+		seedTitle: t.Title,
+		fetching:  true,
+		gen:       newGen,
+	}
+	m.appendLog(fmt.Sprintf("[radio] started from %q (seedID %s)", t.Title, seedID))
+	return m.getStationTracksCmd()
+}
+
+// getStationTracksCmd fires an async fetch of station tracks for the current
+// radio seed. Captures gen, seedID, and cursor at call time.
+func (m *Model) getStationTracksCmd() tea.Cmd {
+	prov := m.provider
+	seedID := m.radio.seedID
+	cursor := m.radio.cursor
+	gen := m.radio.gen
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		tracks, nextCursor, err := prov.GetStationTracks(ctx, seedID, cursor)
+		return stationTracksMsg{tracks: tracks, nextCursor: nextCursor, err: err, gen: gen}
+	}
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
@@ -1422,6 +1548,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		switch k {
 		case "enter":
 			if idx, t := m.queue.SelectedTrack(); t != nil {
+				m.stopRadio()
 				ids := m.queueIDs[idx:]
 				m.queueTracks = m.queueTracks[idx:]
 				m.queueIDs = ids
@@ -1464,6 +1591,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
 			}
 		case "c":
+			m.stopRadio()
 			m.appendLog("[queue] cleared")
 			m.queueTracks = nil
 			m.queueIDs = nil
@@ -1477,6 +1605,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			// Open the playlist picker for the highlighted queue track.
 			if _, t := m.queue.SelectedTrack(); t != nil {
 				return m.openPlaylistPicker(t)
+			}
+		case "R":
+			// Start (or stop) radio seeded by the highlighted queue track.
+			if _, t := m.queue.SelectedTrack(); t != nil {
+				return m.startRadio(t)
 			}
 		default:
 			return m.queue.Update(msg)
@@ -1538,6 +1671,20 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		m.playerState.RepeatMode = next
 		m.appendLog(fmt.Sprintf("[player] repeat → %d", next))
 		return m.playerCmd(func() error { return m.player.SetRepeat(next) })
+
+	case "R":
+		m.lastKey = ""
+		if m.radio.enabled {
+			m.stopRadio()
+			m.appendLog("[radio] stopped")
+			return nil
+		}
+		if m.playerState.Track != nil {
+			return m.startRadio(m.playerState.Track)
+		}
+		m.errMsg = "nothing is playing"
+		m.errExpiry = time.Now().Add(3 * time.Second)
+		return nil
 
 	case "s":
 		m.lastKey = ""
@@ -1670,6 +1817,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		m.lastKey = ""
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
+			m.stopRadio()
 			m.queueTracks = []provider.Track{tc}
 			m.queueIDs = []string{views.PlaybackID(tc)}
 			m.playerState.Track = &tc
@@ -2395,6 +2543,9 @@ func (m *Model) renderBoxHeader(inner int) string {
 	if q := qualityLabel(m.playerState.Bitrate); q != "" {
 		volStr = styles.QueueItemMuted.Render(q+" ·") + " " + volStr
 	}
+	if m.radio.enabled {
+		volStr = styles.Playing.Render("📻 ·") + " " + volStr
+	}
 
 	rightStr := volStr
 	if m.memStats != "" {
@@ -2684,6 +2835,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("d") + muted.Render(" remove"),
 				accent.Render("K/J") + muted.Render(" move up/down"),
 				accent.Render("p") + muted.Render(" add to playlist"),
+				accent.Render("R") + muted.Render(" radio"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
 				accent.Render("esc") + muted.Render(" close"),
@@ -2741,6 +2893,11 @@ func (m *Model) statusPlayContent(_ int) string {
 		discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
 	}
 
+	radioHint := accent.Render("R") + muted.Render(" radio")
+	if m.radio.enabled {
+		radioHint = accent.Render("R") + styles.Playing.Render(" ● radio")
+	}
+
 	parts := []string{
 		accent.Render("spc") + muted.Render(" play/pause"),
 		accent.Render("n/p") + muted.Render(" next/prev"),
@@ -2749,6 +2906,7 @@ func (m *Model) statusPlayContent(_ int) string {
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
 		discoverHint,
+		radioHint,
 	}
 	return strings.Join(parts, dot)
 }

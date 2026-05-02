@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Radio mode (WIP)** — press `R` in normal mode to start a radio station seeded by
+  the currently playing track, or press `R` on any queue item in the queue panel.
+  Radio continuously appends new tracks as the queue drains (auto-refill), displays
+  a `📻` badge in the header, and shows `● radio` in the status bar while active.
+  Press `R` again to stop. Radio is mutually exclusive with discovery mode.
+  Key: `R` (normal mode = seed from now-playing; queue panel = seed from selected track).
+  _Note: the Apple Music Stations API endpoint format is under investigation; the
+  feature is fully wired on the Go/TUI side but may show an API error until the
+  correct URL is confirmed._ Refs #32.
 - **Auto-update** — on startup vibez checks GitHub for a newer release (once per 24 h).
   Progress is shown on the TUI loading screen alongside the Chrome download / auth steps.
   If an update is available the binary is downloaded, its SHA-256 checksum is verified
