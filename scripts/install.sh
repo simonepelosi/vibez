@@ -176,7 +176,29 @@ chmod 755 "${INSTALL_DIR}/${BIN}"
 
 success "${INSTALL_DIR}/${BIN}"
 
-# ── PATH check & update ───────────────────────────────────────────────────────
+# ── desktop integration ───────────────────────────────────────────────────────
+
+step "Installing desktop integration…"
+
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
+APP_ID="io.github.simonepelosi.vibez"
+
+DESKTOP_DIR="${HOME}/.local/share/applications"
+ICON_DIR="${HOME}/.local/share/icons/hicolor/512x512/apps"
+
+mkdir -p "${DESKTOP_DIR}" "${ICON_DIR}"
+
+download "${RAW_BASE}/flatpak/${APP_ID}.desktop" "${DESKTOP_DIR}/${APP_ID}.desktop"
+download "${RAW_BASE}/assets/logo.png"            "${ICON_DIR}/${APP_ID}.png"
+
+# Refresh desktop and icon caches so the DE picks up the new entries immediately.
+command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database "${DESKTOP_DIR}" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 \
+    && gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+
+success "Desktop file and icon installed"
+
 
 step "Checking PATH…"
 

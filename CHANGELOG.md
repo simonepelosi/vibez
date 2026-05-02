@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/v1/me/storefront` with the stored user token. A 401/403 response clears the
   cached token and triggers a fresh login, preventing a silent failure loop after
   the Apple Music session expires. Closes #10.
+- **Streaming quality in header** — the current MusicKit bitrate (e.g. `256 kbps`) is
+  displayed next to the volume indicator in the TUI box header. MusicKit is also
+  explicitly configured to request the highest available quality (256 kbps AAC).
+  Closes #29.
+
+### Fixed
+- **MPRIS app icon** — the `DesktopEntry` property was set to `"vibez"` instead of
+  `"io.github.simonepelosi.vibez"`, causing desktop environments to fall back to a
+  generic icon in media notifications and the media panel. The install script now also
+  installs the `.desktop` file and app icon to the correct XDG locations. Closes #31.
 
 ---
 
