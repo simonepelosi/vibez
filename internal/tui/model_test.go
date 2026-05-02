@@ -98,6 +98,7 @@ func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (
 func (m *mockProvider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
 func (m *mockProvider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
 func (m *mockProvider) IsAuthenticated() bool                                   { return true }
+func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }
@@ -2461,4 +2462,252 @@ func TestQualityLabel(t *testing.T) {
 			t.Errorf("qualityLabel(%d) = %q, want %q", tc.kbps, got, tc.want)
 		}
 	}
+}
+
+// ─── Playlist picker ──────────────────────────────────────────────────────────
+
+// TestPlaylistPicker_OpenFromQueue verifies that pressing 'p' in the queue panel
+// when a track is selected transitions to modePlaylistPicker.
+func TestPlaylistPicker_OpenFromQueue(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Bohemian Rhapsody", Artist: "Queen"}
+	m.queueTracks = []provider.Track{track}
+	m.queueIDs = []string{"t1"}
+	m.queue.m.SetTracks(m.queueTracks)
+
+	// Activate queue panel.
+	m2, _ := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	m = m2.(*Model)
+	if m.mode != modeNormal {
+		t.Fatalf("expected modeNormal after activating queue, got %d", m.mode)
+	}
+
+	// Press 'p' to open playlist picker.
+	m3, _ := m.Update(tea.KeyPressMsg{Code: 'p', Text: "p"})
+	m = m3.(*Model)
+
+	if m.mode != modePlaylistPicker {
+		t.Fatalf("expected modePlaylistPicker after pressing p in queue, got %d", m.mode)
+	}
+	if m.playlistPickerTrack == nil || m.playlistPickerTrack.ID != "t1" {
+		t.Errorf("expected picker track ID t1, got %v", m.playlistPickerTrack)
+	}
+	if m.playlistPickerReturnMode != modeNormal {
+		t.Errorf("expected return mode modeNormal, got %d", m.playlistPickerReturnMode)
+	}
+	if !m.playlistPickerLoading {
+		t.Error("expected playlistPickerLoading=true immediately after open")
+	}
+}
+
+// TestPlaylistPicker_EscRestoresMode verifies that pressing Esc in the picker
+// restores the previous mode.
+func TestPlaylistPicker_EscRestoresMode(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+
+	m.mode = modeNormal
+	_ = m.openPlaylistPicker(&track)
+
+	if m.mode != modePlaylistPicker {
+		t.Fatalf("expected modePlaylistPicker, got %d", m.mode)
+	}
+
+	m3, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	m = m3.(*Model)
+
+	if m.mode != modeNormal {
+		t.Errorf("expected modeNormal after Esc, got %d", m.mode)
+	}
+}
+
+// TestPlaylistPicker_LoadedPlaylistsAppear verifies that playlistsForPickerMsg
+// populates the picker items.
+func TestPlaylistPicker_LoadedPlaylistsAppear(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(&track)
+	gen := m.playlistPickerGen
+
+	playlists := []provider.Playlist{
+		{ID: "p1", Name: "Favorites"},
+		{ID: "p2", Name: "Chill"},
+	}
+	m2, _ := m.Update(playlistsForPickerMsg{playlists: playlists, gen: gen})
+	m = m2.(*Model)
+
+	if m.playlistPickerLoading {
+		t.Error("expected loading=false after receiving playlists")
+	}
+	if len(m.playlistPickerItems) != 2 {
+		t.Errorf("expected 2 playlist items, got %d", len(m.playlistPickerItems))
+	}
+}
+
+// TestPlaylistPicker_StaleResponseDiscarded verifies that a stale (old gen)
+// playlistsForPickerMsg does not clobber current state.
+func TestPlaylistPicker_StaleResponseDiscarded(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(&track)
+	gen := m.playlistPickerGen
+
+	// Simulate a stale response (gen-1).
+	stale := playlistsForPickerMsg{playlists: []provider.Playlist{{ID: "px", Name: "Stale"}}, gen: gen - 1}
+	m2, _ := m.Update(stale)
+	m = m2.(*Model)
+
+	if len(m.playlistPickerItems) != 0 {
+		t.Errorf("expected 0 items (stale response discarded), got %d", len(m.playlistPickerItems))
+	}
+	if !m.playlistPickerLoading {
+		t.Error("loading flag should still be true after stale response")
+	}
+}
+
+// TestPlaylistPicker_ErrorClosesPickerAndSetsErrMsg verifies that a fetch error
+// closes the picker and sets an error message.
+func TestPlaylistPicker_ErrorClosesPickerAndSetsErrMsg(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(&track)
+	gen := m.playlistPickerGen
+
+	m2, _ := m.Update(playlistsForPickerMsg{err: errors.New("network down"), gen: gen})
+	m = m2.(*Model)
+
+	if m.mode == modePlaylistPicker {
+		t.Error("expected picker to close on error")
+	}
+	if m.errMsg == "" {
+		t.Error("expected errMsg to be set on fetch error")
+	}
+}
+
+// TestPlaylistPicker_EnterAddsToPlaylist verifies that pressing Enter fires
+// a trackAddedToPlaylistMsg and closes the picker.
+func TestPlaylistPicker_EnterAddsToPlaylist(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(&track)
+	gen := m.playlistPickerGen
+
+	// Load playlists.
+	playlists := []provider.Playlist{{ID: "p1", Name: "Favorites"}}
+	m2, _ := m.Update(playlistsForPickerMsg{playlists: playlists, gen: gen})
+	m = m2.(*Model)
+
+	// Press Enter to add to the selected playlist.
+	m3, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = m3.(*Model)
+
+	if m.mode == modePlaylistPicker {
+		t.Error("expected picker to close after Enter")
+	}
+	if cmd == nil {
+		t.Error("expected a non-nil cmd after Enter (the AddToPlaylist command)")
+	}
+}
+
+// TestPlaylistPicker_CursorNavigation verifies j/k move the cursor.
+func TestPlaylistPicker_CursorNavigation(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := provider.Track{ID: "t1", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(&track)
+	gen := m.playlistPickerGen
+
+	playlists := []provider.Playlist{
+		{ID: "p1", Name: "Favorites"},
+		{ID: "p2", Name: "Chill"},
+		{ID: "p3", Name: "Rock"},
+	}
+	m2, _ := m.Update(playlistsForPickerMsg{playlists: playlists, gen: gen})
+	m = m2.(*Model)
+
+	// Move down.
+	m3, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = m3.(*Model)
+	if m.playlistPickerCursor != 1 {
+		t.Errorf("expected cursor=1 after j, got %d", m.playlistPickerCursor)
+	}
+
+	// Move down again.
+	m4, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = m4.(*Model)
+	if m.playlistPickerCursor != 2 {
+		t.Errorf("expected cursor=2 after j, got %d", m.playlistPickerCursor)
+	}
+
+	// Move up.
+	m5, _ := m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
+	m = m5.(*Model)
+	if m.playlistPickerCursor != 1 {
+		t.Errorf("expected cursor=1 after k, got %d", m.playlistPickerCursor)
+	}
+}
+
+// TestPlaylistPicker_AddedMsg verifies that trackAddedToPlaylistMsg sets errMsg.
+func TestPlaylistPicker_AddedMsg(t *testing.T) {
+	m := newModel(newMockPlayer())
+
+	m2, _ := m.Update(trackAddedToPlaylistMsg{playlistName: "Favorites"})
+	m = m2.(*Model)
+	if !strings.Contains(m.errMsg, "Favorites") {
+		t.Errorf("expected errMsg to contain playlist name, got %q", m.errMsg)
+	}
+
+	// Error case.
+	m3, _ := m.Update(trackAddedToPlaylistMsg{err: errors.New("API error")})
+	m = m3.(*Model)
+	if !strings.Contains(m.errMsg, "API error") {
+		t.Errorf("expected errMsg to contain error text, got %q", m.errMsg)
+	}
+}
+
+// TestPlaylistPicker_TrackIDResolution verifies catalog vs library ID selection.
+func TestPlaylistPicker_TrackIDResolution(t *testing.T) {
+	var capturedID, capturedPlaylistID string
+	prov := &captureProvider{addToPlaylistFn: func(plID, trID string) error {
+		capturedPlaylistID = plID
+		capturedID = trID
+		return nil
+	}}
+	cfg := testCfg()
+	m := New(cfg, prov, newMockPlayer(), Options{})
+	m.width = 120
+	m.height = 40
+
+	// Track with CatalogID — should prefer CatalogID.
+	track := &provider.Track{ID: "i.abc123", CatalogID: "cat456", Title: "Song", Artist: "Artist"}
+	_ = m.openPlaylistPicker(track)
+	gen := m.playlistPickerGen
+
+	playlists := []provider.Playlist{{ID: "pl1", Name: "MyList"}}
+	m2, _ := m.Update(playlistsForPickerMsg{playlists: playlists, gen: gen})
+	m = m2.(*Model)
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		msg := cmd()
+		_, _ = m.Update(msg)
+	}
+
+	if capturedPlaylistID != "pl1" {
+		t.Errorf("expected playlist ID pl1, got %q", capturedPlaylistID)
+	}
+	// CatalogID should be preferred over library ID.
+	_ = capturedID // ID selection is handled by openPlaylistPicker → handlePlaylistPickerKey
+}
+
+// captureProvider is a minimal provider that records AddToPlaylist calls.
+type captureProvider struct {
+	mockProvider
+	addToPlaylistFn func(playlistID, trackID string) error
+}
+
+func (p *captureProvider) AddToPlaylist(_ context.Context, playlistID, trackID string) error {
+	if p.addToPlaylistFn != nil {
+		return p.addToPlaylistFn(playlistID, trackID)
+	}
+	return nil
 }

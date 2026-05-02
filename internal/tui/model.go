@@ -25,9 +25,10 @@ import (
 type viewMode int
 
 const (
-	modeNormal  viewMode = iota
-	modeSearch           // '/' opens — query accumulates in searchQuery
-	modeCommand          // ':' opens — command accumulates in cmdBuf
+	modeNormal         viewMode = iota
+	modeSearch                  // '/' opens — query accumulates in searchQuery
+	modeCommand                 // ':' opens — command accumulates in cmdBuf
+	modePlaylistPicker          // 'p' in queue / ctrl+p in search
 )
 
 // ── ContentView interface ─────────────────────────────────────────────────
@@ -240,7 +241,7 @@ type Model struct {
 	// Double-key tracking (for 'gg')
 	lastKey string
 
-	// Errors
+	// Errors / status messages
 	errMsg    string
 	errExpiry time.Time
 
@@ -265,6 +266,14 @@ type Model struct {
 	// Mute: preMuteVol holds the volume before mute so it can be restored.
 	// -1 means not muted.
 	preMuteVol float64
+
+	// Playlist picker (modePlaylistPicker)
+	playlistPickerTrack      *provider.Track
+	playlistPickerItems      []provider.Playlist
+	playlistPickerCursor     int
+	playlistPickerLoading    bool
+	playlistPickerReturnMode viewMode
+	playlistPickerGen        int
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
@@ -800,6 +809,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = "✓ Playlist \"" + msg.name + "\" saved"
 		m.errExpiry = time.Now().Add(4 * time.Second)
 
+	case playlistsForPickerMsg:
+		if msg.gen != m.playlistPickerGen {
+			break // stale response; a newer fetch is in flight
+		}
+		m.playlistPickerLoading = false
+		if msg.err != nil {
+			m.mode = m.playlistPickerReturnMode
+			m.errMsg = "could not load playlists"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			m.appendLog(fmt.Sprintf("[playlist] fetch error: %v", msg.err))
+			break
+		}
+		m.playlistPickerItems = msg.playlists
+		if m.playlistPickerCursor >= len(m.playlistPickerItems) {
+			m.playlistPickerCursor = 0
+		}
+
+	case trackAddedToPlaylistMsg:
+		if msg.err != nil {
+			m.errMsg = fmt.Sprintf("✗ add to playlist: %v", msg.err)
+			m.appendLog(fmt.Sprintf("[playlist] add error: %v", msg.err))
+		} else {
+			m.errMsg = fmt.Sprintf("✓ Added to \"%s\"", msg.playlistName)
+			m.appendLog(fmt.Sprintf("[playlist] added to %q", msg.playlistName))
+		}
+		m.errExpiry = time.Now().Add(3 * time.Second)
+
 	case SessionExpiredMsg:
 		m.errMsg = "Session expired — opening browser to re-authenticate…"
 		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persists until restored
@@ -847,6 +883,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return m.handleSearchKey(k, msg)
 	case modeCommand:
 		return m.handleCommandKey(k)
+	case modePlaylistPicker:
+		return m.handlePlaylistPickerKey(k)
 	default:
 		return m.handleNormalKey(msg, k)
 	}
@@ -960,6 +998,12 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		m.searchQuery = string(runes[m.searchCursor:])
 		m.searchCursor = 0
 		return m.scheduleSearch(m.searchQuery)
+	case "ctrl+p":
+		// Open playlist picker for the currently selected search result.
+		if t := m.search.SelectedTrack(); t != nil {
+			return m.openPlaylistPicker(t)
+		}
+		return nil
 	case "space":
 		runes := []rune(m.searchQuery)
 		runes = append(runes[:m.searchCursor], append([]rune{' '}, runes[m.searchCursor:]...)...)
@@ -1429,6 +1473,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			m.mode = modeCommand
 			m.cmdBuf = "save "
 			return nil
+		case "p":
+			// Open the playlist picker for the highlighted queue track.
+			if _, t := m.queue.SelectedTrack(); t != nil {
+				return m.openPlaylistPicker(t)
+			}
 		default:
 			return m.queue.Update(msg)
 		}
@@ -2174,9 +2223,12 @@ func (m *Model) View() tea.View {
 		return v
 	}
 	var content string
-	if m.introStep != introDone {
+	switch {
+	case m.mode == modePlaylistPicker:
+		content = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.renderPlaylistPickerModal())
+	case m.introStep != introDone:
 		content = m.renderIntro()
-	} else {
+	default:
 		content = m.renderBoxLayout()
 	}
 	v := tea.NewView(content)
@@ -2372,7 +2424,13 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		mid := h / 2
 		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
 		if m.errMsg != "" {
-			lines[max(0, mid-2)] = centerStr(styles.ErrorStyle.Render("⚠  "+m.errMsg), contentW)
+			var errRendered string
+			if strings.HasPrefix(m.errMsg, "✓") {
+				errRendered = centerStr(styles.ControlActive.Render(m.errMsg), contentW)
+			} else {
+				errRendered = centerStr(styles.ErrorStyle.Render("⚠  "+m.errMsg), contentW)
+			}
+			lines[max(0, mid-2)] = errRendered
 		}
 		return lines
 	}
@@ -2444,12 +2502,21 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		contentW,
 	)
 
-	// Error line — centred, or blank.
+	// Error / status line — centred, or blank.
+	// Messages prefixed with '✓' are rendered as success (green); all others
+	// are treated as warnings/errors (red with ⚠ prefix).
 	errLine := ""
 	if m.errMsg != "" {
-		const prefix = "⚠  "
-		errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
-		errLine = centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
+		var rendered string
+		if strings.HasPrefix(m.errMsg, "✓") {
+			text := truncateStr(m.errMsg, max(10, contentW))
+			rendered = centerStr(styles.ControlActive.Render(text), contentW)
+		} else {
+			const prefix = "⚠  "
+			errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
+			rendered = centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
+		}
+		errLine = rendered
 	}
 
 	lines := []string{
@@ -2566,6 +2633,7 @@ func (m *Model) searchLines(contentW, h int) []string {
 	}
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add "+kind+" to queue") +
+		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
 	result := append([]string{inputLine, sep}, listLines...)
@@ -2615,6 +2683,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
 				accent.Render("K/J") + muted.Render(" move up/down"),
+				accent.Render("p") + muted.Render(" add to playlist"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
 				accent.Render("esc") + muted.Render(" close"),
@@ -2854,4 +2923,139 @@ func clamp(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// ── Playlist picker ───────────────────────────────────────────────────────
+
+const pickerMaxVisible = 8
+
+// openPlaylistPicker enters modePlaylistPicker for the given track, saving the
+// current mode so it can be restored on close.
+func (m *Model) openPlaylistPicker(t *provider.Track) tea.Cmd {
+	m.playlistPickerTrack = t
+	m.playlistPickerLoading = true
+	m.playlistPickerCursor = 0
+	m.playlistPickerItems = nil
+	m.playlistPickerReturnMode = m.mode
+	m.mode = modePlaylistPicker
+	return m.fetchPlaylistsForPickerCmd()
+}
+
+// fetchPlaylistsForPickerCmd fires a background fetch of library playlists.
+// The generation counter prevents stale responses from landing after the picker
+// has been closed and reopened.
+func (m *Model) fetchPlaylistsForPickerCmd() tea.Cmd {
+	m.playlistPickerGen++
+	gen := m.playlistPickerGen
+	prov := m.provider
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		playlists, err := prov.GetLibraryPlaylists(ctx)
+		return playlistsForPickerMsg{playlists: playlists, err: err, gen: gen}
+	}
+}
+
+// handlePlaylistPickerKey handles key presses while the playlist picker is open.
+func (m *Model) handlePlaylistPickerKey(k string) tea.Cmd {
+	switch k {
+	case "esc":
+		m.mode = m.playlistPickerReturnMode
+		return nil
+	case "up", "k":
+		if m.playlistPickerCursor > 0 {
+			m.playlistPickerCursor--
+		}
+	case "down", "j":
+		if m.playlistPickerCursor < len(m.playlistPickerItems)-1 {
+			m.playlistPickerCursor++
+		}
+	case "enter":
+		if m.playlistPickerLoading || len(m.playlistPickerItems) == 0 {
+			return nil
+		}
+		if m.playlistPickerCursor >= len(m.playlistPickerItems) {
+			m.playlistPickerCursor = len(m.playlistPickerItems) - 1
+		}
+		pl := m.playlistPickerItems[m.playlistPickerCursor]
+		t := m.playlistPickerTrack
+		m.mode = m.playlistPickerReturnMode
+		prov := m.provider
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			// Prefer catalog ID for playback-sourced tracks; fall back to library ID.
+			trackID := t.ID
+			if !strings.HasPrefix(t.ID, "i.") && t.CatalogID != "" {
+				trackID = t.CatalogID
+			}
+			err := prov.AddToPlaylist(ctx, pl.ID, trackID)
+			return trackAddedToPlaylistMsg{playlistName: pl.Name, err: err}
+		}
+	}
+	return nil
+}
+
+// pickerWindow returns the start and end indices of the visible playlist items
+// window, keeping the cursor roughly centred.
+func (m *Model) pickerWindow() (start, end int) {
+	n := len(m.playlistPickerItems)
+	visible := min(pickerMaxVisible, n)
+	start = max(0, m.playlistPickerCursor-visible/2)
+	end = start + visible
+	if end > n {
+		end = n
+		start = max(0, end-visible)
+	}
+	return
+}
+
+// renderPlaylistPickerModal renders the centered "Add to playlist" modal.
+func (m *Model) renderPlaylistPickerModal() string {
+	innerW := min(46, m.width-8)
+	sep := styles.QueueItemMuted.Render(strings.Repeat("─", innerW))
+
+	var lines []string
+
+	// Title line
+	title := "Add to playlist"
+	if m.playlistPickerTrack != nil {
+		title = "+ " + truncateStr(m.playlistPickerTrack.Title, innerW-3)
+	}
+	lines = append(lines, styles.NowPlayingTitlePlaying.Render(title))
+	lines = append(lines, sep)
+
+	switch {
+	case m.playlistPickerLoading:
+		lines = append(lines, styles.QueueItemMuted.Render("  Loading playlists…"))
+	case len(m.playlistPickerItems) == 0:
+		lines = append(lines, styles.QueueItemMuted.Render("  No playlists found"))
+	default:
+		start, end := m.pickerWindow()
+		if start > 0 {
+			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf("  ↑ %d more", start)))
+		}
+		for i := start; i < end; i++ {
+			name := truncateStr(m.playlistPickerItems[i].Name, innerW-3)
+			if i == m.playlistPickerCursor {
+				lines = append(lines, styles.Playing.Render("▶ "+name))
+			} else {
+				lines = append(lines, styles.QueueItem.Render("  "+name))
+			}
+		}
+		remaining := len(m.playlistPickerItems) - end
+		if remaining > 0 {
+			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf("  ↓ %d more", remaining)))
+		}
+	}
+
+	lines = append(lines, sep)
+	lines = append(lines, styles.QueueItemMuted.Render("  ↑↓/jk navigate · ⏎ add · esc cancel"))
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.ColorPrimary).
+		Padding(0, 1).
+		Width(innerW).
+		Render(strings.Join(lines, "\n"))
 }

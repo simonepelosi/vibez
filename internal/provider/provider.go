@@ -83,5 +83,9 @@ type Provider interface {
 	// GetRecommendations returns personalised recommendation groups (albums and
 	// playlists) from Apple Music based on the user's library and history.
 	GetRecommendations(ctx context.Context) ([]RecommendationGroup, error)
+	// AddToPlaylist adds a track to an existing library playlist.
+	// playlistID must be a library playlist ID (e.g. "p.XXXXX").
+	// trackID should be a catalog song ID or a library song ID ("i.XXXXX").
+	AddToPlaylist(ctx context.Context, playlistID, trackID string) error
 	IsAuthenticated() bool
 }

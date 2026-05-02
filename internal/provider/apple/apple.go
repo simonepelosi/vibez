@@ -673,6 +673,32 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 	return toPlaylist(resp.Data[0]), nil
 }
 
+// addPlaylistTracksBody is the JSON body for POST /v1/me/library/playlists/{id}/tracks.
+type addPlaylistTracksBody struct {
+	Data []createPlaylistTrackRef `json:"data"`
+}
+
+func (a *AppleProvider) AddToPlaylist(ctx context.Context, playlistID, trackID string) error {
+	typ := "songs"
+	if strings.HasPrefix(trackID, "i.") {
+		typ = "library-songs"
+	}
+	body := addPlaylistTracksBody{Data: []createPlaylistTrackRef{{ID: trackID, Type: typ}}}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("AddToPlaylist: marshal: %w", err)
+	}
+	ep := "/me/library/playlists/" + playlistID + "/tracks"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+ep, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	req.Header.Set("Content-Type", "application/json")
+	return a.do(req, nil)
+}
+
 // ratingRequest is the body for PUT /v1/me/ratings/songs/{id}.
 type ratingRequest struct {
 	Type       string           `json:"type"`
