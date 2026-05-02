@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   displayed next to the volume indicator in the TUI box header. MusicKit is also
   explicitly configured to request the highest available quality (256 kbps AAC).
   Closes #29.
+- **Add track to playlist** — press `p` on any queue item to open a playlist picker
+  and add that track to an existing Apple Music library playlist. The same action is
+  available from search results with `ctrl+p`. Closes #34.
 
 ### Fixed
 - **MPRIS app icon** — the `DesktopEntry` property was set to `"vibez"` instead of

@@ -40,3 +40,17 @@ type RestartMsg struct{}
 // Use this to surface background-goroutine events (e.g. scrobbling) without
 // printing to stderr.
 type DebugLogMsg string
+
+// playlistsForPickerMsg is the response to a library-playlists fetch for the
+// playlist picker modal.
+type playlistsForPickerMsg struct {
+	playlists []provider.Playlist
+	err       error
+	gen       int // stale-response guard; discarded if != m.playlistPickerGen
+}
+
+// trackAddedToPlaylistMsg is the response to an AddToPlaylist call.
+type trackAddedToPlaylistMsg struct {
+	playlistName string
+	err          error
+}

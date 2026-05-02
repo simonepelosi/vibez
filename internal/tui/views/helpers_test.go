@@ -55,6 +55,7 @@ func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (
 func (m *mockProvider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
 func (m *mockProvider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
 func (m *mockProvider) IsAuthenticated() bool                                   { return true }
+func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }

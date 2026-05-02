@@ -117,6 +117,8 @@ func (Provider) LoveSong(_ context.Context, _ string, _ bool) error { return nil
 
 func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
 
+func (Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
+
 func (Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return []provider.RecommendationGroup{
 		{
