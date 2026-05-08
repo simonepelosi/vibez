@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Persistent volume** — the playback volume is now saved to `~/.config/vibez/config.json`
+  whenever the user changes it (arrow keys, `+`/`-`, or `:vol`). On the next launch vibez
+  restores the saved level automatically. Muting (`m` / `:mute`) is intentionally not
+  persisted so vibez never starts silent. Closes #39.
+
+### Added
 - **Auto-update** — on startup vibez checks GitHub for a newer release (once per 24 h).
   Progress is shown on the TUI loading screen alongside the Chrome download / auth steps.
   If an update is available the binary is downloaded, its SHA-256 checksum is verified

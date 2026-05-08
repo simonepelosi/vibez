@@ -125,6 +125,10 @@ type glowTickMsg time.Time
 type introTickMsg time.Time
 type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
+
+// saveVolumeMsg is returned by volume-change commands to persist the new
+// volume to the config file.
+type saveVolumeMsg struct{ vol float64 }
 type playlistCreatedMsg struct{ name string }
 type SessionExpiredMsg struct{}
 type SessionRestoredMsg struct{}
@@ -784,6 +788,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helperPaths = msg.HelperPaths
 		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
+		if m.cfg.Volume != nil {
+			v := m.cfg.VolumeOrDefault()
+			cmds = append(cmds, m.playerCmd(func() error {
+				return m.player.SetVolume(v)
+			}))
+			m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
+		}
 		if m.memProfiling {
 			cmds = append(cmds, memTick(m.helperPaths))
 		}
@@ -799,6 +810,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errMsg = msg.Err.Error()
 		m.errExpiry = time.Now().Add(30 * time.Second)
 		m.introStep = introDone
+
+	case saveVolumeMsg:
+		m.cfg.SetVolume(msg.vol)
+		if err := m.cfg.Save(""); err != nil {
+			m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
+		}
 
 	case errMsg:
 		m.appendLog("[error] " + msg.err.Error())
@@ -1178,7 +1195,16 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		}
 		m.preMuteVol = -1 // clear mute state on explicit vol change
 		m.appendLog(fmt.Sprintf("[vol] → %.0f%%", newVol*100))
-		return m.playerCmd(func() error { return m.player.SetVolume(newVol) })
+		vol := newVol
+		return func() tea.Msg {
+			if m.player == nil {
+				return errMsg{fmt.Errorf("no player")}
+			}
+			if err := m.player.SetVolume(vol); err != nil {
+				return errMsg{err}
+			}
+			return saveVolumeMsg{vol}
+		}
 
 	case strings.HasPrefix(cmd, "seek"):
 		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "seek"))
@@ -2210,7 +2236,7 @@ func (m *Model) adjustVolume(delta float64) tea.Cmd {
 		if err := m.player.SetVolume(newVol); err != nil {
 			return errMsg{err}
 		}
-		return nil
+		return saveVolumeMsg{newVol}
 	}
 }
 
