@@ -16,12 +16,28 @@ type Config struct {
 	AuthPort            int    `json:"auth_port"`
 	Provider            string `json:"provider"`
 	Theme               string `json:"theme"`
+	// Volume is the last user-set playback volume (0.0–1.0). nil means
+	// "not yet saved" and the player default (1.0) is used on startup.
+	Volume *float64 `json:"volume,omitempty"`
 	// Last.fm scrobbling. LastfmAPIKey and LastfmAPISecret are typically
 	// embedded in the binary at build time via ldflags; set them manually here
 	// only when building from source without the embedded keys.
 	LastfmAPIKey     string `json:"lastfm_api_key,omitempty"`
 	LastfmAPISecret  string `json:"lastfm_api_secret,omitempty"`
 	LastfmSessionKey string `json:"lastfm_session_key,omitempty"`
+}
+
+// VolumeOrDefault returns the saved volume, or 1.0 if none has been stored yet.
+func (c *Config) VolumeOrDefault() float64 {
+	if c.Volume != nil {
+		return *c.Volume
+	}
+	return 1.0
+}
+
+// SetVolume updates the in-memory volume field. Call Save to persist it.
+func (c *Config) SetVolume(v float64) {
+	c.Volume = &v
 }
 
 func defaults() *Config {

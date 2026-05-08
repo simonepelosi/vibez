@@ -417,8 +417,8 @@ func TestAdjustVolume_ClampHi(t *testing.T) {
 	m.playerState.Volume = 0.99
 	cmd := m.adjustVolume(0.05) // would exceed 1.0
 	msg := cmd()
-	if msg != nil {
-		t.Errorf("adjustVolume should succeed, got %v", msg)
+	if _, ok := msg.(saveVolumeMsg); !ok {
+		t.Errorf("adjustVolume should return saveVolumeMsg on success, got %T", msg)
 	}
 }
 
@@ -428,8 +428,8 @@ func TestAdjustVolume_ClampLo(t *testing.T) {
 	m.playerState.Volume = 0.01
 	cmd := m.adjustVolume(-0.05) // would go below 0
 	msg := cmd()
-	if msg != nil {
-		t.Errorf("adjustVolume should succeed, got %v", msg)
+	if _, ok := msg.(saveVolumeMsg); !ok {
+		t.Errorf("adjustVolume should return saveVolumeMsg on success, got %T", msg)
 	}
 }
 
