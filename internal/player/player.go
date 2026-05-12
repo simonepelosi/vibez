@@ -26,7 +26,7 @@ func DefaultEQBands() []EQBand {
 	freqs := []float64{32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000}
 	bands := make([]EQBand, len(freqs))
 	for i, f := range freqs {
-		bands[i] = EQBand{Frequency: f, Q: 1.4, Gain: 0}
+		bands[i] = EQBand{Frequency: f, Q: 1.46, Gain: 0}
 	}
 	return bands
 }
