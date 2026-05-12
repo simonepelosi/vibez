@@ -505,6 +505,15 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
+func (p *Player) SetEqualizer(bands []player.EQBand) error {
+	js, err := buildSetEqualizerJS(bands)
+	if err != nil {
+		return err
+	}
+	p.dispatch(js)
+	return nil
+}
+
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.dispatch(fmt.Sprintf(`window.vibezQueueRemove && window.vibezQueueRemove(%d)`, idx))
 	return nil

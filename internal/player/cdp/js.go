@@ -3,6 +3,8 @@ package cdp
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/simone-vibes/vibez/internal/player"
 )
 
 // buildSetQueueJS returns the JS expression that calls vibezSetQueue.
@@ -40,4 +42,16 @@ func buildAppendQueueJS(ids []string) (string, error) {
 		return "", fmt.Errorf("cdp: marshal append json string: %w", err)
 	}
 	return fmt.Sprintf(`window.vibezAppendQueue && window.vibezAppendQueue(%s)`, js), nil
+}
+
+func buildSetEqualizerJS(bands []player.EQBand) (string, error) {
+	b, err := json.Marshal(bands)
+	if err != nil {
+		return "", fmt.Errorf("cdp: marshal eq bands: %w", err)
+	}
+	js, err := json.Marshal(string(b))
+	if err != nil {
+		return "", fmt.Errorf("cdp: marshal eq json string: %w", err)
+	}
+	return fmt.Sprintf(`window.vibezSetEqualizer && window.vibezSetEqualizer(%s)`, js), nil
 }

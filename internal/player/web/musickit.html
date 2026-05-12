@@ -451,6 +451,49 @@
         const _repeatName = ['off', 'one', 'all'];
         window.vibezSeek      = (t) => { _log(`[js:seek] → ${t.toFixed(1)}s`); _m().seekToTime(t); };
         window.vibezSetVolume = (v) => { _log(`[js:volume] → ${Math.round(v*100)}%`); _m().volume = v; };
+
+        // ── 10-band parametric equalizer (Web Audio API) ─────────────────────
+        let _eqCtx    = null;
+        let _eqNodes  = [];
+        let _eqSource = null;
+
+        async function _ensureEQContext() {
+          if (_eqCtx) return;
+          const audioEl = document.querySelector('audio');
+          if (!audioEl) { _log('[js:eq] no audio element'); return; }
+          _eqCtx   = new AudioContext();
+          _eqSource = _eqCtx.createMediaElementSource(audioEl);
+          _eqSource.connect(_eqCtx.destination);
+        }
+
+        window.vibezSetEqualizer = async function(bandsJSON) {
+          const bands = JSON.parse(bandsJSON);
+          _log(`[js:eq] apply ${bands.length} band(s)`);
+          await _ensureEQContext();
+          if (!_eqCtx) return;
+
+          _eqNodes.forEach(n => n.disconnect());
+          _eqSource.disconnect();
+          _eqNodes = [];
+
+          if (!bands || bands.length === 0) {
+            _eqSource.connect(_eqCtx.destination);
+            return;
+          }
+
+          bands.forEach((b, i) => {
+            const f = _eqCtx.createBiquadFilter();
+            f.type      = (i === 0) ? 'lowshelf' : (i === bands.length - 1) ? 'highshelf' : 'peaking';
+            f.frequency.value = b.frequency;
+            f.Q.value         = b.q;
+            f.gain.value      = b.gain;
+            _eqNodes.push(f);
+          });
+
+          _eqNodes.reduce((prev, cur) => { prev.connect(cur); return cur; }, _eqSource);
+          _eqNodes[_eqNodes.length - 1].connect(_eqCtx.destination);
+          if (_eqCtx.state === 'suspended') _eqCtx.resume();
+        };
         window.vibezSetRepeat  = (mode) => { _log(`[js:repeat] → ${_repeatName[mode]||mode}`); _m().repeatMode  = mode; };
         window.vibezSetShuffle = (on) => {
           _log(`[js:shuffle] → ${on ? 'on' : 'off'}`);

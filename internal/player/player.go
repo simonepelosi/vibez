@@ -13,6 +13,24 @@ const (
 	RepeatModeAll = 2 // repeat entire queue
 )
 
+// EQBand describes a single parametric equalizer band.
+// Gain is in dB (-12.0 to +12.0). Frequency is in Hz. Q is the quality factor.
+type EQBand struct {
+	Frequency float64 `json:"frequency"`
+	Q         float64 `json:"q"`
+	Gain      float64 `json:"gain"`
+}
+
+// DefaultEQBands returns the 10 standard ISO bands with flat (0 dB) gain.
+func DefaultEQBands() []EQBand {
+	freqs := []float64{32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000}
+	bands := make([]EQBand, len(freqs))
+	for i, f := range freqs {
+		bands[i] = EQBand{Frequency: f, Q: 1.4, Gain: 0}
+	}
+	return bands
+}
+
 type State struct {
 	Track       *provider.Track
 	Playing     bool
@@ -48,6 +66,8 @@ type Player interface {
 	SetRepeat(mode int) error
 	// SetShuffle enables or disables shuffle playback.
 	SetShuffle(on bool) error
+	// SetEqualizer applies the given 10-band parametric EQ. Pass nil to bypass.
+	SetEqualizer(bands []EQBand) error
 	// RemoveFromQueue removes the track at idx from the queue without
 	// interrupting playback of any other track.
 	RemoveFromQueue(idx int) error

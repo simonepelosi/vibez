@@ -266,6 +266,10 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
+func (p *Player) SetEqualizer(_ []player.EQBand) error {
+	return nil
+}
+
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.dispatch(fmt.Sprintf(`window.vibezQueueRemove && window.vibezQueueRemove(%d)`, idx))
 	return nil

@@ -262,6 +262,8 @@ func (p *Player) ClearQueue() error {
 	return nil
 }
 
+func (p *Player) SetEqualizer(_ []player.EQBand) error { return nil }
+
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

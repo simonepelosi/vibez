@@ -46,11 +46,12 @@ func (m *mockPlayer) Seek(pos time.Duration) error {
 	m.seekPos = pos
 	return m.err
 }
-func (m *mockPlayer) SetVolume(_ float64) error         { return m.err }
-func (m *mockPlayer) SetRepeat(_ int) error             { return m.err }
-func (m *mockPlayer) SetShuffle(_ bool) error           { return m.err }
-func (m *mockPlayer) SetQueue(ids []string) error       { m.setQueueIDs = ids; return m.err }
-func (m *mockPlayer) SetPlaylist(_ string, _ int) error { return m.err }
+func (m *mockPlayer) SetVolume(_ float64) error            { return m.err }
+func (m *mockPlayer) SetRepeat(_ int) error                { return m.err }
+func (m *mockPlayer) SetShuffle(_ bool) error              { return m.err }
+func (m *mockPlayer) SetEqualizer(_ []player.EQBand) error { return m.err }
+func (m *mockPlayer) SetQueue(ids []string) error          { m.setQueueIDs = ids; return m.err }
+func (m *mockPlayer) SetPlaylist(_ string, _ int) error    { return m.err }
 func (m *mockPlayer) AppendQueue(ids []string) error {
 	m.appendQueueIDs = append(m.appendQueueIDs, ids)
 	return m.err

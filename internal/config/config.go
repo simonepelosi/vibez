@@ -25,6 +25,14 @@ type Config struct {
 	LastfmAPIKey     string `json:"lastfm_api_key,omitempty"`
 	LastfmAPISecret  string `json:"lastfm_api_secret,omitempty"`
 	LastfmSessionKey string `json:"lastfm_session_key,omitempty"`
+	// EQBands stores the last saved 10-band equalizer settings. nil means flat.
+	EQBands []EQBand `json:"eq_bands,omitempty"`
+}
+
+type EQBand struct {
+	Frequency float64 `json:"frequency"`
+	Q         float64 `json:"q"`
+	Gain      float64 `json:"gain"`
 }
 
 // VolumeOrDefault returns the saved volume, or 1.0 if none has been stored yet.
