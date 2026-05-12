@@ -2322,7 +2322,8 @@ func (m *Model) renderBoxLayout() string {
 	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
 	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
 	feedActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP
-	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
+	eqActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP
+	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -2379,6 +2380,11 @@ func (m *Model) renderBoxLayout() string {
 	case feedActive:
 		m.feedP.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.feedP.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case eqActive:
+		m.eqP.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.eqP.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
@@ -2773,6 +2779,15 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("r") + muted.Render(" refresh"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP:
+			parts = []string{
+				styles.ModeNormal.Render("EQUALIZER"),
+				accent.Render("←/→") + muted.Render(" band"),
+				accent.Render("↑/↓") + muted.Render(" gain"),
+				accent.Render("0") + muted.Render(" reset band"),
+				accent.Render("r") + muted.Render(" reset all"),
+				accent.Render("e") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
@@ -2782,6 +2797,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("q") + muted.Render(" queue"),
 				accent.Render("y") + muted.Render(" lyrics"),
 				accent.Render("F") + muted.Render(" feed"),
+				accent.Render("e") + muted.Render(" equalizer"),
 				accent.Render("v") + muted.Render(" vibe"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}

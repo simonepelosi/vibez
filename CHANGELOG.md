@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **10-band parametric equalizer** — press `e` to open the equalizer panel. Each of the 10
+  ISO bands (32 Hz, 64 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 8 kHz, 16 kHz)
+  exposes independent frequency, Q factor, and gain (±12 dB, in 0.5 dB steps). Changes apply
+  live via the Web Audio API (`BiquadFilterNode` chain). Use `←`/`→` to navigate bands,
+  `↑`/`↓` to adjust gain, `0` to reset the current band, `r` to reset all bands, and `e`
+  to close the panel. The EQ curve is persisted to `eq_bands` in `config.json` and restored
+  automatically on the next launch. Closes #41.
+
 ---
 
 ## [0.1.0] — 2026-05-08

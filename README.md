@@ -90,6 +90,13 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 - **Provider architecture** — the player core is decoupled from the music source
 - **More services coming** — Spotify, YouTube Music, Deezer, and Tidal are on the roadmap
 
+### 🎛️ Equalizer
+
+- **10-band parametric EQ** — press `e` to open a full-width equalizer panel
+- **Per-band control** — adjust frequency (32 Hz–16 kHz), Q factor, and gain (±12 dB) for each band
+- **Live preview** — changes apply immediately to the audio stream via Web Audio API
+- **Persistent settings** — your EQ curve is saved to `~/.config/vibez/config.json` and restored on next launch
+
 ### 🎨 Themes
 
 - **Built-in themes** — `default` (Tokyo Night / Catppuccin), `dracula`, `gruvbox`, `nord`
@@ -224,6 +231,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `s` | Toggle shuffle |
 | `f` | Heart / favourite current track |
 | `v` | Open vibe input (mood-driven search) |
+| `e` | Toggle equalizer panel |
 | `d` | Toggle discovery mode |
 | `/` | Open search |
 | `l` | Toggle library panel |
@@ -287,6 +295,16 @@ Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `ta
 | `+` / `=` | Increase similarity (stay closer to current artist / genre) |
 | `-` | Decrease similarity (explore further afield) |
 | `d` | Stop discovery mode |
+
+### Equalizer (`e`)
+
+| Key | Action |
+|-----|--------|
+| `←` / `→` | Navigate between bands |
+| `↑` / `↓` | Increase / decrease gain (±0.5 dB per step) |
+| `0` | Reset current band to flat (0 dB) |
+| `r` | Reset all bands to flat |
+| `e` | Close equalizer panel |
 
 ---
 
