@@ -12,10 +12,13 @@ import (
 )
 
 const (
-	eqMinGain  = -12.0
-	eqMaxGain  = 12.0
-	eqStep     = 0.5
-	eqBarSteps = 24
+	eqMinGain = -12.0
+	eqMaxGain = 12.0
+	eqStep    = 0.5
+
+	eqOverheadRows = 5 // title + blank + gain row + freq label + help line
+	eqMinBarH      = 4
+	eqMaxBarH      = 24
 )
 
 type EQChangeMsg struct {
@@ -70,6 +73,11 @@ func (m *EQModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+func (m *EQModel) barHeight() int {
+	available := m.height - eqOverheadRows
+	return max(eqMinBarH, min(eqMaxBarH, available))
+}
+
 func (m *EQModel) View() string {
 	if len(m.bands) == 0 {
 		return ""
@@ -84,11 +92,12 @@ func (m *EQModel) View() string {
 		Foreground(styles.ColorMuted).
 		Render("←/→ band  ↑/↓ gain  0 reset band  r reset all  e close")
 
-	colW := max(6, (m.width-2)/len(m.bands))
+	colW := max(7, (m.width-2)/len(m.bands))
+	barH := m.barHeight()
 
 	var cols []string
 	for i, b := range m.bands {
-		cols = append(cols, m.renderBand(i, b, colW))
+		cols = append(cols, m.renderBand(i, b, colW, barH))
 	}
 
 	bands := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
@@ -97,15 +106,13 @@ func (m *EQModel) View() string {
 		title,
 		"",
 		bands,
-		"",
 		help,
 	)
 }
 
-func (m *EQModel) renderBand(idx int, b player.EQBand, colW int) string {
-	barH := eqBarSteps
+func (m *EQModel) renderBand(idx int, b player.EQBand, colW, barH int) string {
 	filled := int(math.Round((b.Gain - eqMinGain) / (eqMaxGain - eqMinGain) * float64(barH)))
-	zeroLine := int(math.Round(float64(barH) / 2))
+	zeroLine := barH / 2
 
 	selected := idx == m.cursor
 
@@ -133,30 +140,28 @@ func (m *EQModel) renderBand(idx int, b player.EQBand, colW int) string {
 		default:
 			ch = " "
 		}
-		cell := lipgloss.NewStyle().Foreground(barColor).Render(ch)
-		rows = append(rows, cell)
+		rows = append(rows, lipgloss.NewStyle().Foreground(barColor).Render(ch))
 	}
 
 	bar := strings.Join(rows, "\n")
 
-	label := formatFreq(b.Frequency)
+	freq := formatFreq(b.Frequency)
 	gain := fmt.Sprintf("%+.1f", b.Gain)
 
-	labelStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorMuted)
-	gainStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center)
+	freqStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorMuted)
+	gainStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorFg)
 	if selected {
-		labelStyle = labelStyle.Foreground(styles.ColorPrimary).Bold(true)
+		freqStyle = freqStyle.Foreground(styles.ColorPrimary).Bold(true)
 		gainStyle = gainStyle.Foreground(styles.ColorPrimary).Bold(true)
 	}
 
 	col := lipgloss.JoinVertical(lipgloss.Center,
 		gainStyle.Render(gain),
 		bar,
-		labelStyle.Render(label),
+		freqStyle.Render(freq),
 	)
 
-	colStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center)
-	return colStyle.Render(col)
+	return lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Render(col)
 }
 
 func formatFreq(f float64) string {
