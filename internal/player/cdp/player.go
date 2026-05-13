@@ -96,44 +96,7 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
-	args := []string{
-		// Sandbox requires suid/namespace support unavailable from a non-system path.
-		"--no-sandbox",
-		"--disable-setuid-sandbox",
-		// --no-zygote removes the Linux process-spawning shim; safe when sandbox
-		// is already disabled and cuts one helper process.
-		"--no-zygote",
-		"--autoplay-policy=no-user-gesture-required",
-		"--enable-features=MediaCapabilities,WidevineCdm",
-		"--disable-blink-features=AutomationControlled",
-		"--widevine-path=" + widevinePath,
-		// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
-		// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
-		// visible to the desktop environment.
-		// Also disable the certificate-verifier component updater: when
-		// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
-		// which breaks all TLS connections including the MusicKit.js CDN load.
-		"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
-		"--disable-component-update",
-		"--ignore-certificate-errors",
-		// Memory footprint reduction:
-		// Removes the GPU compositor process (~100–200 MB) — not needed for
-		// audio-only headless playback; Widevine CDM runs in a utility process
-		// and does not require GPU acceleration for audio DRM.
-		"--disable-gpu",
-		// Use /tmp for shared-memory segments instead of /dev/shm to avoid
-		// exhausting the (often small) tmpfs mounted there.
-		"--disable-dev-shm-usage",
-		// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
-		// within this limit; without it Chrome can balloon to 500 MB+.
-		"--js-flags=--max-old-space-size=256",
-		// Disable background network activity (prefetch, DNS pre-resolve,
-		// speculative connections). Not needed for a single-page music player.
-		"--disable-background-networking",
-		// Run browser and renderer in a single OS process. Validated to work
-		// with Widevine DRM; cuts helper count from 8 → 4 and saves ~50 MB PSS.
-		"--single-process",
-	}
+	args := launchArgs(widevinePath)
 
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
@@ -279,6 +242,49 @@ func New(devToken, userToken, storefront string) (*Player, error) {
 	}()
 
 	return p, nil
+}
+
+func launchArgs(widevinePath string) []string {
+	return []string{
+		// Sandbox requires suid/namespace support unavailable from a non-system path.
+		"--no-sandbox",
+		"--disable-setuid-sandbox",
+		// --no-zygote removes the Linux process-spawning shim; safe when sandbox
+		// is already disabled and cuts one helper process.
+		"--no-zygote",
+		"--autoplay-policy=no-user-gesture-required",
+		"--enable-features=MediaCapabilities,WidevineCdm",
+		"--disable-blink-features=AutomationControlled",
+		"--widevine-path=" + widevinePath,
+		// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
+		// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
+		// visible to the desktop environment.
+		// Also disable the certificate-verifier component updater: when
+		// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
+		// which breaks all TLS connections including the MusicKit.js CDN load.
+		"--disable-features=HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater",
+		"--disable-component-update",
+		"--ignore-certificate-errors",
+		// Memory footprint reduction:
+		// Removes the GPU compositor process (~100–200 MB) — not needed for
+		// audio-only headless playback; Widevine CDM runs in a utility process
+		// and does not require GPU acceleration for audio DRM.
+		"--disable-gpu",
+		// Use /tmp for shared-memory segments instead of /dev/shm to avoid
+		// exhausting the (often small) tmpfs mounted there.
+		"--disable-dev-shm-usage",
+		// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
+		// within this limit; without it Chrome can balloon to 500 MB+.
+		"--js-flags=--max-old-space-size=256",
+		// Disable background network activity (prefetch, DNS pre-resolve,
+		// speculative connections). Not needed for a single-page music player.
+		"--disable-background-networking",
+		// WSL2/PulseAudio: increase audio buffering to absorb Hyper-V scheduler jitter.
+		"--audio-buffer-size=4096",
+		// Disable Chrome's out-of-process audio service to avoid distortion
+		// when PulseAudio and Windows run at different sample rates (44100 vs 48000).
+		"--disable-features=AudioServiceOutOfProcess",
+	}
 }
 
 func (p *Player) sendError(err error) {
