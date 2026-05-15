@@ -1105,7 +1105,6 @@ var allCommands = []cmdEntry{
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
-	{"bitrate", "bitrate <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"mute", "mute", "Toggle mute"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
@@ -1211,7 +1210,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.appendLog("[vol] muted")
 		return m.playerCmd(func() error { return m.player.SetVolume(0) })
 
-	case strings.HasPrefix(cmd, "quality") || strings.HasPrefix(cmd, "bitrate"):
+	case strings.HasPrefix(cmd, "quality"):
 		name, arg, _ := strings.Cut(cmd, " ")
 		arg = strings.TrimSpace(arg)
 		if arg == "" {

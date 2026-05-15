@@ -292,7 +292,6 @@ Vim-style command mode — press `:` from anywhere to open the command prompt.
 | `:vol` | Show current volume in the status bar |
 | `:mute` | Toggle mute (run again to restore the previous volume) |
 | `:quality <high|standard|256|64>` | Set Apple Music AAC bitrate |
-| `:bitrate <high|standard|256|64>` | Alias for `:quality` |
 | `:seek <seconds>` | Jump to an absolute position in the current song |
 | `:debug-logs` | Toggle the debug log panel |
 | `:q` / `:quit` | Quit vibez |

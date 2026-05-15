@@ -2760,9 +2760,4 @@ func TestCommandSuggestionsIncludeQuality(t *testing.T) {
 	if len(got) == 0 || got[0].trigger != "quality" {
 		t.Fatalf("quality suggestions = %#v", got)
 	}
-	m.cmdBuf = "bit"
-	got = m.commandSuggestions()
-	if len(got) == 0 || got[0].trigger != "bitrate" {
-		t.Fatalf("bitrate suggestions = %#v", got)
-	}
 }
