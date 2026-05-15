@@ -1612,6 +1612,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		return nil
 	}
 
+	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
+		m.lastKey = ""
+		return nil
+	}
+
 	// Player control keys always work, even when other panels are active.
 	switch k {
 	case "space":
@@ -2830,9 +2835,8 @@ func (m *Model) statusNavContent(_ int) string {
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.library:
 			parts = []string{
 				styles.ModeNormal.Render("LIBRARY"),
-				accent.Render("Enter") + muted.Render(" play"),
-				accent.Render("Tab") + muted.Render(" add to queue"),
-				accent.Render("esc") + muted.Render(" close"),
+				accent.Render("Enter") + muted.Render(" browse/play"),
+				accent.Render("esc") + muted.Render(" back/close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
 			parts = []string{

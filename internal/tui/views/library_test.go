@@ -519,6 +519,7 @@ func TestLibrary_CurrentTopLevelResponseAccepted(t *testing.T) {
 	}
 	if lib.pane != paneTracks || len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "s.1" {
 		t.Fatalf("tracks pane = %d drillTracks = %+v, want accepted songs", lib.pane, lib.drillTracks)
+
 	}
 }
 

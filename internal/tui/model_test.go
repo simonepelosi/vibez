@@ -2822,6 +2822,29 @@ func TestModel_ActivePanelEscCallsBackBeforeClose(t *testing.T) {
 	}
 }
 
+func TestModel_ActivePanelLeftBacksBeforeSeek(t *testing.T) {
+	player := newMockPlayer()
+	m := newModel(player)
+	panel := &backTestPanel{}
+	m.player = player
+	m.panels = []ContentView{panel}
+	m.playerState.Track = &provider.Track{ID: "track-1", Title: "Playing"}
+	m.playerState.Position = 30 * time.Second
+	m.activePanel = 0
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyLeft}, "left")
+	if cmd != nil {
+		cmd()
+	}
+
+	if !panel.backCalled {
+		t.Fatal("left did not call active panel Back")
+	}
+	if player.seekCalled {
+		t.Fatal("left sought player while active panel Back handled key")
+	}
+}
+
 func TestModel_PlaylistPickerFiltersReadOnly(t *testing.T) {
 	m := newModel(nil)
 	m.playlistPickerGen = 7
