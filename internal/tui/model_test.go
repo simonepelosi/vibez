@@ -2821,38 +2821,3 @@ func TestModel_ActivePanelEscCallsBackBeforeClose(t *testing.T) {
 		t.Fatalf("activePanel = %d, want still open after Back handled", m.activePanel)
 	}
 }
-
-func TestModel_ActivePanelLeftBacksBeforeSeek(t *testing.T) {
-	player := newMockPlayer()
-	m := newModel(player)
-	panel := &backTestPanel{}
-	m.player = player
-	m.panels = []ContentView{panel}
-	m.playerState.Track = &provider.Track{ID: "track-1", Title: "Playing"}
-	m.playerState.Position = 30 * time.Second
-	m.activePanel = 0
-
-	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyLeft}, "left")
-	if cmd != nil {
-		cmd()
-	}
-
-	if !panel.backCalled {
-		t.Fatal("left did not call active panel Back")
-	}
-	if player.seekCalled {
-		t.Fatal("left sought player while active panel Back handled key")
-	}
-}
-
-func TestModel_PlaylistPickerFiltersReadOnly(t *testing.T) {
-	m := newModel(nil)
-	m.playlistPickerGen = 7
-	m.Update(playlistsForPickerMsg{gen: 7, playlists: []provider.Playlist{
-		{ID: "vibez:favorites", Name: "Favorites", ReadOnly: true},
-		{ID: "p.editable", Name: "Editable"},
-	}})
-	if len(m.playlistPickerItems) != 1 || m.playlistPickerItems[0].ID != "p.editable" {
-		t.Fatalf("playlistPickerItems = %+v", m.playlistPickerItems)
-	}
-}

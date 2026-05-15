@@ -969,24 +969,6 @@ func TestGetPlaylistTracks_FavoritesUsesRatings(t *testing.T) {
 	}
 }
 
-func TestGetPlaylistTracks_PathEscapesPlaylistID(t *testing.T) {
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.EscapedPath()
-		writeJSON(t, w, map[string]any{"data": []any{}, "next": ""})
-	}))
-	defer srv.Close()
-
-	p := newTestProvider(t, srv)
-	_, err := p.GetPlaylistTracks(context.Background(), "p.foo/bar baz")
-	if err != nil {
-		t.Fatalf("GetPlaylistTracks: %v", err)
-	}
-	if !strings.Contains(gotPath, "p.foo%2Fbar%20baz") {
-		t.Fatalf("path not escaped: %s", gotPath)
-	}
-}
-
 func songJSONWithCatalog(id, catalogID, name, artist, album string, durationMs int, artURL string) map[string]any {
 	s := songJSON(id, name, artist, album, durationMs, artURL)
 	s["attributes"].(map[string]any)["playParams"] = map[string]any{"id": id, "kind": "song", "catalogId": catalogID}

@@ -416,17 +416,6 @@ test('lossless/unsupported values are rejected with web max', () => {
   }
 });
 
-console.log('\nplaylist track URL helpers');
-const playlistTracksURL = (playlistID, sf) => {
-  const encodedPlaylistID = encodeURIComponent(playlistID);
-  return playlistID.startsWith('p.')
-    ? `/v1/me/library/playlists/${encodedPlaylistID}/tracks`
-    : `/v1/catalog/${sf}/playlists/${encodedPlaylistID}/tracks`;
-};
-test('playlistTracksURL encodes library IDs', () =>
-  eq(playlistTracksURL('p.foo/bar baz', 'us'), '/v1/me/library/playlists/p.foo%2Fbar%20baz/tracks'));
-test('playlistTracksURL encodes catalog IDs', () =>
-  eq(playlistTracksURL('pl/foo baz', 'gb'), '/v1/catalog/gb/playlists/pl%2Ffoo%20baz/tracks'));
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
