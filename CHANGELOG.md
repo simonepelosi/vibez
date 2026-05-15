@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to close the panel. The EQ curve is persisted to `eq_bands` in `config.json` and restored
   automatically on the next launch. Closes #41.
 
+### Fixed
+
+- **Apple Music playlist browsing** — the library playlist view now includes a
+  read-only Favorites entry, supports back navigation from playlist tracks, and
+  shows playlist track-loading errors instead of silently rendering an empty view.
+  Playlist IDs are safely encoded so names/IDs containing spaces or slashes load
+  correctly.
+
 ---
 
 ## [0.1.0] — 2026-05-08
