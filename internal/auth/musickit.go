@@ -8,12 +8,12 @@ import (
 	"html/template"
 	"net"
 	"net/http"
-	"os/exec"
 	"time"
 
 	_ "embed"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/openurl"
 )
 
 //go:embed web/login.html
@@ -69,7 +69,7 @@ To get one:
 	fmt.Println("Connecting to Apple Music...")
 	fmt.Println("Your browser will open to complete the login.")
 
-	_ = exec.Command("xdg-open", loginURL).Start() //nolint:gosec // intentional: opens browser at a known localhost URL
+	_ = openurl.Open(loginURL) // intentional best-effort browser open
 
 	// Print the fallback URL after a short delay so users whose browser did
 	// not open automatically can still complete the flow.

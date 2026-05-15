@@ -153,19 +153,21 @@ func TestExtractBinary_NotFound(t *testing.T) {
 // ── shouldCheck / markChecked ─────────────────────────────────────────────────
 
 func TestShouldCheck_NoStamp(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", "")
 	if !shouldCheck() {
 		t.Error("shouldCheck should return true when stamp does not exist")
 	}
 }
 
 func TestShouldCheck_RecentStamp(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "vibez"), 0o750); err != nil {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", "")
+	dir := cacheDir()
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	stamp := filepath.Join(dir, "vibez", "last_update_check")
+	stamp := filepath.Join(dir, "last_update_check")
 	if err := os.WriteFile(stamp, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package webkit provides an Apple Music player backed by an embedded
 // WebKit2GTK WebView running MusicKit JS. This eliminates the dependency on
 // Cider or any external MPRIS player — vibez owns the full playback stack.

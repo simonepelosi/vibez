@@ -34,8 +34,8 @@ jobs:
       - name: Run pre-commit
         run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config pre-commit run --all-files
 
-  test:
-    name: build-vet-test
+  test-linux:
+    name: build-vet-test-linux
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,3 +60,26 @@ jobs:
       - name: Coverage summary
         run: |
           go tool cover -func=coverage.out | tail -1 | awk '{print "Total coverage: " $3}' >> $GITHUB_STEP_SUMMARY
+
+  test-macos:
+    name: build-vet-test-macos
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build
+        run: CGO_ENABLED=0 go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Test release build mode
+        run: CGO_ENABLED=0 go test ./...

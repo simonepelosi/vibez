@@ -28,9 +28,9 @@
 
 ---
 
-vibez is an open-source TUI Apple Music player for Linux. Search, queue, and control playback entirely from the keyboard.
+vibez is an open-source TUI Apple Music player for Linux and macOS. Search, queue, and control playback entirely from the keyboard.
 
-Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downloaded). Falls back to WebKit + GStreamer (30 s previews) when Chrome is unavailable. MPRIS support means desktop media keys and notifications just work.
+Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on other Linux builds, WebKit + GStreamer remains available as a 30-second preview backend. On macOS, install Google Chrome before using Apple Music playback.
 
 ---
 
@@ -39,7 +39,7 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 ### 🎵 Music Playback
 
 - **Full-track streaming** via headless Chrome + Widevine DRM — the real deal, not 30-second clips
-- **Automatic fallback** to WebKit + GStreamer (30 s previews) when Chrome is unavailable
+- **Linux preview backend** via WebKit + GStreamer (30 s previews) when CDP playback is not selected
 - **Playback controls** — play/pause, next, previous, seek ±10 s, volume up/down
 - **Repeat modes** — cycle through off, repeat-all, and repeat-one
 - **Shuffle** — randomise your queue with a single keypress
@@ -58,9 +58,9 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ### 🖥️ System Integration
 
-- **MPRIS D-Bus** — your desktop media keys (play, pause, next, previous) work out of the box
 - **Desktop notifications** — see the current track in your notification area
-- **No external player needed** — vibez is fully self-contained, no Cider, no VLC
+- **MPRIS D-Bus on Linux** — desktop media keys and notifications integrate with supported desktop environments
+- **No external music player needed** — vibez does not depend on Cider, VLC, or Music.app
 - **Last.fm scrobbling** — optional integration; connect with `vibez auth lastfm login` and your listening history is tracked automatically
 - **WSL2 support** — set `"wsl": true` in config to enable audio workarounds for WSL2 environments
 
@@ -107,19 +107,27 @@ Full tracks stream via an embedded headless Chrome with Widevine DRM (auto-downl
 
 ## Installation
 
-### One-liner (recommended)
+### One-liner (recommended, Linux)
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf \
   https://raw.githubusercontent.com/simonepelosi/vibez/main/scripts/install.sh | sh
 ```
 
-Installs the latest release binary to `~/.local/bin/` and updates your shell profile if needed.  
+Installs the latest release binary to `~/.local/bin/` and updates your shell profile if needed.
 You can also inspect the script before running it — that's always a good idea.
 
 > **Update:** re-running the same command updates vibez to the latest release.
 
 > **Custom install dir:** `VIBEZ_INSTALL_DIR=/usr/local/bin curl ... | sh`
+
+### macOS Chrome
+
+Install Google Chrome before using Apple Music playback on macOS:
+
+```sh
+brew install --cask google-chrome
+```
 
 ### From source
 
@@ -129,7 +137,7 @@ cd vibez
 make build-with-token   # requires APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KEY
 ```
 
-**Requirements:** Linux x86-64 · Go 1.25+ · Apple Developer Account with a MusicKit key
+**Requirements:** Linux x86-64 or macOS · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS · Apple Developer Account with a MusicKit key
 
 ---
 
@@ -313,10 +321,10 @@ Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `ta
 
 | Engine | Tracks | How it works |
 |--------|--------|--------------|
-| **Chrome + Widevine** *(primary)* | Full tracks | Headless Chrome via Playwright; MusicKit JS + Widevine DRM |
-| **WebKit + GStreamer** *(fallback)* | 30 s previews | Embedded webkit2gtk-4.0; GStreamer decodes preview URLs |
+| **Chrome + Widevine** | Full tracks | Chrome via Playwright; MusicKit JS + Widevine DRM |
+| **WebKit + GStreamer** *(Linux fallback)* | 30 s previews | Embedded webkit2gtk-4.1; GStreamer decodes preview URLs |
 
-Chrome is downloaded once to `~/.cache/vibez/playwright` and reused on every start.
+On Linux, Chrome is downloaded once to `~/.cache/vibez/chrome` and the Playwright driver is stored in `~/.cache/vibez/driver`. On macOS, vibez uses an installed Google Chrome app.
 
 ---
 
@@ -355,9 +363,9 @@ vibez/
 │   ├── provider/           # Provider interface + Apple Music implementation
 │   ├── player/
 │   │   ├── cdp/            # Chrome CDP player (Widevine, full tracks)
-│   │   ├── webkit/         # WebKit player (30 s previews)
-│   │   ├── gst/            # GStreamer decoder
-│   │   └── mpris/          # MPRIS D-Bus server
+│   │   ├── webkit/         # WebKit player (30 s previews, Linux)
+│   │   ├── gst/            # GStreamer decoder (Linux)
+│   │   └── mpris/          # Linux MPRIS D-Bus server
 │   ├── tui/
 │   │   ├── model.go        # Bubble Tea model + key handling
 │   │   ├── views/          # Search, queue, library, now-playing, bear
@@ -388,7 +396,17 @@ Open an issue before sending a PR — happy to discuss ideas.
 ```bash
 git clone https://github.com/simonepelosi/vibez
 cd vibez
-go mod tidy && go build ./... && go test ./...
+go mod tidy
+
+# Linux
+PKG_CONFIG_PATH=$PWD/pkg-config go build ./...
+PKG_CONFIG_PATH=$PWD/pkg-config go test ./...
+PKG_CONFIG_PATH=$PWD/pkg-config go run . --demo
+
+# macOS
+go build ./...
+go test ./...
+go run . --demo
 ```
 
 ---

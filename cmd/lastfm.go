@@ -4,10 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lastfm"
+	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/spf13/cobra"
 )
 
@@ -51,7 +51,7 @@ and add to ~/.config/vibez/config.json:
 
 		authURL := client.AuthorizeURL(token)
 		fmt.Println("Connecting to Last.fm…")
-		_ = exec.Command("xdg-open", authURL).Start() //nolint:gosec // opens a known last.fm URL in the browser
+		_ = openurl.Open(authURL) // best-effort browser open
 
 		fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", authURL)
 		fmt.Print("Press Enter after you have granted access in your browser: ")
