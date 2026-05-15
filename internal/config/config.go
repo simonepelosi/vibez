@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/simone-vibes/vibez/internal/audioquality"
 )
 
 type Config struct {
@@ -16,6 +18,7 @@ type Config struct {
 	AuthPort            int    `json:"auth_port"`
 	Provider            string `json:"provider"`
 	Theme               string `json:"theme"`
+	AudioQuality        string `json:"audio_quality,omitempty"`
 	// Volume is the last user-set playback volume (0.0–1.0). nil means
 	// "not yet saved" and the player default (1.0) is used on startup.
 	Volume *float64 `json:"volume,omitempty"`
@@ -53,10 +56,24 @@ func (c *Config) SetVolume(v float64) {
 
 func defaults() *Config {
 	return &Config{
-		AuthPort: 7777,
-		Provider: "apple",
-		Theme:    "default",
+		AuthPort:     7777,
+		Provider:     "apple",
+		Theme:        "default",
+		AudioQuality: "high",
 	}
+}
+
+func (c *Config) AudioBitrateKbps() (int, error) {
+	return audioquality.Parse(c.AudioQuality)
+}
+
+func (c *Config) SetAudioBitrate(kbps int) error {
+	value, err := audioquality.ConfigValue(kbps)
+	if err != nil {
+		return err
+	}
+	c.AudioQuality = value
+	return nil
 }
 
 func ConfigPath(override string) (string, error) {
@@ -105,6 +122,9 @@ func (c *Config) normalize() {
 	}
 	if c.Provider == "" {
 		c.Provider = "apple"
+	}
+	if c.AudioQuality == "" {
+		c.AudioQuality = "high"
 	}
 }
 

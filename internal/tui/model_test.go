@@ -26,6 +26,7 @@ type mockPlayer struct {
 	closeCalled    bool
 	seekCalled     bool
 	seekPos        time.Duration
+	bitrateKbps    int
 	setQueueIDs    []string   // last IDs passed to SetQueue
 	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
 	err            error
@@ -46,7 +47,11 @@ func (m *mockPlayer) Seek(pos time.Duration) error {
 	m.seekPos = pos
 	return m.err
 }
-func (m *mockPlayer) SetVolume(_ float64) error            { return m.err }
+func (m *mockPlayer) SetVolume(_ float64) error { return m.err }
+func (m *mockPlayer) SetAudioBitrate(kbps int) error {
+	m.bitrateKbps = kbps
+	return m.err
+}
 func (m *mockPlayer) SetRepeat(_ int) error                { return m.err }
 func (m *mockPlayer) SetShuffle(_ bool) error              { return m.err }
 func (m *mockPlayer) SetEqualizer(_ []player.EQBand) error { return m.err }
@@ -2711,4 +2716,53 @@ func (p *captureProvider) AddToPlaylist(_ context.Context, playlistID, trackID s
 		return p.addToPlaylistFn(playlistID, trackID)
 	}
 	return nil
+}
+
+func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
+	p := newMockPlayer()
+	m := newModel(p)
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := m.executeCommand("quality 64")
+	if cmd == nil {
+		t.Fatal("quality command returned nil cmd")
+	}
+	msg := cmd()
+	if p.bitrateKbps != 64 {
+		t.Fatalf("player bitrate = %d, want 64", p.bitrateKbps)
+	}
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
+		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
+	}
+}
+
+func TestExecuteCommandQualityRejectsLossless(t *testing.T) {
+	p := newMockPlayer()
+	m := newModel(p)
+	cmd := m.executeCommand("quality lossless")
+	if cmd != nil {
+		t.Fatal("lossless quality returned command")
+	}
+	if p.bitrateKbps != 0 {
+		t.Fatalf("player bitrate changed to %d", p.bitrateKbps)
+	}
+	if !strings.Contains(m.errMsg, "MusicKit JS/web playback max is 256 kbps AAC") {
+		t.Fatalf("errMsg = %q", m.errMsg)
+	}
+}
+
+func TestCommandSuggestionsIncludeQuality(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.cmdBuf = "qual"
+	got := m.commandSuggestions()
+	if len(got) == 0 || got[0].trigger != "quality" {
+		t.Fatalf("quality suggestions = %#v", got)
+	}
+	m.cmdBuf = "bit"
+	got = m.commandSuggestions()
+	if len(got) == 0 || got[0].trigger != "bitrate" {
+		t.Fatalf("bitrate suggestions = %#v", got)
+	}
 }

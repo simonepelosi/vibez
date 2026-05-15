@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	demodp "github.com/simone-vibes/vibez/internal/provider/demo"
@@ -41,6 +42,7 @@ func New() *Player {
 		Track:   &p.queue[0],
 		Playing: true,
 		Volume:  0.8,
+		Bitrate: audioquality.HighKbps,
 	}
 	go p.run()
 	return p
@@ -144,6 +146,18 @@ func (p *Player) Seek(pos time.Duration) error {
 	if p.state.Track != nil && pos <= p.state.Track.Duration {
 		p.state.Position = pos
 	}
+	st := p.state
+	p.mu.Unlock()
+	p.broadcast(st)
+	return nil
+}
+
+func (p *Player) SetAudioBitrate(kbps int) error {
+	if err := audioquality.Validate(kbps); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.state.Bitrate = kbps
 	st := p.state
 	p.mu.Unlock()
 	p.broadcast(st)

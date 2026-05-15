@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/player"
@@ -143,6 +144,7 @@ type errMsg struct{ err error }
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
+type saveAudioQualityMsg struct{ kbps int }
 type playlistCreatedMsg struct{ name string }
 type SessionExpiredMsg struct{}
 type SessionRestoredMsg struct{}
@@ -853,6 +855,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
 		}
 
+	case saveAudioQualityMsg:
+		if err := m.cfg.SetAudioBitrate(msg.kbps); err != nil {
+			m.appendLog(fmt.Sprintf("[quality] config error: %v", err))
+			break
+		}
+		if err := m.cfg.Save(""); err != nil {
+			m.appendLog(fmt.Sprintf("[quality] config save error: %v", err))
+			break
+		}
+		m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC", msg.kbps)
+		m.errExpiry = time.Now().Add(3 * time.Second)
+
 	case errMsg:
 		m.appendLog("[error] " + msg.err.Error())
 		m.errMsg = msg.err.Error()
@@ -1090,6 +1104,8 @@ var allCommands = []cmdEntry{
 	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
+	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
+	{"bitrate", "bitrate <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"mute", "mute", "Toggle mute"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
@@ -1194,6 +1210,31 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.preMuteVol = m.playerState.Volume
 		m.appendLog("[vol] muted")
 		return m.playerCmd(func() error { return m.player.SetVolume(0) })
+
+	case strings.HasPrefix(cmd, "quality") || strings.HasPrefix(cmd, "bitrate"):
+		name, arg, _ := strings.Cut(cmd, " ")
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			m.errMsg = ":" + name + " requires high, standard, 256, or 64"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		kbps, err := audioquality.Parse(arg)
+		if err != nil {
+			m.errMsg = err.Error()
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			return nil
+		}
+		m.appendLog(fmt.Sprintf("[quality] → %d kbps AAC", kbps))
+		return func() tea.Msg {
+			if m.player == nil {
+				return errMsg{fmt.Errorf("no player")}
+			}
+			if err := m.player.SetAudioBitrate(kbps); err != nil {
+				return errMsg{err}
+			}
+			return saveAudioQualityMsg{kbps: kbps}
+		}
 
 	case strings.HasPrefix(cmd, "vol"):
 		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "vol"))
@@ -2832,7 +2873,7 @@ func (m *Model) statusPlayContent(_ int) string {
 }
 
 // commandLines renders the command palette in the panel area when CMD mode is active.
-func (m *Model) commandLines(w, h int) []string {
+func (m *Model) commandLines(_ int, h int) []string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
 	header := accent.Render("Commands")

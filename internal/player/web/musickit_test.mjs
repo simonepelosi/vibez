@@ -389,5 +389,32 @@ test('vibezSetShuffle: setQueue resets shuffle snapshot', () => {
   _qUnshuffled = [];
   eq(_qUnshuffled.length, 0, 'shuffle snapshot cleared on setQueue');
 });
+
+// ─── audio bitrate ───────────────────────────────────────────────────────────
+const resolveAudioBitrate = (kbps, MusicKit) => {
+  const n = Number(kbps);
+  if (n === 64) return (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.STANDARD) || 64;
+  if (n === 256) return (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.HIGH) || 256;
+  throw new Error('MusicKit JS/web playback max is 256 kbps AAC; supported values are 64 and 256 kbps AAC');
+};
+
+console.log('\nresolveAudioBitrate()');
+test('64 uses STANDARD enum when present', () =>
+  eq(resolveAudioBitrate(64, { PlaybackBitrate: { STANDARD: 'standard' } }), 'standard'));
+test('256 uses HIGH enum when present', () =>
+  eq(resolveAudioBitrate(256, { PlaybackBitrate: { HIGH: 'high' } }), 'high'));
+test('64/256 fall back to numeric MusicKit values', () => {
+  eq(resolveAudioBitrate(64, {}), 64);
+  eq(resolveAudioBitrate(256, {}), 256);
+});
+test('lossless/unsupported values are rejected with web max', () => {
+  for (const input of ['lossless', 'hi-res', 320, 1411]) {
+    let ok = false;
+    try { resolveAudioBitrate(input, {}); }
+    catch (e) { ok = String(e.message).includes('MusicKit JS/web playback max is 256 kbps AAC'); }
+    if (!ok) throw new Error(`${input} was not rejected with MusicKit web max`);
+  }
+});
+
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

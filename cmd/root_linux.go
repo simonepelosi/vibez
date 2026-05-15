@@ -19,12 +19,12 @@ import (
 	"github.com/simone-vibes/vibez/internal/tui"
 )
 
-func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string)) error {
+func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	_, chromeErr := os.Stat(cdp.ChromePath())
 	cdpAvailable := chromeErr == nil || runtime.GOARCH == "amd64"
 
 	if cdpAvailable {
-		return runCDPFlow(cfg, opts, onUserToken, onStorefront, cdpPlatformHooks{
+		return runCDPFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps, cdpPlatformHooks{
 			initStatus: "Initializing vibez...",
 			afterReady: func(cdpPlayer *cdp.Player) {
 				if srv, mprisErr := mpris.NewServer(cdpPlayer); mprisErr == nil {
@@ -38,18 +38,18 @@ func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserTo
 			helperPaths: func() []string {
 				return []string{cdp.HelperPath(), cdp.ChromePath()}
 			},
-			backend: func() string {
-				return fmt.Sprintf("Chrome/CDP · provider: Apple Music · helper: %s", cdp.HelperPath())
+			backend: func(audioBitrateKbps int) string {
+				return fmt.Sprintf("Chrome/CDP · provider: Apple Music · %d kbps AAC · helper: %s", audioBitrateKbps, cdp.HelperPath())
 			},
 		})
 	}
-	return runWebKitFlow(cfg, iconPath, opts, onUserToken, onStorefront)
+	return runWebKitFlow(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
 }
 
 // runWebKitFlow is the legacy path: GTK must own the main OS thread so auth
 // and engine setup happen before the TUI, and BubbleTea runs in a goroutine.
-func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string)) error {
-	fmt.Fprintln(os.Stderr, "Engine: WebKit + GStreamer (30 s preview)")
+func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
+	fmt.Fprintln(os.Stderr, "Engine: WebKit + GStreamer (30 s preview, bitrate changes unsupported)")
 
 	if cfg.AppleUserToken != "" {
 		fmt.Fprintln(os.Stderr, "Checking Apple Music session...")
@@ -65,7 +65,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 		}
 	}
 
-	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront)
+	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, audioBitrateKbps)
 	if err != nil {
 		return fmt.Errorf("creating audio engine: %w", err)
 	}
@@ -94,7 +94,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 			}()
 		}
 
-		opts.Backend = "WebKit/GStreamer · 30s preview · provider: Apple Music"
+		opts.Backend = "WebKit/GStreamer · fixed 30s previews · bitrate changes unsupported · provider: Apple Music"
 		m := tui.New(cfg, prov, wkPlayer, opts)
 		p := tea.NewProgram(m)
 

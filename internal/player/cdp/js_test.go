@@ -238,3 +238,22 @@ func TestBuildSetPlaylistJS_GuardPrefix(t *testing.T) {
 		t.Errorf("guard prefix missing in: %s", expr)
 	}
 }
+
+func TestBuildSetAudioBitrateJS_Supported(t *testing.T) {
+	for _, kbps := range []int{64, 256} {
+		expr, err := buildSetAudioBitrateJS(kbps)
+		if err != nil {
+			t.Fatalf("buildSetAudioBitrateJS(%d): %v", kbps, err)
+		}
+		if !strings.Contains(expr, "vibezSetAudioBitrate") {
+			t.Fatalf("expression does not call bitrate setter: %s", expr)
+		}
+	}
+}
+
+func TestBuildSetAudioBitrateJS_Unsupported(t *testing.T) {
+	_, err := buildSetAudioBitrateJS(320)
+	if err == nil || !strings.Contains(err.Error(), "MusicKit JS/web playback max is 256 kbps AAC") {
+		t.Fatalf("buildSetAudioBitrateJS(320) error = %v", err)
+	}
+}

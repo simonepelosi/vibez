@@ -300,3 +300,50 @@ func TestSave_WithOverridePath(t *testing.T) {
 		t.Errorf("AuthPort = %d, want 1234", loaded.AuthPort)
 	}
 }
+
+func TestAudioQualityDefaultsHigh(t *testing.T) {
+	path := writeCfg(t, map[string]any{"storefront": "us"})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, err := cfg.AudioBitrateKbps()
+	if err != nil || got != 256 {
+		t.Fatalf("AudioBitrateKbps = %d, %v; want 256, nil", got, err)
+	}
+}
+
+func TestAudioQualityStandardRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := testConfigWithDefaults()
+	if err := cfg.SetAudioBitrate(64); err != nil {
+		t.Fatalf("SetAudioBitrate: %v", err)
+	}
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, err := loaded.AudioBitrateKbps()
+	if err != nil || got != 64 {
+		t.Fatalf("AudioBitrateKbps = %d, %v; want 64, nil", got, err)
+	}
+}
+
+func TestAudioQualityInvalidConfig(t *testing.T) {
+	path := writeCfg(t, map[string]any{"audio_quality": "lossless"})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = cfg.AudioBitrateKbps()
+	if err == nil || !strings.Contains(err.Error(), "MusicKit JS/web playback max is 256 kbps AAC") {
+		t.Fatalf("AudioBitrateKbps error = %v", err)
+	}
+}
+
+func testConfigWithDefaults() *config.Config {
+	return &config.Config{AuthPort: 7777, Provider: "apple", Theme: "default"}
+}

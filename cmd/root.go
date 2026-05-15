@@ -55,6 +55,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	audioBitrateKbps, err := cfg.AudioBitrateKbps()
+	if err != nil {
+		return err
+	}
+
 	opts := tui.Options{MemProfiling: memProfiling}
 
 	// Apply theme before creating any TUI model so all panels pick up the palette.
@@ -104,5 +109,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	return runPlatform(cfg, iconPath, opts, onUserToken, onStorefront)
+	return runPlatform(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
+
 }

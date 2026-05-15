@@ -53,6 +53,7 @@ type Player interface {
 	Previous() error
 	Seek(position time.Duration) error
 	SetVolume(v float64) error
+	SetAudioBitrate(kbps int) error
 	// SetQueue replaces the playback queue with the given catalog track IDs and
 	// starts playback from the first entry.
 	SetQueue(ids []string) error

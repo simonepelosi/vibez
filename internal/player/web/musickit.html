@@ -44,12 +44,18 @@
         try { music.isExplicitContentAllowed = true; } catch(_) {}
       }
 
-      // Request highest available streaming quality (256 kbps AAC — the ceiling
-      // for MusicKit JS on web). Falls back to the numeric value if the enum is
-      // not present in this build of MusicKit.
-      try {
-        music.bitrate = (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.HIGH) || 256;
-      } catch(_) {}
+      function resolveAudioBitrate(kbps) {
+        const n = Number(kbps);
+        if (n === 64) return (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.STANDARD) || 64;
+        if (n === 256) return (MusicKit.PlaybackBitrate && MusicKit.PlaybackBitrate.HIGH) || 256;
+        throw new Error('MusicKit JS/web playback max is 256 kbps AAC; supported values are 64 and 256 kbps AAC');
+      }
+
+      function applyAudioBitrate(kbps) {
+        music.bitrate = resolveAudioBitrate(kbps);
+      }
+
+      try { applyAudioBitrate({{.AudioBitrateKbps}}); } catch(e) { goError(e.message || String(e)).catch(() => {}); }
 
       const savedToken = '{{.UserToken}}';
       if (savedToken !== '') {
@@ -451,6 +457,11 @@
         const _repeatName = ['off', 'one', 'all'];
         window.vibezSeek      = (t) => { _log(`[js:seek] → ${t.toFixed(1)}s`); _m().seekToTime(t); };
         window.vibezSetVolume = (v) => { _log(`[js:volume] → ${Math.round(v*100)}%`); _m().volume = v; };
+        window.vibezSetAudioBitrate = (kbps) => {
+          applyAudioBitrate(kbps);
+          _log(`[js:bitrate] → ${Number(kbps)} kbps AAC`);
+          notifyState();
+        };
 
         // ── 10-band parametric equalizer (Web Audio API) ─────────────────────
         let _eqCtx    = null;
