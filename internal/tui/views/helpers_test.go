@@ -8,10 +8,11 @@ import (
 
 // mockProvider is a no-op provider for unit tests.
 type mockProvider struct {
-	searchResult  *provider.SearchResult
-	searchErr     error
-	libraryTracks []provider.Track
-	playlists     []provider.Playlist
+	searchResult   *provider.SearchResult
+	searchErr      error
+	libraryTracks  []provider.Track
+	playlists      []provider.Playlist
+	playlistTracks map[string][]provider.Track
 }
 
 func (m *mockProvider) Name() string { return "mock" }
@@ -34,8 +35,11 @@ func (m *mockProvider) GetLibraryPlaylists(_ context.Context) ([]provider.Playli
 	return m.playlists, nil
 }
 
-func (m *mockProvider) GetPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
-	return nil, nil
+func (m *mockProvider) GetPlaylistTracks(_ context.Context, id string) ([]provider.Track, error) {
+	if m.playlistTracks == nil {
+		return nil, nil
+	}
+	return m.playlistTracks[id], nil
 }
 
 func (m *mockProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
