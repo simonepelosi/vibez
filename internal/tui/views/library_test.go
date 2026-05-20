@@ -346,11 +346,25 @@ func TestLibrary_Update_DrillPane_Esc_ReturnsToList(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 20)
 	lib.pane = paneTracks
+	lib.tracksBackPane = paneItems
+	lib.drillPlaylist = provider.Playlist{ID: "pl1"}
+	lib.drillRequestGeneration = 3
+	lib.drillRequestKind = playlistRequestTracks
+	lib.drillLoading = true
 	lib.drillTracks = []provider.Track{{Title: "T1"}}
 
 	updated, _ := lib.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if updated.pane != paneItems {
 		t.Error("esc in drill pane should return to list pane")
+	}
+	if updated.drillPlaylist.ID != "" {
+		t.Errorf("drillPlaylist.ID = %q, want empty", updated.drillPlaylist.ID)
+	}
+	if updated.drillRequestGeneration != 4 {
+		t.Errorf("drillRequestGeneration = %d, want 4", updated.drillRequestGeneration)
+	}
+	if updated.drillLoading {
+		t.Error("drillLoading should be false after back")
 	}
 }
 
@@ -464,5 +478,28 @@ func TestLibrary_Update_DrillPane_BackKeys(t *testing.T) {
 		if updated.pane != paneItems {
 			t.Fatalf("%s pane = %v, want paneItems", key, updated.pane)
 		}
+	}
+}
+
+func TestLibrary_Update_PlaylistTracksMsg_StaleRequestIgnored(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillPlaylist = provider.Playlist{ID: "pl1", Name: "Playlist"}
+	lib.drillRequestGeneration = 2
+	lib.drillRequestKind = playlistRequestTracks
+	lib.drillLoading = true
+
+	updated, _ := lib.Update(playlistTracksMsg{
+		playlist:   provider.Playlist{ID: "pl1", Name: "Playlist"},
+		generation: 1,
+		kind:       playlistRequestTracks,
+		tracks:     []provider.Track{{Title: "Stale"}},
+	})
+	if len(updated.drillTracks) != 0 {
+		t.Fatalf("stale tracks accepted: %+v", updated.drillTracks)
+	}
+	if !updated.drillLoading {
+		t.Fatal("stale response should not clear current loading state")
 	}
 }

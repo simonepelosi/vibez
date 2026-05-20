@@ -150,6 +150,7 @@ func (m *LibraryModel) Back() bool {
 	} else {
 		m.pane = m.tracksBackPane
 	}
+
 	return true
 }
 
@@ -200,6 +201,7 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 	m.drillRequestKind = playlistRequestTracks
 	generation := m.drillRequestGeneration
 	kind := m.drillRequestKind
+
 	m.drillLoading = true
 	prov := m.provider
 	return func() tea.Msg {
@@ -207,6 +209,7 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 		defer cancel()
 		tracks, err := prov.GetPlaylistTracks(ctx, pl.ID)
 		return playlistTracksMsg{playlist: pl, generation: generation, kind: kind, tracks: tracks, err: err}
+
 	}
 }
 
@@ -239,6 +242,7 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		return m, nil
 	case playlistTracksMsg:
 		if m.pane != paneTracks || m.drillPlaylist.ID != msg.playlist.ID || m.drillRequestGeneration != msg.generation || m.drillRequestKind != msg.kind || msg.kind != playlistRequestTracks {
+
 			return m, nil
 		}
 		m.drillLoading = false
@@ -266,6 +270,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 			if item, ok := m.list.SelectedItem().(sectionItem); ok {
 				m.selectedSection = item.section
 				return m.openSelectedSection()
+
 			}
 			return m, nil
 		}

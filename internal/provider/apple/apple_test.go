@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -952,7 +954,7 @@ func TestGetPlaylistTracks_FavoritesUsesRatings(t *testing.T) {
 			if r.URL.Query().Get("ids") != "cat1,cat2" {
 				t.Errorf("ids query = %q", r.URL.Query().Get("ids"))
 			}
-			writeJSON(t, w, map[string]any{"data": []any{map[string]any{"id": "cat1", "attributes": map[string]any{"value": 1}}}})
+			writeJSON(t, w, map[string]any{"data": []any{map[string]any{"id": "r.cat1", "attributes": map[string]any{"value": 1}}}})
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -966,6 +968,54 @@ func TestGetPlaylistTracks_FavoritesUsesRatings(t *testing.T) {
 	}
 	if len(tracks) != 1 || tracks[0].Title != "Loved" {
 		t.Fatalf("favorites tracks = %+v", tracks)
+	}
+}
+
+func TestGetPlaylistTracks_FavoritesRatingsBatchesAreBoundedParallel(t *testing.T) {
+	librarySongs := make([]any, 250)
+	for i := range librarySongs {
+		catalogID := "cat" + strconv.Itoa(i)
+		librarySongs[i] = songJSONWithCatalog("i."+catalogID, catalogID, "Song "+catalogID, "A", "B", 1000, "")
+	}
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var ratingCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/library/songs":
+			writeJSON(t, w, map[string]any{"data": librarySongs, "next": ""})
+		case "/me/ratings/songs":
+			current := active.Add(1)
+			for {
+				maxSeen := maxActive.Load()
+				if current <= maxSeen || maxActive.CompareAndSwap(maxSeen, current) {
+					break
+				}
+			}
+			ratingCalls.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			active.Add(-1)
+			writeJSON(t, w, map[string]any{"data": []any{}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.GetPlaylistTracks(context.Background(), "vibez:favorites")
+	if err != nil {
+		t.Fatalf("GetPlaylistTracks(favorites): %v", err)
+	}
+	if ratingCalls.Load() != 3 {
+		t.Fatalf("ratingCalls = %d, want 3", ratingCalls.Load())
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("ratings were not fetched in parallel, maxActive = %d", maxActive.Load())
+	}
+	if maxActive.Load() > 5 {
+		t.Fatalf("ratings concurrency unbounded, maxActive = %d", maxActive.Load())
 	}
 }
 
