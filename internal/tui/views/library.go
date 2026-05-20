@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
@@ -19,7 +20,11 @@ const (
 	paneSections libraryPane = iota
 	paneItems
 	paneTracks
-	paneList = paneItems
+)
+
+const (
+	libraryLoadTimeout = 20 * time.Second
+	libraryTracksTTL   = 5 * time.Minute
 )
 
 type librarySection int
@@ -60,14 +65,15 @@ type LibraryModel struct {
 	list     list.Model
 	spinner  spinner.Model
 
-	pane            libraryPane
-	selectedSection librarySection
-	libraryTracks   []provider.Track
-	tracksLoaded    bool
-	playlists       []provider.Playlist
-	playlistsLoaded bool
-	albums          []trackGroup
-	artists         []trackGroup
+	pane              libraryPane
+	selectedSection   librarySection
+	libraryTracks     []provider.Track
+	tracksLoaded      bool
+	libraryTracksTime time.Time
+	playlists         []provider.Playlist
+	playlistsLoaded   bool
+	albums            []trackGroup
+	artists           []trackGroup
 
 	drillTitle     string
 	drillPlaylist  provider.Playlist
@@ -117,7 +123,9 @@ func (m *LibraryModel) loadLibraryTracks() tea.Cmd {
 	m.loading = true
 	prov := m.provider
 	return func() tea.Msg {
-		tracks, err := prov.GetLibraryTracks(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
+		defer cancel()
+		tracks, err := prov.GetLibraryTracks(ctx)
 		return libraryTracksLoadedMsg{tracks: tracks, err: err}
 	}
 }
@@ -126,7 +134,9 @@ func (m *LibraryModel) loadPlaylists() tea.Cmd {
 	m.loading = true
 	prov := m.provider
 	return func() tea.Msg {
-		playlists, err := prov.GetLibraryPlaylists(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
+		defer cancel()
+		playlists, err := prov.GetLibraryPlaylists(ctx)
 		return libraryLoadedMsg{playlists: playlists, err: err}
 	}
 }
@@ -135,7 +145,9 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 	m.drillLoading = true
 	prov := m.provider
 	return func() tea.Msg {
-		tracks, err := prov.GetPlaylistTracks(context.Background(), pl.ID)
+		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
+		defer cancel()
+		tracks, err := prov.GetPlaylistTracks(ctx, pl.ID)
 		return playlistTracksMsg{playlist: pl, tracks: tracks, err: err}
 	}
 }
@@ -148,6 +160,7 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		if msg.err == nil {
 			m.libraryTracks = append([]provider.Track{}, msg.tracks...)
 			m.tracksLoaded = true
+			m.libraryTracksTime = time.Now()
 			m.routeLoadedLibraryTracks()
 		}
 		return m, nil
@@ -203,7 +216,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "backspace":
 			if m.tracksBackPane == paneSections && m.drillTitle == "" {
-				m.pane = paneList
+				m.pane = paneItems
 			} else {
 				m.pane = m.tracksBackPane
 			}
@@ -228,7 +241,7 @@ func (m *LibraryModel) updateActiveList(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 func (m *LibraryModel) openSelectedSection() (*LibraryModel, tea.Cmd) {
 	switch m.selectedSection {
 	case sectionSongs, sectionAlbums, sectionArtists:
-		if !m.tracksLoaded {
+		if !m.tracksLoaded || m.libraryTracksExpired(time.Now()) {
 			m.loading = true
 			return m, tea.Batch(m.spinner.Tick, m.loadLibraryTracks())
 		}
@@ -242,8 +255,21 @@ func (m *LibraryModel) openSelectedSection() (*LibraryModel, tea.Cmd) {
 		m.showPlaylists()
 		return m, nil
 	default:
-		panic("unknown library section")
+		m.loadErr = fmt.Errorf("unknown library section: %d", m.selectedSection)
+		m.pane = paneSections
+		m.showSections()
+		return m, nil
 	}
+}
+
+func (m *LibraryModel) libraryTracksExpired(now time.Time) bool {
+	if !m.tracksLoaded {
+		return true
+	}
+	if m.libraryTracksTime.IsZero() {
+		return true
+	}
+	return now.Sub(m.libraryTracksTime) >= libraryTracksTTL
 }
 
 func (m *LibraryModel) routeLoadedLibraryTracks() {
@@ -259,7 +285,9 @@ func (m *LibraryModel) routeLoadedLibraryTracks() {
 	case sectionPlaylists:
 		m.showPlaylists()
 	default:
-		panic("unknown library section")
+		m.loadErr = fmt.Errorf("unknown library section: %d", m.selectedSection)
+		m.pane = paneSections
+		m.showSections()
 	}
 }
 
@@ -424,7 +452,7 @@ func sectionTitle(section librarySection) string {
 	case sectionPlaylists:
 		return "Playlists"
 	default:
-		panic("unknown library section")
+		return "Library"
 	}
 }
 

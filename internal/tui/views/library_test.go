@@ -301,8 +301,57 @@ func TestLibrary_Update_DrillPane_Esc_ReturnsToList(t *testing.T) {
 	lib.drillTracks = []provider.Track{{Title: "T1"}}
 
 	updated, _ := lib.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	if updated.pane != paneList {
+	if updated.pane != paneItems {
 		t.Error("esc in drill pane should return to list pane")
+	}
+}
+
+func TestLibrary_LoadCommandsUseTimeoutContexts(t *testing.T) {
+	prov := &mockProvider{}
+	lib := NewLibrary(prov)
+
+	lib.loadLibraryTracks()()
+	if _, ok := prov.libraryTrackCtx.Deadline(); !ok {
+		t.Fatal("GetLibraryTracks context missing deadline")
+	}
+
+	lib.loadPlaylists()()
+	if _, ok := prov.playlistCtx.Deadline(); !ok {
+		t.Fatal("GetLibraryPlaylists context missing deadline")
+	}
+
+	lib.loadPlaylistTracks(provider.Playlist{ID: "p1"})()
+	if _, ok := prov.playlistTrackCtx.Deadline(); !ok {
+		t.Fatal("GetPlaylistTracks context missing deadline")
+	}
+}
+
+func TestLibrary_OpenSelectedSectionRefreshesExpiredTracks(t *testing.T) {
+	prov := &mockProvider{libraryTracks: []provider.Track{{ID: "i.1", Title: "One"}}}
+	lib := NewLibrary(prov)
+	lib.selectedSection = sectionSongs
+	lib.tracksLoaded = true
+	lib.libraryTracksTime = time.Now().Add(-libraryTracksTTL)
+
+	_, cmd := lib.openSelectedSection()
+	if cmd == nil {
+		t.Fatal("expired library tracks should trigger reload")
+	}
+}
+
+func TestLibrary_UnknownSectionDoesNotPanic(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.selectedSection = librarySection(99)
+
+	updated, cmd := lib.openSelectedSection()
+	if cmd != nil {
+		t.Fatal("unknown section should not return load command")
+	}
+	if updated.LoadErr() == nil {
+		t.Fatal("unknown section should record load error")
+	}
+	if got := sectionTitle(librarySection(99)); got != "Library" {
+		t.Fatalf("sectionTitle(unknown) = %q, want Library", got)
 	}
 }
 

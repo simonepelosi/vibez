@@ -8,11 +8,17 @@ import (
 
 // mockProvider is a no-op provider for unit tests.
 type mockProvider struct {
-	searchResult   *provider.SearchResult
-	searchErr      error
-	libraryTracks  []provider.Track
-	playlists      []provider.Playlist
-	playlistTracks map[string][]provider.Track
+	searchResult       *provider.SearchResult
+	searchErr          error
+	libraryTracks      []provider.Track
+	playlists          []provider.Playlist
+	playlistTracks     map[string][]provider.Track
+	libraryTrackCalls  int
+	libraryTrackCtx    context.Context
+	playlistCalls      int
+	playlistCtx        context.Context
+	playlistTrackCalls int
+	playlistTrackCtx   context.Context
 }
 
 func (m *mockProvider) Name() string { return "mock" }
@@ -27,15 +33,21 @@ func (m *mockProvider) Search(_ context.Context, _ string) (*provider.SearchResu
 	return &provider.SearchResult{}, nil
 }
 
-func (m *mockProvider) GetLibraryTracks(_ context.Context) ([]provider.Track, error) {
+func (m *mockProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track, error) {
+	m.libraryTrackCalls++
+	m.libraryTrackCtx = ctx
 	return m.libraryTracks, nil
 }
 
-func (m *mockProvider) GetLibraryPlaylists(_ context.Context) ([]provider.Playlist, error) {
+func (m *mockProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Playlist, error) {
+	m.playlistCalls++
+	m.playlistCtx = ctx
 	return m.playlists, nil
 }
 
-func (m *mockProvider) GetPlaylistTracks(_ context.Context, id string) ([]provider.Track, error) {
+func (m *mockProvider) GetPlaylistTracks(ctx context.Context, id string) ([]provider.Track, error) {
+	m.playlistTrackCalls++
+	m.playlistTrackCtx = ctx
 	if m.playlistTracks == nil {
 		return nil, nil
 	}
