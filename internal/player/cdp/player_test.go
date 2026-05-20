@@ -21,6 +21,9 @@ func TestLaunchArgs_WSL(t *testing.T) {
 	if slices.Contains(args, "--single-process") {
 		t.Fatal("--single-process must not be present")
 	}
+	if slices.Contains(args, "--ignore-certificate-errors") {
+		t.Fatal("--ignore-certificate-errors must not be present")
+	}
 }
 
 func TestLaunchArgs_NonWSL(t *testing.T) {

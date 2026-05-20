@@ -9,9 +9,15 @@ running in a headless Chromium instance (CDP), and renders a TUI with Bubbletea 
 # Required system libs (Ubuntu/Debian)
 sudo apt-get install -y libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-# Always set PKG_CONFIG_PATH when building or testing
+# Always set PKG_CONFIG_PATH when building or testing on Linux
 PKG_CONFIG_PATH=$PWD/pkg-config go build ./...
 PKG_CONFIG_PATH=$PWD/pkg-config go test ./...
+
+# Linux demo
+PKG_CONFIG_PATH=$PWD/pkg-config go run . --demo
+
+# macOS demo
+go run . --demo
 ```
 
 ## Architecture

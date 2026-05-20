@@ -1,6 +1,6 @@
 # Contributing to vibez
 
-Thanks for your interest in contributing! vibez is a TUI Apple Music player for Linux.  
+Thanks for your interest in contributing! vibez is a TUI Apple Music player for Linux and macOS.
 This guide will help you set up a productive development environment.
 
 ---
@@ -17,8 +17,8 @@ vibez/
 │   ├── player/
 │   │   ├── cdp/    # Chrome DevTools Protocol player (Playwright + Widevine)
 │   │   ├── demo/   # In-memory fake player — no credentials required
-│   │   └── webkit/ # WebKit + GStreamer fallback (30-s previews)
-│   ├── player/mpris/ # MPRIS D-Bus server
+│   │   └── webkit/ # WebKit + GStreamer fallback (30-s previews, Linux)
+│   ├── player/mpris/ # Linux MPRIS D-Bus server
 │   ├── provider/
 │   │   ├── apple/  # Apple Music REST API provider
 │   │   └── demo/   # In-memory fake provider — no credentials required
@@ -31,7 +31,7 @@ vibez/
 
 ## Running without Apple credentials (demo mode)
 
-You **do not need** an Apple Developer account or Apple Music subscription to work on the UI.  
+You **do not need** an Apple Developer account or Apple Music subscription to work on the UI.
 The `--demo` flag loads a built-in fake player and provider with ten realistic tracks:
 
 ```sh
@@ -42,6 +42,16 @@ All TUI interactions — search, queue, playback, keyboard shortcuts — work ex
 The fake player advances the progress bar in real time and auto-advances to the next track.
 
 ---
+
+## macOS setup
+
+Install Google Chrome before testing Apple Music playback on macOS:
+
+```sh
+brew install --cask google-chrome
+```
+
+Demo mode does not require Chrome, Apple credentials, or network access.
 
 ## Full development setup (Apple credentials required)
 
@@ -66,7 +76,8 @@ The token is written to `~/.config/vibez/config.json`.
 go run .
 ```
 
-Chrome (~150 MB, Widevine-enabled) is downloaded on first launch to `~/.cache/vibez/playwright`.  
+On Linux, Chrome (~150 MB, Widevine-enabled) is downloaded on first launch to `~/.cache/vibez/chrome`, and the Playwright driver is stored in `~/.cache/vibez/driver`.
+On macOS, vibez uses the installed Google Chrome app.
 Your Apple ID is authorised in a popup browser window; the user token is cached in the config file.
 
 ---
@@ -78,7 +89,7 @@ Your Apple ID is authorised in a popup browser window; the user token is cached 
 make build
 
 # Build with your own token baked in (for local testing)
-APPLE_DEVELOPER_TOKEN=... make build-with-token
+APPLE_KEY_ID=... APPLE_TEAM_ID=... APPLE_PRIVATE_KEY="$(cat AuthKey.p8)" make build-with-token
 ```
 
 ---

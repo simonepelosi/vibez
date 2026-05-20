@@ -6,7 +6,7 @@ before:
     - go install mvdan.cc/garble@v0.16.0
 
 builds:
-  - id: vibez
+  - id: vibez-linux
     binary: vibez
     gobinary: ./scripts/garble-go
     ldflags:
@@ -22,8 +22,27 @@ builds:
     goarch:
       - amd64
 
+  - id: vibez-darwin
+    binary: vibez
+    gobinary: ./scripts/garble-go
+    ldflags:
+      - -s -w
+      - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
+    env:
+      - CGO_ENABLED=0
+      - GOTOOLCHAIN=local
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: vibez
+    ids:
+      - vibez-linux
+      - vibez-darwin
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz

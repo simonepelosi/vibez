@@ -294,7 +294,7 @@ func parseVersion(v string) [3]int {
 }
 
 func cacheDir() string {
-	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
+	if d, err := os.UserCacheDir(); err == nil && d != "" {
 		return filepath.Join(d, "vibez")
 	}
 	home, _ := os.UserHomeDir()

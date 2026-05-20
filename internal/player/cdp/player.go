@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package cdp
 
@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +21,9 @@ import (
 )
 
 // Player drives Apple Music playback through a Playwright-managed Chrome
-// browser stored in vibez's private cache. Chrome's built-in Widevine CDM
-// enables full-track DRM playback. Audio goes directly to PulseAudio/PipeWire
-// via Chrome — GStreamer is not used.
+// browser. Linux uses vibez's cached Chrome binary; macOS uses the installed
+// Google Chrome app. Chrome's built-in Widevine CDM enables full-track DRM
+// playback, and GStreamer is not used in this path.
 //
 // The absence of the goStreamURL binding tells musickit.html to use Chrome's
 // native m.play()/m.setQueue() Widevine path instead of GStreamer previews.
@@ -87,22 +86,17 @@ func New(devToken, userToken, storefront string, wsl bool) (*Player, error) {
 	if _, err := os.Stat(chromePath); err != nil {
 		chromePath = ChromePath() // fall back if link not yet created
 	}
-	// Widevine CDM is bundled inside Chrome at this well-known relative path.
-	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
-
 	// Playwright injects --mute-audio into every headless Chromium launch.
 	// We must strip it so Chrome's audio service can route through
 	// PulseAudio/PipeWire normally. Use headless when we have a saved token
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
-	args := launchArgs(widevinePath, wsl)
-
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
 		IgnoreDefaultArgs: []string{"--mute-audio"},
-		Args:              args,
+		Args:              chromeLaunchArgs(wsl),
 	})
 	if err != nil {
 		_ = pw.Stop()
@@ -242,58 +236,6 @@ func New(devToken, userToken, storefront string, wsl bool) (*Player, error) {
 	}()
 
 	return p, nil
-}
-
-func launchArgs(widevinePath string, wsl bool) []string {
-	disableFeatures := "HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater"
-	if wsl {
-		// WSL2: disable out-of-process audio service to avoid distortion when
-		// PulseAudio and Windows run at different sample rates (44100 vs 48000).
-		disableFeatures += ",AudioServiceOutOfProcess"
-	}
-
-	args := []string{
-		// Sandbox requires suid/namespace support unavailable from a non-system path.
-		"--no-sandbox",
-		"--disable-setuid-sandbox",
-		// --no-zygote removes the Linux process-spawning shim; safe when sandbox
-		// is already disabled and cuts one helper process.
-		"--no-zygote",
-		"--autoplay-policy=no-user-gesture-required",
-		"--enable-features=MediaCapabilities,WidevineCdm",
-		"--disable-blink-features=AutomationControlled",
-		"--widevine-path=" + widevinePath,
-		// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
-		// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
-		// visible to the desktop environment.
-		// Also disable the certificate-verifier component updater: when
-		// Chrome swaps it mid-session it raises ERR_CERT_VERIFIER_CHANGED
-		// which breaks all TLS connections including the MusicKit.js CDN load.
-		"--disable-features=" + disableFeatures,
-		"--disable-component-update",
-		"--ignore-certificate-errors",
-		// Memory footprint reduction:
-		// Removes the GPU compositor process (~100–200 MB) — not needed for
-		// audio-only headless playback; Widevine CDM runs in a utility process
-		// and does not require GPU acceleration for audio DRM.
-		"--disable-gpu",
-		// Use /tmp for shared-memory segments instead of /dev/shm to avoid
-		// exhausting the (often small) tmpfs mounted there.
-		"--disable-dev-shm-usage",
-		// Cap the V8 JavaScript heap at 256 MB. MusicKit.js runs comfortably
-		// within this limit; without it Chrome can balloon to 500 MB+.
-		"--js-flags=--max-old-space-size=256",
-		// Disable background network activity (prefetch, DNS pre-resolve,
-		// speculative connections). Not needed for a single-page music player.
-		"--disable-background-networking",
-	}
-
-	if wsl {
-		// WSL2/PulseAudio: increase audio buffering to absorb Hyper-V scheduler jitter.
-		args = append(args, "--audio-buffer-size=4096")
-	}
-
-	return args
 }
 
 func (p *Player) sendError(err error) {
