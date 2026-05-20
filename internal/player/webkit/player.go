@@ -231,7 +231,7 @@ func (p *Player) SetAudioBitrate(kbps int) error {
 	if err := audioquality.Validate(kbps); err != nil {
 		return err
 	}
-	return fmt.Errorf("WebKit/GStreamer uses fixed 30 s preview URLs and cannot change bitrate; MusicKit JS/web playback max is 256 kbps AAC")
+	return player.ErrAudioBitrateRequiresRestart
 }
 
 func (p *Player) SetQueue(ids []string) error {

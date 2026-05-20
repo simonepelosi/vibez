@@ -1,6 +1,7 @@
 package player
 
 import (
+	"errors"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -12,6 +13,8 @@ const (
 	RepeatModeOne = 1 // repeat current track
 	RepeatModeAll = 2 // repeat entire queue
 )
+
+var ErrAudioBitrateRequiresRestart = errors.New("audio bitrate change requires restarting the audio engine")
 
 // EQBand describes a single parametric equalizer band.
 // Gain is in dB (-12.0 to +12.0). Frequency is in Hz. Q is the quality factor.

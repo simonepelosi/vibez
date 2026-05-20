@@ -376,7 +376,7 @@ func TestTogglePlayPause_PlayerError(t *testing.T) {
 
 func TestPlayerCmd_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	cmd := m.playerCmd(func() error { return nil })
+	cmd := m.playerCmd(func(player.Player) error { return nil })
 	msg := cmd()
 	if _, ok := msg.(errMsg); !ok {
 		t.Errorf("playerCmd with nil player should return errMsg, got %T", msg)
@@ -386,7 +386,7 @@ func TestPlayerCmd_NilPlayer(t *testing.T) {
 func TestPlayerCmd_Next(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.playerCmd(func() error { return mp.Next() })
+	cmd := m.playerCmd(func(p player.Player) error { return p.Next() })
 	msg := cmd()
 	if msg != nil {
 		t.Errorf("playerCmd success should return nil msg, got %v", msg)
@@ -399,10 +399,24 @@ func TestPlayerCmd_Next(t *testing.T) {
 func TestPlayerCmd_Previous(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.playerCmd(func() error { return mp.Previous() })
+	cmd := m.playerCmd(func(p player.Player) error { return p.Previous() })
 	cmd()
 	if !mp.prevCalled {
 		t.Error("Previous() should have been called")
+	}
+}
+
+func TestPlayerCmdUsesCapturedPlayer(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	cmd := m.playerCmd(func(p player.Player) error { return p.Next() })
+	m.player = nil
+	msg := cmd()
+	if msg != nil {
+		t.Fatalf("playerCmd with captured player returned %v", msg)
+	}
+	if !mp.nextCalled {
+		t.Fatal("captured player Next() was not called")
 	}
 }
 
@@ -2735,6 +2749,27 @@ func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
 	m = updated.(*Model)
 	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
 		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
+	}
+}
+
+func TestExecuteCommandQualityPersistsWhenPlayerRequiresRestart(t *testing.T) {
+	p := newMockPlayer()
+	p.err = player.ErrAudioBitrateRequiresRestart
+	m := newModel(p)
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := m.executeCommand("quality 64")
+	if cmd == nil {
+		t.Fatal("quality command returned nil cmd")
+	}
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
+		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
+	}
+	if !strings.Contains(m.errMsg, "restart audio engine to apply") {
+		t.Fatalf("errMsg = %q", m.errMsg)
 	}
 }
 
