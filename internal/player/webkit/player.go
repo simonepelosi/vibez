@@ -231,7 +231,7 @@ func (p *Player) SetAudioBitrate(kbps int) error {
 	if err := audioquality.Validate(kbps); err != nil {
 		return err
 	}
-	return player.ErrAudioBitrateRequiresRestart
+	return player.ErrAudioBitrateSavedPreferenceOnly
 }
 
 func (p *Player) SetQueue(ids []string) error {

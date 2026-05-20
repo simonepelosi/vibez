@@ -146,8 +146,8 @@ type errMsg struct{ err error }
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
 type saveAudioQualityMsg struct {
-	kbps            int
-	requiresRestart bool
+	kbps      int
+	savedOnly bool
 }
 type playlistCreatedMsg struct{ name string }
 type SessionExpiredMsg struct{}
@@ -868,8 +868,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[quality] config save error: %v", err))
 			break
 		}
-		if msg.requiresRestart {
-			m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC (restart audio engine to apply)", msg.kbps)
+		if msg.savedOnly {
+			m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC (used next launch; current backend cannot switch live)", msg.kbps)
 		} else {
 			m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC", msg.kbps)
 		}
@@ -1239,8 +1239,8 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 				return errMsg{fmt.Errorf("no player")}
 			}
 			if err := p.SetAudioBitrate(kbps); err != nil {
-				if errors.Is(err, player.ErrAudioBitrateRequiresRestart) {
-					return saveAudioQualityMsg{kbps: kbps, requiresRestart: true}
+				if errors.Is(err, player.ErrAudioBitrateSavedPreferenceOnly) {
+					return saveAudioQualityMsg{kbps: kbps, savedOnly: true}
 				}
 				return errMsg{err}
 			}

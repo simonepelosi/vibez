@@ -14,7 +14,7 @@ const (
 	RepeatModeAll = 2 // repeat entire queue
 )
 
-var ErrAudioBitrateRequiresRestart = errors.New("audio bitrate change requires restarting the audio engine")
+var ErrAudioBitrateSavedPreferenceOnly = errors.New("audio bitrate saved as preference; backend cannot change bitrate at runtime")
 
 // EQBand describes a single parametric equalizer band.
 // Gain is in dB (-12.0 to +12.0). Frequency is in Hz. Q is the quality factor.

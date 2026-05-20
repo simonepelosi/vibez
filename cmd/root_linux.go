@@ -94,6 +94,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 			}()
 		}
 
+		opts.IconPath = iconPath
 		opts.Backend = "WebKit/GStreamer · fixed 30s previews · bitrate changes unsupported · provider: Apple Music"
 		m := tui.New(cfg, prov, wkPlayer, opts)
 		p := tea.NewProgram(m)

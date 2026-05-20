@@ -2752,9 +2752,9 @@ func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
 	}
 }
 
-func TestExecuteCommandQualityPersistsWhenPlayerRequiresRestart(t *testing.T) {
+func TestExecuteCommandQualityPersistsWhenBackendCannotSwitchLive(t *testing.T) {
 	p := newMockPlayer()
-	p.err = player.ErrAudioBitrateRequiresRestart
+	p.err = player.ErrAudioBitrateSavedPreferenceOnly
 	m := newModel(p)
 	t.Setenv("HOME", t.TempDir())
 
@@ -2768,7 +2768,7 @@ func TestExecuteCommandQualityPersistsWhenPlayerRequiresRestart(t *testing.T) {
 	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
 		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
 	}
-	if !strings.Contains(m.errMsg, "restart audio engine to apply") {
+	if !strings.Contains(m.errMsg, "used next launch; current backend cannot switch live") {
 		t.Fatalf("errMsg = %q", m.errMsg)
 	}
 }
