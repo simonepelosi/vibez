@@ -905,12 +905,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	default:
-		// Forward library background loads
+		// Forward library background loads.
+		prevDrillErr := m.library.m.DrillErr()
+		prevLoadErr := m.library.m.LoadErr()
 		updated, libCmd := m.library.m.Update(msg)
-		if err := updated.DrillErr(); err != nil && m.library.m.DrillErr() == nil {
+		if err := updated.DrillErr(); err != nil && prevDrillErr == nil {
 			m.appendLog("[library] playlist tracks error: " + err.Error())
 		}
-		if err := updated.LoadErr(); err != nil && m.library.m.LoadErr() == nil {
+		if err := updated.LoadErr(); err != nil && prevLoadErr == nil {
 			m.appendLog("[library] load error: " + err.Error())
 		}
 		m.library.m = updated

@@ -277,6 +277,8 @@ func TestLibrary_Update_PlaylistTracksMsg_Success(t *testing.T) {
 	lib.SetSize(80, 20)
 	pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
 	tracks := []provider.Track{{Title: "Song", Artist: "Artist"}}
+	lib.pane = paneTracks
+	lib.drillPlaylist = pl
 	updated, _ := lib.Update(playlistTracksMsg{playlist: pl, tracks: tracks})
 	if len(updated.drillTracks) != 1 {
 		t.Errorf("drillTracks after playlistTracksMsg = %d, want 1", len(updated.drillTracks))
@@ -286,9 +288,34 @@ func TestLibrary_Update_PlaylistTracksMsg_Success(t *testing.T) {
 func TestLibrary_Update_PlaylistTracksMsg_Error(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 20)
-	updated, _ := lib.Update(playlistTracksMsg{err: errors.New("load error")})
+	pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
+	lib.pane = paneTracks
+	lib.drillPlaylist = pl
+	lib.drillLoading = true
+	updated, _ := lib.Update(playlistTracksMsg{playlist: pl, err: errors.New("load error")})
 	if updated.drillLoading {
 		t.Error("drillLoading should be false after error")
+	}
+}
+
+func TestLibrary_Update_PlaylistTracksMsg_DropsStaleResponse(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
+	tracks := []provider.Track{{Title: "Song", Artist: "Artist"}}
+	lib.pane = paneItems
+	lib.drillPlaylist = pl
+	lib.drillLoading = true
+
+	updated, _ := lib.Update(playlistTracksMsg{playlist: pl, tracks: tracks})
+	if updated.pane != paneItems {
+		t.Fatalf("stale playlist response changed pane = %d, want %d", updated.pane, paneItems)
+	}
+	if len(updated.drillTracks) != 0 {
+		t.Fatalf("stale playlist response set %d drill tracks, want 0", len(updated.drillTracks))
+	}
+	if !updated.drillLoading {
+		t.Fatal("stale playlist response should not clear current drill loading state")
 	}
 }
 

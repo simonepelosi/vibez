@@ -174,9 +174,11 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		}
 		return m, nil
 	case playlistTracksMsg:
+		if m.pane != paneTracks || m.drillPlaylist.ID != msg.playlist.ID {
+			return m, nil
+		}
 		m.drillLoading = false
 		m.drillErr = msg.err
-		m.drillPlaylist = msg.playlist
 		if msg.err == nil {
 			m.showTrackPane(msg.playlist.Name, msg.tracks, paneItems)
 		}
