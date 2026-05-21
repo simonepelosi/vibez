@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between MusicKit's supported AAC streaming tiers. Unsupported values such as
   lossless, Hi-Res, 320 kbps, or ALAC are rejected with a clear message because
   MusicKit JS/web playback only exposes 64 kbps and 256 kbps AAC.
+- **Library sections** — the library panel now opens to Songs, Albums, Artists,
+  and Playlists. Songs play directly from the selected track onward, Albums and
+  Artists are grouped from saved library songs, and Playlists keep the existing
+  playlist drill-down and playback flow.
 
 - **10-band parametric equalizer** — press `e` to open the equalizer panel. Each of the 10
   ISO bands (32 Hz, 64 Hz, 125 Hz, 250 Hz, 500 Hz, 1 kHz, 2 kHz, 4 kHz, 8 kHz, 16 kHz)
