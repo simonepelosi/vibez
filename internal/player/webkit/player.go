@@ -23,6 +23,7 @@ import (
 
 	webview "github.com/webview/webview_go"
 
+	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/gst"
 	"github.com/simone-vibes/vibez/internal/player/web"
@@ -69,8 +70,8 @@ type Player struct {
 
 // New creates a Player and loads MusicKit JS into a fully hidden WebView.
 // Call Run() on the main OS goroutine to start the GTK event loop.
-func New(devToken, userToken, storefront string) (*Player, error) {
-	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
+func New(devToken, userToken, storefront string, audioBitrateKbps int) (*Player, error) {
+	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps)
 	if err != nil {
 		return nil, err
 	}
@@ -224,6 +225,13 @@ func (p *Player) Seek(position time.Duration) error {
 func (p *Player) SetVolume(v float64) error {
 	p.gst.SetVolume(v)
 	return nil
+}
+
+func (p *Player) SetAudioBitrate(kbps int) error {
+	if err := audioquality.Validate(kbps); err != nil {
+		return err
+	}
+	return player.ErrAudioBitrateSavedPreferenceOnly
 }
 
 func (p *Player) SetQueue(ids []string) error {

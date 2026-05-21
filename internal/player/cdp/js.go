@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/player"
 )
 
@@ -42,6 +43,13 @@ func buildAppendQueueJS(ids []string) (string, error) {
 		return "", fmt.Errorf("cdp: marshal append json string: %w", err)
 	}
 	return fmt.Sprintf(`window.vibezAppendQueue && window.vibezAppendQueue(%s)`, js), nil
+}
+
+func buildSetAudioBitrateJS(kbps int) (string, error) {
+	if err := audioquality.Validate(kbps); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`window.vibezSetAudioBitrate && window.vibezSetAudioBitrate(%d)`, kbps), nil
 }
 
 func buildSetEqualizerJS(bands []player.EQBand) (string, error) {

@@ -1,6 +1,7 @@
 package player
 
 import (
+	"errors"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -12,6 +13,8 @@ const (
 	RepeatModeOne = 1 // repeat current track
 	RepeatModeAll = 2 // repeat entire queue
 )
+
+var ErrAudioBitrateSavedPreferenceOnly = errors.New("audio bitrate saved as preference; backend cannot change bitrate at runtime")
 
 // EQBand describes a single parametric equalizer band.
 // Gain is in dB (-12.0 to +12.0). Frequency is in Hz. Q is the quality factor.
@@ -53,6 +56,7 @@ type Player interface {
 	Previous() error
 	Seek(position time.Duration) error
 	SetVolume(v float64) error
+	SetAudioBitrate(kbps int) error
 	// SetQueue replaces the playback queue with the given catalog track IDs and
 	// starts playback from the first entry.
 	SetQueue(ids []string) error

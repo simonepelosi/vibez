@@ -25,10 +25,10 @@ type cdpPlatformHooks struct {
 	initStatus  string
 	afterReady  func(*cdp.Player)
 	helperPaths func() []string
-	backend     func() string
+	backend     func(audioBitrateKbps int) string
 }
 
-func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), hooks cdpPlatformHooks) error {
+func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int, hooks cdpPlatformHooks) error {
 	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *cdp.Player, 1)
 	runDone := make(chan struct{})
@@ -73,7 +73,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 		}
 
 		prog.Send(tui.InitStatusMsg("Starting audio engine..."))
-		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, cfg.WSL)
+		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, cfg.WSL, audioBitrateKbps)
 		if err != nil {
 			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("audio engine: %w", err)})
 			return
@@ -119,7 +119,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 			Player:      cdpPlayer,
 			Provider:    apple.New(cfg),
 			HelperPaths: hooks.helperPaths(),
-			Backend:     hooks.backend(),
+			Backend:     hooks.backend(audioBitrateKbps),
 		})
 	}()
 

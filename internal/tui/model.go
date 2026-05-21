@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"slices"
@@ -11,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/player"
@@ -143,6 +145,10 @@ type errMsg struct{ err error }
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
+type saveAudioQualityMsg struct {
+	kbps      int
+	savedOnly bool
+}
 type playlistCreatedMsg struct{ name string }
 type SessionExpiredMsg struct{}
 type SessionRestoredMsg struct{}
@@ -439,7 +445,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.appendLog(fmt.Sprintf("[skip] restricted: %s", title))
 				if m.player != nil {
-					cmds = append(cmds, m.playerCmd(func() error { return m.player.Next() }))
+					cmds = append(cmds, m.playerCmd(func(p player.Player) error { return p.Next() }))
 				}
 			} else {
 				m.appendLog("[error] " + s.Error)
@@ -597,13 +603,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queueIDs = ids
 			m.queue.SetTracks(m.queueTracks)
 			m.appendLog(fmt.Sprintf("[feed] playing %q (%d tracks)", msg.item.Title, len(ids)))
-			return m, m.playerCmd(func() error { return m.player.SetQueue(ids) })
+			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
 		m.appendLog(fmt.Sprintf("[feed] queued %q (%d tracks)", msg.item.Title, len(ids)))
-		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
+		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(ids) })
 
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
@@ -768,13 +774,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerState.Loading = true
 			m.playerState.Playing = false
 			m.playerState.Position = 0
-			return m, m.playerCmd(func() error { return m.player.SetQueue(ids) })
+			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
 		m.appendLog(fmt.Sprintf("[search] queued %q (%d tracks)", msg.label, len(ids)))
-		return m, m.playerCmd(func() error { return m.player.AppendQueue(ids) })
+		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(ids) })
 
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
@@ -790,11 +796,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.queueIDs = msg.IDs
 		m.queue.SetTracks(m.queueTracks)
-		cmds = append(cmds, m.playerCmd(func() error {
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
 			if msg.PlaylistID != "" {
-				return m.player.SetPlaylist(msg.PlaylistID, msg.StartIdx)
+				return p.SetPlaylist(msg.PlaylistID, msg.StartIdx)
 			}
-			return m.player.SetQueue(msg.IDs)
+			return p.SetQueue(msg.IDs)
 		}))
 		m.mode = modeNormal
 		m.activePanel = -1
@@ -819,15 +825,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
 		if m.cfg.Volume != nil {
 			v := m.cfg.VolumeOrDefault()
-			cmds = append(cmds, m.playerCmd(func() error {
-				return m.player.SetVolume(v)
+			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+				return p.SetVolume(v)
 			}))
 			m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
 		}
 		if len(m.cfg.EQBands) > 0 {
 			bands := configEQBandsToPlayer(m.cfg.EQBands)
-			cmds = append(cmds, m.playerCmd(func() error {
-				return m.player.SetEqualizer(bands)
+			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+				return p.SetEqualizer(bands)
 			}))
 			m.appendLog("[eq] restored from config")
 		}
@@ -852,6 +858,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := m.cfg.Save(""); err != nil {
 			m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
 		}
+
+	case saveAudioQualityMsg:
+		if err := m.cfg.SetAudioBitrate(msg.kbps); err != nil {
+			m.appendLog(fmt.Sprintf("[quality] config error: %v", err))
+			break
+		}
+		if err := m.cfg.Save(""); err != nil {
+			m.appendLog(fmt.Sprintf("[quality] config save error: %v", err))
+			break
+		}
+		if msg.savedOnly {
+			m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC (used next launch; current backend cannot switch live)", msg.kbps)
+		} else {
+			m.errMsg = fmt.Sprintf("✓ Audio quality saved: %d kbps AAC", msg.kbps)
+		}
+		m.errExpiry = time.Now().Add(3 * time.Second)
 
 	case errMsg:
 		m.appendLog("[error] " + msg.err.Error())
@@ -965,7 +987,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
 			m.mode = modeNormal
-			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
+			return m.playerCmd(func(p player.Player) error { return p.SetQueue(m.queueIDs) })
 		}
 		// Album: fetch all tracks then play.
 		if a := m.search.SelectedAlbum(); a != nil {
@@ -986,7 +1008,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 			m.queueTracks = append(m.queueTracks, tc)
 			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
-			return m.playerCmd(func() error { return m.player.AppendQueue([]string{views.PlaybackID(tc)}) })
+			return m.playerCmd(func(p player.Player) error { return p.AppendQueue([]string{views.PlaybackID(tc)}) })
 		}
 		// Album: fetch all tracks then add to queue.
 		if a := m.search.SelectedAlbum(); a != nil {
@@ -1092,6 +1114,7 @@ var allCommands = []cmdEntry{
 	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
+	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"mute", "mute", "Toggle mute"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
@@ -1190,12 +1213,41 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			vol := m.preMuteVol
 			m.preMuteVol = -1
 			m.appendLog(fmt.Sprintf("[vol] unmuted → %.0f%%", vol*100))
-			return m.playerCmd(func() error { return m.player.SetVolume(vol) })
+			return m.playerCmd(func(p player.Player) error { return p.SetVolume(vol) })
 		}
 		// Mute: save current volume and set to 0.
 		m.preMuteVol = m.playerState.Volume
 		m.appendLog("[vol] muted")
-		return m.playerCmd(func() error { return m.player.SetVolume(0) })
+		return m.playerCmd(func(p player.Player) error { return p.SetVolume(0) })
+
+	case strings.HasPrefix(cmd, "quality"):
+		name, arg, _ := strings.Cut(cmd, " ")
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			m.errMsg = ":" + name + " requires high, standard, 256, or 64"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		kbps, err := audioquality.Parse(arg)
+		if err != nil {
+			m.errMsg = err.Error()
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			return nil
+		}
+		m.appendLog(fmt.Sprintf("[quality] → %d kbps AAC", kbps))
+		p := m.player
+		return func() tea.Msg {
+			if p == nil {
+				return errMsg{fmt.Errorf("no player")}
+			}
+			if err := p.SetAudioBitrate(kbps); err != nil {
+				if errors.Is(err, player.ErrAudioBitrateSavedPreferenceOnly) {
+					return saveAudioQualityMsg{kbps: kbps, savedOnly: true}
+				}
+				return errMsg{err}
+			}
+			return saveAudioQualityMsg{kbps: kbps}
+		}
 
 	case strings.HasPrefix(cmd, "vol"):
 		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "vol"))
@@ -1234,11 +1286,12 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.preMuteVol = -1 // clear mute state on explicit vol change
 		m.appendLog(fmt.Sprintf("[vol] → %.0f%%", newVol*100))
 		vol := newVol
+		p := m.player
 		return func() tea.Msg {
-			if m.player == nil {
+			if p == nil {
 				return errMsg{fmt.Errorf("no player")}
 			}
-			if err := m.player.SetVolume(vol); err != nil {
+			if err := p.SetVolume(vol); err != nil {
 				return errMsg{err}
 			}
 			return saveVolumeMsg{vol}
@@ -1263,7 +1316,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		}
 		pos := time.Duration(n) * time.Second
 		m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(pos)))
-		return m.playerCmd(func() error { return m.player.Seek(pos) })
+		return m.playerCmd(func(p player.Player) error { return p.Seek(pos) })
 
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
@@ -1494,7 +1547,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				m.playerState.Loading = true
 				m.playerState.Playing = false
 				m.playerState.Position = 0
-				return m.playerCmd(func() error { return m.player.SetQueue(ids) })
+				return m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 			}
 		case "d":
 			if idx, t := m.queue.SelectedTrack(); idx >= 0 {
@@ -1507,7 +1560,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				m.queue.SetTracks(m.queueTracks)
 				m.appendLog(fmt.Sprintf("[queue] removed #%d: %s", idx+1, title))
 				i := idx
-				return m.playerCmd(func() error { return m.player.RemoveFromQueue(i) })
+				return m.playerCmd(func(p player.Player) error { return p.RemoveFromQueue(i) })
 			}
 		case "K":
 			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
@@ -1516,7 +1569,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				m.queue.SetTracks(m.queueTracks)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d up", idx+1))
 				from, to := idx, idx-1
-				return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
 		case "J":
 			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
@@ -1525,14 +1578,14 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				m.queue.SetTracks(m.queueTracks)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d down", idx+1))
 				from, to := idx, idx+1
-				return m.playerCmd(func() error { return m.player.MoveInQueue(from, to) })
+				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
 		case "c":
 			m.appendLog("[queue] cleared")
 			m.queueTracks = nil
 			m.queueIDs = nil
 			m.queue.SetTracks(nil)
-			return m.playerCmd(func() error { return m.player.ClearQueue() })
+			return m.playerCmd(func(p player.Player) error { return p.ClearQueue() })
 		case "s":
 			m.mode = modeCommand
 			m.cmdBuf = "save "
@@ -1557,13 +1610,13 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		m.lastKey = ""
 		m.appendLog("[player] next")
 		m.playerState.Loading = true
-		return m.playerCmd(func() error { return m.player.Next() })
+		return m.playerCmd(func(p player.Player) error { return p.Next() })
 
 	case "p":
 		m.lastKey = ""
 		m.appendLog("[player] previous")
 		m.playerState.Loading = true
-		return m.playerCmd(func() error { return m.player.Previous() })
+		return m.playerCmd(func(p player.Player) error { return p.Previous() })
 
 	case "+", "=":
 		m.lastKey = ""
@@ -1601,14 +1654,14 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		}
 		m.playerState.RepeatMode = next
 		m.appendLog(fmt.Sprintf("[player] repeat → %d", next))
-		return m.playerCmd(func() error { return m.player.SetRepeat(next) })
+		return m.playerCmd(func(p player.Player) error { return p.SetRepeat(next) })
 
 	case "s":
 		m.lastKey = ""
 		on := !m.playerState.ShuffleMode
 		m.playerState.ShuffleMode = on
 		m.appendLog(fmt.Sprintf("[player] shuffle → %v", on))
-		return m.playerCmd(func() error { return m.player.SetShuffle(on) })
+		return m.playerCmd(func(p player.Player) error { return p.SetShuffle(on) })
 
 	case "f":
 		m.lastKey = ""
@@ -1654,7 +1707,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			newPos := max(0, m.playerState.Position-10*time.Second)
 			m.appendLog(fmt.Sprintf("[player] seek ← %s", views.FormatDuration(newPos)))
 			pos := newPos
-			return m.playerCmd(func() error { return m.player.Seek(pos) })
+			return m.playerCmd(func(p player.Player) error { return p.Seek(pos) })
 		}
 
 	case "right":
@@ -1666,7 +1719,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			}
 			m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(newPos)))
 			pos := newPos
-			return m.playerCmd(func() error { return m.player.Seek(pos) })
+			return m.playerCmd(func(p player.Player) error { return p.Seek(pos) })
 		}
 	}
 
@@ -1741,7 +1794,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			m.playerState.Playing = false
 			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
-			return m.playerCmd(func() error { return m.player.SetQueue(m.queueIDs) })
+			return m.playerCmd(func(p player.Player) error { return p.SetQueue(m.queueIDs) })
 		}
 
 	case "a":
@@ -1751,7 +1804,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			m.queueTracks = append(m.queueTracks, tc)
 			m.queueIDs = append(m.queueIDs, views.PlaybackID(tc))
 			m.queue.SetTracks(m.queueTracks)
-			return m.playerCmd(func() error { return m.player.AppendQueue([]string{views.PlaybackID(tc)}) })
+			return m.playerCmd(func(p player.Player) error { return p.AppendQueue([]string{views.PlaybackID(tc)}) })
 		}
 
 	default:
@@ -2253,12 +2306,13 @@ func (m *Model) togglePlayPause() tea.Cmd {
 	}
 }
 
-func (m *Model) playerCmd(fn func() error) tea.Cmd {
+func (m *Model) playerCmd(fn func(player.Player) error) tea.Cmd {
+	p := m.player
 	return func() tea.Msg {
-		if m.player == nil {
+		if p == nil {
 			return errMsg{fmt.Errorf("no player")}
 		}
-		if err := fn(); err != nil {
+		if err := fn(p); err != nil {
 			return errMsg{err}
 		}
 		return nil

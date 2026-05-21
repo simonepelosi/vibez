@@ -48,8 +48,8 @@ type Player struct {
 }
 
 // New creates a CDP Player. EnsureBrowser must be called once before New().
-func New(devToken, userToken, storefront string, wsl bool) (*Player, error) {
-	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0")
+func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int) (*Player, error) {
+	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps)
 	if err != nil {
 		return nil, fmt.Errorf("cdp: render html: %w", err)
 	}
@@ -418,6 +418,15 @@ func (p *Player) Seek(position time.Duration) error {
 
 func (p *Player) SetVolume(v float64) error {
 	p.dispatch(fmt.Sprintf(`window.vibezSetVolume && window.vibezSetVolume(%f)`, v))
+	return nil
+}
+
+func (p *Player) SetAudioBitrate(kbps int) error {
+	expr, err := buildSetAudioBitrateJS(kbps)
+	if err != nil {
+		return err
+	}
+	p.dispatch(expr)
 	return nil
 }
 

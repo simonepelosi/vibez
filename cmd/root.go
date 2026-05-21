@@ -55,6 +55,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	audioBitrateKbps, err := cfg.AudioBitrateKbps()
+	if err != nil {
+		return err
+	}
+
 	opts := tui.Options{MemProfiling: memProfiling}
 
 	// Apply theme before creating any TUI model so all panels pick up the palette.
@@ -88,6 +93,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	// but lets the DE resolve the icon via the MPRIS DesktopEntry property.
 	iconPath := assets.InstallIcon()
 	assets.InstallDesktopEntry()
+	opts.IconPath = iconPath
 
 	onUserToken := func(token string) {
 		cfg.AppleUserToken = token
@@ -104,5 +110,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	return runPlatform(cfg, iconPath, opts, onUserToken, onStorefront)
+	return runPlatform(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
+
 }

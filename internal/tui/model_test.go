@@ -26,6 +26,7 @@ type mockPlayer struct {
 	closeCalled    bool
 	seekCalled     bool
 	seekPos        time.Duration
+	bitrateKbps    int
 	setQueueIDs    []string   // last IDs passed to SetQueue
 	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
 	err            error
@@ -46,7 +47,11 @@ func (m *mockPlayer) Seek(pos time.Duration) error {
 	m.seekPos = pos
 	return m.err
 }
-func (m *mockPlayer) SetVolume(_ float64) error            { return m.err }
+func (m *mockPlayer) SetVolume(_ float64) error { return m.err }
+func (m *mockPlayer) SetAudioBitrate(kbps int) error {
+	m.bitrateKbps = kbps
+	return m.err
+}
 func (m *mockPlayer) SetRepeat(_ int) error                { return m.err }
 func (m *mockPlayer) SetShuffle(_ bool) error              { return m.err }
 func (m *mockPlayer) SetEqualizer(_ []player.EQBand) error { return m.err }
@@ -371,7 +376,7 @@ func TestTogglePlayPause_PlayerError(t *testing.T) {
 
 func TestPlayerCmd_NilPlayer(t *testing.T) {
 	m := newModel(nil)
-	cmd := m.playerCmd(func() error { return nil })
+	cmd := m.playerCmd(func(player.Player) error { return nil })
 	msg := cmd()
 	if _, ok := msg.(errMsg); !ok {
 		t.Errorf("playerCmd with nil player should return errMsg, got %T", msg)
@@ -381,7 +386,7 @@ func TestPlayerCmd_NilPlayer(t *testing.T) {
 func TestPlayerCmd_Next(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.playerCmd(func() error { return mp.Next() })
+	cmd := m.playerCmd(func(p player.Player) error { return p.Next() })
 	msg := cmd()
 	if msg != nil {
 		t.Errorf("playerCmd success should return nil msg, got %v", msg)
@@ -394,10 +399,24 @@ func TestPlayerCmd_Next(t *testing.T) {
 func TestPlayerCmd_Previous(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
-	cmd := m.playerCmd(func() error { return mp.Previous() })
+	cmd := m.playerCmd(func(p player.Player) error { return p.Previous() })
 	cmd()
 	if !mp.prevCalled {
 		t.Error("Previous() should have been called")
+	}
+}
+
+func TestPlayerCmdUsesCapturedPlayer(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	cmd := m.playerCmd(func(p player.Player) error { return p.Next() })
+	m.player = nil
+	msg := cmd()
+	if msg != nil {
+		t.Fatalf("playerCmd with captured player returned %v", msg)
+	}
+	if !mp.nextCalled {
+		t.Fatal("captured player Next() was not called")
 	}
 }
 
@@ -2711,4 +2730,69 @@ func (p *captureProvider) AddToPlaylist(_ context.Context, playlistID, trackID s
 		return p.addToPlaylistFn(playlistID, trackID)
 	}
 	return nil
+}
+
+func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
+	p := newMockPlayer()
+	m := newModel(p)
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := m.executeCommand("quality 64")
+	if cmd == nil {
+		t.Fatal("quality command returned nil cmd")
+	}
+	msg := cmd()
+	if p.bitrateKbps != 64 {
+		t.Fatalf("player bitrate = %d, want 64", p.bitrateKbps)
+	}
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
+		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
+	}
+}
+
+func TestExecuteCommandQualityPersistsWhenBackendCannotSwitchLive(t *testing.T) {
+	p := newMockPlayer()
+	p.err = player.ErrAudioBitrateSavedPreferenceOnly
+	m := newModel(p)
+	t.Setenv("HOME", t.TempDir())
+
+	cmd := m.executeCommand("quality 64")
+	if cmd == nil {
+		t.Fatal("quality command returned nil cmd")
+	}
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+	if got, err := m.cfg.AudioBitrateKbps(); err != nil || got != 64 {
+		t.Fatalf("config bitrate = %d, %v; want 64, nil", got, err)
+	}
+	if !strings.Contains(m.errMsg, "used next launch; current backend cannot switch live") {
+		t.Fatalf("errMsg = %q", m.errMsg)
+	}
+}
+
+func TestExecuteCommandQualityRejectsLossless(t *testing.T) {
+	p := newMockPlayer()
+	m := newModel(p)
+	cmd := m.executeCommand("quality lossless")
+	if cmd != nil {
+		t.Fatal("lossless quality returned command")
+	}
+	if p.bitrateKbps != 0 {
+		t.Fatalf("player bitrate changed to %d", p.bitrateKbps)
+	}
+	if !strings.Contains(m.errMsg, "MusicKit JS/web playback max is 256 kbps AAC") {
+		t.Fatalf("errMsg = %q", m.errMsg)
+	}
+}
+
+func TestCommandSuggestionsIncludeQuality(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.cmdBuf = "qual"
+	got := m.commandSuggestions()
+	if len(got) == 0 || got[0].trigger != "quality" {
+		t.Fatalf("quality suggestions = %#v", got)
+	}
 }

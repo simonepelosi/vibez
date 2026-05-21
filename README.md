@@ -291,6 +291,7 @@ Vim-style command mode — press `:` from anywhere to open the command prompt.
 | `:vol +n` / `:vol -n` | Raise or lower volume by *n* percent (e.g. `:vol +10`) |
 | `:vol` | Show current volume in the status bar |
 | `:mute` | Toggle mute (run again to restore the previous volume) |
+| `:quality <high|standard|256|64>` | Set Apple Music AAC bitrate |
 | `:seek <seconds>` | Jump to an absolute position in the current song |
 | `:debug-logs` | Toggle the debug log panel |
 | `:q` / `:quit` | Quit vibez |
@@ -348,6 +349,18 @@ When enabled, vibez launches Chrome with:
 | `--disable-features=…,AudioServiceOutOfProcess` | Disables out-of-process audio service that causes distortion at mismatched sample rates |
 
 The flag is `false` by default so native Linux users are unaffected.
+
+### Audio quality
+
+Set `audio_quality` in `~/.config/vibez/config.json`:
+
+```json
+{
+  "audio_quality": "high"
+}
+```
+
+Supported values: `"high"`/`"256"` for 256 kbps AAC (default), `"standard"`/`"64"` for 64 kbps AAC. MusicKit JS/web playback maxes out at 256 kbps AAC; lossless and Hi-Res/ALAC are not available through the Chrome/CDP backend. WebKit + GStreamer uses fixed 30 s preview URLs and cannot change bitrate at runtime.
 
 ---
 
