@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"math/rand"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/lyrics"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/tui/art"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/tui/views"
 	"github.com/simone-vibes/vibez/internal/vibe"
@@ -115,6 +118,11 @@ func (p *eqPanel) Back() bool   { return false }
 // ── Messages ──────────────────────────────────────────────────────────────
 
 type playerStateMsg player.State
+type artworkLoadedMsg struct {
+	url string
+	img image.Image
+	err error
+}
 type searchResultMsg struct {
 	result *provider.SearchResult
 	query  string
@@ -147,6 +155,13 @@ type glowTickMsg time.Time
 type introTickMsg time.Time
 type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
+
+type artworkCache struct {
+	url      string
+	img      image.Image
+	rendered map[art.Size][]string
+	failed   bool
+}
 
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
@@ -229,11 +244,14 @@ type Model struct {
 
 	width, height int
 
-	playerState     player.State
-	stateCh         <-chan player.State
-	queueIDs        []string         // current playback queue (for "add to queue")
-	queueTracks     []provider.Track // full track objects parallel to queueIDs
-	queueMiniOffset int              // scroll offset for the mini-queue in the split view
+	playerState       player.State
+	stateCh           <-chan player.State
+	artwork           artworkCache
+	artHTTP           *http.Client
+	supportsTrueColor func() bool
+	queueIDs          []string         // current playback queue (for "add to queue")
+	queueTracks       []provider.Track // full track objects parallel to queueIDs
+	queueMiniOffset   int              // scroll offset for the mini-queue in the split view
 
 	// Discovery mode
 	discovery discoveryMode
@@ -309,12 +327,15 @@ type Model struct {
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
 	m := &Model{
-		cfg:          cfg,
-		provider:     prov,
-		player:       plyr,
-		activePanel:  -1,
-		memProfiling: opts.MemProfiling,
-		preMuteVol:   -1,
+		cfg:               cfg,
+		provider:          prov,
+		player:            plyr,
+		activePanel:       -1,
+		memProfiling:      opts.MemProfiling,
+		preMuteVol:        -1,
+		artwork:           artworkCache{rendered: map[art.Size][]string{}},
+		artHTTP:           &http.Client{Timeout: 5 * time.Second},
+		supportsTrueColor: art.SupportsTrueColor,
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -484,6 +505,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLog("[discovery] max retries reached — giving up")
 			}
 		}
+		if s.Track == nil || s.Track.ArtworkURL == "" {
+			m.artwork = artworkCache{rendered: map[art.Size][]string{}}
+		} else if s.Track.ArtworkURL != m.artwork.url {
+			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
+			if m.supportsTrueColor != nil && m.supportsTrueColor() {
+				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL))
+			}
+		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
 			// Log playParams so we can confirm which ID path MusicKit will use.
@@ -546,7 +575,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if wasPlaying && !m.playerState.Playing && !m.playerState.Loading {
 			m.appendLog("[player] paused")
 		}
-		cmds = append(cmds, waitForState(m.stateCh))
+		if m.stateCh != nil {
+			cmds = append(cmds, waitForState(m.stateCh))
+		}
+
+	case artworkLoadedMsg:
+		if msg.url != m.artwork.url {
+			break
+		}
+		if msg.err != nil {
+			m.artwork.failed = true
+			m.artwork.img = nil
+			m.artwork.rendered = map[art.Size][]string{}
+			m.appendLog(fmt.Sprintf("[art] artwork unavailable: %v", msg.err))
+			break
+		}
+		m.artwork.img = msg.img
+		m.artwork.failed = false
+		m.artwork.rendered = map[art.Size][]string{}
 
 	case songRatingMsg:
 		// Update favorite state to match what Apple Music reports.
@@ -1359,6 +1405,22 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 			return errMsg{fmt.Errorf("save-playlist: %w", err)}
 		}
 		return playlistCreatedMsg{name: name}
+	}
+}
+
+func (m *Model) fetchArtworkCmd(url string) tea.Cmd {
+	if url == "" || m.supportsTrueColor == nil || !m.supportsTrueColor() {
+		return nil
+	}
+	if m.artwork.url == url && (m.artwork.img != nil || m.artwork.failed) {
+		return nil
+	}
+	client := m.artHTTP
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		img, err := art.FetchAndDecode(ctx, client, url, 5<<20)
+		return artworkLoadedMsg{url: url, img: img, err: err}
 	}
 }
 
@@ -2388,7 +2450,7 @@ func (m *Model) View() tea.View {
 //	└─────────────────────────────────────┘
 func (m *Model) renderBoxLayout() string {
 	inner := m.width - 2 // visual width between the │ border chars
-	npH := 12            // now playing section height (fixed)
+	npH := m.nowPlayingHeight()
 	panelH := m.panelHeight()
 
 	splitW := inner / 2          // left column inner width (includes padding)
@@ -2558,8 +2620,51 @@ func (m *Model) renderBoxHeader(inner int) string {
 	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + rightStr + " │"
 }
 
+func (m *Model) nowPlayingHeight() int {
+	if m.height <= 30 {
+		return 12
+	}
+	return min(18, max(12, m.height/3))
+}
+
 // nowPlayingLines returns exactly h lines for the Now Playing section.
 func (m *Model) nowPlayingLines(contentW, h int) []string {
+	if m.supportsTrueColor == nil || !m.supportsTrueColor() || m.artwork.img == nil || m.artwork.failed || contentW < 42 || h < 8 || m.playerState.Track == nil {
+		return m.nowPlayingTextLines(contentW, h)
+	}
+
+	artRows := min(h-2, 16)
+	artCols := min(min(max(12, contentW/3), artRows*2), 40)
+	rightW := contentW - artCols - 2
+	if rightW < 28 {
+		return m.nowPlayingTextLines(contentW, h)
+	}
+	size := art.Size{Width: artCols, Height: artRows}
+	if m.artwork.rendered == nil {
+		m.artwork.rendered = map[art.Size][]string{}
+	}
+	artLines := m.artwork.rendered[size]
+	if artLines == nil {
+		const maxRenderedArtworkSizes = 16
+		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
+			m.artwork.rendered = map[art.Size][]string{}
+		}
+		artLines = art.RenderHalfBlocks(m.artwork.img, size)
+		m.artwork.rendered[size] = artLines
+	}
+	rightLines := m.nowPlayingTextLines(rightW, h)
+	lines := make([]string, h)
+	for i := range h {
+		left := ""
+		if i < len(artLines) {
+			left = artLines[i]
+		}
+		lines[i] = padRight(left, artCols) + "  " + padRight(safeIdx(rightLines, i), rightW)
+	}
+	return lines
+}
+
+func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 	muted := styles.QueueItemMuted
 
 	t := m.playerState.Track
@@ -2940,9 +3045,9 @@ func (m *Model) commandLines(_ int, h int) []string {
 }
 
 // panelHeight returns the number of rows available for the split panel section.
-// Fixed overhead = top(1)+hdr(1)+hdrdiv(1)+np(12)+splitdiv(1)+joindiv(1)+status(2)+bottom(1) = 20.
 func (m *Model) panelHeight() int {
-	return max(3, m.height-20)
+	fixedOverhead := 8 + m.nowPlayingHeight()
+	return max(3, m.height-fixedOverhead)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

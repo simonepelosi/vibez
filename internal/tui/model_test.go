@@ -1,10 +1,17 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1848,6 +1855,110 @@ func TestNowPlayingLines_WithTrack_Paused(t *testing.T) {
 	if len(lines) != 12 {
 		t.Errorf("nowPlayingLines returned %d lines, want 12", len(lines))
 	}
+}
+
+func TestNowPlayingLines_NoTrueColorFallsBackToText(t *testing.T) {
+	m := newModel(nil)
+	m.supportsTrueColor = func() bool { return false }
+	m.playerState.Track = &provider.Track{Title: "Text Song", Artist: "Text Artist", Album: "Album", ArtworkURL: "https://example.invalid/a.png", Duration: time.Minute}
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "Text Song") || !strings.Contains(joined, "Text Artist") {
+		t.Fatalf("fallback missing metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("fallback rendered artwork: %q", joined)
+	}
+}
+
+func TestNowPlayingArtworkFetchAndResizeUsesCachedImage(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testArtworkPNG(t))
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsTrueColor = func() bool { return true }
+	track := &provider.Track{Title: "Art Song", Artist: "Art Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
+	if cmd == nil {
+		t.Fatal("playerStateMsg with artwork returned nil cmd")
+	}
+	msg := runArtworkCommand(t, cmd)
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+
+	first := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	second := strings.Join(m.nowPlayingLines(120, 16), "\n")
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("artwork requests = %d, want 1", got)
+	}
+	for name, view := range map[string]string{"first": first, "second": second} {
+		if !strings.Contains(view, "▀") || !strings.Contains(view, "Art Song") || !strings.Contains(view, "Art Artist") {
+			t.Fatalf("%s render missing artwork or metadata: %q", name, view)
+		}
+	}
+}
+
+func TestNowPlayingArtworkDownloadFailureFallsBack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsTrueColor = func() bool { return true }
+	track := &provider.Track{Title: "Fallback Song", Artist: "Fallback Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
+	if cmd == nil {
+		t.Fatal("playerStateMsg with artwork returned nil cmd")
+	}
+	updated, _ := m.Update(runArtworkCommand(t, cmd))
+	m = updated.(*Model)
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "Fallback Song") || !strings.Contains(joined, "Fallback Artist") {
+		t.Fatalf("fallback missing metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("failed artwork rendered art glyphs: %q", joined)
+	}
+}
+
+func runArtworkCommand(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, batched := range batch {
+			if batched == nil {
+				continue
+			}
+			msg = batched()
+			if _, ok := msg.(artworkLoadedMsg); ok {
+				return msg
+			}
+		}
+	}
+	return msg
+}
+
+func testArtworkPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{G: 255, A: 255})
+	img.SetNRGBA(0, 1, color.NRGBA{B: 255, A: 255})
+	img.SetNRGBA(1, 1, color.NRGBA{R: 255, G: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestNowPlayingLines_WithErrMsg(t *testing.T) {
