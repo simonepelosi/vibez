@@ -234,6 +234,9 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 			m.tracksLoaded = true
 			m.libraryTracksTime = time.Now()
 			m.routeLoadedLibraryTracks()
+		} else {
+			m.pane = paneItems
+			m.list.SetItems(nil)
 		}
 		return m, nil
 	case libraryLoadedMsg:
@@ -246,6 +249,9 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 			m.playlists = append([]provider.Playlist{}, msg.playlists...)
 			m.playlistsLoaded = true
 			m.showPlaylists()
+		} else {
+			m.pane = paneItems
+			m.list.SetItems(nil)
 		}
 		return m, nil
 	case playlistTracksMsg:
@@ -286,6 +292,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "backspace":
 			m.invalidatePlaylistRequest()
+			m.loadErr = nil
 			m.pane = paneSections
 			m.showSections()
 			return m, nil
@@ -480,6 +487,9 @@ func (m *LibraryModel) View() string {
 	header := m.renderHeader()
 	if m.loading {
 		return header + "\n\n  " + m.spinner.View() + " " + m.loadingText()
+	}
+	if m.loadErr != nil && m.pane != paneSections {
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load: "+m.loadErr.Error()), m.width)
 	}
 	if len(m.list.Items()) == 0 {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render(m.emptyText()), m.width)
