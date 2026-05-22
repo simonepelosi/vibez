@@ -9,6 +9,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"os"
 	"strings"
 )
@@ -44,9 +45,6 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if ctx == nil {
 		return nil, fmt.Errorf("fetch artwork: nil context")
 	}
-	if client == nil {
-		return nil, fmt.Errorf("fetch artwork: nil http client")
-	}
 	if url == "" {
 		return nil, fmt.Errorf("fetch artwork: empty url")
 	}
@@ -54,6 +52,26 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 		return nil, fmt.Errorf("fetch artwork: non-positive max bytes %d", maxBytes)
 	}
 
+	parsed, err := urlpkg.Parse(url)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme == "" || parsed.Scheme == "file" {
+		path := url
+		if parsed.Scheme == "file" {
+			path = parsed.Path
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		return decodeBounded(f, maxBytes)
+	}
+
+	if client == nil {
+		return nil, fmt.Errorf("fetch artwork: nil http client")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err

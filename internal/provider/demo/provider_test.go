@@ -2,6 +2,8 @@ package demo_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,6 +42,26 @@ func TestProvider_GetLibraryTracks_ReturnsAllTracks(t *testing.T) {
 	}
 	if len(tracks) != len(demo.Tracks) {
 		t.Errorf("GetLibraryTracks = %d tracks, want %d", len(tracks), len(demo.Tracks))
+	}
+}
+
+func TestProvider_GetLibraryTracks_ReturnsLocalArtwork(t *testing.T) {
+	p := newProvider()
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 10 {
+		t.Fatalf("track count = %d, want 10", len(tracks))
+	}
+	for _, tr := range tracks {
+		if tr.ArtworkURL == "" {
+			t.Fatalf("track %s artwork URL is empty", tr.ID)
+		}
+		path := filepath.Join("../../..", tr.ArtworkURL)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("track %s artwork %q: %v", tr.ID, tr.ArtworkURL, err)
+		}
 	}
 }
 

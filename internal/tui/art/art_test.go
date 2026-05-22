@@ -133,6 +133,16 @@ func TestDecode_RejectsUnsupportedBytes(t *testing.T) {
 	}
 }
 
+func TestFetchAndDecode_SupportsLocalArtworkPath(t *testing.T) {
+	img, err := FetchAndDecode(t.Context(), nil, "testdata/gorillaz_2001_album.png", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() == 0 || img.Bounds().Dy() == 0 {
+		t.Fatalf("decoded bounds = %v, want non-empty", img.Bounds())
+	}
+}
+
 func TestDecodeBounded_RejectsOverByteCap(t *testing.T) {
 	if _, err := decodeBounded(strings.NewReader("abcdef"), 5); err == nil || !strings.Contains(err.Error(), "exceeds max bytes") {
 		t.Fatalf("decodeBounded(over cap) error = %v, want exceeds max bytes", err)
