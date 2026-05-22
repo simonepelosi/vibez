@@ -46,8 +46,8 @@ func TestRenderHalfBlocks_ScalesImageToRequestedOutput(t *testing.T) {
 		{R: 9, G: 0, B: 0, A: 255}, {R: 10, G: 0, B: 0, A: 255}, {R: 11, G: 0, B: 0, A: 255}, {R: 12, G: 0, B: 0, A: 255},
 		{R: 13, G: 0, B: 0, A: 255}, {R: 14, G: 0, B: 0, A: 255}, {R: 15, G: 0, B: 0, A: 255}, {R: 16, G: 0, B: 0, A: 255},
 	}
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 4 {
+		for x := range 4 {
 			img.SetNRGBA(x, y, colors[y*4+x])
 		}
 	}

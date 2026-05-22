@@ -75,7 +75,12 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			// Response body close errors are not actionable after the body is read.
+			return
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetch artwork: status %d", resp.StatusCode)
@@ -151,5 +156,13 @@ func sample(img image.Image, bounds image.Rectangle, outX, outY, outW, outH int)
 		y = bounds.Max.Y - 1
 	}
 	r, g, b, _ := img.At(x, y).RGBA()
-	return rgb{uint8(r >> 8), uint8(g >> 8), uint8(b >> 8)}
+	return rgb{rgbaToByte(r), rgbaToByte(g), rgbaToByte(b)}
+}
+
+func rgbaToByte(v uint32) uint8 {
+	v >>= 8
+	if v > 255 {
+		return 255
+	}
+	return uint8(v)
 }
