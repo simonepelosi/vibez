@@ -12,7 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func TestRenderHalfBlocks_Uses24BitANSIForegroundAndBackground(t *testing.T) {
+func TestRenderHalfBlocks_RendersExactHalfBlockANSI(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
 	img.SetNRGBA(0, 0, color.NRGBA{R: 1, G: 2, B: 3, A: 255})
 	img.SetNRGBA(0, 1, color.NRGBA{R: 4, G: 5, B: 6, A: 255})
@@ -20,17 +20,54 @@ func TestRenderHalfBlocks_Uses24BitANSIForegroundAndBackground(t *testing.T) {
 	img.SetNRGBA(1, 1, color.NRGBA{R: 10, G: 11, B: 12, A: 255})
 
 	lines := RenderHalfBlocks(img, Size{Width: 2, Height: 1})
-	if len(lines) != 1 {
-		t.Fatalf("line count = %d, want 1", len(lines))
+	want := []string{
+		"\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m▀" +
+			"\x1b[38;2;7;8;9m\x1b[48;2;10;11;12m▀" +
+			"\x1b[0m",
 	}
-	line := lines[0]
-	for _, want := range []string{"\x1b[38;2;1;2;3m", "\x1b[48;2;4;5;6m", "\x1b[38;2;7;8;9m", "\x1b[48;2;10;11;12m", "▀", "\x1b[0m"} {
-		if !strings.Contains(line, want) {
-			t.Fatalf("rendered line missing %q: %q", want, line)
+	if len(lines) != len(want) {
+		t.Fatalf("line count = %d, want %d: %#v", len(lines), len(want), lines)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+		if got := lipgloss.Width(lines[i]); got != 2 {
+			t.Fatalf("line %d visual width = %d, want 2", i, got)
 		}
 	}
-	if got := lipgloss.Width(line); got != 2 {
-		t.Fatalf("visual width = %d, want 2", got)
+}
+
+func TestRenderHalfBlocks_ScalesImageToRequestedOutput(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	colors := []color.NRGBA{
+		{R: 1, G: 0, B: 0, A: 255}, {R: 2, G: 0, B: 0, A: 255}, {R: 3, G: 0, B: 0, A: 255}, {R: 4, G: 0, B: 0, A: 255},
+		{R: 5, G: 0, B: 0, A: 255}, {R: 6, G: 0, B: 0, A: 255}, {R: 7, G: 0, B: 0, A: 255}, {R: 8, G: 0, B: 0, A: 255},
+		{R: 9, G: 0, B: 0, A: 255}, {R: 10, G: 0, B: 0, A: 255}, {R: 11, G: 0, B: 0, A: 255}, {R: 12, G: 0, B: 0, A: 255},
+		{R: 13, G: 0, B: 0, A: 255}, {R: 14, G: 0, B: 0, A: 255}, {R: 15, G: 0, B: 0, A: 255}, {R: 16, G: 0, B: 0, A: 255},
+	}
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetNRGBA(x, y, colors[y*4+x])
+		}
+	}
+
+	lines := RenderHalfBlocks(img, Size{Width: 2, Height: 2})
+	want := []string{
+		"\x1b[38;2;1;0;0m\x1b[48;2;5;0;0m▀" +
+			"\x1b[38;2;3;0;0m\x1b[48;2;7;0;0m▀" +
+			"\x1b[0m",
+		"\x1b[38;2;9;0;0m\x1b[48;2;13;0;0m▀" +
+			"\x1b[38;2;11;0;0m\x1b[48;2;15;0;0m▀" +
+			"\x1b[0m",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("line count = %d, want %d: %#v", len(lines), len(want), lines)
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
+		}
 	}
 }
 
