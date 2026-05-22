@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"os"
 	"strings"
 	"testing"
 
@@ -68,6 +69,30 @@ func TestRenderHalfBlocks_ScalesImageToRequestedOutput(t *testing.T) {
 		if lines[i] != want[i] {
 			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
 		}
+	}
+}
+
+func TestRenderHalfBlocks_GorillazArtworkMatchesGolden(t *testing.T) {
+	f, err := os.Open("testdata/gorillaz_2001_album.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	img, err := Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := RenderHalfBlocks(img, Size{Width: 16, Height: 8})
+	got := strings.Join(lines, "\n") + "\n"
+
+	wantBytes, err := os.ReadFile("testdata/gorillaz_2001_album_16x8.ansi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(wantBytes)
+	if got != want {
+		t.Fatalf("rendered Gorillaz artwork mismatch\ngot:\n%q\nwant:\n%q", got, want)
 	}
 }
 
