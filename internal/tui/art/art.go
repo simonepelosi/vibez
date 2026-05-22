@@ -1,6 +1,7 @@
 package art
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
@@ -10,6 +11,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+)
+
+const (
+	MaxArtworkWidth  = 4096
+	MaxArtworkHeight = 4096
+	MaxArtworkPixels = 16_000_000
 )
 
 type Size struct {
@@ -60,7 +67,37 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetch artwork: status %d", resp.StatusCode)
 	}
-	return Decode(io.LimitReader(resp.Body, maxBytes))
+	return decodeBounded(resp.Body, maxBytes)
+}
+
+func decodeBounded(r io.Reader, maxBytes int64) (image.Image, error) {
+	if r == nil {
+		return nil, fmt.Errorf("decode artwork: nil reader")
+	}
+	if maxBytes <= 0 {
+		return nil, fmt.Errorf("decode artwork: non-positive max bytes %d", maxBytes)
+	}
+	buf, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > maxBytes {
+		return nil, fmt.Errorf("decode artwork: exceeds max bytes %d", maxBytes)
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return nil, fmt.Errorf("decode artwork: invalid dimensions %dx%d", cfg.Width, cfg.Height)
+	}
+	if cfg.Width > MaxArtworkWidth || cfg.Height > MaxArtworkHeight {
+		return nil, fmt.Errorf("decode artwork: dimensions %dx%d exceed max %dx%d", cfg.Width, cfg.Height, MaxArtworkWidth, MaxArtworkHeight)
+	}
+	if cfg.Width > MaxArtworkPixels/cfg.Height {
+		return nil, fmt.Errorf("decode artwork: pixels %dx%d exceed max %d", cfg.Width, cfg.Height, MaxArtworkPixels)
+	}
+	return Decode(bytes.NewReader(buf))
 }
 
 func RenderHalfBlocks(img image.Image, size Size) []string {
@@ -78,7 +115,7 @@ func RenderHalfBlocks(img image.Image, size Size) []string {
 		for col := 0; col < size.Width; col++ {
 			top := sample(img, bounds, col, row*2, size.Width, size.Height*2)
 			bottom := sample(img, bounds, col, row*2+1, size.Width, size.Height*2)
-			sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀", top.r, top.g, top.b, bottom.r, bottom.g, bottom.b))
+			_, _ = fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀", top.r, top.g, top.b, bottom.r, bottom.g, bottom.b)
 		}
 		sb.WriteString("\x1b[0m")
 		lines[row] = sb.String()

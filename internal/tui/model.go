@@ -120,6 +120,7 @@ func (p *eqPanel) Back() bool   { return false }
 type playerStateMsg player.State
 type artworkLoadedMsg struct {
 	url string
+	gen int
 	img image.Image
 	err error
 }
@@ -247,6 +248,7 @@ type Model struct {
 	playerState       player.State
 	stateCh           <-chan player.State
 	artwork           artworkCache
+	artworkGen        int
 	artHTTP           *http.Client
 	supportsTrueColor func() bool
 	queueIDs          []string         // current playback queue (for "add to queue")
@@ -506,11 +508,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.Track == nil || s.Track.ArtworkURL == "" {
+			if m.artwork.url != "" || m.artwork.img != nil || m.artwork.failed {
+				m.artworkGen++
+			}
 			m.artwork = artworkCache{rendered: map[art.Size][]string{}}
 		} else if s.Track.ArtworkURL != m.artwork.url {
+			m.artworkGen++
 			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
 			if m.supportsTrueColor != nil && m.supportsTrueColor() {
-				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL))
+				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
 			}
 		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
@@ -580,7 +586,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case artworkLoadedMsg:
-		if msg.url != m.artwork.url {
+		if msg.url != m.artwork.url || msg.gen != m.artworkGen {
 			break
 		}
 		if msg.err != nil {
@@ -1408,11 +1414,11 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	}
 }
 
-func (m *Model) fetchArtworkCmd(url string) tea.Cmd {
+func (m *Model) fetchArtworkCmd(url string, gen int) tea.Cmd {
 	if url == "" || m.supportsTrueColor == nil || !m.supportsTrueColor() {
 		return nil
 	}
-	if m.artwork.url == url && (m.artwork.img != nil || m.artwork.failed) {
+	if m.artwork.url == url && gen == m.artworkGen && (m.artwork.img != nil || m.artwork.failed) {
 		return nil
 	}
 	client := m.artHTTP
@@ -1420,7 +1426,7 @@ func (m *Model) fetchArtworkCmd(url string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		img, err := art.FetchAndDecode(ctx, client, url, 5<<20)
-		return artworkLoadedMsg{url: url, img: img, err: err}
+		return artworkLoadedMsg{url: url, gen: gen, img: img, err: err}
 	}
 }
 
@@ -2474,7 +2480,7 @@ func (m *Model) renderBoxLayout() string {
 	// ── Header divider ──
 	sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
 
-	// ── Now Playing (12 lines) ──
+	// ── Now Playing ──
 	for _, line := range m.nowPlayingLines(inner-2, npH) {
 		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 	}
@@ -2659,7 +2665,8 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		if i < len(artLines) {
 			left = artLines[i]
 		}
-		lines[i] = padRight(left, artCols) + "  " + padRight(safeIdx(rightLines, i), rightW)
+		right := clipVisualLine(safeIdx(rightLines, i), rightW)
+		lines[i] = padRight(left, artCols) + "  " + padRight(right, rightW)
 	}
 	return lines
 }
@@ -3059,6 +3066,16 @@ func padRight(s string, w int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", w-sw)
+}
+
+func clipVisualLine(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	return lipgloss.NewStyle().MaxWidth(w).Render(s)
 }
 
 // toLines splits s into exactly h lines, padding/truncating as needed.
