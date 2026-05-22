@@ -1976,6 +1976,34 @@ func TestArtworkLoadedMsg_DiscardStaleSameURLFailureAfterABA(t *testing.T) {
 	}
 }
 
+func TestNowPlayingLines_DoesNotRenderStaleArtworkForNewTrack(t *testing.T) {
+	m := newModel(nil)
+	m.supportsTrueColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/old.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 2, 2)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing: true,
+		Track: &provider.Track{
+			Title:      "New Song",
+			Artist:     "New Artist",
+			Album:      "New Album",
+			ArtworkURL: "https://example.invalid/new.png",
+			Duration:   time.Minute,
+		},
+	}
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "New Song") || !strings.Contains(joined, "New Artist") {
+		t.Fatalf("fallback missing new metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("rendered stale artwork beside new metadata: %q", joined)
+	}
+}
+
 func TestNowPlayingArtworkRightColumnClipsLongMetadata(t *testing.T) {
 	m := newModel(nil)
 	m.supportsTrueColor = func() bool { return true }
@@ -1987,11 +2015,12 @@ func TestNowPlayingArtworkRightColumnClipsLongMetadata(t *testing.T) {
 	m.playerState = player.State{
 		Playing: true,
 		Track: &provider.Track{
-			ID:       "long",
-			Title:    strings.Repeat("Title", 80),
-			Artist:   strings.Repeat("Artist", 80),
-			Album:    strings.Repeat("Album", 80),
-			Duration: time.Minute,
+			ID:         "long",
+			Title:      strings.Repeat("Title", 80),
+			Artist:     strings.Repeat("Artist", 80),
+			Album:      strings.Repeat("Album", 80),
+			ArtworkURL: "https://example.invalid/a.png",
+			Duration:   time.Minute,
 		},
 	}
 

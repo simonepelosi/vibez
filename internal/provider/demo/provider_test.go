@@ -2,8 +2,6 @@ package demo_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -45,7 +43,7 @@ func TestProvider_GetLibraryTracks_ReturnsAllTracks(t *testing.T) {
 	}
 }
 
-func TestProvider_GetLibraryTracks_ReturnsLocalArtwork(t *testing.T) {
+func TestProvider_GetLibraryTracks_ReturnsHTTPArtwork(t *testing.T) {
 	p := newProvider()
 	tracks, err := p.GetLibraryTracks(context.Background())
 	if err != nil {
@@ -58,9 +56,8 @@ func TestProvider_GetLibraryTracks_ReturnsLocalArtwork(t *testing.T) {
 		if tr.ArtworkURL == "" {
 			t.Fatalf("track %s artwork URL is empty", tr.ID)
 		}
-		path := filepath.Join("../../..", tr.ArtworkURL)
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("track %s artwork %q: %v", tr.ID, tr.ArtworkURL, err)
+		if !strings.HasPrefix(tr.ArtworkURL, "https://") && !strings.HasPrefix(tr.ArtworkURL, "http://") {
+			t.Fatalf("track %s artwork URL = %q, want http(s)", tr.ID, tr.ArtworkURL)
 		}
 	}
 }

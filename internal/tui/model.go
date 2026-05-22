@@ -2635,7 +2635,7 @@ func (m *Model) nowPlayingHeight() int {
 
 // nowPlayingLines returns exactly h lines for the Now Playing section.
 func (m *Model) nowPlayingLines(contentW, h int) []string {
-	if m.supportsTrueColor == nil || !m.supportsTrueColor() || m.artwork.img == nil || m.artwork.failed || contentW < 42 || h < 8 || m.playerState.Track == nil {
+	if m.supportsTrueColor == nil || !m.supportsTrueColor() || m.artwork.img == nil || m.artwork.failed || contentW < 42 || h < 8 || m.playerState.Track == nil || m.artwork.url != m.playerState.Track.ArtworkURL {
 		return m.nowPlayingTextLines(contentW, h)
 	}
 

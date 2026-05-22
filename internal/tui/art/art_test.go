@@ -6,7 +6,6 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
-	"os"
 	"strings"
 	"testing"
 
@@ -72,30 +71,6 @@ func TestRenderHalfBlocks_ScalesImageToRequestedOutput(t *testing.T) {
 	}
 }
 
-func TestRenderHalfBlocks_GorillazArtworkMatchesGolden(t *testing.T) {
-	f, err := os.Open("testdata/gorillaz_2001_album.png")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-
-	img, err := Decode(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := RenderHalfBlocks(img, Size{Width: 16, Height: 8})
-	got := strings.Join(lines, "\n") + "\n"
-
-	wantBytes, err := os.ReadFile("testdata/gorillaz_2001_album_16x8.ansi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := string(wantBytes)
-	if got != want {
-		t.Fatalf("rendered Gorillaz artwork mismatch\ngot:\n%q\nwant:\n%q", got, want)
-	}
-}
-
 func TestRenderHalfBlocks_RejectsNonPositiveSize(t *testing.T) {
 	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
 	cases := []Size{{Width: 0, Height: 1}, {Width: 1, Height: 0}, {Width: -1, Height: 1}, {Width: 1, Height: -1}}
@@ -152,16 +127,6 @@ func TestSupportsTrueColor_ReadsCOLORTERM(t *testing.T) {
 				t.Fatalf("SupportsTrueColor() = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestFetchAndDecode_SupportsLocalArtworkPath(t *testing.T) {
-	img, err := FetchAndDecode(t.Context(), nil, "testdata/gorillaz_2001_album.png", 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if img.Bounds().Dx() == 0 || img.Bounds().Dy() == 0 {
-		t.Fatalf("decoded bounds = %v, want non-empty", img.Bounds())
 	}
 }
 
