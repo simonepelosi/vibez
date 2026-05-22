@@ -1859,6 +1859,17 @@ func TestNowPlayingLines_WithTrack_Paused(t *testing.T) {
 	}
 }
 
+func TestFetchArtworkCmd_NoTrueColorReturnsNil(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.supportsTrueColor = func() bool { return false }
+	m.artwork = artworkCache{url: "https://example.invalid/a.png", rendered: map[art.Size][]string{}}
+	m.artworkGen = 1
+
+	if cmd := m.fetchArtworkCmd("https://example.invalid/a.png", m.artworkGen); cmd != nil {
+		t.Fatal("fetchArtworkCmd without truecolor returned command, want nil")
+	}
+}
+
 func TestNowPlayingLines_NoTrueColorFallsBackToText(t *testing.T) {
 	m := newModel(nil)
 	m.supportsTrueColor = func() bool { return false }

@@ -133,6 +133,28 @@ func TestDecode_RejectsUnsupportedBytes(t *testing.T) {
 	}
 }
 
+func TestSupportsTrueColor_ReadsCOLORTERM(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "truecolor", value: "truecolor", want: true},
+		{name: "24bit", value: "24bit", want: true},
+		{name: "mixed case", value: "TRUECOLOR", want: true},
+		{name: "empty", value: "", want: false},
+		{name: "256color", value: "256color", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("COLORTERM", tc.value)
+			if got := SupportsTrueColor(); got != tc.want {
+				t.Fatalf("SupportsTrueColor() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFetchAndDecode_SupportsLocalArtworkPath(t *testing.T) {
 	img, err := FetchAndDecode(t.Context(), nil, "testdata/gorillaz_2001_album.png", 1<<20)
 	if err != nil {
