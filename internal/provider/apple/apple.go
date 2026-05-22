@@ -123,12 +123,24 @@ func (a *AppleProvider) do(req *http.Request, dst any) error {
 	}()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("apple music api %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%s", formatAPIError(resp.StatusCode, resp.Status, body))
 	}
 	if dst == nil || len(body) == 0 {
 		return nil
 	}
 	return json.Unmarshal(body, dst)
+}
+
+func formatAPIError(statusCode int, status string, body []byte) string {
+	msg := fmt.Sprintf("apple music api %s", status)
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed != "" {
+		msg += ": " + trimmed
+	}
+	if statusCode == http.StatusUnauthorized {
+		msg += ". Re-run `vibez login`; if you're using a local build, also refresh apple_developer_token."
+	}
+	return msg
 }
 
 // --- Apple Music API response types ---
@@ -223,6 +235,18 @@ type paginatedSongs struct {
 type paginatedPlaylists struct {
 	Data []playlistResource `json:"data"`
 	Next string             `json:"next"`
+}
+
+type playlistWithTracksResponse struct {
+	Data []struct {
+		ID            string             `json:"id"`
+		Attributes    playlistAttributes `json:"attributes"`
+		Relationships struct {
+			Tracks struct {
+				Data []songResource `json:"data"`
+			} `json:"tracks"`
+		} `json:"relationships"`
+	} `json:"data"`
 }
 
 type searchResponse struct {
@@ -540,7 +564,6 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 	}
 	var tracks []provider.Track
 	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", url.PathEscape(playlistID))
-
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -548,6 +571,23 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") {
+				fallbackReq, reqErr := a.newRequest(ctx, http.MethodGet, fmt.Sprintf("/me/library/playlists/%s?include=tracks", url.PathEscape(playlistID)))
+				if reqErr != nil {
+					return nil, reqErr
+				}
+				var playlistResp playlistWithTracksResponse
+				if doErr := a.do(fallbackReq, &playlistResp); doErr != nil {
+					return nil, err
+				}
+				if len(playlistResp.Data) == 0 {
+					return nil, err
+				}
+				for _, s := range playlistResp.Data[0].Relationships.Tracks.Data {
+					tracks = append(tracks, toTrack(s))
+				}
+				return tracks, nil
+			}
 			return nil, err
 		}
 		for _, s := range page.Data {

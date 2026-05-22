@@ -296,6 +296,9 @@ func TestSearch_HTTPError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for HTTP 401, got nil")
 	}
+	if !strings.Contains(err.Error(), "Re-run `vibez login`") {
+		t.Fatalf("expected actionable auth guidance, got %q", err)
+	}
 }
 
 func TestSearch_ContextCancelled(t *testing.T) {
@@ -631,6 +634,22 @@ func TestGetLibraryPlaylists_HTTPError(t *testing.T) {
 	}
 }
 
+func TestGetLibraryTracks_HTTPUnauthorizedHasGuidance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.GetLibraryTracks(context.Background())
+	if err == nil {
+		t.Fatal("expected error for HTTP 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "refresh apple_developer_token") {
+		t.Fatalf("expected developer token guidance, got %q", err)
+	}
+}
+
 func TestGetPlaylistTracks_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -641,6 +660,36 @@ func TestGetPlaylistTracks_HTTPError(t *testing.T) {
 	_, err := p.GetPlaylistTracks(context.Background(), "pl-id")
 	if err == nil {
 		t.Fatal("expected error for HTTP 404, got nil")
+	}
+}
+
+func TestGetPlaylistTracks_FallbackToIncludeTracksOn404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/library/playlists/pl-id/tracks":
+			http.Error(w, "not found", http.StatusNotFound)
+		case "/me/library/playlists/pl-id":
+			if r.URL.Query().Get("include") != "tracks" {
+				t.Fatalf("include query = %q", r.URL.Query().Get("include"))
+			}
+			writeJSON(t, w, map[string]any{"data": []any{map[string]any{
+				"id":            "pl-id",
+				"attributes":    map[string]any{"name": "Mix", "trackCount": 1, "artwork": map[string]any{"url": "", "width": 300, "height": 300}},
+				"relationships": map[string]any{"tracks": map[string]any{"data": []any{songJSON("s1", "Playlist Track", "Some Artist", "Some Album", 240000, "")}}},
+			}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetPlaylistTracks(context.Background(), "pl-id")
+	if err != nil {
+		t.Fatalf("GetPlaylistTracks fallback: %v", err)
+	}
+	if len(tracks) != 1 || tracks[0].Title != "Playlist Track" {
+		t.Fatalf("tracks = %+v", tracks)
 	}
 }
 
