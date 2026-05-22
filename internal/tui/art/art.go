@@ -67,7 +67,7 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if client == nil {
 		return nil, fmt.Errorf("fetch artwork: nil http client")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // G107: URL scheme is explicitly limited to http/https above before fetching artwork
 	if err != nil {
 		return nil, err
 	}
