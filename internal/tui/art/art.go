@@ -56,17 +56,12 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if err != nil {
 		return nil, err
 	}
-	if parsed.Scheme == "" || parsed.Scheme == "file" {
-		path := url
-		if parsed.Scheme == "file" {
-			path = parsed.Path
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-		return decodeBounded(f, maxBytes)
+	switch parsed.Scheme {
+	case "http", "https":
+	case "":
+		return nil, fmt.Errorf("fetch artwork: missing URL scheme")
+	default:
+		return nil, fmt.Errorf("fetch artwork: unsupported URL scheme %q", parsed.Scheme)
 	}
 
 	if client == nil {

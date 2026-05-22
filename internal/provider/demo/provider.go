@@ -12,20 +12,16 @@ import (
 
 // Tracks is the built-in demo library shared with the demo Player.
 var Tracks = []provider.Track{
-	{ID: "d1", Title: "Nights", Artist: "Frank Ocean", Album: "Blonde", Duration: dur(5, 7), ArtworkURL: artworkPath("d1.jpg")},
-	{ID: "d2", Title: "Pyramids", Artist: "Frank Ocean", Album: "channel ORANGE", Duration: dur(9, 2), ArtworkURL: artworkPath("d2.jpg")},
-	{ID: "d3", Title: "Novacane", Artist: "Frank Ocean", Album: "nostalgia, ULTRA", Duration: dur(5, 7), ArtworkURL: artworkPath("d3.jpg")},
-	{ID: "d4", Title: "Redbone", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(5, 27), ArtworkURL: artworkPath("d4.jpg")},
-	{ID: "d5", Title: "Me and Your Mama", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(4, 40), ArtworkURL: artworkPath("d5.jpg")},
-	{ID: "d6", Title: "See You Again", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 1), ArtworkURL: artworkPath("d6.jpg")},
-	{ID: "d7", Title: "Garden Shed", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 32), ArtworkURL: artworkPath("d7.jpg")},
-	{ID: "d8", Title: "Kill Bill", Artist: "SZA", Album: "SOS", Duration: dur(2, 33), ArtworkURL: artworkPath("d8.jpg")},
-	{ID: "d9", Title: "Good Days", Artist: "SZA", Album: "Good Days", Duration: dur(4, 39), ArtworkURL: artworkPath("d9.jpg")},
-	{ID: "d10", Title: "After The Storm", Artist: "Kali Uchis", Album: "Isolation", Duration: dur(3, 57), ArtworkURL: artworkPath("d10.jpg")},
-}
-
-func artworkPath(name string) string {
-	return "internal/provider/demo/testdata/artwork/" + name
+	{ID: "d1", Title: "Nights", Artist: "Frank Ocean", Album: "Blonde", Duration: dur(5, 7), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/92/03/16/920316ad-387d-3912-2a38-9def9f8c6bf0/18UMGIM18102.rgb.jpg/300x300bb.jpg"},
+	{ID: "d2", Title: "Pyramids", Artist: "Frank Ocean", Album: "channel ORANGE", Duration: dur(9, 2), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/21/12/c5/2112c5dd-7cbc-077a-c86f-19821679fa57/12UMGIM40298.rgb.jpg/300x300bb.jpg"},
+	{ID: "d3", Title: "Novacane", Artist: "Frank Ocean", Album: "nostalgia, ULTRA", Duration: dur(5, 7), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/dc/cb/ec/dccbec6b-3e33-7a93-adbf-bf81e4ee42e0/11UMGIM17475.rgb.jpg/300x300bb.jpg"},
+	{ID: "d4", Title: "Redbone", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(5, 27), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/e1/f0/c9/e1f0c9e4-dbe6-4982-f4cc-353a405cd06e/16UMGIM77860.rgb.jpg/300x300bb.jpg"},
+	{ID: "d5", Title: "Me and Your Mama", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(4, 40), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/e1/f0/c9/e1f0c9e4-dbe6-4982-f4cc-353a405cd06e/16UMGIM77860.rgb.jpg/300x300bb.jpg"},
+	{ID: "d6", Title: "See You Again", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 1), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/5a/cf/1d/5acf1dbd-9d9c-8e77-06ac-c563f7ef629d/886446632373.jpg/300x300bb.jpg"},
+	{ID: "d7", Title: "Garden Shed", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 32), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/5a/cf/1d/5acf1dbd-9d9c-8e77-06ac-c563f7ef629d/886446632373.jpg/300x300bb.jpg"},
+	{ID: "d8", Title: "Kill Bill", Artist: "SZA", Album: "SOS", Duration: dur(2, 33), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music112/v4/f9/e3/5d/f9e35d35-6c7c-a358-910d-17ff6394a38e/196589564931.jpg/300x300bb.jpg"},
+	{ID: "d9", Title: "Good Days", Artist: "SZA", Album: "Good Days", Duration: dur(4, 39), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/b1/c6/9a/b1c69a2f-d81e-1f76-dd28-5ec7146f9cd6/886448817637.jpg/300x300bb.jpg"},
+	{ID: "d10", Title: "After The Storm", Artist: "Kali Uchis", Album: "Isolation", Duration: dur(3, 57), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/19/f8/9e/19f89ed7-0c2a-7c92-99ff-241146c0a771/17UMGIM98371.rgb.jpg/300x300bb.jpg"},
 }
 
 func dur(m, s int) time.Duration {
