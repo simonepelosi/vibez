@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -922,4 +924,103 @@ func TestGetSongRating_InvalidJSON_ReturnsFalse(t *testing.T) {
 	if loved {
 		t.Error("GetSongRating = true for invalid JSON, want false")
 	}
+}
+
+func TestGetLibraryPlaylists_AddsSyntheticFavorites(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"data": []any{playlistJSON("pl2", "Workout", 25)}, "next": ""})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	lists, err := p.GetLibraryPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryPlaylists: %v", err)
+	}
+	if len(lists) != 2 || lists[0].Name != "Favorites" || !lists[0].ReadOnly {
+		t.Fatalf("synthetic favorites not prepended/read-only: %+v", lists)
+	}
+}
+
+func TestGetPlaylistTracks_FavoritesUsesRatings(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/library/songs":
+			writeJSON(t, w, map[string]any{"data": []any{
+				songJSONWithCatalog("i.one", "cat1", "Loved", "A", "B", 1000, ""),
+				songJSONWithCatalog("i.two", "cat2", "Plain", "A", "B", 1000, ""),
+			}, "next": ""})
+		case "/me/ratings/songs":
+			if r.URL.Query().Get("ids") != "cat1,cat2" {
+				t.Errorf("ids query = %q", r.URL.Query().Get("ids"))
+			}
+			writeJSON(t, w, map[string]any{"data": []any{map[string]any{"id": "r.cat1", "attributes": map[string]any{"value": 1}}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetPlaylistTracks(context.Background(), "vibez:favorites")
+	if err != nil {
+		t.Fatalf("GetPlaylistTracks(favorites): %v", err)
+	}
+	if len(tracks) != 1 || tracks[0].Title != "Loved" {
+		t.Fatalf("favorites tracks = %+v", tracks)
+	}
+}
+
+func TestGetPlaylistTracks_FavoritesRatingsBatchesAreBoundedParallel(t *testing.T) {
+	librarySongs := make([]any, 250)
+	for i := range librarySongs {
+		catalogID := "cat" + strconv.Itoa(i)
+		librarySongs[i] = songJSONWithCatalog("i."+catalogID, catalogID, "Song "+catalogID, "A", "B", 1000, "")
+	}
+
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	var ratingCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/library/songs":
+			writeJSON(t, w, map[string]any{"data": librarySongs, "next": ""})
+		case "/me/ratings/songs":
+			current := active.Add(1)
+			for {
+				maxSeen := maxActive.Load()
+				if current <= maxSeen || maxActive.CompareAndSwap(maxSeen, current) {
+					break
+				}
+			}
+			ratingCalls.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			active.Add(-1)
+			writeJSON(t, w, map[string]any{"data": []any{}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.GetPlaylistTracks(context.Background(), "vibez:favorites")
+	if err != nil {
+		t.Fatalf("GetPlaylistTracks(favorites): %v", err)
+	}
+	if ratingCalls.Load() != 3 {
+		t.Fatalf("ratingCalls = %d, want 3", ratingCalls.Load())
+	}
+	if maxActive.Load() < 2 {
+		t.Fatalf("ratings were not fetched in parallel, maxActive = %d", maxActive.Load())
+	}
+	if maxActive.Load() > 5 {
+		t.Fatalf("ratings concurrency unbounded, maxActive = %d", maxActive.Load())
+	}
+}
+
+func songJSONWithCatalog(id, catalogID, name, artist, album string, durationMs int, artURL string) map[string]any {
+	s := songJSON(id, name, artist, album, durationMs, artURL)
+	s["attributes"].(map[string]any)["playParams"] = map[string]any{"id": id, "kind": "song", "catalogId": catalogID}
+	return s
 }

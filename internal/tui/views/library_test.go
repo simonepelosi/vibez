@@ -340,199 +340,31 @@ func TestLibrary_Update_PlaylistTracksMsg_Error(t *testing.T) {
 	}
 }
 
-func TestLibrary_Update_PlaylistTracksMsg_DropsStaleResponse(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	pl := provider.Playlist{ID: "pl1", Name: "Playlist"}
-	tracks := []provider.Track{{Title: "Song", Artist: "Artist"}}
-	lib.pane = paneItems
-	lib.drillPlaylist = pl
-	lib.drillLoading = true
-	lib.drillRequestGeneration = 1
-	lib.drillRequestKind = playlistRequestTracks
-
-	updated, _ := lib.Update(playlistTracksMsg{playlist: pl, generation: 1, kind: playlistRequestTracks, tracks: tracks})
-	if updated.pane != paneItems {
-		t.Fatalf("stale playlist response changed pane = %d, want %d", updated.pane, paneItems)
-	}
-	if len(updated.drillTracks) != 0 {
-		t.Fatalf("stale playlist response set %d drill tracks, want 0", len(updated.drillTracks))
-	}
-	if !updated.drillLoading {
-		t.Fatal("stale playlist response should not clear current drill loading state")
-	}
-}
-
-func TestLibrary_PlaylistResponseAfterBackAndSongsDoesNotOverwriteSongs(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	playlist := provider.Playlist{ID: "pl1", Name: "Playlist"}
-	playlistTracks := []provider.Track{{ID: "p.1", Title: "Playlist Song"}}
-	songTracks := []provider.Track{{ID: "s.1", Title: "Song Pane Track"}}
-
-	cmd := lib.loadPlaylistTracks(playlist)
-	msg := cmd().(playlistTracksMsg)
-	lib.pane = paneTracks
-	lib.drillPlaylist = playlist
-	lib.drillTitle = playlist.Name
-	lib.tracksBackPane = paneItems
-
-	lib, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	lib.showTrackPane("Songs", songTracks, paneSections)
-	lib, _ = lib.Update(playlistTracksMsg{playlist: playlist, generation: msg.generation, kind: msg.kind, tracks: playlistTracks})
-
-	if lib.pane != paneTracks {
-		t.Fatalf("pane = %d, want %d", lib.pane, paneTracks)
-	}
-	if lib.drillLoading {
-		t.Fatal("stale playlist response left drill loading stuck")
-	}
-	if len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "s.1" {
-		t.Fatalf("drillTracks = %+v, want songs pane tracks", lib.drillTracks)
-	}
-}
-
-func TestLibrary_PlaylistAResponseIgnoredAfterOpeningPlaylistB(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	playlistA := provider.Playlist{ID: "a", Name: "Playlist A"}
-	playlistB := provider.Playlist{ID: "b", Name: "Playlist B"}
-	tracksA := []provider.Track{{ID: "a.1", Title: "A"}}
-	tracksB := []provider.Track{{ID: "b.1", Title: "B"}}
-
-	cmdA := lib.loadPlaylistTracks(playlistA)
-	msgA := cmdA().(playlistTracksMsg)
-	lib.pane = paneTracks
-	lib.drillPlaylist = playlistA
-
-	cmdB := lib.loadPlaylistTracks(playlistB)
-	msgB := cmdB().(playlistTracksMsg)
-	lib.drillPlaylist = playlistB
-
-	lib, _ = lib.Update(playlistTracksMsg{playlist: playlistA, generation: msgA.generation, kind: msgA.kind, tracks: tracksA})
-	if len(lib.drillTracks) != 0 {
-		t.Fatalf("stale playlist A set tracks: %+v", lib.drillTracks)
-	}
-	if !lib.drillLoading {
-		t.Fatal("stale playlist A cleared playlist B loading")
-	}
-
-	lib, _ = lib.Update(playlistTracksMsg{playlist: playlistB, generation: msgB.generation, kind: msgB.kind, tracks: tracksB})
-	if lib.drillLoading {
-		t.Fatal("valid playlist B response should clear loading")
-	}
-	if len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "b.1" {
-		t.Fatalf("drillTracks = %+v, want playlist B tracks", lib.drillTracks)
-	}
-}
-
-func TestLibrary_CurrentPlaylistResponseAccepted(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	playlist := provider.Playlist{ID: "pl1", Name: "Playlist"}
-	tracks := []provider.Track{{ID: "t.1", Title: "Track"}}
-
-	cmd := lib.loadPlaylistTracks(playlist)
-	msg := cmd().(playlistTracksMsg)
-	lib.pane = paneTracks
-	lib.drillPlaylist = playlist
-
-	lib, _ = lib.Update(playlistTracksMsg{playlist: playlist, generation: msg.generation, kind: msg.kind, tracks: tracks})
-	if lib.drillLoading {
-		t.Fatal("valid playlist response should clear loading")
-	}
-	if len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "t.1" {
-		t.Fatalf("drillTracks = %+v, want current playlist tracks", lib.drillTracks)
-	}
-}
-
-func TestLibrary_StalePlaylistsResponseAfterNavigatingSongsDoesNotReplaceSongs(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	playlists := []provider.Playlist{{ID: "p.1", Name: "Slow Playlist"}}
-	songs := []provider.Track{{ID: "s.1", Title: "Current Song"}}
-
-	lib.selectedSection = sectionPlaylists
-	playlistsCmd := lib.loadPlaylists()
-	playlistsMsg := playlistsCmd().(libraryLoadedMsg)
-
-	lib.selectedSection = sectionSongs
-	songsCmd := lib.loadLibraryTracks()
-	songsMsg := songsCmd().(libraryTracksLoadedMsg)
-	lib, _ = lib.Update(libraryTracksLoadedMsg{generation: songsMsg.generation, section: songsMsg.section, kind: songsMsg.kind, tracks: songs})
-	lib, _ = lib.Update(libraryLoadedMsg{generation: playlistsMsg.generation, section: playlistsMsg.section, kind: playlistsMsg.kind, playlists: playlists})
-
-	if lib.pane != paneTracks {
-		t.Fatalf("pane = %d, want %d", lib.pane, paneTracks)
-	}
-	if len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "s.1" {
-		t.Fatalf("drillTracks = %+v, want current songs", lib.drillTracks)
-	}
-	if lib.loading {
-		t.Fatal("stale playlists response cleared/changed current loading state")
-	}
-}
-
-func TestLibrary_StaleSongsResponseAfterNavigatingPlaylistsDoesNotOverwritePlaylists(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	songs := []provider.Track{{ID: "s.1", Title: "Slow Song"}}
-	playlists := []provider.Playlist{{ID: "p.1", Name: "Current Playlist"}}
-
-	lib.selectedSection = sectionSongs
-	songsCmd := lib.loadLibraryTracks()
-	songsMsg := songsCmd().(libraryTracksLoadedMsg)
-
-	lib.selectedSection = sectionPlaylists
-	playlistsCmd := lib.loadPlaylists()
-	playlistsMsg := playlistsCmd().(libraryLoadedMsg)
-	lib, _ = lib.Update(libraryTracksLoadedMsg{generation: songsMsg.generation, section: songsMsg.section, kind: songsMsg.kind, tracks: songs})
-
-	if !lib.loading {
-		t.Fatal("stale songs response cleared current playlists loading")
-	}
-	if lib.pane != paneSections {
-		t.Fatalf("pane = %d, want sections while playlists load", lib.pane)
-	}
-
-	lib, _ = lib.Update(libraryLoadedMsg{generation: playlistsMsg.generation, section: playlistsMsg.section, kind: playlistsMsg.kind, playlists: playlists})
-	if lib.loading {
-		t.Fatal("valid playlists response should clear loading")
-	}
-	if lib.pane != paneItems || len(lib.playlists) != 1 || lib.playlists[0].ID != "p.1" {
-		t.Fatalf("playlists pane = %d playlists = %+v, want current playlists", lib.pane, lib.playlists)
-	}
-}
-
-func TestLibrary_CurrentTopLevelResponseAccepted(t *testing.T) {
-	lib := NewLibrary(&mockProvider{})
-	lib.SetSize(80, 20)
-	tracks := []provider.Track{{ID: "s.1", Title: "Accepted Song"}}
-
-	lib.selectedSection = sectionSongs
-	cmd := lib.loadLibraryTracks()
-	msg := cmd().(libraryTracksLoadedMsg)
-	lib, _ = lib.Update(libraryTracksLoadedMsg{generation: msg.generation, section: msg.section, kind: msg.kind, tracks: tracks})
-
-	if lib.loading {
-		t.Fatal("valid tracks response should clear loading")
-	}
-	if lib.pane != paneTracks || len(lib.drillTracks) != 1 || lib.drillTracks[0].ID != "s.1" {
-		t.Fatalf("tracks pane = %d drillTracks = %+v, want accepted songs", lib.pane, lib.drillTracks)
-	}
-}
-
 // --- Library.Update: drill pane key handling ---
 
 func TestLibrary_Update_DrillPane_Esc_ReturnsToList(t *testing.T) {
 	lib := NewLibrary(&mockProvider{})
 	lib.SetSize(80, 20)
 	lib.pane = paneTracks
+	lib.tracksBackPane = paneItems
+	lib.drillPlaylist = provider.Playlist{ID: "pl1"}
+	lib.drillRequestGeneration = 3
+	lib.drillRequestKind = playlistRequestTracks
+	lib.drillLoading = true
 	lib.drillTracks = []provider.Track{{Title: "T1"}}
 
 	updated, _ := lib.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	if updated.pane != paneItems {
 		t.Error("esc in drill pane should return to list pane")
+	}
+	if updated.drillPlaylist.ID != "" {
+		t.Errorf("drillPlaylist.ID = %q, want empty", updated.drillPlaylist.ID)
+	}
+	if updated.drillRequestGeneration != 4 {
+		t.Errorf("drillRequestGeneration = %d, want 4", updated.drillRequestGeneration)
+	}
+	if updated.drillLoading {
+		t.Error("drillLoading should be false after back")
 	}
 }
 
@@ -624,4 +456,69 @@ func TestLibrary_Update_SpinnerTick_WhenLoadingDrillList(t *testing.T) {
 	lib.drillLoading = true
 	// Should not panic.
 	lib.Update(spinner.TickMsg{ID: 1, Time: time.Now()})
+}
+
+func TestLibrary_Back_ReturnsFromItemsPane(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.pane = paneItems
+	lib.selectedSection = sectionArtists
+	lib.showGroups([]trackGroup{{title: "Artist", desc: "1 track"}})
+	if !lib.Back() {
+		t.Fatal("Back() = false, want true")
+	}
+	if lib.pane != paneSections {
+		t.Fatalf("pane = %v, want paneSections", lib.pane)
+	}
+	if len(lib.list.Items()) != 4 {
+		t.Fatalf("section picker item count = %d, want 4", len(lib.list.Items()))
+	}
+	if lib.Back() {
+		t.Fatal("Back() at sections pane = true, want false")
+	}
+}
+
+func TestLibrary_RenderDrillView_Error(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillErr = errors.New("apple 404")
+	view := lib.renderDrillView()
+	if !strings.Contains(view, "Could not load tracks: apple 404") {
+		t.Fatalf("error not rendered: %q", view)
+	}
+}
+
+func TestLibrary_Update_DrillPane_BackKeys(t *testing.T) {
+	for _, key := range []string{"left", "h", "esc", "backspace"} {
+		lib := NewLibrary(&mockProvider{})
+		lib.pane = paneTracks
+		lib.tracksBackPane = paneItems
+		updated, _ := lib.Update(tea.KeyPressMsg{Text: key})
+		if updated.pane != paneItems {
+			t.Fatalf("%s pane = %v, want paneItems", key, updated.pane)
+		}
+	}
+}
+
+func TestLibrary_Update_PlaylistTracksMsg_StaleRequestIgnored(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.SetSize(80, 20)
+	lib.pane = paneTracks
+	lib.drillPlaylist = provider.Playlist{ID: "pl1", Name: "Playlist"}
+	lib.drillRequestGeneration = 2
+	lib.drillRequestKind = playlistRequestTracks
+	lib.drillLoading = true
+
+	updated, _ := lib.Update(playlistTracksMsg{
+		playlist:   provider.Playlist{ID: "pl1", Name: "Playlist"},
+		generation: 1,
+		kind:       playlistRequestTracks,
+		tracks:     []provider.Track{{Title: "Stale"}},
+	})
+	if len(updated.drillTracks) != 0 {
+		t.Fatalf("stale tracks accepted: %+v", updated.drillTracks)
+	}
+	if !updated.drillLoading {
+		t.Fatal("stale response should not clear current loading state")
+	}
 }

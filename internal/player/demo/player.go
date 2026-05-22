@@ -74,6 +74,13 @@ func (p *Player) run() {
 
 // advance moves to the next track (wraps around). Must be called with mu held.
 func (p *Player) advance() {
+	if len(p.queue) == 0 {
+		p.idx = 0
+		p.state.Track = nil
+		p.state.Position = 0
+		p.state.Playing = false
+		return
+	}
 	p.idx = (p.idx + 1) % len(p.queue)
 	t := p.queue[p.idx]
 	p.state.Track = &t
@@ -93,7 +100,7 @@ func (p *Player) broadcast(st player.State) {
 
 func (p *Player) Play() error {
 	p.mu.Lock()
-	p.state.Playing = true
+	p.state.Playing = p.state.Track != nil
 	st := p.state
 	p.mu.Unlock()
 	p.broadcast(st)
@@ -123,14 +130,21 @@ func (p *Player) Next() error {
 
 func (p *Player) Previous() error {
 	p.mu.Lock()
-	if p.state.Position > 3*time.Second {
+	switch {
+	case len(p.queue) == 0:
+		p.idx = 0
+		p.state.Track = nil
 		p.state.Position = 0
-	} else {
-		if p.idx == 0 {
-			p.idx = len(p.queue) - 1
-		} else {
-			p.idx--
-		}
+		p.state.Playing = false
+	case p.state.Position > 3*time.Second:
+		p.state.Position = 0
+	case p.idx == 0:
+		p.idx = len(p.queue) - 1
+		t := p.queue[p.idx]
+		p.state.Track = &t
+		p.state.Position = 0
+	default:
+		p.idx--
 		t := p.queue[p.idx]
 		p.state.Track = &t
 		p.state.Position = 0

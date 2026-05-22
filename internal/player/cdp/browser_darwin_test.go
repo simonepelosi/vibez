@@ -80,7 +80,7 @@ func TestCDPLaunchProbeInvalidToken(t *testing.T) {
 		t.Fatalf("EnsureBrowser: %v", err)
 	}
 
-	p, err := New("invalid.developer.token", "invalid.user.token", "", false)
+	p, err := New("invalid.developer.token", "invalid.user.token", "", false, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

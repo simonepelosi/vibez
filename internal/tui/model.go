@@ -44,6 +44,7 @@ type ContentView interface {
 	SetSize(w, h int)
 	Update(msg tea.KeyPressMsg) tea.Cmd
 	View() string
+	Back() bool
 }
 
 // libraryPanel wraps views.LibraryModel to satisfy ContentView.
@@ -58,6 +59,7 @@ func (p *libraryPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	return cmd
 }
 func (p *libraryPanel) View() string  { return p.m.View() }
+func (p *libraryPanel) Back() bool    { return p.m.Back() }
 func (p *libraryPanel) Init() tea.Cmd { return p.m.Init() }
 
 // queuePanel wraps views.QueueModel to satisfy ContentView.
@@ -71,6 +73,7 @@ func (p *queuePanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 func (p *queuePanel) View() string                          { return p.m.View() }
+func (p *queuePanel) Back() bool                            { return false }
 func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
 func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
 
@@ -82,6 +85,7 @@ func (p *lyricsPanel) NavLabel() string                   { return "lyrics" }
 func (p *lyricsPanel) SetSize(w, h int)                   { p.m.SetSize(w, h) }
 func (p *lyricsPanel) Update(msg tea.KeyPressMsg) tea.Cmd { return p.m.Update(msg) }
 func (p *lyricsPanel) View() string                       { return p.m.View() }
+func (p *lyricsPanel) Back() bool                         { return false }
 
 // feedPanel wraps views.FeedModel to satisfy ContentView.
 type feedPanel struct{ m *views.FeedModel }
@@ -91,6 +95,7 @@ func (p *feedPanel) NavLabel() string                   { return "feed" }
 func (p *feedPanel) SetSize(w, h int)                   { p.m.SetSize(w, h) }
 func (p *feedPanel) Update(msg tea.KeyPressMsg) tea.Cmd { return p.m.Update(msg) }
 func (p *feedPanel) View() string                       { return p.m.View() }
+func (p *feedPanel) Back() bool                         { return false }
 
 // eqPanel wraps views.EQModel to satisfy ContentView.
 type eqPanel struct{ m *views.EQModel }
@@ -105,6 +110,7 @@ func (p *eqPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	return p.m.Update(msg)
 }
 func (p *eqPanel) View() string { return p.m.View() }
+func (p *eqPanel) Back() bool   { return false }
 
 // ── Messages ──────────────────────────────────────────────────────────────
 
@@ -896,7 +902,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[playlist] fetch error: %v", msg.err))
 			break
 		}
-		m.playlistPickerItems = msg.playlists
+		m.playlistPickerItems = m.playlistPickerItems[:0]
+		for _, pl := range msg.playlists {
+			if !pl.ReadOnly {
+				m.playlistPickerItems = append(m.playlistPickerItems, pl)
+			}
+		}
 		if m.playlistPickerCursor >= len(m.playlistPickerItems) {
 			m.playlistPickerCursor = 0
 		}
@@ -1469,7 +1480,7 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
-	// When debug log is open, j/k/G scroll it; esc closes it.
+	// When debug log is open, j/k/G scroll it; esc back/closes it.
 	if m.debugView {
 		switch k {
 		case "j", "down":
@@ -1601,6 +1612,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		return nil
 	}
 
+	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
+		m.lastKey = ""
+		return nil
+	}
+
 	// Player control keys always work, even when other panels are active.
 	switch k {
 	case "space":
@@ -1726,6 +1742,10 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	// Forward remaining keys to other active panels (e.g. library).
 	if m.activePanel >= 0 {
 		if k == "esc" {
+			if m.panels[m.activePanel].Back() {
+				m.lastKey = ""
+				return nil
+			}
 			m.activePanel = -1
 			m.lastKey = ""
 			return nil
@@ -2815,9 +2835,8 @@ func (m *Model) statusNavContent(_ int) string {
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.library:
 			parts = []string{
 				styles.ModeNormal.Render("LIBRARY"),
-				accent.Render("Enter") + muted.Render(" play"),
-				accent.Render("Tab") + muted.Render(" add to queue"),
-				accent.Render("esc") + muted.Render(" close"),
+				accent.Render("Enter") + muted.Render(" browse/play"),
+				accent.Render("esc") + muted.Render(" back/close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
 			parts = []string{

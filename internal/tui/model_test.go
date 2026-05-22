@@ -2796,3 +2796,28 @@ func TestCommandSuggestionsIncludeQuality(t *testing.T) {
 		t.Fatalf("quality suggestions = %#v", got)
 	}
 }
+
+type backTestPanel struct {
+	backCalled bool
+}
+
+func (p *backTestPanel) NavKey() string                 { return "b" }
+func (p *backTestPanel) NavLabel() string               { return "backtest" }
+func (p *backTestPanel) SetSize(_, _ int)               {}
+func (p *backTestPanel) Update(tea.KeyPressMsg) tea.Cmd { return nil }
+func (p *backTestPanel) View() string                   { return "" }
+func (p *backTestPanel) Back() bool                     { p.backCalled = true; return true }
+
+func TestModel_ActivePanelEscCallsBackBeforeClose(t *testing.T) {
+	m := newModel(nil)
+	panel := &backTestPanel{}
+	m.panels = []ContentView{panel}
+	m.activePanel = 0
+	m.handleNormalKey(tea.KeyPressMsg{Code: tea.KeyEsc}, "esc")
+	if !panel.backCalled {
+		t.Fatal("esc did not call active panel Back")
+	}
+	if m.activePanel != 0 {
+		t.Fatalf("activePanel = %d, want still open after Back handled", m.activePanel)
+	}
+}

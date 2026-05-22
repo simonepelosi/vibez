@@ -293,9 +293,10 @@
           try {
             const m   = _m();
             const sf  = m.storefrontId || 'us';
+            const encodedPlaylistID = encodeURIComponent(playlistID);
             const url = playlistID.startsWith('p.')
-              ? `/v1/me/library/playlists/${playlistID}/tracks`
-              : `/v1/catalog/${sf}/playlists/${playlistID}/tracks`;
+              ? `/v1/me/library/playlists/${encodedPlaylistID}/tracks`
+              : `/v1/catalog/${sf}/playlists/${encodedPlaylistID}/tracks`;
             let items = [];
             try {
               const resp = await m.api.music(url);
@@ -383,7 +384,11 @@
             const sf = m.storefrontId || 'us';
             let items = [];
             try {
-              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              const encodedPlaylistID = encodeURIComponent(playlistID);
+              const url = playlistID.startsWith('p.')
+                ? `/v1/me/library/playlists/${encodedPlaylistID}/tracks`
+                : `/v1/catalog/${sf}/playlists/${encodedPlaylistID}/tracks`;
+              const resp = await m.api.music(url);
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }

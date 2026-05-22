@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
@@ -17,8 +18,12 @@ import (
 )
 
 const (
-	defaultBaseURL    = "https://api.music.apple.com/v1"
-	defaultCatalogURL = "https://amp-api.music.apple.com/v1" // used for catalog search: returns extendedAssetUrls
+	defaultBaseURL         = "https://api.music.apple.com/v1"
+	defaultCatalogURL      = "https://amp-api.music.apple.com/v1" // used for catalog search: returns extendedAssetUrls
+	favoritesPlaylistID    = "vibez:favorites"
+	favoritesPlaylistName  = "Favorites"
+	ratingBatchSize        = 100
+	ratingBatchConcurrency = 5
 )
 
 type AppleProvider struct {
@@ -510,12 +515,31 @@ func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Pla
 		}
 		endpoint = page.Next
 	}
+	if !hasFavoritesPlaylist(playlists) {
+		playlists = append([]provider.Playlist{{ID: favoritesPlaylistID, Name: favoritesPlaylistName, ReadOnly: true}}, playlists...)
+	}
 	return playlists, nil
 }
 
+func hasFavoritesPlaylist(playlists []provider.Playlist) bool {
+	for _, pl := range playlists {
+		name := strings.ToLower(strings.TrimSpace(pl.Name))
+		// Apple localizes the built-in Favorites playlist name. MusicKit library
+		// playlist responses do not expose a stable built-in Favorites identifier,
+		// so v1 only suppresses the synthetic playlist for known English names.
+		if name == "favorites" || name == "favorite songs" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
+	if playlistID == favoritesPlaylistID {
+		return a.getFavoriteTracks(ctx)
+	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", playlistID)
+	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", url.PathEscape(playlistID))
 
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
@@ -540,7 +564,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, albumID)
+	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, url.PathEscape(albumID))
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -560,7 +584,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 
 func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=100", albumID)
+	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=100", url.PathEscape(albumID))
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -584,7 +608,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
 	var tracks []provider.Track
-	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, playlistID)
+	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, url.PathEscape(playlistID))
 	for endpoint != "" {
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
@@ -600,6 +624,146 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		endpoint = page.Next
 	}
 	return tracks, nil
+}
+
+func (a *AppleProvider) getFavoriteTracks(ctx context.Context) ([]provider.Track, error) {
+	tracks, err := a.GetLibraryTracks(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("favorites: library tracks: %w", err)
+	}
+	catalogIDs := make([]string, 0, len(tracks))
+	trackCatalogID := make(map[string]string, len(tracks))
+	seen := make(map[string]bool, len(tracks))
+	for _, track := range tracks {
+		catalogID := track.CatalogID
+		if catalogID == "" && !strings.HasPrefix(track.ID, "i.") {
+			catalogID = track.ID
+		}
+		if catalogID == "" {
+			continue
+		}
+		trackCatalogID[track.ID] = catalogID
+		if !seen[catalogID] {
+			catalogIDs = append(catalogIDs, catalogID)
+			seen[catalogID] = true
+		}
+	}
+	if len(catalogIDs) == 0 {
+		return nil, nil
+	}
+	loved, err := a.getSongRatings(ctx, catalogIDs)
+	if err != nil {
+		return nil, fmt.Errorf("favorites: ratings: %w", err)
+	}
+	favorites := make([]provider.Track, 0, len(tracks))
+	for _, track := range tracks {
+		if loved[trackCatalogID[track.ID]] {
+			favorites = append(favorites, track)
+		}
+	}
+	return favorites, nil
+}
+
+type ratingsResponse struct {
+	Data []struct {
+		ID         string `json:"id"`
+		Attributes struct {
+			Value int `json:"value"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+func (a *AppleProvider) getSongRatings(ctx context.Context, ids []string) (map[string]bool, error) {
+	loved := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return loved, nil
+	}
+
+	type batch struct {
+		ids []string
+	}
+	batchCount := (len(ids) + ratingBatchSize - 1) / ratingBatchSize
+	jobs := make(chan batch, batchCount)
+	errs := make(chan error, 1)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	workerCount := min(ratingBatchConcurrency, batchCount)
+	for range workerCount {
+		wg.Go(func() {
+			for job := range jobs {
+				ratings, err := a.fetchSongRatingsBatch(ctx, job.ids)
+				if err != nil {
+					select {
+					case errs <- err:
+					default:
+					}
+					continue
+				}
+				mu.Lock()
+				for id := range ratings {
+					loved[id] = true
+				}
+				mu.Unlock()
+			}
+		})
+	}
+
+	for start := 0; start < len(ids); start += ratingBatchSize {
+		end := min(start+ratingBatchSize, len(ids))
+		select {
+		case jobs <- batch{ids: ids[start:end]}:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, ctx.Err()
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	select {
+	case err := <-errs:
+		return nil, err
+	default:
+	}
+	return loved, nil
+}
+
+func (a *AppleProvider) fetchSongRatingsBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	ep := "/me/ratings/songs?ids=" + url.QueryEscape(strings.Join(ids, ","))
+	req, err := a.newRequest(ctx, http.MethodGet, ep)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.client.Do(req) //nolint:gosec // G704: URL is constructed from config, not user input
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
+		return map[string]bool{}, nil
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("apple music api %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var ratings ratingsResponse
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &ratings); err != nil {
+			return nil, err
+		}
+	}
+	loved := make(map[string]bool, len(ratings.Data))
+	for _, rating := range ratings.Data {
+		if rating.Attributes.Value == 1 {
+			// GET /v1/me/ratings/songs?ids=<catalog ids> has been observed to return
+			// rating resource IDs prefixed as "r.<catalog id>". Apple's public docs do
+			// not document the wrapper prefix, so only strip that exact prefix.
+			loved[strings.TrimPrefix(rating.ID, "r.")] = true
+		}
+	}
+	return loved, nil
 }
 
 // createPlaylistRequest is the JSON body for POST /v1/me/library/playlists.
@@ -688,7 +852,7 @@ func (a *AppleProvider) AddToPlaylist(ctx context.Context, playlistID, trackID s
 	if err != nil {
 		return fmt.Errorf("AddToPlaylist: marshal: %w", err)
 	}
-	ep := "/me/library/playlists/" + playlistID + "/tracks"
+	ep := "/me/library/playlists/" + url.PathEscape(playlistID) + "/tracks"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+ep, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return err

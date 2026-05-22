@@ -45,6 +45,8 @@ type Playlist struct {
 	Name       string
 	TrackCount int
 	ArtworkURL string
+	// ReadOnly playlists are browsable system playlists but must not appear in add-to-playlist pickers.
+	ReadOnly bool
 }
 
 type SearchResult struct {

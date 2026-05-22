@@ -140,6 +140,28 @@ func (m *LibraryModel) Height() int     { return m.height }
 func (m *LibraryModel) DrillErr() error { return m.drillErr }
 func (m *LibraryModel) LoadErr() error  { return m.loadErr }
 
+func (m *LibraryModel) Back() bool {
+	switch m.pane {
+	case paneSections:
+		return false
+	case paneItems:
+		m.invalidateLibraryRequest()
+		m.pane = paneSections
+		m.showSections()
+		return true
+	case paneTracks:
+		m.invalidatePlaylistRequest()
+		if m.tracksBackPane == paneSections && m.drillTitle == "" {
+			m.pane = paneItems
+		} else {
+			m.pane = m.tracksBackPane
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *LibraryModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
@@ -187,6 +209,7 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 	m.drillRequestKind = playlistRequestTracks
 	generation := m.drillRequestGeneration
 	kind := m.drillRequestKind
+
 	m.drillLoading = true
 	prov := m.provider
 	return func() tea.Msg {
@@ -194,6 +217,7 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 		defer cancel()
 		tracks, err := prov.GetPlaylistTracks(ctx, pl.ID)
 		return playlistTracksMsg{playlist: pl, generation: generation, kind: kind, tracks: tracks, err: err}
+
 	}
 }
 
@@ -226,6 +250,7 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 		return m, nil
 	case playlistTracksMsg:
 		if m.pane != paneTracks || m.drillPlaylist.ID != msg.playlist.ID || m.drillRequestGeneration != msg.generation || m.drillRequestKind != msg.kind || msg.kind != playlistRequestTracks {
+
 			return m, nil
 		}
 		m.drillLoading = false
@@ -253,6 +278,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 			if item, ok := m.list.SelectedItem().(sectionItem); ok {
 				m.selectedSection = item.section
 				return m.openSelectedSection()
+
 			}
 			return m, nil
 		}
@@ -268,13 +294,8 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		}
 	case paneTracks:
 		switch msg.String() {
-		case "esc", "backspace":
-			m.invalidatePlaylistRequest()
-			if m.tracksBackPane == paneSections && m.drillTitle == "" {
-				m.pane = paneItems
-			} else {
-				m.pane = m.tracksBackPane
-			}
+		case "esc", "backspace", "left", "h":
+			m.Back()
 			return m, nil
 		case "enter":
 			return m, m.playTracksFromSelection()
@@ -471,10 +492,13 @@ func (m *LibraryModel) renderDrillView() string {
 	if m.drillTitle == "" {
 		name = styles.SidebarActive.Render("Tracks")
 	}
-	hint := styles.QueueItemMuted.Render("  ← esc · enter play")
+	hint := styles.QueueItemMuted.Render("  ←/h/esc back · enter play")
 	header := name + hint + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", m.width))
 	if m.drillLoading {
 		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"
+	}
+	if m.drillErr != nil {
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load tracks: "+m.drillErr.Error()), m.width)
 	}
 	if len(m.drillTracks) == 0 {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("No tracks found"), m.width)

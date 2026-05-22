@@ -115,6 +115,23 @@ func TestNext_WrapsAround(t *testing.T) {
 	}
 }
 
+func TestNext_EmptyQueueIsNoop(t *testing.T) {
+	p := newPlayer(t)
+	if err := p.ClearQueue(); err != nil {
+		t.Fatalf("ClearQueue: %v", err)
+	}
+	if err := p.Next(); err != nil {
+		t.Fatalf("Next after ClearQueue: %v", err)
+	}
+	st := state(t, p)
+	if st.Track != nil {
+		t.Fatalf("Track = %+v, want nil", st.Track)
+	}
+	if st.Playing {
+		t.Fatal("Playing = true, want false")
+	}
+}
+
 // --- Previous ---
 
 func TestPrevious_RestartsTrackWhenPositionGt3s(t *testing.T) {
@@ -164,6 +181,23 @@ func TestPrevious_FromFirstTrack_GoesToLast(t *testing.T) {
 	}
 	if state(t, p).Track.Title != last {
 		t.Errorf("Previous from first track = %q, want last track %q", state(t, p).Track.Title, last)
+	}
+}
+
+func TestPrevious_EmptyQueueIsNoop(t *testing.T) {
+	p := newPlayer(t)
+	if err := p.ClearQueue(); err != nil {
+		t.Fatalf("ClearQueue: %v", err)
+	}
+	if err := p.Previous(); err != nil {
+		t.Fatalf("Previous after ClearQueue: %v", err)
+	}
+	st := state(t, p)
+	if st.Track != nil {
+		t.Fatalf("Track = %+v, want nil", st.Track)
+	}
+	if st.Playing {
+		t.Fatal("Playing = true, want false")
 	}
 }
 
