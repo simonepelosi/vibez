@@ -16,9 +16,11 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/tui/art"
 	"github.com/simone-vibes/vibez/internal/tui/views"
 )
 
@@ -1927,6 +1929,67 @@ func TestNowPlayingArtworkDownloadFailureFallsBack(t *testing.T) {
 	}
 	if strings.Contains(joined, "▀") {
 		t.Fatalf("failed artwork rendered art glyphs: %q", joined)
+	}
+}
+
+func TestArtworkLoadedMsg_DiscardStaleSameURLFailureAfterABA(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsTrueColor = func() bool { return true }
+	a := "https://example.invalid/a.png"
+	b := "https://example.invalid/b.png"
+
+	updated, _ := m.Update(playerStateMsg{Track: &provider.Track{Title: "A1", Artist: "Artist", Album: "Album", ArtworkURL: a, Duration: time.Minute}})
+	m = updated.(*Model)
+	oldAGen := m.artworkGen
+	updated, _ = m.Update(playerStateMsg{Track: &provider.Track{Title: "B", Artist: "Artist", Album: "Album", ArtworkURL: b, Duration: time.Minute}})
+	m = updated.(*Model)
+	updated, _ = m.Update(playerStateMsg{Track: &provider.Track{Title: "A2", Artist: "Artist", Album: "Album", ArtworkURL: a, Duration: time.Minute}})
+	m = updated.(*Model)
+	newAGen := m.artworkGen
+	if oldAGen == newAGen {
+		t.Fatalf("artwork generation did not advance across A→B→A: %d", newAGen)
+	}
+
+	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	updated, _ = m.Update(artworkLoadedMsg{url: a, gen: newAGen, img: img})
+	m = updated.(*Model)
+	if m.artwork.img == nil || m.artwork.failed {
+		t.Fatalf("new artwork success not applied: img=%v failed=%v", m.artwork.img, m.artwork.failed)
+	}
+
+	updated, _ = m.Update(artworkLoadedMsg{url: a, gen: oldAGen, err: errors.New("old failure")})
+	m = updated.(*Model)
+	if m.artwork.img == nil || m.artwork.failed {
+		t.Fatalf("stale same-URL failure cleared newer success: img=%v failed=%v", m.artwork.img, m.artwork.failed)
+	}
+}
+
+func TestNowPlayingArtworkRightColumnClipsLongMetadata(t *testing.T) {
+	m := newModel(nil)
+	m.supportsTrueColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/a.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 2, 2)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing: true,
+		Track: &provider.Track{
+			ID:       "long",
+			Title:    strings.Repeat("Title", 80),
+			Artist:   strings.Repeat("Artist", 80),
+			Album:    strings.Repeat("Album", 80),
+			Duration: time.Minute,
+		},
+	}
+
+	contentW := 100
+	lines := m.nowPlayingLines(contentW, 14)
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got > contentW {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, contentW, line)
+		}
 	}
 }
 

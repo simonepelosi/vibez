@@ -70,3 +70,20 @@ func TestDecode_RejectsUnsupportedBytes(t *testing.T) {
 		t.Fatal("Decode(invalid) error = nil, want error")
 	}
 }
+
+func TestDecodeBounded_RejectsOverByteCap(t *testing.T) {
+	if _, err := decodeBounded(strings.NewReader("abcdef"), 5); err == nil || !strings.Contains(err.Error(), "exceeds max bytes") {
+		t.Fatalf("decodeBounded(over cap) error = %v, want exceeds max bytes", err)
+	}
+}
+
+func TestDecodeBounded_RejectsOversizedDimensions(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, MaxArtworkWidth+1, 1))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeBounded(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil || !strings.Contains(err.Error(), "exceed max") {
+		t.Fatalf("decodeBounded(oversized) error = %v, want exceed max", err)
+	}
+}
