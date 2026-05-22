@@ -2447,7 +2447,7 @@ func (m *Model) View() tea.View {
 //	┌─────────────────────────────────────┐
 //	│ ʕ•ᴥ•ʔ vibez ♪               ♪ 72% │
 //	├─────────────────────────────────────┤
-//	│  Now Playing                        │  (12 lines)
+//	│  Now Playing                        │  (nowPlayingHeight lines)
 //	│  …progress bar, controls, bear…     │
 //	├──────────────────┬──────────────────┤
 //	│ Queue            │ Vibe             │  (panelH lines)
