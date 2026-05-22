@@ -3,12 +3,7 @@
 package demo
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"image"
-	"image/color"
-	"image/png"
 	"strings"
 	"time"
 
@@ -17,62 +12,16 @@ import (
 
 // Tracks is the built-in demo library shared with the demo Player.
 var Tracks = []provider.Track{
-	{ID: "d1", Title: "Nights", Artist: "Frank Ocean", Album: "Blonde", Duration: dur(5, 7), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 228, G: 188, B: 89, A: 255}, color.NRGBA{R: 58, G: 34, B: 90, A: 255}, color.NRGBA{R: 245, G: 102, B: 91, A: 255})},
-	{ID: "d2", Title: "Pyramids", Artist: "Frank Ocean", Album: "channel ORANGE", Duration: dur(9, 2), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 232, G: 116, B: 44, A: 255}, color.NRGBA{R: 65, G: 31, B: 20, A: 255}, color.NRGBA{R: 251, G: 210, B: 94, A: 255})},
-	{ID: "d3", Title: "Novacane", Artist: "Frank Ocean", Album: "nostalgia, ULTRA", Duration: dur(5, 7), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 78, G: 150, B: 187, A: 255}, color.NRGBA{R: 20, G: 30, B: 42, A: 255}, color.NRGBA{R: 238, G: 239, B: 216, A: 255})},
-	{ID: "d4", Title: "Redbone", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(5, 27), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 172, G: 56, B: 44, A: 255}, color.NRGBA{R: 30, G: 12, B: 28, A: 255}, color.NRGBA{R: 245, G: 178, B: 101, A: 255})},
-	{ID: "d5", Title: "Me and Your Mama", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(4, 40), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 106, G: 50, B: 129, A: 255}, color.NRGBA{R: 20, G: 14, B: 38, A: 255}, color.NRGBA{R: 242, G: 129, B: 74, A: 255})},
-	{ID: "d6", Title: "See You Again", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 1), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 246, G: 142, B: 177, A: 255}, color.NRGBA{R: 74, G: 41, B: 94, A: 255}, color.NRGBA{R: 142, G: 213, B: 155, A: 255})},
-	{ID: "d7", Title: "Garden Shed", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 32), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 119, G: 190, B: 111, A: 255}, color.NRGBA{R: 39, G: 71, B: 47, A: 255}, color.NRGBA{R: 248, G: 197, B: 97, A: 255})},
-	{ID: "d8", Title: "Kill Bill", Artist: "SZA", Album: "SOS", Duration: dur(2, 33), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 68, G: 130, B: 184, A: 255}, color.NRGBA{R: 12, G: 36, B: 62, A: 255}, color.NRGBA{R: 241, G: 225, B: 153, A: 255})},
-	{ID: "d9", Title: "Good Days", Artist: "SZA", Album: "Good Days", Duration: dur(4, 39), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 80, G: 172, B: 148, A: 255}, color.NRGBA{R: 20, G: 55, B: 57, A: 255}, color.NRGBA{R: 242, G: 214, B: 135, A: 255})},
-	{ID: "d10", Title: "After The Storm", Artist: "Kali Uchis", Album: "Isolation", Duration: dur(3, 57), ArtworkURL: generatedArtworkURL(color.NRGBA{R: 242, G: 157, B: 94, A: 255}, color.NRGBA{R: 54, G: 45, B: 88, A: 255}, color.NRGBA{R: 116, G: 198, B: 184, A: 255})},
-}
-
-func generatedArtworkURL(primary, secondary, accent color.NRGBA) string {
-	img := image.NewNRGBA(image.Rect(0, 0, 96, 96))
-	for y := range 96 {
-		for x := range 96 {
-			mix := (x*3 + y*2) % 96
-			c := blend(primary, secondary, mix)
-			if (x/12+y/12)%3 == 0 {
-				c = blend(c, accent, 80)
-			}
-			if x > 18 && x < 78 && y > 18 && y < 78 && (x+y)%17 < 8 {
-				c = blend(c, accent, 140)
-			}
-			img.SetNRGBA(x, y, c)
-		}
-	}
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		panic(err)
-	}
-	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
-}
-
-func blend(a, b color.NRGBA, amount int) color.NRGBA {
-	if amount < 0 || amount > 255 {
-		panic("invalid blend amount")
-	}
-	keep := 255 - amount
-	return color.NRGBA{
-		R: colorByte((int(a.R)*keep + int(b.R)*amount) / 255),
-		G: colorByte((int(a.G)*keep + int(b.G)*amount) / 255),
-		B: colorByte((int(a.B)*keep + int(b.B)*amount) / 255),
-		A: 255,
-	}
-}
-
-func colorByte(v int) uint8 {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return uint8(v)
+	{ID: "d1", Title: "Nights", Artist: "Frank Ocean", Album: "Blonde", Duration: dur(5, 7), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/bb/45/68/bb4568f3-68cd-619d-fbcb-4e179916545d/BlondCover-Final.jpg/600x600bb.jpg"},
+	{ID: "d2", Title: "Pyramids", Artist: "Frank Ocean", Album: "channel ORANGE", Duration: dur(9, 2), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/bb/45/68/bb4568f3-68cd-619d-fbcb-4e179916545d/BlondCover-Final.jpg/600x600bb.jpg"},
+	{ID: "d3", Title: "Novacane", Artist: "Frank Ocean", Album: "nostalgia, ULTRA", Duration: dur(5, 7), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/8d/76/23/8d76234b-5101-fa9b-58b3-5e17645d5b05/00602527744209.rgb.jpg/600x600bb.jpg"},
+	{ID: "d4", Title: "Redbone", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(5, 27), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/f1/3c/d7/f13cd7ab-7319-028a-8807-5991d0b308d4/0044003187658_Cover.jpg/600x600bb.jpg"},
+	{ID: "d5", Title: "Me and Your Mama", Artist: "Childish Gambino", Album: "Awaken, My Love!", Duration: dur(4, 40), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/f1/3c/d7/f13cd7ab-7319-028a-8807-5991d0b308d4/0044003187658_Cover.jpg/600x600bb.jpg"},
+	{ID: "d6", Title: "See You Again", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 1), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/fd/fd/8c/fdfd8c26-b8f9-4768-41d3-b24773250c65/886446605814.jpg/600x600bb.jpg"},
+	{ID: "d7", Title: "Garden Shed", Artist: "Tyler, The Creator", Album: "Flower Boy", Duration: dur(3, 32), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music125/v4/fd/fd/8c/fdfd8c26-b8f9-4768-41d3-b24773250c65/886446605814.jpg/600x600bb.jpg"},
+	{ID: "d8", Title: "Kill Bill", Artist: "SZA", Album: "SOS", Duration: dur(2, 33), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/62/93/13/6293132e-20ff-67ab-3d1f-96bb6797a6ba/196589564955.jpg/600x600bb.jpg"},
+	{ID: "d9", Title: "Good Days", Artist: "SZA", Album: "Good Days", Duration: dur(4, 39), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/0e/5c/6e/0e5c6e76-928a-bb8c-ec7d-b323f6079f67/886449007394.jpg/600x600bb.jpg"},
+	{ID: "d10", Title: "After The Storm", Artist: "Kali Uchis", Album: "Isolation", Duration: dur(3, 57), ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/de/e1/8b/dee18be4-276a-1e90-7aec-883c91a5a43e/17UM1IM08185.rgb.jpg/600x600bb.jpg"},
 }
 
 func dur(m, s int) time.Duration {

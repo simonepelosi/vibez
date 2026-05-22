@@ -56,8 +56,8 @@ func TestProvider_GetLibraryTracks_ReturnsHTTPArtwork(t *testing.T) {
 		if tr.ArtworkURL == "" {
 			t.Fatalf("track %s artwork URL is empty", tr.ID)
 		}
-		if !strings.HasPrefix(tr.ArtworkURL, "data:image/png;base64,") {
-			t.Fatalf("track %s artwork URL = %q, want PNG data URL", tr.ID, tr.ArtworkURL)
+		if !strings.HasPrefix(tr.ArtworkURL, "https://") && !strings.HasPrefix(tr.ArtworkURL, "http://") {
+			t.Fatalf("track %s artwork URL = %q, want http(s)", tr.ID, tr.ArtworkURL)
 		}
 	}
 }
