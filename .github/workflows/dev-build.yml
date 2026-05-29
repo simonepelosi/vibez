@@ -61,7 +61,7 @@ jobs:
         env:
           APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
           CGO_ENABLED: "1"
-          PROJECT_DIR: ${{ github.workspace }}
+          PKG_CONFIG_PATH: ${{ github.workspace }}/pkg-config
           GOTOOLCHAIN: local
         run: |
           go build -o vibez \
