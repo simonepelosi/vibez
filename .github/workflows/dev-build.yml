@@ -1,0 +1,76 @@
+name: Dev Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to build"
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }} --jq '{head_sha: .head.sha, head_ref: .head.ref, title: .title}')
+          echo "sha=$(echo "$PR_DATA" | jq -r .head_sha)" >> "$GITHUB_OUTPUT"
+          echo "ref=$(echo "$PR_DATA" | jq -r .head_ref)" >> "$GITHUB_OUTPUT"
+          echo "title=$(echo "$PR_DATA" | jq -r .title)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install garble
+        run: go install mvdan.cc/garble@v0.15.0
+
+      - name: Generate Apple Developer Token
+        id: devtoken
+        env:
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
+        run: |
+          TOKEN=$(go run ./scripts/gen-devtoken)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Build (linux/amd64)
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          CGO_ENABLED: "1"
+          PROJECT_DIR: ${{ github.workspace }}
+          GOTOOLCHAIN: local
+        run: |
+          go build -o vibez \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-dev-pr${{ inputs.pr_number }}-linux-amd64
+          path: vibez
+          retention-days: 14
