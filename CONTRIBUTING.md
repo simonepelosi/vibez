@@ -122,3 +122,15 @@ Most tests run without credentials. The demo packages provide realistic test fix
 5. For large features, open an issue first to discuss the approach
 
 We review PRs as soon as we can. Feel free to ping in the issue thread if you don't hear back within a week.
+
+---
+
+## Dev builds
+
+Contributors don't need Apple credentials to test full playback. Maintainers can generate a dev build from any open PR:
+
+1. Tag or reach out to a maintainer on your PR and ask for a dev build
+2. A maintainer runs the **Dev Build** workflow from the Actions tab with your PR number
+3. Once complete, a comment is posted on the PR with a link to download the binary
+
+The artifact is a linux/amd64 binary with the Apple Developer Token embedded. Artifacts expire after 14 days.
