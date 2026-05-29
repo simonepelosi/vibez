@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -69,8 +69,20 @@ jobs:
             .
 
       - name: Upload artifact
+        id: upload
         uses: actions/upload-artifact@v4
         with:
           name: vibez-dev-pr${{ inputs.pr_number }}-linux-amd64
           path: vibez
           retention-days: 14
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment ${{ inputs.pr_number }} --body "🎵 **Dev build ready** — [\`dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)\`]($RUN_URL)
+
+          **Download:** Go to the [workflow run]($RUN_URL) → Artifacts → \`vibez-dev-pr${{ inputs.pr_number }}-linux-amd64\`
+
+          <sub>Built from ${{ steps.pr.outputs.sha }} • expires in 14 days</sub>"
