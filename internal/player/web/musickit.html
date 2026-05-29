@@ -146,6 +146,7 @@
           navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
         }
 
+        let _lastStateJSON = '';
         function notifyState() {
           const m = _m();
           const item = m.nowPlayingItem;
@@ -173,12 +174,24 @@
           goPlayerStateChange(JSON.stringify(state)).catch(console.error);
         }
 
+        // Deduplicated version for polling — only sends when state differs.
+        function notifyStateIfChanged() {
+          const m = _m();
+          const item = m.nowPlayingItem;
+          const currentTime = m.currentPlaybackTime;
+          const snap = m.isPlaying + '|' + m.playbackState + '|' + Math.floor(currentTime) + '|' +
+            (item ? item.id : '') + '|' + m.volume + '|' + m.repeatMode + '|' + m.shuffleMode;
+          if (snap === _lastStateJSON) return;
+          _lastStateJSON = snap;
+          notifyState();
+        }
+
         music.addEventListener('playbackStateDidChange',  notifyState);
         music.addEventListener('nowPlayingItemDidChange', notifyState);
 
         // Poll position every 200 ms so the TUI timer advances and transitions
         // (completed → loading → playing) reach Go without delay.
-        setInterval(notifyState, 200);
+        setInterval(notifyStateIfChanged, 200);
 
         // Shorthand: send a debug-only log entry (never shown in status bar).
         const _stateN = ['none','loading','playing','paused','stopped','ended','seekFwd','seekBwd','waiting','completed','completed'];

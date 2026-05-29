@@ -49,8 +49,12 @@ type Server struct {
 	conn  *dbus.Conn
 	props *prop.Properties
 
-	mu  sync.Mutex
-	pos time.Duration
+	mu          sync.Mutex
+	pos         time.Duration
+	lastStatus  string
+	lastTrackID string
+	debounce    *time.Timer
+	pending     *player.State
 }
 
 // sanitizePathElement replaces any character that is not a valid D-Bus object
@@ -233,13 +237,43 @@ func NewServer(ctrl Controller) (*Server, error) {
 // Update pushes fresh playback state to MPRIS clients. Call this whenever
 // the audio engine emits a new State on its Subscribe channel.
 func (s *Server) Update(st player.State) {
+	s.mu.Lock()
+	s.pos = st.Position
+	s.pending = &st
+	if s.debounce == nil {
+		s.debounce = time.AfterFunc(100*time.Millisecond, s.flush)
+	} else {
+		s.debounce.Reset(100 * time.Millisecond)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Server) flush() {
+	s.mu.Lock()
+	st := s.pending
+	if st == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.pending = nil
+
 	status := "Paused"
 	if st.Playing {
 		status = "Playing"
 	}
+	trackID := ""
+	if st.Track != nil {
+		trackID = st.Track.ID
+	}
 
-	s.mu.Lock()
-	s.pos = st.Position
+	statusChanged := status != s.lastStatus
+	trackChanged := trackID != s.lastTrackID
+	if !statusChanged && !trackChanged {
+		s.mu.Unlock()
+		return
+	}
+	s.lastStatus = status
+	s.lastTrackID = trackID
 	s.mu.Unlock()
 
 	meta := map[string]dbus.Variant{
