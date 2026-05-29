@@ -73,6 +73,56 @@ func TestLibrary_ArtistsSectionGroupsSongsAndPlaysArtistTracks(t *testing.T) {
 	assertPlayTracksMsg(t, cmd, []string{"i.1", "i.2"}, tracks[:2])
 }
 
+func TestLibrary_AlbumsSectionTabQueuesAlbumTracksWithoutLeavingMenu(t *testing.T) {
+	tracks := []provider.Track{{ID: "i.1", Title: "One", Artist: "A", Album: "Alpha"}, {ID: "i.2", Title: "Two", Artist: "A", Album: "Alpha"}}
+	lib := NewLibrary(&mockProvider{libraryTracks: tracks})
+	lib.SetSize(80, 24)
+	lib, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	lib, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	lib, _ = lib.Update(libraryTracksLoadedMsg{generation: lib.libraryRequestGeneration, section: lib.libraryRequestSection, kind: lib.libraryRequestKind, tracks: tracks})
+
+	updated, cmd := lib.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if updated.pane != paneItems {
+		t.Fatalf("pane = %v, want paneItems", updated.pane)
+	}
+	assertQueueTracksMsg(t, cmd, []string{"i.1", "i.2"}, tracks)
+}
+
+func TestLibrary_SongsSectionTabQueuesSelectedSongWithoutLeavingMenu(t *testing.T) {
+	tracks := []provider.Track{{ID: "i.1", Title: "One", Artist: "A"}, {ID: "i.2", Title: "Two", Artist: "B"}}
+	lib := NewLibrary(&mockProvider{libraryTracks: tracks})
+	lib.SetSize(80, 24)
+	lib, _ = lib.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	lib, _ = lib.Update(libraryTracksLoadedMsg{generation: lib.libraryRequestGeneration, section: lib.libraryRequestSection, kind: lib.libraryRequestKind, tracks: tracks})
+
+	updated, cmd := lib.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if updated.pane != paneTracks {
+		t.Fatalf("pane = %v, want paneTracks", updated.pane)
+	}
+	assertQueueTracksMsg(t, cmd, []string{"i.1"}, tracks[:1])
+}
+
+func TestLibrary_ResetTopLevelShowsSections(t *testing.T) {
+	lib := NewLibrary(&mockProvider{})
+	lib.showGroups([]trackGroup{{title: "Artist", desc: "1 track"}})
+	lib.ResetTopLevel()
+	if lib.pane != paneSections {
+		t.Fatalf("pane = %v, want paneSections", lib.pane)
+	}
+	if len(lib.list.Items()) != 4 {
+		t.Fatalf("section item count = %d, want 4", len(lib.list.Items()))
+	}
+	for i, want := range []string{"Songs", "Albums", "Artists", "Playlists"} {
+		item, ok := lib.list.Items()[i].(sectionItem)
+		if !ok {
+			t.Fatalf("item %d = %T, want sectionItem", i, lib.list.Items()[i])
+		}
+		if item.Title() != want {
+			t.Fatalf("item %d title = %q, want %q", i, item.Title(), want)
+		}
+	}
+}
+
 func TestLibrary_PlaylistsSectionLoadsPlaylistThenPlaysTracks(t *testing.T) {
 	playlists := []provider.Playlist{{ID: "p.1", Name: "Mix", TrackCount: 2}}
 	tracks := []provider.Track{{ID: "i.1", Title: "One", Artist: "A"}, {ID: "i.2", Title: "Two", Artist: "B"}}
@@ -93,6 +143,23 @@ func TestLibrary_PlaylistsSectionLoadsPlaylistThenPlaysTracks(t *testing.T) {
 	}
 	_, cmd := lib.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	assertPlayTracksMsg(t, cmd, []string{"i.1", "i.2"}, tracks)
+}
+
+func assertQueueTracksMsg(t *testing.T, cmd tea.Cmd, ids []string, tracks []provider.Track) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected queue command")
+	}
+	msg, ok := cmd().(QueueTracksMsg)
+	if !ok {
+		t.Fatalf("cmd returned %T, want QueueTracksMsg", cmd())
+	}
+	if strings.Join(msg.IDs, ",") != strings.Join(ids, ",") {
+		t.Fatalf("IDs = %#v, want %#v", msg.IDs, ids)
+	}
+	if len(msg.Tracks) != len(tracks) {
+		t.Fatalf("Tracks len = %d, want %d", len(msg.Tracks), len(tracks))
+	}
 }
 
 func assertPlayTracksMsg(t *testing.T, cmd tea.Cmd, ids []string, tracks []provider.Track) {

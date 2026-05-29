@@ -444,6 +444,23 @@ func TestRemoveFromQueue_NegativeIsNoop(t *testing.T) {
 	}
 }
 
+func TestRemoveFromQueue_LastTrackStopsPlayback(t *testing.T) {
+	p := newPlayer(t)
+	if err := p.SetQueue([]string{demodp.Tracks[0].ID}); err != nil {
+		t.Fatalf("SetQueue: %v", err)
+	}
+	if err := p.RemoveFromQueue(0); err != nil {
+		t.Fatalf("RemoveFromQueue: %v", err)
+	}
+	st := state(t, p)
+	if st.Track != nil {
+		t.Fatalf("Track = %+v, want nil", st.Track)
+	}
+	if st.Playing {
+		t.Fatal("Playing = true, want false")
+	}
+}
+
 // --- MoveInQueue ---
 
 func TestMoveInQueue_ValidIndices(t *testing.T) {

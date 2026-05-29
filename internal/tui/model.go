@@ -788,6 +788,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendLog(fmt.Sprintf("[search] queued %q (%d tracks)", msg.label, len(ids)))
 		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(ids) })
 
+	case views.QueueTracksMsg:
+		if len(msg.Tracks) == 0 || len(msg.IDs) == 0 {
+			break
+		}
+		m.queueTracks = append(m.queueTracks, msg.Tracks...)
+		m.queueIDs = append(m.queueIDs, msg.IDs...)
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[library] queued %q (%d tracks)", msg.Label, len(msg.IDs)))
+		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(msg.IDs) })
+
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
@@ -1503,6 +1513,17 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	// When vibe panel has text-input focus or picker is open, route all keys to it.
 	if m.vibe.IsFocused() || m.vibe.PickerActive() {
 		return m.vibe.Update(msg)
+	}
+
+	if k == "L" {
+		m.library.m.ResetTopLevel()
+		for i, p := range m.panels {
+			if p == m.library {
+				m.activePanel = i
+				m.lastKey = ""
+				return nil
+			}
+		}
 	}
 
 	// Panel nav keys toggle their panel (always checked first).

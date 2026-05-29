@@ -260,12 +260,36 @@ func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
 	if idx >= 0 && idx < len(p.queue) {
 		p.queue = append(p.queue[:idx], p.queue[idx+1:]...)
-		if p.idx >= len(p.queue) {
-			p.idx = len(p.queue) - 1
-		}
+		p.syncTrackAfterQueueMutation()
 	}
+	st := p.state
 	p.mu.Unlock()
+	p.broadcast(st)
 	return nil
+}
+
+// syncTrackAfterQueueMutation preserves the invariant that idx and state.Track
+// are valid for queue, or playback is stopped when queue is empty. Must be
+// called with mu held.
+func (p *Player) syncTrackAfterQueueMutation() {
+	if len(p.queue) == 0 {
+		p.idx = 0
+		p.state.Track = nil
+		p.state.Position = 0
+		p.state.Playing = false
+		return
+	}
+	if p.idx >= len(p.queue) {
+		p.idx = len(p.queue) - 1
+	}
+	if p.idx < 0 {
+		p.idx = 0
+	}
+	t := p.queue[p.idx]
+	p.state.Track = &t
+	if p.state.Position > t.Duration {
+		p.state.Position = 0
+	}
 }
 
 func (p *Player) MoveInQueue(from, to int) error {

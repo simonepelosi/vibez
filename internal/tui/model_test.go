@@ -773,6 +773,48 @@ func TestHandleSearchKey_Tab_MultipleTabsAccumulate(t *testing.T) {
 	}
 }
 
+func TestModel_QueueTracksMsg_AppendsWithoutLeavingLibrary(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.activePanel = 0
+	tracks := []provider.Track{{ID: "i.1", Title: "One"}, {ID: "i.2", Title: "Two"}}
+
+	_, cmd := m.Update(views.QueueTracksMsg{IDs: []string{"i.1", "i.2"}, Tracks: tracks, Label: "Artist"})
+	if cmd == nil {
+		t.Fatal("QueueTracksMsg returned nil cmd")
+	}
+	cmd()
+	if len(mp.appendQueueIDs) != 1 || strings.Join(mp.appendQueueIDs[0], ",") != "i.1,i.2" {
+		t.Fatalf("AppendQueue calls = %#v, want [[i.1 i.2]]", mp.appendQueueIDs)
+	}
+	if m.activePanel != 0 {
+		t.Fatalf("activePanel = %d, want library still active", m.activePanel)
+	}
+	if len(m.queueTracks) != 2 {
+		t.Fatalf("queueTracks len = %d, want 2", len(m.queueTracks))
+	}
+}
+
+func TestHandleNormalKey_CapitalLOpensTopLevelLibrary(t *testing.T) {
+	m := newModel(nil)
+	m.activePanel = -1
+	m.library.SetSize(80, 24)
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Text: "L"}, "L")
+	if cmd != nil {
+		t.Fatal("capital L should not return a command")
+	}
+	if m.activePanel < 0 || m.panels[m.activePanel] != m.library {
+		t.Fatalf("activePanel = %d, want library", m.activePanel)
+	}
+	view := m.library.View()
+	for _, want := range []string{"Songs", "Albums", "Artists", "Playlists"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("library view missing %q: %q", want, view)
+		}
+	}
+}
+
 func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
