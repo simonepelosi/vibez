@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.1] — 2026-05-29
+
+### Added
+- **Top-level library nav (`L`)** — press capital `L` from anywhere to jump
+  directly to the library sections menu (Songs, Albums, Artists, Playlists).
+- **Queue hotkey (`Tab`)** — press `Tab` on albums, artists, or tracks inside
+  the library to append them to the queue without leaving the panel.
+- **Dev build workflow** — maintainers can trigger a dev build from any open PR
+  via the Actions tab. A comment with the download link is posted on the PR.
+
+### Fixed
+- **Compositor stutter on GNOME/Wayland** — the CDP player's JS bridge fired
+  state updates every 200ms unconditionally, causing ~30 D-Bus signals/sec that
+  flooded Mutter's main loop. State notifications are now deduplicated in JS and
+  MPRIS emissions are debounced (100ms window, only on status/track changes).
+- **Demo player queue removal** — removing the final track from the queue now
+  correctly stops playback instead of leaving a dangling state.
+
+---
+
 ## [0.2.0] — 2026-05-22
 
 ### Added
