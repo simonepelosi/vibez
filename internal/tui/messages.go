@@ -16,6 +16,8 @@ type Options struct {
 	// the debug view on startup. Leave empty if the engine starts asynchronously
 	// (CDP path uses EngineReadyMsg.Backend instead).
 	Backend string
+	// InitialTracks pre-populates the queue panel on launch (used by local mode).
+	InitialTracks []provider.Track
 }
 
 // InitStatusMsg updates the status text shown on the loading screen.
