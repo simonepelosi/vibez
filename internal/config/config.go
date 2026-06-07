@@ -41,6 +41,9 @@ type Config struct {
 	// AlbumArt starts the now-playing panel in the album-art view (the :art
 	// command toggles it at runtime and persists the choice here).
 	AlbumArt bool `json:"album_art,omitempty"`
+	// MusicDir is the local directory to scan for audio files
+	// Supports MP3, FLAC, M4A. Scanned recursively.
+	MusicDir string `json:"music_dir,omitempty"`
 }
 
 type EQBand struct {
