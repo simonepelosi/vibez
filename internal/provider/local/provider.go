@@ -17,20 +17,20 @@ import (
 )
 
 var supportedExts = map[string]bool{
-	".mp3": true,
+	".mp3":  true,
 	".flac": true,
-	".m4a": true,
-	".ogg": true,
+	".m4a":  true,
+	".ogg":  true,
 }
 
 // Provider scans a local directory and exposes tracks via the provider interface.
 type Provider struct {
-	dir string
+	dir    string
 	tracks []provider.Track
 }
 
 // New creates a Provider and performs the initial directory scan.
-func New (dir string) (*Provider, error) {
+func New(dir string) (*Provider, error) {
 	p := &Provider{dir: dir}
 	if err := p.scan(); err != nil {
 		return nil, err
@@ -38,15 +38,15 @@ func New (dir string) (*Provider, error) {
 	return p, nil
 }
 
-func (p *Provider) Name() string {return "Local"}
-func (P *Provider) IsAuthenticated() bool {return true}
+func (p *Provider) Name() string          { return "Local" }
+func (p *Provider) IsAuthenticated() bool { return true }
 
 // scan walks dir recursively and indexes all supported audio files.
 func (p *Provider) scan() error {
 	p.tracks = nil
-	return filepath.Walk(p.dir, func(path string, info os.FileInfo ,err error) error {
+	return filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if info.IsDir() {
 			return nil
@@ -66,11 +66,11 @@ func (p *Provider) scan() error {
 
 // trackFromFile reads metadata from an audio file and returns a Track.
 func trackFromFile(path string) (provider.Track, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // the path comes from user-configured music dir
 	if err != nil {
 		return provider.Track{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	m, err := tag.ReadFrom(f)
 
@@ -95,10 +95,10 @@ func trackFromFile(path string) (provider.Track, error) {
 	}
 
 	return provider.Track{
-		ID:	fmt.Sprintf("local:%s", path),
-		Title: title,
+		ID:     fmt.Sprintf("local:%s", path),
+		Title:  title,
 		Artist: artist,
-		Album: album,
+		Album:  album,
 		Genres: genres,
 	}, nil
 }
@@ -119,16 +119,16 @@ func (p *Provider) Search(_ context.Context, query string) (*provider.SearchResu
 		if strings.Contains(strings.ToLower(t.Title), q) ||
 			strings.Contains(strings.ToLower(t.Artist), q) ||
 			strings.Contains(strings.ToLower(t.Album), q) {
-				tracks = append(tracks, t)
-				if !seen[t.Album] {
-					seen[t.Album] = true
-					albums = append(albums, provider.Album{
-						ID: "local-album:" + t.Album,
-						Title:  t.Album,
-						Artist: t.Artist,
-					})
-				}
+			tracks = append(tracks, t)
+			if !seen[t.Album] {
+				seen[t.Album] = true
+				albums = append(albums, provider.Album{
+					ID:     "local-album:" + t.Album,
+					Title:  t.Album,
+					Artist: t.Artist,
+				})
 			}
+		}
 	}
 	return &provider.SearchResult{Tracks: tracks, Albums: albums}, nil
 }
@@ -149,7 +149,7 @@ func (p *Provider) GetAlbumTracks(_ context.Context, albumID string) ([]provider
 			out = append(out, t)
 		}
 	}
-	return out , nil
+	return out, nil
 }
 
 func (p *Provider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
@@ -164,14 +164,14 @@ func (p *Provider) CreatePlaylist(_ context.Context, _ string, _ []string) (prov
 	return provider.Playlist{}, nil
 }
 
-func (p *Provider) LoveSong(_ context.Context, _ string, _ bool) error { return nil }
+func (p *Provider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
 func (p *Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
-func (p *Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
+func (p *Provider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
 
 func (p *Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	// Group tracks by genre using their metadata tags.
-	// Tracks with no genre tag are skipped.	
-	byGenre :=  map[string][]provider.Track{}
+	// Tracks with no genre tag are skipped.
+	byGenre := map[string][]provider.Track{}
 	for _, t := range p.tracks {
 		for _, g := range t.Genres {
 			if g != "" {
@@ -188,9 +188,9 @@ func (p *Provider) GetRecommendations(_ context.Context) ([]provider.Recommendat
 		items := make([]provider.RecommendationItem, 0, len(tracks))
 		for _, t := range tracks {
 			items = append(items, provider.RecommendationItem{
-				ID: t.ID,
-				Kind: "track",
-				Title: t.Title,
+				ID:       t.ID,
+				Kind:     "track",
+				Title:    t.Title,
 				Subtitle: t.Artist,
 			})
 		}

@@ -17,12 +17,13 @@ import (
 
 // Player implements player.Player for local audio files using GStreamer.
 type Player struct {
-	gst *gst.Player
-	mu sync.RWMutex
+	gst   *gst.Player
+	mu    sync.RWMutex
 	state player.State
-	subs []chan player.State
+	subs  []chan player.State
 	queue []provider.Track
-	idx int
+	idx   int
+	done  chan struct{}
 }
 
 // New creates a local Player backed by a GStreamer pipeline.
@@ -31,14 +32,14 @@ func New() (*Player, error) {
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
 	}
-	p := &Player{gst: gstPlayer}
-	p.gst.OnEOS(func () {
+	p := &Player{gst: gstPlayer, done: make(chan struct{})}
+	p.gst.OnEOS(func() {
 		_ = p.Next()
 	})
 	p.gst.OnError(func(e error) {
 		p.mu.Lock()
+		p.state.Error = e.Error()
 		s := p.state
-		s.Error = e.Error()
 		p.mu.Unlock()
 		p.broadcast(s)
 	})
@@ -50,7 +51,7 @@ func (p *Player) broadcast(s player.State) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, ch := range p.subs {
-		select  {
+		select {
 		case ch <- s:
 		default:
 		}
@@ -169,11 +170,17 @@ func (p *Player) SetQueue(ids []string) error {
 	}
 	// Finding the first ID in the full queue and starting from there.
 	p.mu.Lock()
+	found := false
 	for i, t := range p.queue {
 		if t.ID == ids[0] {
 			p.idx = i
+			found = true
 			break
 		}
+	}
+	if !found || len(p.queue) == 0 {
+		p.mu.Unlock()
+		return nil
 	}
 	t := p.queue[p.idx]
 	p.mu.Unlock()
@@ -233,9 +240,12 @@ func (p *Player) RemoveFromQueue(idx int) error {
 
 func (p *Player) MoveInQueue(from, to int) error {
 	p.mu.Lock()
-	if from >= 0 && from < len(p.queue) && to >=0 && to < len(p.queue) {
+	if from >= 0 && from < len(p.queue) && to >= 0 && to < len(p.queue) {
 		t := p.queue[from]
 		p.queue = append(p.queue[:from], p.queue[from+1:]...)
+		if from < to {
+			to--
+		}
 		p.queue = append(p.queue[:to], append([]provider.Track{t}, p.queue[to:]...)...)
 	}
 	p.mu.Unlock()
@@ -257,10 +267,10 @@ func (p *Player) ClearQueue() error {
 
 func (p *Player) GetState() (*player.State, error) {
 	s := p.currentState()
-	return &s,nil
+	return &s, nil
 }
 
-func (p *Player) Subscribe() <- chan player.State {
+func (p *Player) Subscribe() <-chan player.State {
 	ch := make(chan player.State, 8)
 	p.mu.Lock()
 	p.subs = append(p.subs, ch)
@@ -269,6 +279,7 @@ func (p *Player) Subscribe() <- chan player.State {
 }
 
 func (p *Player) Close() error {
+	close(p.done)
 	p.gst.Destroy()
 	return nil
 }
@@ -299,18 +310,22 @@ func tracksForIDs(tracks []provider.Track, ids []string) []provider.Track {
 func (p *Player) pollState() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-	for range ticker.C {
-		p.mu.RLock()
-		playing := p.state.Playing
-		p.mu.RUnlock()
-		if !playing {
-			continue
+	for {
+		select {
+		case <-ticker.C:
+			p.mu.RLock()
+			playing := p.state.Playing
+			p.mu.RUnlock()
+			if !playing {
+				continue
+			}
+			p.mu.Lock()
+			p.state.Position = p.gst.Position()
+			s := p.state
+			p.mu.Unlock()
+			p.broadcast(s)
+		case <-p.done:
+			return
 		}
-		p.mu.Lock()
-		pos := p.gst.Position()
-		p.state.Position = pos
-		s := p.state
-		p.mu.Unlock()
-		p.broadcast(s)
 	}
 }
