@@ -36,7 +36,7 @@ type Config struct {
 	// MusicDir is the local directory to scan for audio files
 	// Supports MP3, FLAC, M4A, OGG, Scanned recursively.
 	MusicDir string `json:"music_dir,omitempty"`
-	}
+}
 
 type EQBand struct {
 	Frequency float64 `json:"frequency"`

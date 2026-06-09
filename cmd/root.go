@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/assets"
@@ -89,8 +91,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		// before launching the TUI.
 		if cfg.MusicDir == "" {
 			fmt.Print("Enter path to your music directory: ")
-			var dir string
-			fmt.Scanln(&dir)
+			dir, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			dir = strings.TrimSpace(dir)
 			if dir == "" {
 				return fmt.Errorf("no music directory provided")
 			}
@@ -105,7 +107,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		assets.InstallDesktopEntry()
 		prov, err := localProvider.New(cfg.MusicDir)
 		if err != nil {
-			return fmt.Errorf("local provider: %w",err) 
+			return fmt.Errorf("local provider: %w", err)
 		}
 		plyr, err := localPlayer.New()
 		if err != nil {
