@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Equalizer key conflicts** — Intercept equalizer-specific key presses (arrow keys, `h`/`j`/`k`/`l`, `0`, `r`) when the equalizer panel is open, resolving a conflict where arrow keys would seek playback and `r` would toggle repeat mode. Closes #64.
+
 ---
 
 ## [0.2.1] — 2026-05-29
