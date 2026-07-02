@@ -107,12 +107,16 @@ func runPlaywright() (*playwright.Playwright, error) {
 	return pw, nil
 }
 
-func chromeLaunchArgs(_ bool) []string {
-	return []string{
+func chromeLaunchArgs(headless bool, _ bool) []string {
+	args := []string{
 		"--autoplay-policy=no-user-gesture-required",
 		"--enable-features=MediaCapabilities,WidevineCdm",
 		"--disable-blink-features=AutomationControlled",
 		"--disable-background-networking",
 		"--js-flags=--max-old-space-size=256",
 	}
+	if headless {
+		args = append(args, "--headless=new")
+	}
+	return args
 }

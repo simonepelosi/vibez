@@ -332,8 +332,20 @@ func TestExtractDeb_TruncatedArHeader(t *testing.T) {
 }
 
 func TestChromeLaunchArgs_HasDisableComponentUpdate(t *testing.T) {
-	args := chromeLaunchArgs(false)
+	args := chromeLaunchArgs(false, false)
 	if !slices.Contains(args, "--disable-component-update") {
 		t.Error("chromeLaunchArgs does not contain --disable-component-update, which is expected on Linux for network isolation")
+	}
+}
+
+func TestChromeLaunchArgs_HasHeadlessNew(t *testing.T) {
+	args := chromeLaunchArgs(true, false)
+	if !slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should contain --headless=new when headless=true on Linux")
+	}
+
+	args = chromeLaunchArgs(false, false)
+	if slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should not contain --headless=new when headless=false on Linux")
 	}
 }

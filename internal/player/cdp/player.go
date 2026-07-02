@@ -92,11 +92,16 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
+	// To ensure DRM (Widevine) playback works correctly in headless mode, we
+	// launch in headless mode (Headless = true) and pass "--headless=new" in
+	// the browser arguments. Playwright by default blocks Google Chrome component
+	// updates via the --disable-component-update flag; we must ignore this default
+	// argument to allow Chrome to download/load the Widevine CDM component.
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
-		IgnoreDefaultArgs: []string{"--mute-audio"},
-		Args:              chromeLaunchArgs(wsl),
+		IgnoreDefaultArgs: []string{"--mute-audio", "--disable-component-update"},
+		Args:              chromeLaunchArgs(headless, wsl),
 	})
 	if err != nil {
 		_ = pw.Stop()
