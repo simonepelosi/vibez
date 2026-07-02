@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -93,19 +92,20 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
-	// To ensure DRM (Widevine) playback works correctly in headless mode on
-	// Linux, we avoid Playwright's default old headless shell by launching in
-	// headed mode (Headless = false) and passing "--headless=new" in the CLI arguments.
-	// On macOS, Google Chrome does not support Widevine DRM in any headless mode.
-	// Thus, we must launch Chrome in headed mode on macOS. To hide the window
-	// from the user, if headless mode is requested, we immediately minimize it
-	// via a Chrome DevTools Protocol (CDP) session.
+	// To ensure DRM (Widevine) playback works correctly, we avoid Playwright's
+	// default old headless shell by launching in headed mode (Headless = false).
+	// On Linux, we pass "--headless=new" in chromeLaunchArgs to run headless with DRM.
+	// On macOS, Chrome's DRM does not support headless mode due to VMP constraints,
+	// so we launch it headed but position the window off-screen to keep it out of sight.
+	// Playwright by default blocks Google Chrome component updates via the
+	// --disable-component-update flag; we must ignore this default argument to
+	// allow Chrome on macOS to download/load the Widevine CDM component.
 	headlessOpt := false
 
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headlessOpt,
-		IgnoreDefaultArgs: []string{"--mute-audio"},
+		IgnoreDefaultArgs: []string{"--mute-audio", "--disable-component-update"},
 		Args:              chromeLaunchArgs(headless, wsl),
 	})
 	if err != nil {
@@ -123,28 +123,6 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 		return nil, fmt.Errorf("cdp: new page: %w", err)
 	}
 	p.page = pg
-
-	if runtime.GOOS == "darwin" && headless {
-		// Create a CDP session to minimize the headed browser window on macOS
-		// so it doesn't disrupt the user's view while keeping Widevine active.
-		cdpSession, err := pg.Context().NewCDPSession(pg)
-		if err == nil {
-			result, err := cdpSession.Send("Browser.getWindowForTarget", nil)
-			if err == nil {
-				if m, ok := result.(map[string]any); ok {
-					if windowId, ok := m["windowId"]; ok {
-						_, _ = cdpSession.Send("Browser.setWindowBounds", map[string]any{
-							"windowId": windowId,
-							"bounds": map[string]any{
-								"windowState": "minimized",
-							},
-						})
-					}
-				}
-			}
-			_ = cdpSession.Detach()
-		}
-	}
 
 	// Forward page crashes and unhandled JS errors to errCh so WaitReady
 	// returns immediately instead of waiting for the full timeout.

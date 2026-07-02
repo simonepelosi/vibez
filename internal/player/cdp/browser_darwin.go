@@ -117,5 +117,9 @@ func chromeLaunchArgs(headless bool, _ bool) []string {
 	}
 	// We do NOT use --headless=new on macOS because Widevine DRM is unsupported
 	// in any headless mode on macOS due to VMP (Verified Media Path) constraints.
+	// Instead, we run headed but position the window off-screen to hide it.
+	if headless {
+		args = append(args, "--window-position=-2000,-2000")
+	}
 	return args
 }
