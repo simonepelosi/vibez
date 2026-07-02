@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Play Next feature (`Shift+Tab`)** — press `Shift+Tab` on albums, artists, recommendations, or tracks to insert them to play immediately after the currently playing song. Closes #63.
+
 ### Fixed
 - **Equalizer key conflicts** — Intercept equalizer-specific key presses (arrow keys, `h`/`j`/`k`/`l`, `0`, `r`) when the equalizer panel is open, resolving a conflict where arrow keys would seek playback and `r` would toggle repeat mode. Closes #64.
 
