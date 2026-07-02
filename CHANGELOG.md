@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Optional PR input for Dev Build action** — The Dev Build workflow can now be triggered from any branch (e.g. `main`) without specifying a PR number, enabling quick ad-hoc builds of the latest development version.
 - **Play Next feature (`Shift+Tab`)** — press `Shift+Tab` on albums, artists, recommendations, or tracks to insert them to play immediately after the currently playing song. Closes #63.
 - **Queue view reordering improvements** — support `Shift+Up/Down` (and `Ctrl+Up/Down`) to move songs up and down in the queue panel. The track selection cursor now automatically follows the moved track.
 - **Documentation for keyboard shortcuts** — documented `Tab` (add to queue), `Shift+Tab` (play next), and `Shift+Up/Down` (move in queue) shortcuts in the README and inline TUI help hints.

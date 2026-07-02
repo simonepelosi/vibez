@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number to build"
-        required: true
-        type: number
+        description: "PR number to build (leave empty to build from main)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -24,10 +24,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }} --jq '{head_sha: .head.sha, head_ref: .head.ref, title: .title}')
-          echo "sha=$(echo "$PR_DATA" | jq -r .head_sha)" >> "$GITHUB_OUTPUT"
-          echo "ref=$(echo "$PR_DATA" | jq -r .head_ref)" >> "$GITHUB_OUTPUT"
-          echo "title=$(echo "$PR_DATA" | jq -r .title)" >> "$GITHUB_OUTPUT"
+          PR_NUM="${{ github.event.inputs.pr_number }}"
+          if [ -z "$PR_NUM" ]; then
+            echo "is_pr=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "version=dev-main-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "name_suffix=dev-main" >> "$GITHUB_OUTPUT"
+          else
+            PR_DATA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUM --jq '{head_sha: .head.sha, head_ref: .head.ref, title: .title}')
+            SHA=$(echo "$PR_DATA" | jq -r .head_sha)
+            echo "is_pr=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+            echo "ref=$(echo "$PR_DATA" | jq -r .head_ref)" >> "$GITHUB_OUTPUT"
+            echo "version=dev-pr${PR_NUM}-$(echo $SHA | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "name_suffix=dev-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Checkout PR head
         uses: actions/checkout@v4
@@ -65,7 +77,7 @@ jobs:
           GOTOOLCHAIN: local
         run: |
           go build -o vibez-linux-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
             .
 
       - name: Build (darwin/amd64)
@@ -77,7 +89,7 @@ jobs:
           GOARCH: amd64
         run: |
           go build -o vibez-darwin-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
             .
 
       - name: Build (darwin/arm64)
@@ -89,40 +101,41 @@ jobs:
           GOARCH: arm64
         run: |
           go build -o vibez-darwin-arm64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
             .
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vibez-dev-pr${{ inputs.pr_number }}-linux-amd64
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64
           path: vibez-linux-amd64
           retention-days: 14
 
       - name: Upload Darwin AMD64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vibez-dev-pr${{ inputs.pr_number }}-darwin-amd64
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64
           path: vibez-darwin-amd64
           retention-days: 14
 
       - name: Upload Darwin ARM64 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vibez-dev-pr${{ inputs.pr_number }}-darwin-arm64
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64
           path: vibez-darwin-arm64
           retention-days: 14
 
       - name: Comment on PR
+        if: steps.pr.outputs.is_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh pr comment ${{ inputs.pr_number }} --body "🎵 **Dev builds ready** — [\`dev-pr${{ inputs.pr_number }}-$(echo ${{ steps.pr.outputs.sha }} | cut -c1-7)\`]($RUN_URL)
+          gh pr comment ${{ github.event.inputs.pr_number }} --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
 
           **Download:** Go to the [workflow run]($RUN_URL) → Artifacts:
-          - \`vibez-dev-pr${{ inputs.pr_number }}-linux-amd64\`
-          - \`vibez-dev-pr${{ inputs.pr_number }}-darwin-amd64\`
-          - \`vibez-dev-pr${{ inputs.pr_number }}-darwin-arm64\` (for Apple Silicon Macs)
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64\`
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64\`
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64\` (for Apple Silicon Macs)
 
           <sub>Built from ${{ steps.pr.outputs.sha }} • expires in 14 days</sub>"
