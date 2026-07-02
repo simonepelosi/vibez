@@ -511,6 +511,9 @@ func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track,
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") {
+				return nil, nil
+			}
 			return nil, err
 		}
 		for _, s := range page.Data {
@@ -532,6 +535,9 @@ func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Pla
 		}
 		var page paginatedPlaylists
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") {
+				break
+			}
 			return nil, err
 		}
 		for _, r := range page.Data {

@@ -621,6 +621,38 @@ func TestGetLibraryTracks_HTTPError(t *testing.T) {
 	}
 }
 
+func TestGetLibraryTracks_EmptyLibrary404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"code":404,"message":"HTTP 404 Not Found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error on 404 Not Found, got: %v", err)
+	}
+	if len(tracks) != 0 {
+		t.Errorf("expected 0 tracks, got %d", len(tracks))
+	}
+}
+
+func TestGetLibraryPlaylists_EmptyLibrary404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"code":404,"message":"HTTP 404 Not Found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	playlists, err := p.GetLibraryPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error on 404 Not Found, got: %v", err)
+	}
+	if len(playlists) != 1 || playlists[0].ID != "vibez:favorites" {
+		t.Errorf("expected exactly 1 playlist (Favorites), got: %+v", playlists)
+	}
+}
+
 func TestGetLibraryPlaylists_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
