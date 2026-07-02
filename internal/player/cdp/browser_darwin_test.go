@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,11 +64,9 @@ func TestFindChromePathRejectsMissingOverride(t *testing.T) {
 
 func TestChromeLaunchArgsDoNotUseLinuxOnlyOrUnsafeFlags(t *testing.T) {
 	args := chromeLaunchArgs(false)
-	for _, forbidden := range []string{"--no-sandbox", "--disable-setuid-sandbox", "--no-zygote", "--single-process", "--ignore-certificate-errors"} {
-		for _, arg := range args {
-			if arg == forbidden {
-				t.Fatalf("chromeLaunchArgs contains forbidden flag %q", forbidden)
-			}
+	for _, forbidden := range []string{"--no-sandbox", "--disable-setuid-sandbox", "--no-zygote", "--single-process", "--ignore-certificate-errors", "--disable-component-update"} {
+		if slices.Contains(args, forbidden) {
+			t.Fatalf("chromeLaunchArgs contains forbidden flag %q", forbidden)
 		}
 	}
 }

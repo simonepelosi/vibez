@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -327,5 +328,12 @@ func TestExtractDeb_TruncatedArHeader(t *testing.T) {
 	// extractDeb should return an error (missing data.tar.*), not panic.
 	if err := extractDeb(path, t.TempDir()); err == nil {
 		t.Error("expected error for truncated ar, got nil")
+	}
+}
+
+func TestChromeLaunchArgs_HasDisableComponentUpdate(t *testing.T) {
+	args := chromeLaunchArgs(false)
+	if !slices.Contains(args, "--disable-component-update") {
+		t.Error("chromeLaunchArgs does not contain --disable-component-update, which is expected on Linux for network isolation")
 	}
 }

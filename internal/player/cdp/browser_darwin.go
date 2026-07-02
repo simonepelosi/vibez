@@ -112,7 +112,6 @@ func chromeLaunchArgs(_ bool) []string {
 		"--autoplay-policy=no-user-gesture-required",
 		"--enable-features=MediaCapabilities,WidevineCdm",
 		"--disable-blink-features=AutomationControlled",
-		"--disable-component-update",
 		"--disable-background-networking",
 		"--js-flags=--max-old-space-size=256",
 	}
