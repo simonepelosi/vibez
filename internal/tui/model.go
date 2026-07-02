@@ -2889,7 +2889,8 @@ func (m *Model) searchLines(contentW, h int) []string {
 		kind = "playlist"
 	}
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
-		"  ·  " + accent.Render("Tab") + muted.Render(" add "+kind+" to queue") +
+		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
+		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
 		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
@@ -2949,6 +2950,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("LIBRARY"),
 				accent.Render("Enter") + muted.Render(" browse/play"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("esc") + muted.Render(" back/close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
@@ -2962,7 +2965,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("FEED"),
 				accent.Render("Enter") + muted.Render(" play"),
-				accent.Render("Tab") + muted.Render(" add to queue"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("j/k") + muted.Render(" navigate"),
 				accent.Render("r") + muted.Render(" refresh"),
 				accent.Render("esc") + muted.Render(" close"),
