@@ -115,8 +115,7 @@ func chromeLaunchArgs(headless bool, _ bool) []string {
 		"--disable-background-networking",
 		"--js-flags=--max-old-space-size=256",
 	}
-	if headless {
-		args = append(args, "--headless=new")
-	}
+	// We do NOT use --headless=new on macOS because Widevine DRM is unsupported
+	// in any headless mode on macOS due to VMP (Verified Media Path) constraints.
 	return args
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -92,10 +93,13 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
-	// To ensure DRM (Widevine) playback works correctly in headless mode on macOS
-	// and Linux, we avoid Playwright's default old headless shell. Instead, we
-	// launch in headed mode (Headless = false) and pass "--headless=new" in
-	// the browser arguments list.
+	// To ensure DRM (Widevine) playback works correctly in headless mode on
+	// Linux, we avoid Playwright's default old headless shell by launching in
+	// headed mode (Headless = false) and passing "--headless=new" in the CLI arguments.
+	// On macOS, Google Chrome does not support Widevine DRM in any headless mode.
+	// Thus, we must launch Chrome in headed mode on macOS. To hide the window
+	// from the user, if headless mode is requested, we immediately minimize it
+	// via a Chrome DevTools Protocol (CDP) session.
 	headlessOpt := false
 
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
@@ -119,6 +123,28 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 		return nil, fmt.Errorf("cdp: new page: %w", err)
 	}
 	p.page = pg
+
+	if runtime.GOOS == "darwin" && headless {
+		// Create a CDP session to minimize the headed browser window on macOS
+		// so it doesn't disrupt the user's view while keeping Widevine active.
+		cdpSession, err := pg.Context().NewCDPSession(pg)
+		if err == nil {
+			result, err := cdpSession.Send("Browser.getWindowForTarget", nil)
+			if err == nil {
+				if m, ok := result.(map[string]any); ok {
+					if windowId, ok := m["windowId"]; ok {
+						_, _ = cdpSession.Send("Browser.setWindowBounds", map[string]any{
+							"windowId": windowId,
+							"bounds": map[string]any{
+								"windowState": "minimized",
+							},
+						})
+					}
+				}
+			}
+			_ = cdpSession.Detach()
+		}
+	}
 
 	// Forward page crashes and unhandled JS errors to errCh so WaitReady
 	// returns immediately instead of waiting for the full timeout.

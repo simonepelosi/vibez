@@ -71,10 +71,10 @@ func TestChromeLaunchArgsDoNotUseLinuxOnlyOrUnsafeFlags(t *testing.T) {
 	}
 }
 
-func TestChromeLaunchArgs_HasHeadlessNew(t *testing.T) {
+func TestChromeLaunchArgs_DoesNotHaveHeadlessNew(t *testing.T) {
 	args := chromeLaunchArgs(true, false)
-	if !slices.Contains(args, "--headless=new") {
-		t.Error("chromeLaunchArgs should contain --headless=new when headless=true on macOS")
+	if slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should not contain --headless=new on macOS (DRM requires headed mode)")
 	}
 
 	args = chromeLaunchArgs(false, false)
