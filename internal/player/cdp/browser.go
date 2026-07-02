@@ -186,12 +186,12 @@ func runPlaywright() (*playwright.Playwright, error) {
 	return pw, nil
 }
 
-func chromeLaunchArgs(wsl bool) []string {
+func chromeLaunchArgs(headless bool, wsl bool) []string {
 	widevinePath := filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
-	return launchArgs(widevinePath, wsl)
+	return launchArgs(widevinePath, headless, wsl)
 }
 
-func launchArgs(widevinePath string, wsl bool) []string {
+func launchArgs(widevinePath string, headless bool, wsl bool) []string {
 	disableFeatures := "HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater"
 	if wsl {
 		// WSL2: disable out-of-process audio service to avoid distortion when
@@ -229,6 +229,10 @@ func launchArgs(widevinePath string, wsl bool) []string {
 		// Disable background network activity (prefetch, DNS pre-resolve,
 		// speculative connections). Not needed for a single-page music player.
 		"--disable-background-networking",
+	}
+
+	if headless {
+		args = append(args, "--headless=new")
 	}
 
 	if wsl {

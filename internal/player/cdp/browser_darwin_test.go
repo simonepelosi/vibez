@@ -63,11 +63,23 @@ func TestFindChromePathRejectsMissingOverride(t *testing.T) {
 }
 
 func TestChromeLaunchArgsDoNotUseLinuxOnlyOrUnsafeFlags(t *testing.T) {
-	args := chromeLaunchArgs(false)
+	args := chromeLaunchArgs(false, false)
 	for _, forbidden := range []string{"--no-sandbox", "--disable-setuid-sandbox", "--no-zygote", "--single-process", "--ignore-certificate-errors", "--disable-component-update"} {
 		if slices.Contains(args, forbidden) {
 			t.Fatalf("chromeLaunchArgs contains forbidden flag %q", forbidden)
 		}
+	}
+}
+
+func TestChromeLaunchArgs_HasHeadlessNew(t *testing.T) {
+	args := chromeLaunchArgs(true, false)
+	if !slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should contain --headless=new when headless=true on macOS")
+	}
+
+	args = chromeLaunchArgs(false, false)
+	if slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should not contain --headless=new when headless=false on macOS")
 	}
 }
 

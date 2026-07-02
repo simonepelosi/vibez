@@ -92,11 +92,17 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	// (no auth UI needed); show a real window for first-run interactive login.
 	headless := userToken != ""
 
+	// To ensure DRM (Widevine) playback works correctly in headless mode on macOS
+	// and Linux, we avoid Playwright's default old headless shell. Instead, we
+	// launch in headed mode (Headless = false) and pass "--headless=new" in
+	// the browser arguments list.
+	headlessOpt := false
+
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
-		Headless:          &headless,
+		Headless:          &headlessOpt,
 		IgnoreDefaultArgs: []string{"--mute-audio"},
-		Args:              chromeLaunchArgs(wsl),
+		Args:              chromeLaunchArgs(headless, wsl),
 	})
 	if err != nil {
 		_ = pw.Stop()

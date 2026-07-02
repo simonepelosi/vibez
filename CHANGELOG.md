@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation for keyboard shortcuts** — documented `Tab` (add to queue), `Shift+Tab` (play next), and `Shift+Up/Down` (move in queue) shortcuts in the README and inline TUI help hints.
 
 ### Fixed
+- **Headless Widevine DRM support** — Launch Playwright Chrome in headed mode (`Headless: false`) and pass `"--headless=new"` in the command line parameters on macOS and Linux. This bypasses the default lightweight headless shell which does not support Encrypted Media Extensions (EME) and Widevine DRM, fixing `CONTENT_UNSUPPORTED` / `"no DRM"` errors during headless streaming.
 - **Expired token initialization handling** — Catch expired user token errors thrown during player initialization (both Chrome/CDP and WebKit backends) and trigger the terminal re-authentication flow, preventing the app from hanging on a broken token.
 - **macOS Apple Music playback** — Enable Google Chrome component updates on macOS by removing the `--disable-component-update` launch flag, allowing Chrome to correctly load and initialize the Widevine Content Decryption Module (CDM) for DRM playback. Closes #54.
 - **Empty library 404 error handling** — Handle `404 Not Found` API errors gracefully when fetching tracks or playlists from an empty Apple Music library (or when opening Favorites), returning empty collections instead of failing.

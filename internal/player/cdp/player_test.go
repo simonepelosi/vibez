@@ -9,7 +9,7 @@ import (
 )
 
 func TestLaunchArgs_WSL(t *testing.T) {
-	args := launchArgs("/tmp/widevine", true)
+	args := launchArgs("/tmp/widevine", false, true)
 
 	if !slices.Contains(args, "--audio-buffer-size=4096") {
 		t.Fatal("wsl=true: missing --audio-buffer-size=4096")
@@ -27,7 +27,7 @@ func TestLaunchArgs_WSL(t *testing.T) {
 }
 
 func TestLaunchArgs_NonWSL(t *testing.T) {
-	args := launchArgs("/tmp/widevine", false)
+	args := launchArgs("/tmp/widevine", false, false)
 
 	if slices.Contains(args, "--audio-buffer-size=4096") {
 		t.Fatal("wsl=false: --audio-buffer-size=4096 should not be present")
