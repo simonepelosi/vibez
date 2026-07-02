@@ -309,7 +309,9 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		case "enter":
 			return m.openSelectedItem()
 		case "tab":
-			return m.queueSelectedItem()
+			return m.queueSelectedItem(false)
+		case "shift+tab":
+			return m.queueSelectedItem(true)
 		}
 	case paneTracks:
 		switch msg.String() {
@@ -319,7 +321,9 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		case "enter":
 			return m, m.playTracksFromSelection()
 		case "tab":
-			return m, m.queueTracksFromSelection()
+			return m, m.queueTracksFromSelection(false)
+		case "shift+tab":
+			return m, m.queueTracksFromSelection(true)
 		}
 	}
 	return m.updateActiveList(msg)
@@ -420,12 +424,12 @@ func (m *LibraryModel) openSelectedItem() (*LibraryModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m *LibraryModel) queueSelectedItem() (*LibraryModel, tea.Cmd) {
+func (m *LibraryModel) queueSelectedItem(playNext bool) (*LibraryModel, tea.Cmd) {
 	switch item := m.list.SelectedItem().(type) {
 	case albumItem:
-		return m, queueTracksCmd(item.group.title, item.group.tracks)
+		return m, queueTracksCmd(item.group.title, item.group.tracks, playNext)
 	case artistItem:
-		return m, queueTracksCmd(item.group.title, item.group.tracks)
+		return m, queueTracksCmd(item.group.title, item.group.tracks, playNext)
 	case playlistItem:
 		pl := provider.Playlist(item)
 		m.drillPlaylist = pl
@@ -459,7 +463,7 @@ func (m *LibraryModel) playTracksFromSelection() tea.Cmd {
 	return func() tea.Msg { return PlayTracksMsg{IDs: ids, Tracks: tracks, Track: &first} }
 }
 
-func (m *LibraryModel) queueTracksFromSelection() tea.Cmd {
+func (m *LibraryModel) queueTracksFromSelection(playNext bool) tea.Cmd {
 	if selected := m.drillList.SelectedItem(); selected == nil {
 		return nil
 	}
@@ -468,12 +472,12 @@ func (m *LibraryModel) queueTracksFromSelection() tea.Cmd {
 		return nil
 	}
 	if m.tracksBackPane == paneSections && m.drillTitle == "Songs" {
-		return queueTracksCmd(m.drillTracks[idx].Title, m.drillTracks[idx:idx+1])
+		return queueTracksCmd(m.drillTracks[idx].Title, m.drillTracks[idx:idx+1], playNext)
 	}
-	return queueTracksCmd(m.drillTitle, m.drillTracks[idx:])
+	return queueTracksCmd(m.drillTitle, m.drillTracks[idx:], playNext)
 }
 
-func queueTracksCmd(label string, tracks []provider.Track) tea.Cmd {
+func queueTracksCmd(label string, tracks []provider.Track, playNext bool) tea.Cmd {
 	if len(tracks) == 0 {
 		return nil
 	}
@@ -482,7 +486,7 @@ func queueTracksCmd(label string, tracks []provider.Track) tea.Cmd {
 	for i, track := range queued {
 		ids[i] = PlaybackID(track)
 	}
-	return func() tea.Msg { return QueueTracksMsg{IDs: ids, Tracks: queued, Label: label} }
+	return func() tea.Msg { return QueueTracksMsg{IDs: ids, Tracks: queued, Label: label, PlayNext: playNext} }
 }
 
 func (m *LibraryModel) showSections() {

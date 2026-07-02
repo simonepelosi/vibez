@@ -29,9 +29,10 @@ type PlayTracksMsg struct {
 // QueueTracksMsg is emitted when the user appends library tracks without
 // interrupting playback.
 type QueueTracksMsg struct {
-	IDs    []string
-	Tracks []provider.Track
-	Label  string
+	IDs      []string
+	Tracks   []provider.Track
+	Label    string
+	PlayNext bool
 }
 
 // PlaybackID returns the best ID to use for MusicKit queue descriptors.
