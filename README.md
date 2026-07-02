@@ -276,8 +276,8 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `↑` / `↓` | Navigate list |
 | `enter` | Play selected track |
 | `d` | Remove track from queue |
-| `K` | Move track up |
-| `J` | Move track down |
+| `K` / `shift+up` | Move track up |
+| `J` / `shift+down` | Move track down |
 | `c` | Clear entire queue |
 | `s` | Save queue as playlist (opens command prompt) |
 | `esc` | Close |

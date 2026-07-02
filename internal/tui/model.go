@@ -76,6 +76,7 @@ func (p *queuePanel) View() string                          { return p.m.View() 
 func (p *queuePanel) Back() bool                            { return false }
 func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
 func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
+func (p *queuePanel) Select(idx int)                        { p.m.Select(idx) }
 
 // lyricsPanel wraps views.LyricsModel to satisfy ContentView.
 type lyricsPanel struct{ m *views.LyricsModel }
@@ -1621,20 +1622,22 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				i := idx
 				return m.playerCmd(func(p player.Player) error { return p.RemoveFromQueue(i) })
 			}
-		case "K":
+		case "K", "shift+up", "ctrl+up":
 			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
 				m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
 				m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx - 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d up", idx+1))
 				from, to := idx, idx-1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
-		case "J":
+		case "J", "shift+down", "ctrl+down":
 			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
 				m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
 				m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx + 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d down", idx+1))
 				from, to := idx, idx+1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })

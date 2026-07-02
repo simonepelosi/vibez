@@ -3000,3 +3000,53 @@ func TestPlayNextCmd(t *testing.T) {
 		t.Errorf("expected second MoveInQueue(4, 3), got MoveInQueue(%d, %d)", plyr.moveInQueueCalls[1].From, plyr.moveInQueueCalls[1].To)
 	}
 }
+
+func TestQueueReordering(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	m.queueTracks = []provider.Track{
+		{ID: "a", Title: "A"},
+		{ID: "b", Title: "B"},
+		{ID: "c", Title: "C"},
+	}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.queue.SetTracks(m.queueTracks)
+
+	m.activePanel = 0
+	m.panels = []ContentView{m.queue}
+
+	m.queue.Select(1)
+
+	// Move B up using "shift+up"
+	m2, cmd := m.Update(tea.KeyPressMsg{Text: "shift+up"})
+	m = m2.(*Model)
+	if cmd != nil {
+		cmd()
+	}
+
+	if m.queueTracks[0].ID != "b" || m.queueTracks[1].ID != "a" {
+		t.Errorf("expected B at index 0 and A at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ := m.queue.SelectedTrack()
+	if idx != 0 {
+		t.Errorf("expected selected index to be 0 after moving up, got %d", idx)
+	}
+
+	// Move B down using "shift+down"
+	m3, cmd2 := m.Update(tea.KeyPressMsg{Text: "shift+down"})
+	m = m3.(*Model)
+	if cmd2 != nil {
+		cmd2()
+	}
+
+	if m.queueTracks[0].ID != "a" || m.queueTracks[1].ID != "b" {
+		t.Errorf("expected A at index 0 and B at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ = m.queue.SelectedTrack()
+	if idx != 1 {
+		t.Errorf("expected selected index to be 1 after moving down, got %d", idx)
+	}
+}
