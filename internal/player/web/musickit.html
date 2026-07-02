@@ -57,9 +57,26 @@
 
       try { applyAudioBitrate({{.AudioBitrateKbps}}); } catch(e) { goError(e.message || String(e)).catch(() => {}); }
 
+      // isAuthError returns true when an error indicates an expired/invalid token.
+      const isAuthError = (e) => {
+        if (!e) return false;
+        const s = (errName(e) + ' ' + String(e.status || '')).toLowerCase();
+        return s.includes('authorization') || s.includes('not authorized') ||
+               s.includes('unauthorized')  || s.includes('401') ||
+               s.includes('expired token');
+      };
+
       const savedToken = '{{.UserToken}}';
       if (savedToken !== '') {
-        music.musicUserToken = savedToken;
+        try {
+          music.musicUserToken = savedToken;
+        } catch(e) {
+          if (isAuthError(e)) {
+            await goNeedsAuth('expired').catch(() => {});
+            return;
+          }
+          throw e;
+        }
       }
 
       // ── Runtime mode detection ───────────────────────────────────────────
@@ -74,14 +91,6 @@
         const msg  = (typeof e.message === 'string' && e.message) ? e.message : '';
         if (name && msg && name !== 'Error') return name + ': ' + msg;
         return msg || name || String(e);
-      };
-
-      // isAuthError returns true when an error indicates an expired/invalid token.
-      const isAuthError = (e) => {
-        if (!e) return false;
-        const s = (errName(e) + ' ' + String(e.status || '')).toLowerCase();
-        return s.includes('authorization') || s.includes('not authorized') ||
-               s.includes('unauthorized')  || s.includes('401');
       };
 
       // ── State notification ───────────────────────────────────────────────

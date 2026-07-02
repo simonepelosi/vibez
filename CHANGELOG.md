@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Documentation for keyboard shortcuts** — documented `Tab` (add to queue), `Shift+Tab` (play next), and `Shift+Up/Down` (move in queue) shortcuts in the README and inline TUI help hints.
 
 ### Fixed
+- **Expired token initialization handling** — Catch expired user token errors thrown during player initialization (both Chrome/CDP and WebKit backends) and trigger the terminal re-authentication flow, preventing the app from hanging on a broken token.
 - **macOS Apple Music playback** — Enable Google Chrome component updates on macOS by removing the `--disable-component-update` launch flag, allowing Chrome to correctly load and initialize the Widevine Content Decryption Module (CDM) for DRM playback. Closes #54.
 - **Empty library 404 error handling** — Handle `404 Not Found` API errors gracefully when fetching tracks or playlists from an empty Apple Music library (or when opening Favorites), returning empty collections instead of failing.
 - **Equalizer key conflicts** — Intercept equalizer-specific key presses (arrow keys, `h`/`j`/`k`/`l`, `0`, `r`) when the equalizer panel is open, resolving a conflict where arrow keys would seek playback and `r` would toggle repeat mode. Closes #64.
