@@ -69,6 +69,10 @@ func (m *QueueModel) SetSize(w, h int) {
 	m.list.SetSize(w, h)
 }
 
+func (m *QueueModel) Select(idx int) {
+	m.list.Select(idx)
+}
+
 func (m *QueueModel) Update(msg tea.KeyPressMsg) {
 	m.list, _ = m.list.Update(msg)
 }

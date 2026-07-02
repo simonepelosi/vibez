@@ -18,19 +18,20 @@ import (
 // --- mock player ---
 
 type mockPlayer struct {
-	state          player.State
-	playCalled     bool
-	pauseCalled    bool
-	nextCalled     bool
-	prevCalled     bool
-	closeCalled    bool
-	seekCalled     bool
-	seekPos        time.Duration
-	bitrateKbps    int
-	setQueueIDs    []string   // last IDs passed to SetQueue
-	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
-	err            error
-	stateCh        chan player.State
+	state            player.State
+	playCalled       bool
+	pauseCalled      bool
+	nextCalled       bool
+	prevCalled       bool
+	closeCalled      bool
+	seekCalled       bool
+	seekPos          time.Duration
+	bitrateKbps      int
+	setQueueIDs      []string   // last IDs passed to SetQueue
+	appendQueueIDs   [][]string // all calls to AppendQueue (each call appended)
+	moveInQueueCalls []struct{ From, To int }
+	err              error
+	stateCh          chan player.State
 }
 
 func newMockPlayer() *mockPlayer {
@@ -62,8 +63,11 @@ func (m *mockPlayer) AppendQueue(ids []string) error {
 	return m.err
 }
 func (m *mockPlayer) RemoveFromQueue(_ int) error { return m.err }
-func (m *mockPlayer) MoveInQueue(_, _ int) error  { return m.err }
-func (m *mockPlayer) ClearQueue() error           { return m.err }
+func (m *mockPlayer) MoveInQueue(from, to int) error {
+	m.moveInQueueCalls = append(m.moveInQueueCalls, struct{ From, To int }{from, to})
+	return m.err
+}
+func (m *mockPlayer) ClearQueue() error { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
@@ -2924,5 +2928,125 @@ func TestEqualizerKeyPriority(t *testing.T) {
 	}
 	if !plyr.playCalled && !plyr.pauseCalled {
 		t.Error("player play/pause was NOT called when pressing space in equalizer")
+	}
+}
+
+func TestPlayNextCmd(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	// Case 1: Play next on empty queue
+	tracks := []provider.Track{{ID: "x1", Title: "X1", Artist: "ArtX"}}
+	ids := []string{"x1"}
+	cmd1 := m.playNextCmd("X1", tracks, ids)
+	if cmd1 != nil {
+		cmd1()
+	}
+	if len(plyr.setQueueIDs) == 0 || plyr.setQueueIDs[0] != "x1" {
+		t.Errorf("expected SetQueue with x1, got %v", plyr.setQueueIDs)
+	}
+
+	// Reset mock player
+	plyr.setQueueIDs = nil
+	plyr.appendQueueIDs = nil
+	plyr.moveInQueueCalls = nil
+
+	// Case 2: Play next on non-empty queue, when song B is playing in queue [A, B, C]
+	m.queueTracks = []provider.Track{
+		{ID: "a", Title: "A"},
+		{ID: "b", Title: "B"},
+		{ID: "c", Title: "C"},
+	}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.playerState.Track = &provider.Track{ID: "b", Title: "B"}
+
+	newTracks := []provider.Track{
+		{ID: "x2", Title: "X2"},
+		{ID: "y2", Title: "Y2"},
+	}
+	newIDs := []string{"x2", "y2"}
+
+	cmd2 := m.playNextCmd("Collection", newTracks, newIDs)
+	if cmd2 != nil {
+		cmd2()
+	}
+
+	// Verify local queueIDs insertion: [A, B, X2, Y2, C]
+	expectedIDs := []string{"a", "b", "x2", "y2", "c"}
+	if len(m.queueIDs) != len(expectedIDs) {
+		t.Fatalf("expected queueIDs length %d, got %d", len(expectedIDs), len(m.queueIDs))
+	}
+	for i, id := range m.queueIDs {
+		if id != expectedIDs[i] {
+			t.Errorf("expected local queueIDs[%d] to be %s, got %s", i, expectedIDs[i], id)
+		}
+	}
+
+	// Verify backend calls: AppendQueue followed by MoveInQueue calls
+	if len(plyr.appendQueueIDs) != 1 || plyr.appendQueueIDs[0][0] != "x2" || plyr.appendQueueIDs[0][1] != "y2" {
+		t.Errorf("expected AppendQueue([x2, y2]), got %v", plyr.appendQueueIDs)
+	}
+
+	// Track was originally 3 elements. New tracks appended at index 3 and 4.
+	// B is at index 1. Target insert index is 2.
+	// So we expect MoveInQueue(3, 2) followed by MoveInQueue(4, 3).
+	if len(plyr.moveInQueueCalls) != 2 {
+		t.Fatalf("expected 2 MoveInQueue calls, got %d", len(plyr.moveInQueueCalls))
+	}
+	if plyr.moveInQueueCalls[0].From != 3 || plyr.moveInQueueCalls[0].To != 2 {
+		t.Errorf("expected first MoveInQueue(3, 2), got MoveInQueue(%d, %d)", plyr.moveInQueueCalls[0].From, plyr.moveInQueueCalls[0].To)
+	}
+	if plyr.moveInQueueCalls[1].From != 4 || plyr.moveInQueueCalls[1].To != 3 {
+		t.Errorf("expected second MoveInQueue(4, 3), got MoveInQueue(%d, %d)", plyr.moveInQueueCalls[1].From, plyr.moveInQueueCalls[1].To)
+	}
+}
+
+func TestQueueReordering(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	m.queueTracks = []provider.Track{
+		{ID: "a", Title: "A"},
+		{ID: "b", Title: "B"},
+		{ID: "c", Title: "C"},
+	}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.queue.SetTracks(m.queueTracks)
+
+	m.activePanel = 0
+	m.panels = []ContentView{m.queue}
+
+	m.queue.Select(1)
+
+	// Move B up using "shift+up"
+	m2, cmd := m.Update(tea.KeyPressMsg{Text: "shift+up"})
+	m = m2.(*Model)
+	if cmd != nil {
+		cmd()
+	}
+
+	if m.queueTracks[0].ID != "b" || m.queueTracks[1].ID != "a" {
+		t.Errorf("expected B at index 0 and A at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ := m.queue.SelectedTrack()
+	if idx != 0 {
+		t.Errorf("expected selected index to be 0 after moving up, got %d", idx)
+	}
+
+	// Move B down using "shift+down"
+	m3, cmd2 := m.Update(tea.KeyPressMsg{Text: "shift+down"})
+	m = m3.(*Model)
+	if cmd2 != nil {
+		cmd2()
+	}
+
+	if m.queueTracks[0].ID != "a" || m.queueTracks[1].ID != "b" {
+		t.Errorf("expected A at index 0 and B at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ = m.queue.SelectedTrack()
+	if idx != 1 {
+		t.Errorf("expected selected index to be 1 after moving down, got %d", idx)
 	}
 }

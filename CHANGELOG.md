@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Play Next feature (`Shift+Tab`)** — press `Shift+Tab` on albums, artists, recommendations, or tracks to insert them to play immediately after the currently playing song. Closes #63.
+- **Queue view reordering improvements** — support `Shift+Up/Down` (and `Ctrl+Up/Down`) to move songs up and down in the queue panel. The track selection cursor now automatically follows the moved track.
+- **Documentation for keyboard shortcuts** — documented `Tab` (add to queue), `Shift+Tab` (play next), and `Shift+Up/Down` (move in queue) shortcuts in the README and inline TUI help hints.
+
 ### Fixed
 - **Equalizer key conflicts** — Intercept equalizer-specific key presses (arrow keys, `h`/`j`/`k`/`l`, `0`, `r`) when the equalizer panel is open, resolving a conflict where arrow keys would seek playback and `r` would toggle repeat mode. Closes #64.
 

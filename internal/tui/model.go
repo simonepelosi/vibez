@@ -76,6 +76,7 @@ func (p *queuePanel) View() string                          { return p.m.View() 
 func (p *queuePanel) Back() bool                            { return false }
 func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
 func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
+func (p *queuePanel) Select(idx int)                        { p.m.Select(idx) }
 
 // lyricsPanel wraps views.LyricsModel to satisfy ContentView.
 type lyricsPanel struct{ m *views.LyricsModel }
@@ -168,16 +169,18 @@ type feedResultMsg struct {
 	err    error
 }
 type feedTracksMsg struct {
-	item   provider.RecommendationItem
-	tracks []provider.Track
-	play   bool // true = replace queue & play; false = append
-	err    error
+	item     provider.RecommendationItem
+	tracks   []provider.Track
+	play     bool // true = replace queue & play; false = append
+	playNext bool
+	err      error
 }
 type searchCollectionTracksMsg struct {
-	label  string // album/playlist name for log messages
-	tracks []provider.Track
-	play   bool // true = replace queue & play; false = append
-	err    error
+	label    string // album/playlist name for log messages
+	tracks   []provider.Track
+	play     bool // true = replace queue & play; false = append
+	playNext bool
+	err      error
 }
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
@@ -611,6 +614,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[feed] playing %q (%d tracks)", msg.item.Title, len(ids)))
 			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
+		if msg.playNext {
+			return m, m.playNextCmd(msg.item.Title, msg.tracks, ids)
+		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
@@ -782,6 +788,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerState.Position = 0
 			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
+		if msg.playNext {
+			m.mode = modeNormal
+			return m, m.playNextCmd(msg.label, msg.tracks, ids)
+		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
@@ -791,6 +801,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.QueueTracksMsg:
 		if len(msg.Tracks) == 0 || len(msg.IDs) == 0 {
 			break
+		}
+		if msg.PlayNext {
+			return m, m.playNextCmd(msg.Label, msg.Tracks, msg.IDs)
 		}
 		m.queueTracks = append(m.queueTracks, msg.Tracks...)
 		m.queueIDs = append(m.queueIDs, msg.IDs...)
@@ -1013,12 +1026,12 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		// Album: fetch all tracks then play.
 		if a := m.search.SelectedAlbum(); a != nil {
 			m.playerState.Loading = true
-			return m.fetchSearchCollectionCmd(a, nil, true)
+			return m.fetchSearchCollectionCmd(a, nil, true, false)
 		}
 		// Playlist: fetch all tracks then play.
 		if p := m.search.SelectedPlaylist(); p != nil {
 			m.playerState.Loading = true
-			return m.fetchSearchCollectionCmd(nil, p, true)
+			return m.fetchSearchCollectionCmd(nil, p, true, false)
 		}
 		return nil
 	case "tab":
@@ -1033,11 +1046,26 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		}
 		// Album: fetch all tracks then add to queue.
 		if a := m.search.SelectedAlbum(); a != nil {
-			return m.fetchSearchCollectionCmd(a, nil, false)
+			return m.fetchSearchCollectionCmd(a, nil, false, false)
 		}
 		// Playlist: fetch all tracks then add to queue.
 		if p := m.search.SelectedPlaylist(); p != nil {
-			return m.fetchSearchCollectionCmd(nil, p, false)
+			return m.fetchSearchCollectionCmd(nil, p, false, false)
+		}
+		return nil
+	case "shift+tab":
+		// Track: play next.
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
+			return m.playNextCmd(tc.Artist+" — "+tc.Title, []provider.Track{tc}, []string{views.PlaybackID(tc)})
+		}
+		// Album: fetch all tracks then play next.
+		if a := m.search.SelectedAlbum(); a != nil {
+			return m.fetchSearchCollectionCmd(a, nil, false, true)
+		}
+		// Playlist: fetch all tracks then play next.
+		if p := m.search.SelectedPlaylist(); p != nil {
+			return m.fetchSearchCollectionCmd(nil, p, false, true)
 		}
 		return nil
 	case "up", "down", "pgup", "pgdown":
@@ -1405,7 +1433,7 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 //
 // Playlist routing: IDs starting with "p." are library playlists; everything else
 // uses the catalog endpoint.
-func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool) tea.Cmd {
+func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool, playNext bool) tea.Cmd {
 	prov := m.provider
 	if album != nil {
 		snap := *album
@@ -1414,7 +1442,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			tracks, err := prov.GetAlbumTracks(ctx, snap.ID)
-			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, err: err}
+			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, playNext: playNext, err: err}
 		}
 	}
 	if playlist != nil {
@@ -1431,7 +1459,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 			} else {
 				tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
 			}
-			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, err: err}
+			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, playNext: playNext, err: err}
 		}
 	}
 	return nil
@@ -1439,7 +1467,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 
 // fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
 // plays them (play=true) or appends them to the queue.
-func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool) tea.Cmd {
+func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool, playNext bool) tea.Cmd {
 	snap := *item
 	prov := m.provider
 	m.appendLog(fmt.Sprintf("[feed] loading %q (%s)…", snap.Title, snap.Kind))
@@ -1456,7 +1484,7 @@ func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play b
 		default:
 			err = fmt.Errorf("unknown kind %q", snap.Kind)
 		}
-		return feedTracksMsg{item: snap, tracks: tracks, play: play, err: err}
+		return feedTracksMsg{item: snap, tracks: tracks, play: play, playNext: playNext, err: err}
 	}
 }
 
@@ -1594,20 +1622,22 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				i := idx
 				return m.playerCmd(func(p player.Player) error { return p.RemoveFromQueue(i) })
 			}
-		case "K":
+		case "K", "shift+up", "ctrl+up":
 			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
 				m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
 				m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx - 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d up", idx+1))
 				from, to := idx, idx-1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
-		case "J":
+		case "J", "shift+down", "ctrl+down":
 			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
 				m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
 				m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx + 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d down", idx+1))
 				from, to := idx, idx+1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
@@ -1791,11 +1821,15 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			case "enter":
 				if item := m.feedP.m.SelectedItem(); item != nil {
 					m.playerState.Loading = true
-					return m.fetchFeedItemTracksCmd(item, true)
+					return m.fetchFeedItemTracksCmd(item, true, false)
 				}
 			case "tab":
 				if item := m.feedP.m.SelectedItem(); item != nil {
-					return m.fetchFeedItemTracksCmd(item, false)
+					return m.fetchFeedItemTracksCmd(item, false, false)
+				}
+			case "shift+tab":
+				if item := m.feedP.m.SelectedItem(); item != nil {
+					return m.fetchFeedItemTracksCmd(item, false, true)
 				}
 			default:
 				return m.feedP.m.Update(msg)
@@ -2371,6 +2405,56 @@ func (m *Model) playerCmd(fn func(player.Player) error) tea.Cmd {
 	}
 }
 
+func (m *Model) playNextCmd(label string, tracks []provider.Track, ids []string) tea.Cmd {
+	insertIdx := 0
+	if m.playerState.Track != nil {
+		for i, t := range m.queueTracks {
+			if views.PlaybackID(t) == views.PlaybackID(*m.playerState.Track) {
+				insertIdx = i + 1
+				break
+			}
+		}
+	}
+
+	origLen := len(m.queueTracks)
+	if origLen == 0 {
+		m.queueTracks = tracks
+		m.queueIDs = ids
+		m.playerState.Track = &tracks[0]
+		m.playerState.Loading = true
+		m.playerState.Playing = false
+		m.playerState.Position = 0
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[queue] play now: %s", label))
+		return m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
+	}
+
+	if insertIdx > origLen {
+		insertIdx = origLen
+	}
+
+	// Insert locally
+	m.queueTracks = append(m.queueTracks[:insertIdx], append(tracks, m.queueTracks[insertIdx:]...)...)
+	m.queueIDs = append(m.queueIDs[:insertIdx], append(ids, m.queueIDs[insertIdx:]...)...)
+	m.queue.SetTracks(m.queueTracks)
+
+	m.appendLog(fmt.Sprintf("[queue] play next: %s (%d track(s))", label, len(tracks)))
+
+	return m.playerCmd(func(p player.Player) error {
+		if err := p.AppendQueue(ids); err != nil {
+			return err
+		}
+		for i := range len(ids) {
+			from := origLen + i
+			to := insertIdx + i
+			if err := p.MoveInQueue(from, to); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (m *Model) adjustVolume(delta float64) tea.Cmd {
 	return func() tea.Msg {
 		if m.player == nil {
@@ -2808,7 +2892,8 @@ func (m *Model) searchLines(contentW, h int) []string {
 		kind = "playlist"
 	}
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
-		"  ·  " + accent.Render("Tab") + muted.Render(" add "+kind+" to queue") +
+		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
+		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
 		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
@@ -2858,7 +2943,7 @@ func (m *Model) statusNavContent(_ int) string {
 				styles.ModeNormal.Render("QUEUE"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
-				accent.Render("K/J") + muted.Render(" move up/down"),
+				accent.Render("Shift+↑/↓ / K/J") + muted.Render(" move"),
 				accent.Render("p") + muted.Render(" add to playlist"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
@@ -2868,6 +2953,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("LIBRARY"),
 				accent.Render("Enter") + muted.Render(" browse/play"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("esc") + muted.Render(" back/close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
@@ -2881,7 +2968,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("FEED"),
 				accent.Render("Enter") + muted.Render(" play"),
-				accent.Render("Tab") + muted.Render(" add to queue"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("j/k") + muted.Render(" navigate"),
 				accent.Render("r") + muted.Render(" refresh"),
 				accent.Render("esc") + muted.Render(" close"),

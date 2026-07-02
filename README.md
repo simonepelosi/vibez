@@ -52,7 +52,8 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 
 ### 📋 Queue Management
 
-- **Add tracks to queue** with `tab` from search or library
+- **Add tracks to queue** with `tab` from search, library, or recommendation feed
+- **Play next** — insert any song, album, playlist, or recommendation next in the queue with `shift+tab`
 - **Navigate the queue** — jump to any track or let it auto-advance
 - **Persistent queue panel** — toggle it on/off without losing your place
 
@@ -255,6 +256,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `↑` / `↓` | Navigate results |
 | `enter` | Play now |
 | `tab` | Add to queue |
+| `shift+tab` | Play next (insert after current track) |
 | `esc` | Close |
 
 ### Library (`l`)
@@ -263,7 +265,8 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 |-----|--------|
 | `↑` / `↓` | Navigate list |
 | `enter` | Open / play |
-| `tab` | Switch tab (Playlists / Albums / Tracks) |
+| `tab` | Add selected item/track to queue (when viewing albums/artists/playlists/tracks) or switch tab (when viewing library sections pane) |
+| `shift+tab` | Play next (insert selected item/track after current track) |
 | `esc` | Back / close |
 
 ### Queue (`q`)
@@ -273,8 +276,8 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `↑` / `↓` | Navigate list |
 | `enter` | Play selected track |
 | `d` | Remove track from queue |
-| `K` | Move track up |
-| `J` | Move track down |
+| `K` / `shift+up` | Move track up |
+| `J` / `shift+down` | Move track down |
 | `c` | Clear entire queue |
 | `s` | Save queue as playlist (opens command prompt) |
 | `esc` | Close |
