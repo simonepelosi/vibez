@@ -2943,7 +2943,7 @@ func (m *Model) statusNavContent(_ int) string {
 				styles.ModeNormal.Render("QUEUE"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
-				accent.Render("K/J") + muted.Render(" move up/down"),
+				accent.Render("Shift+↑/↓ / K/J") + muted.Render(" move"),
 				accent.Render("p") + muted.Render(" add to playlist"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
