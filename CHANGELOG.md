@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-02
+
 ### Added
 - **Optional PR input for Dev Build action** — The Dev Build workflow can now be triggered from any branch (e.g. `main`) without specifying a PR number, enabling quick ad-hoc builds of the latest development version.
 - **Play Next feature (`Shift+Tab`)** — press `Shift+Tab` on albums, artists, recommendations, or tracks to insert them to play immediately after the currently playing song. Closes #63.
@@ -537,7 +539,13 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/simonepelosi/vibez/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/simonepelosi/vibez/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/simonepelosi/vibez/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/simonepelosi/vibez/compare/v0.0.9...v0.1.0
+[0.0.9]: https://github.com/simonepelosi/vibez/compare/v0.0.8...v0.0.9
+[0.0.8]: https://github.com/simonepelosi/vibez/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/simonepelosi/vibez/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/simonepelosi/vibez/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/simonepelosi/vibez/compare/v0.0.4...v0.0.5
