@@ -1633,6 +1633,17 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		return nil
 	}
 
+	if m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP {
+		switch k {
+		case "esc":
+			m.activePanel = -1
+			m.lastKey = ""
+			return nil
+		case "left", "h", "right", "l", "up", "k", "down", "j", "0", "r":
+			return m.eqP.Update(msg)
+		}
+	}
+
 	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
 		m.lastKey = ""
 		return nil

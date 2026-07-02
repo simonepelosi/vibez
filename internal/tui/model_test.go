@@ -2863,3 +2863,66 @@ func TestModel_ActivePanelEscCallsBackBeforeClose(t *testing.T) {
 		t.Fatalf("activePanel = %d, want still open after Back handled", m.activePanel)
 	}
 }
+
+func TestEqualizerKeyPriority(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	// Set up track state for seeking checks
+	m.playerState.Track = &provider.Track{ID: "t1", Title: "Song", Duration: 100 * time.Second}
+	m.playerState.Position = 50 * time.Second
+
+	// Open equalizer panel
+	eqIdx := -1
+	for i, p := range m.panels {
+		if p == m.eqP {
+			eqIdx = i
+			break
+		}
+	}
+	if eqIdx == -1 {
+		t.Fatal("eqP not found in panels")
+	}
+	m.activePanel = eqIdx
+
+	// Verify equalizer cursor is initially at 0
+	if m.eqP.m.Cursor() != 0 {
+		t.Fatalf("expected equalizer cursor to be 0, got %d", m.eqP.m.Cursor())
+	}
+
+	// 1. Send "right" arrow key. It should move equalizer cursor to 1, and NOT seek player.
+	m2, _ := m.Update(tea.KeyPressMsg{Text: "right"})
+	m = m2.(*Model)
+	if m.eqP.m.Cursor() != 1 {
+		t.Errorf("expected equalizer cursor to move to 1, got %d", m.eqP.m.Cursor())
+	}
+	if plyr.seekCalled {
+		t.Error("player seek was incorrectly called when pressing right key in equalizer")
+	}
+
+	// Reset mock player call tracking
+	plyr.seekCalled = false
+
+	// 2. Send "r" key. It should reset equalizer bands, and NOT cycle player repeat mode.
+	m.eqP.m.Bands()[0].Gain = 5.0
+	m.playerState.RepeatMode = player.RepeatModeAll
+
+	m3, _ := m.Update(tea.KeyPressMsg{Text: "r"})
+	m = m3.(*Model)
+	if m.eqP.m.Bands()[0].Gain != 0.0 {
+		t.Errorf("expected bands to reset to 0, got %f", m.eqP.m.Bands()[0].Gain)
+	}
+	// RepeatMode is managed by state update in the actual app, but locally it shouldn't have changed
+	if m.playerState.RepeatMode != player.RepeatModeAll {
+		t.Error("player repeat mode was incorrectly changed when pressing r in equalizer")
+	}
+
+	// 3. Send "space" key. It should fall through and toggle play/pause.
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	if cmd != nil {
+		cmd()
+	}
+	if !plyr.playCalled && !plyr.pauseCalled {
+		t.Error("player play/pause was NOT called when pressing space in equalizer")
+	}
+}
