@@ -336,6 +336,15 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
+	if len(opts.InitialTracks) > 0 {
+		ids := make([]string, len(opts.InitialTracks))
+		for i, t := range opts.InitialTracks {
+			ids[i] = views.PlaybackID(t)
+		}
+		m.queueTracks = append([]provider.Track{}, opts.InitialTracks...)
+		m.queueIDs = ids
+		m.queue.SetTracks(m.queueTracks)
+	}
 	return m
 }
 

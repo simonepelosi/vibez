@@ -1,9 +1,31 @@
 GOFLAGS=-tags webkit2gtk_4_1
 PKG_CONFIG_PATH=$(CURDIR)/pkg-config
 
-.PHONY: build run test lint clean release build-with-token
+.PHONY: build run test lint clean release build-with-token check-deps
 
-build:
+check-deps:
+	@echo "Checking dependencies..."
+	@pkg-config --exists gstreamer-1.0 2>/dev/null || \
+		{ echo ""; \
+		echo "ERROR: gstreamer-1.0 not found."; \
+		echo "Please install: gstreamer, gstreamer-plugins-base, gstreamer-plugins-good"; \
+		echo ""; exit 1; }
+
+	@pkg-config --exists gtk+-3.0 2>/dev/null || \
+		{ echo ""; \
+		echo "ERROR: gtk+-3.0 not found"; \
+		echo "Please install: gtk3 (or libgtk-3-dev on Debian based distros)"; \
+		echo ""; exit 1; }
+
+	@pkg-config --exists webkit2gtk-4.1 2>/dev/null || pkg-config --exists webkit2gtk-4.0 2>/dev/null || \
+		{ echo ""; \
+		echo "ERROR: webkit2gtk not found (checked 4.1 and 4.0)."; \
+		echo "Please install: webkit2gtk-4.1 (or libwebkit2gtk-4.1-dev on Debian based distros)"; \
+		echo ""; exit 1; }
+	@echo "All dependencies found."
+
+
+build: check-deps
 	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go build -o vibez .
 
 # build-with-token embeds the Apple developer token without obfuscation.
