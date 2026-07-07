@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Playwright driver installation on Linux** — Upgraded `playwright-go` dependency to `v0.6000.0` to resolve `404 Not Found` errors when fetching the Linux x86_64 driver binary. Closes #75.
+
 ## [0.3.0] — 2026-07-02
 
 ### Added
