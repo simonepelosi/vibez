@@ -300,7 +300,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		}
 	case paneItems:
 		switch msg.String() {
-		case "esc", "backspace":
+		case "esc", "backspace", "b":
 			m.invalidatePlaylistRequest()
 			m.loadErr = nil
 			m.pane = paneSections
@@ -315,7 +315,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		}
 	case paneTracks:
 		switch msg.String() {
-		case "esc", "backspace", "left", "h":
+		case "esc", "backspace", "b":
 			m.Back()
 			return m, nil
 		case "enter":
@@ -567,7 +567,7 @@ func (m *LibraryModel) renderDrillView() string {
 	if m.drillTitle == "" {
 		name = styles.SidebarActive.Render("Tracks")
 	}
-	hint := styles.QueueItemMuted.Render("  ←/h/esc back · enter play · tab queue · shift+tab next")
+	hint := styles.QueueItemMuted.Render("  b/esc back · enter play · tab queue · shift+tab next")
 	header := name + hint + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", m.width))
 	if m.drillLoading {
 		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"

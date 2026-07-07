@@ -1517,6 +1517,37 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	return m.runDiscoverySearch()
 }
 
+func (m *Model) forwardToActivePanel(msg tea.KeyPressMsg) tea.Cmd {
+	if m.activePanel < 0 {
+		return nil
+	}
+	k := msg.String()
+	if m.panels[m.activePanel] == m.feedP {
+		switch k {
+		case "r":
+			m.feedP.m.SetLoading()
+			return m.fetchFeedCmd()
+		case "enter":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				m.playerState.Loading = true
+				return m.fetchFeedItemTracksCmd(item, true, false)
+			}
+		case "tab":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				return m.fetchFeedItemTracksCmd(item, false, false)
+			}
+		case "shift+tab":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				return m.fetchFeedItemTracksCmd(item, false, true)
+			}
+		default:
+			return m.feedP.m.Update(msg)
+		}
+		return nil
+	}
+	return m.panels[m.activePanel].Update(msg)
+}
+
 func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	// When debug log is open, j/k/G scroll it; esc back/closes it.
 	if m.debugView {
@@ -1674,11 +1705,6 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		}
 	}
 
-	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
-		m.lastKey = ""
-		return nil
-	}
-
 	// Player control keys always work, even when other panels are active.
 	switch k {
 	case "space":
@@ -1781,6 +1807,9 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 	case "left":
 		m.lastKey = ""
+		if m.activePanel >= 0 {
+			return m.forwardToActivePanel(msg)
+		}
 		if m.playerState.Track != nil {
 			newPos := max(0, m.playerState.Position-10*time.Second)
 			m.appendLog(fmt.Sprintf("[player] seek ← %s", views.FormatDuration(newPos)))
@@ -1790,6 +1819,9 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 	case "right":
 		m.lastKey = ""
+		if m.activePanel >= 0 {
+			return m.forwardToActivePanel(msg)
+		}
 		if m.playerState.Track != nil {
 			newPos := m.playerState.Position + 10*time.Second
 			if dur := m.playerState.Track.Duration; dur > 0 && newPos > dur {
@@ -1812,31 +1844,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			m.lastKey = ""
 			return nil
 		}
-		// Feed panel special keys.
-		if m.panels[m.activePanel] == m.feedP {
-			switch k {
-			case "r":
-				m.feedP.m.SetLoading()
-				return m.fetchFeedCmd()
-			case "enter":
-				if item := m.feedP.m.SelectedItem(); item != nil {
-					m.playerState.Loading = true
-					return m.fetchFeedItemTracksCmd(item, true, false)
-				}
-			case "tab":
-				if item := m.feedP.m.SelectedItem(); item != nil {
-					return m.fetchFeedItemTracksCmd(item, false, false)
-				}
-			case "shift+tab":
-				if item := m.feedP.m.SelectedItem(); item != nil {
-					return m.fetchFeedItemTracksCmd(item, false, true)
-				}
-			default:
-				return m.feedP.m.Update(msg)
-			}
-			return nil
-		}
-		return m.panels[m.activePanel].Update(msg)
+		return m.forwardToActivePanel(msg)
 	}
 
 	// Keys that only work when no panel is covering the content area.

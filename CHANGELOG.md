@@ -12,7 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Parallel pagination page fetching** — Fetch collection pages in parallel rather than sequentially, achieving up to a 10x-30x speedup when loading large playlists and library views.
 
+### Changed
+- **Navigation keys in panels** — Allow `"left"` and `"right"` arrow keys to navigate pages/cursors in the active panels (e.g., library lists, search cursor) rather than globally triggering seeking. Use the `"b"` key (along with `"esc"` and `"backspace"`) to go back in lists.
+
 ### Fixed
+- **Queue resolution limits** — Batch track resolution requests in parallel blocks of 100 to support playing large lists/queues (like library Songs and large Favorites list) without hitting Apple Music's 300 IDs batch query limit.
 - **Double path duplication in pagination** — Trim duplicate `/v1` prefix from relative endpoint paths during pagination to prevent double `/v1/v1/` routing errors (which caused pagination loops to stop early at exactly 100 tracks).
 - **Graceful timeout/cancellation handling** — Return already-accumulated tracks when a pagination query times out or is cancelled, and display a clean `"request timed out"` error message instead of raw HTTP logs.
 - **Localized Favorites suppression** — Suppress synthetic Favorites playlist generation when localized favorites playlists (e.g. Italian `"Brani preferiti"`, `"Preferiti"`, French `"Morceaux préférés"`, Spanish `"Canciones favoritas"`, Portuguese `"Músicas favoritas"`, or custom `"Favorite/Starred Songs"`, etc.) are already present in the library. Closes #74.

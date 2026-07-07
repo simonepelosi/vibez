@@ -489,7 +489,7 @@ func TestLibrary_RenderDrillView_Error(t *testing.T) {
 }
 
 func TestLibrary_Update_DrillPane_BackKeys(t *testing.T) {
-	for _, key := range []string{"left", "h", "esc", "backspace"} {
+	for _, key := range []string{"esc", "backspace", "b"} {
 		lib := NewLibrary(&mockProvider{})
 		lib.pane = paneTracks
 		lib.tracksBackPane = paneItems
