@@ -512,6 +512,9 @@ func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track,
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
 			if strings.Contains(err.Error(), "404 Not Found") {
+				if len(tracks) > 0 {
+					break
+				}
 				return nil, nil
 			}
 			return nil, err
@@ -578,6 +581,9 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
 			if strings.Contains(err.Error(), "404 Not Found") {
+				if len(tracks) > 0 {
+					break
+				}
 				fallbackReq, reqErr := a.newRequest(ctx, http.MethodGet, fmt.Sprintf("/me/library/playlists/%s?include=tracks", url.PathEscape(playlistID)))
 				if reqErr != nil {
 					return nil, reqErr
@@ -618,6 +624,9 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+				break
+			}
 			return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 		}
 		for _, s := range page.Data {
@@ -638,6 +647,9 @@ func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID strin
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+				break
+			}
 			return nil, fmt.Errorf("GetLibraryAlbumTracks: %w", err)
 		}
 		for _, s := range page.Data {
@@ -662,6 +674,9 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+				break
+			}
 			return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 		}
 		for _, s := range page.Data {

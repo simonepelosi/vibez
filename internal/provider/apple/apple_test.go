@@ -377,6 +377,36 @@ func TestGetLibraryTracks_Pagination(t *testing.T) {
 	}
 }
 
+func TestGetLibraryTracks_Pagination_404OnNextPage(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSON("1", "Track 1", "Art", "Alb", 100000, "")},
+				"next": "/me/library/songs?limit=100&offset=100",
+			})
+		case 2:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("404 Not Found"))
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: unexpected error: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1 (gracefully stopped on 404 next page)", len(tracks))
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 HTTP calls, got %d", calls)
+	}
+}
+
 // --- GetLibraryPlaylists ---
 
 func TestGetLibraryPlaylists(t *testing.T) {
@@ -433,6 +463,33 @@ func TestGetPlaylistTracks(t *testing.T) {
 	}
 	if tracks[0].Title != "Playlist Track" {
 		t.Errorf("Title = %q", tracks[0].Title)
+	}
+}
+
+func TestGetPlaylistTracks_Pagination_404OnNextPage(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch calls {
+		case 1:
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSON("1", "Track 1", "Art", "Alb", 100000, "")},
+				"next": "/me/library/playlists/pl-abc/tracks?limit=100&offset=100",
+			})
+		case 2:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("404 Not Found"))
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetPlaylistTracks(context.Background(), "pl-abc")
+	if err != nil {
+		t.Fatalf("GetPlaylistTracks: unexpected error: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1 (gracefully stopped on 404 next page)", len(tracks))
 	}
 }
 
