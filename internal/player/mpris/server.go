@@ -53,6 +53,8 @@ type Server struct {
 	pos         time.Duration
 	lastStatus  string
 	lastTrackID string
+	lastPos     time.Duration // position at the previous flush, for seek detection
+	lastPosAt   time.Time     // wall-clock time lastPos was sampled
 	debounce    *time.Timer
 	pending     *player.State
 }
@@ -248,6 +250,31 @@ func (s *Server) Update(st player.State) {
 	s.mu.Unlock()
 }
 
+// seekThreshold is the position jump beyond which a change is treated as a
+// deliberate seek rather than normal playback drift or timing jitter. Position
+// updates arrive roughly once per second and vibez seeks in ±10s steps, so this
+// sits safely between the two.
+const seekThreshold = 2 * time.Second
+
+// isSeek reports whether newPos is a discontinuous jump away from where
+// uninterrupted playback would have reached: lastPos sampled at lastAt, plus
+// the elapsed wall-clock time when playback was advancing. With no prior sample
+// (zero lastAt) it is never a seek.
+func isSeek(playing bool, lastPos time.Duration, lastAt time.Time, newPos time.Duration, now time.Time) bool {
+	if lastAt.IsZero() {
+		return false
+	}
+	expected := lastPos
+	if playing {
+		expected += now.Sub(lastAt)
+	}
+	delta := newPos - expected
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta > seekThreshold
+}
+
 func (s *Server) flush() {
 	s.mu.Lock()
 	st := s.pending
@@ -268,13 +295,32 @@ func (s *Server) flush() {
 
 	statusChanged := status != s.lastStatus
 	trackChanged := trackID != s.lastTrackID
-	if !statusChanged && !trackChanged {
+
+	// A seek within the current track surfaces only as a position jump; without
+	// a Seeked signal, clients extrapolate from a stale Position and desync.
+	now := time.Now()
+	seeked := !trackChanged && isSeek(s.lastStatus == "Playing", s.lastPos, s.lastPosAt, st.Position, now)
+	s.lastPos = st.Position
+	s.lastPosAt = now
+
+	if !statusChanged && !trackChanged && !seeked {
 		s.mu.Unlock()
 		return
 	}
 	s.lastStatus = status
 	s.lastTrackID = trackID
 	s.mu.Unlock()
+
+	// Per the MPRIS spec, discontinuous position changes are announced via the
+	// Seeked signal (the Position property does not emit PropertiesChanged).
+	// Refresh Position first so a client reading it in response gets the new value.
+	if seeked {
+		s.props.SetMust(mprisPlayerIface, "Position", st.Position.Microseconds())
+		_ = s.conn.Emit(mprisObjectPath, mprisPlayerIface+".Seeked", st.Position.Microseconds())
+		if !statusChanged && !trackChanged {
+			return
+		}
+	}
 
 	meta := map[string]dbus.Variant{
 		"mpris:trackid": dbus.MakeVariant(noTrackPath),
