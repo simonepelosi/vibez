@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	playwright "github.com/playwright-community/playwright-go"
 )
 
 // buildAr writes a minimal ar(1) archive from an ordered list of (name, data)
@@ -305,8 +307,24 @@ func TestEnsureBrowser_AlreadyInstalled(t *testing.T) {
 		t.Fatalf("write chrome: %v", err)
 	}
 
+	// Mock the playwright driver as also already installed and up-to-date.
+	driver, err := playwright.NewDriver(&playwright.RunOptions{
+		DriverDirectory: driverDir(),
+	})
+	if err != nil {
+		t.Fatalf("new driver: %v", err)
+	}
+	pkgDir := filepath.Join(driverDir(), "package")
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatalf("mkdir driver package: %v", err)
+	}
+	pkgJSON := fmt.Sprintf(`{"version": %q}`, driver.Version)
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(pkgJSON), 0o600); err != nil { //nolint:gosec // test fixture
+		t.Fatalf("write driver package.json: %v", err)
+	}
+
 	var progress []string
-	err := EnsureBrowser(func(s string) { progress = append(progress, s) })
+	err = EnsureBrowser(func(s string) { progress = append(progress, s) })
 	if err != nil {
 		t.Errorf("EnsureBrowser when already installed should return nil, got: %v", err)
 	}

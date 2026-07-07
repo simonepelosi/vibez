@@ -11,6 +11,7 @@
 package cdp
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -64,10 +65,37 @@ func linkHelper() {
 // cache directory if not already present. Never calls apt-get or sudo.
 // onProgress is called with human-readable status strings (e.g. "Downloading
 // Chrome… 42%", "Extracting Chrome…"). Pass func(string){} to silence.
+func isDriverUpToDate() bool {
+	driver, err := playwright.NewDriver(&playwright.RunOptions{
+		DriverDirectory: driverDir(),
+	})
+	if err != nil {
+		return false
+	}
+	pkgJSONPath := filepath.Join(driverDir(), "package", "package.json")
+	data, err := os.ReadFile(pkgJSONPath) //nolint:gosec // path constructed from cache dir
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false
+	}
+	return pkg.Version == driver.Version
+}
+
 func EnsureBrowser(onProgress func(string)) error {
+	driverUpToDate := isDriverUpToDate()
+	chromeInstalled := false
 	if _, err := os.Stat(ChromePath()); err == nil {
-		linkHelper() // idempotent — creates vibez-helper link if absent
-		return nil   // already installed
+		chromeInstalled = true
+	}
+
+	if driverUpToDate && chromeInstalled {
+		linkHelper()
+		return nil
 	}
 
 	// Also ensure the playwright driver is available (no browser install via playwright).
@@ -78,6 +106,11 @@ func EnsureBrowser(onProgress func(string)) error {
 		SkipInstallBrowsers: true,
 	}); err != nil {
 		return fmt.Errorf("playwright driver: %w", err)
+	}
+
+	if chromeInstalled {
+		linkHelper()
+		return nil
 	}
 
 	debPath := filepath.Join(baseDir(), "chrome.deb")

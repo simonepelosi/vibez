@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Queue resolution limits** — Batch track resolution requests in parallel blocks of 100 to support playing large lists/queues (like library Songs and large Favorites list) without hitting Apple Music's 300 IDs batch query limit.
+- **Playwright driver upgrade validation** — Ensure the Playwright driver in the local cache is always verified and updated when the dependency version changes, even if Chrome is already cached/installed.
 - **Double path duplication in pagination** — Trim duplicate `/v1` prefix from relative endpoint paths during pagination to prevent double `/v1/v1/` routing errors (which caused pagination loops to stop early at exactly 100 tracks).
 - **Graceful timeout/cancellation handling** — Return already-accumulated tracks when a pagination query times out or is cancelled, and display a clean `"request timed out"` error message instead of raw HTTP logs.
 - **Localized Favorites suppression** — Suppress synthetic Favorites playlist generation when localized favorites playlists (e.g. Italian `"Brani preferiti"`, `"Preferiti"`, French `"Morceaux préférés"`, Spanish `"Canciones favoritas"`, Portuguese `"Músicas favoritas"`, or custom `"Favorite/Starred Songs"`, etc.) are already present in the library. Closes #74.
