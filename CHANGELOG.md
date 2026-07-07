@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Parallel pagination page fetching** — Fetch collection pages in parallel rather than sequentially, achieving up to a 10x-30x speedup when loading large playlists and library views.
 
 ### Changed
-- **Navigation keys in library view** — Use the `"b"` key (along with `"esc"` and `"backspace"`) to go back, allowing `"left"` and `"h"` to be used for page-by-page list pagination.
+- **Navigation keys in panels** — Allow `"left"` and `"right"` arrow keys to navigate pages/cursors in the active panels (e.g., library lists, search cursor) rather than globally triggering seeking. Use the `"b"` key (along with `"esc"` and `"backspace"`) to go back in lists.
 
 ### Fixed
 - **Queue resolution limits** — Batch track resolution requests in parallel blocks of 100 to support playing large lists/queues (like library Songs and large Favorites list) without hitting Apple Music's 300 IDs batch query limit.
