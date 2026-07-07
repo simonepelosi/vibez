@@ -256,6 +256,9 @@ type paginatedSongs struct {
 type paginatedPlaylists struct {
 	Data []playlistResource `json:"data"`
 	Next string             `json:"next"`
+	Meta struct {
+		Total int `json:"total"`
+	} `json:"meta"`
 }
 
 type playlistWithTracksResponse struct {
@@ -687,26 +690,164 @@ func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track,
 	return tracks, nil
 }
 
-func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Playlist, error) {
-	var playlists []provider.Playlist
-	endpoint := "/me/library/playlists?limit=100"
+func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoint string) ([]provider.Playlist, error) {
+	req, err := a.newRequest(ctx, http.MethodGet, baseEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	var firstPage paginatedPlaylists
+	if err := a.do(req, &firstPage); err != nil {
+		return nil, err
+	}
 
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedPlaylists
-		if err := a.do(req, &page); err != nil {
-			if strings.Contains(err.Error(), "404 Not Found") {
-				break
-			}
-			return nil, err
-		}
-		for _, r := range page.Data {
+	total := firstPage.Meta.Total
+	if total == 0 {
+		playlists := make([]provider.Playlist, 0, len(firstPage.Data))
+		for _, r := range firstPage.Data {
 			playlists = append(playlists, toPlaylist(r))
 		}
-		endpoint = page.Next
+		if firstPage.Next == "" {
+			return playlists, nil
+		}
+		endpoint := firstPage.Next
+		for endpoint != "" {
+			req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			var page paginatedPlaylists
+			if err := a.do(req, &page); err != nil {
+				if len(playlists) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+					break
+				}
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return nil, nil
+				}
+				return nil, err
+			}
+			for _, r := range page.Data {
+				playlists = append(playlists, toPlaylist(r))
+			}
+			endpoint = page.Next
+		}
+		return playlists, nil
+	}
+
+	limit := 100
+	playlists := make([]provider.Playlist, total)
+	for i, r := range firstPage.Data {
+		if i < total {
+			playlists[i] = toPlaylist(r)
+		}
+	}
+
+	if total <= len(firstPage.Data) {
+		return playlists[:len(firstPage.Data)], nil
+	}
+
+	offsets := []int{}
+	for offset := len(firstPage.Data); offset < total; offset += limit {
+		offsets = append(offsets, offset)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(offsets))
+	sem := make(chan struct{}, 10)
+
+	for _, offset := range offsets {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			u, err := url.Parse(baseEndpoint)
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+			q := u.Query()
+			q.Set("offset", strconv.Itoa(offset))
+			q.Set("limit", strconv.Itoa(limit))
+			u.RawQuery = q.Encode()
+
+			req, err := a.newRequest(ctx, http.MethodGet, u.String())
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+			var page paginatedPlaylists
+			if err := a.do(req, &page); err != nil {
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return
+				}
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+
+			for j, r := range page.Data {
+				idx := offset + j
+				if idx < len(playlists) {
+					playlists[idx] = toPlaylist(r)
+				}
+			}
+		}(offset)
+	}
+
+	wg.Wait()
+
+	select {
+	case err := <-errChan:
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			var filtered []provider.Playlist
+			for _, p := range playlists {
+				if p.ID != "" {
+					filtered = append(filtered, p)
+				}
+			}
+			if len(filtered) > 0 {
+				return filtered, nil
+			}
+		}
+		return nil, err
+	default:
+	}
+
+	var finalPlaylists []provider.Playlist
+	for _, p := range playlists {
+		if p.ID != "" {
+			finalPlaylists = append(finalPlaylists, p)
+		}
+	}
+	return finalPlaylists, nil
+}
+
+func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Playlist, error) {
+	endpoint := "/me/library/playlists?limit=100"
+	playlists, err := a.fetchPlaylistsPaginated(ctx, endpoint)
+	if err != nil {
+		if strings.Contains(err.Error(), "404 Not Found") {
+			playlists = nil
+		} else {
+			return nil, err
+		}
 	}
 	if !hasFavoritesPlaylist(playlists) {
 		playlists = append([]provider.Playlist{{ID: favoritesPlaylistID, Name: favoritesPlaylistName, ReadOnly: true}}, playlists...)

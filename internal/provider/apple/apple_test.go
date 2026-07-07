@@ -514,6 +514,46 @@ func TestGetLibraryPlaylists(t *testing.T) {
 	}
 }
 
+func TestGetLibraryPlaylists_PaginationParallel(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		val := atomic.AddInt32(&calls, 1)
+		if val == 1 {
+			var playlists []any
+			for range 100 {
+				playlists = append(playlists, playlistJSON("pl", "Workout", 25))
+			}
+			writeJSON(t, w, map[string]any{
+				"data": playlists,
+				"next": "/me/library/playlists?limit=100&offset=100",
+				"meta": map[string]any{
+					"total": 101,
+				},
+			})
+		} else {
+			if r.URL.Query().Get("offset") != "100" {
+				t.Errorf("unexpected offset: %q", r.URL.Query().Get("offset"))
+			}
+			writeJSON(t, w, map[string]any{
+				"data": []any{playlistJSON("pl2", "Another", 10)},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	lists, err := p.GetLibraryPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryPlaylists: %v", err)
+	}
+	if len(lists) != 102 {
+		t.Fatalf("got %d playlists, want 102", len(lists))
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Errorf("expected 2 HTTP calls, got %d", calls)
+	}
+}
+
 // --- GetPlaylistTracks ---
 
 func TestGetPlaylistTracks(t *testing.T) {
