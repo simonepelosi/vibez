@@ -407,6 +407,43 @@ func TestGetLibraryTracks_Pagination_404OnNextPage(t *testing.T) {
 	}
 }
 
+func TestGetLibraryTracks_PaginationWithV1Prefix(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if strings.Contains(r.URL.Path, "/v1/v1/") {
+			t.Errorf("unexpected path with double /v1/: %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		switch calls {
+		case 1:
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSON("1", "Track 1", "Art", "Alb", 100000, "")},
+				"next": "/v1/me/library/songs?limit=100&offset=100",
+			})
+		case 2:
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSON("2", "Track 2", "Art", "Alb", 100000, "")},
+				"next": "",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("got %d tracks, want 2 (pagination with v1 prefix)", len(tracks))
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 HTTP calls, got %d", calls)
+	}
+}
+
 // --- GetLibraryPlaylists ---
 
 func TestGetLibraryPlaylists(t *testing.T) {

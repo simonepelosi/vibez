@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,7 +90,14 @@ func (a *AppleProvider) IsAuthenticated() bool {
 }
 
 func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+endpoint, nil) //nolint:gosec // G107: URL is constructed from config, not user input
+	u := endpoint
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		if strings.HasPrefix(u, "/v1/") {
+			u = strings.TrimPrefix(u, "/v1")
+		}
+		u = a.baseURL + u
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +111,14 @@ func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string)
 // unlike the standard API it returns extendedAssetUrls in search responses,
 // which lets us reliably detect purchase-only / region-locked tracks.
 func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, a.catalogBaseURL+endpoint, nil) //nolint:gosec // G107: URL is constructed from config, not user input
+	u := endpoint
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		if strings.HasPrefix(u, "/v1/") {
+			u = strings.TrimPrefix(u, "/v1")
+		}
+		u = a.catalogBaseURL + u
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -116,6 +131,9 @@ func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint 
 func (a *AppleProvider) do(req *http.Request, dst any) error {
 	resp, err := a.client.Do(req) //nolint:gosec // G704: URL is constructed from config, not user input
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("request timed out: %w", err)
+		}
 		return fmt.Errorf("http request: %w", err)
 	}
 	defer func() {
@@ -511,10 +529,10 @@ func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track,
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+				break
+			}
 			if strings.Contains(err.Error(), "404 Not Found") {
-				if len(tracks) > 0 {
-					break
-				}
 				return nil, nil
 			}
 			return nil, err
@@ -580,10 +598,10 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
+			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+				break
+			}
 			if strings.Contains(err.Error(), "404 Not Found") {
-				if len(tracks) > 0 {
-					break
-				}
 				fallbackReq, reqErr := a.newRequest(ctx, http.MethodGet, fmt.Sprintf("/me/library/playlists/%s?include=tracks", url.PathEscape(playlistID)))
 				if reqErr != nil {
 					return nil, reqErr
@@ -624,7 +642,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
-			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 				break
 			}
 			return nil, fmt.Errorf("GetAlbumTracks: %w", err)
@@ -647,7 +665,7 @@ func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID strin
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
-			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 				break
 			}
 			return nil, fmt.Errorf("GetLibraryAlbumTracks: %w", err)
@@ -674,7 +692,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		}
 		var page paginatedSongs
 		if err := a.do(req, &page); err != nil {
-			if strings.Contains(err.Error(), "404 Not Found") && len(tracks) > 0 {
+			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
 				break
 			}
 			return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
