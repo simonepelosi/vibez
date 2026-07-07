@@ -248,6 +248,9 @@ type playlistResource struct {
 type paginatedSongs struct {
 	Data []songResource `json:"data"`
 	Next string         `json:"next"`
+	Meta struct {
+		Total int `json:"total"`
+	} `json:"meta"`
 }
 
 type paginatedPlaylists struct {
@@ -518,29 +521,168 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 	return result, nil
 }
 
-func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track, error) {
-	var tracks []provider.Track
-	endpoint := "/me/library/songs?limit=100"
+func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint string, isCatalog bool) ([]provider.Track, error) {
+	reqBuilder := a.newRequest
+	if isCatalog {
+		reqBuilder = a.newCatalogRequest
+	}
 
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedSongs
-		if err := a.do(req, &page); err != nil {
-			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-				break
-			}
-			if strings.Contains(err.Error(), "404 Not Found") {
-				return nil, nil
-			}
-			return nil, err
-		}
-		for _, s := range page.Data {
+	req, err := reqBuilder(ctx, http.MethodGet, baseEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	var firstPage paginatedSongs
+	if err := a.do(req, &firstPage); err != nil {
+		return nil, err
+	}
+
+	total := firstPage.Meta.Total
+	if total == 0 {
+		tracks := make([]provider.Track, 0, len(firstPage.Data))
+		for _, s := range firstPage.Data {
 			tracks = append(tracks, toTrack(s))
 		}
-		endpoint = page.Next
+		if firstPage.Next == "" {
+			return tracks, nil
+		}
+		endpoint := firstPage.Next
+		for endpoint != "" {
+			req, err := reqBuilder(ctx, http.MethodGet, endpoint)
+			if err != nil {
+				return nil, err
+			}
+			var page paginatedSongs
+			if err := a.do(req, &page); err != nil {
+				if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
+					break
+				}
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return nil, nil
+				}
+				return nil, err
+			}
+			for _, s := range page.Data {
+				tracks = append(tracks, toTrack(s))
+			}
+			endpoint = page.Next
+		}
+		return tracks, nil
+	}
+
+	limit := 100
+	tracks := make([]provider.Track, total)
+	for i, s := range firstPage.Data {
+		if i < total {
+			tracks[i] = toTrack(s)
+		}
+	}
+
+	if total <= len(firstPage.Data) {
+		return tracks[:len(firstPage.Data)], nil
+	}
+
+	offsets := []int{}
+	for offset := len(firstPage.Data); offset < total; offset += limit {
+		offsets = append(offsets, offset)
+	}
+
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(offsets))
+	sem := make(chan struct{}, 10)
+
+	for _, offset := range offsets {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			u, err := url.Parse(baseEndpoint)
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+			q := u.Query()
+			q.Set("offset", strconv.Itoa(offset))
+			q.Set("limit", strconv.Itoa(limit))
+			u.RawQuery = q.Encode()
+
+			req, err := reqBuilder(ctx, http.MethodGet, u.String())
+			if err != nil {
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+			var page paginatedSongs
+			if err := a.do(req, &page); err != nil {
+				if strings.Contains(err.Error(), "404 Not Found") {
+					return
+				}
+				select {
+				case errChan <- err:
+				default:
+				}
+				return
+			}
+
+			for j, s := range page.Data {
+				idx := offset + j
+				if idx < len(tracks) {
+					tracks[idx] = toTrack(s)
+				}
+			}
+		}(offset)
+	}
+
+	wg.Wait()
+
+	select {
+	case err := <-errChan:
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			var filtered []provider.Track
+			for _, t := range tracks {
+				if t.ID != "" {
+					filtered = append(filtered, t)
+				}
+			}
+			if len(filtered) > 0 {
+				return filtered, nil
+			}
+		}
+		return nil, err
+	default:
+	}
+
+	var finalTracks []provider.Track
+	for _, t := range tracks {
+		if t.ID != "" {
+			finalTracks = append(finalTracks, t)
+		}
+	}
+	return finalTracks, nil
+}
+
+func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track, error) {
+	endpoint := "/me/library/songs?limit=100"
+	tracks, err := a.fetchSongsPaginated(ctx, endpoint, false)
+	if err != nil {
+		if strings.Contains(err.Error(), "404 Not Found") {
+			return nil, nil
+		}
+		return nil, err
 	}
 	return tracks, nil
 }
@@ -577,8 +719,9 @@ func hasFavoritesPlaylist(playlists []provider.Playlist) bool {
 		name := strings.ToLower(strings.TrimSpace(pl.Name))
 		// Apple localizes the built-in Favorites playlist name. MusicKit library
 		// playlist responses do not expose a stable built-in Favorites identifier,
-		// so v1 only suppresses the synthetic playlist for known English names.
-		if name == "favorites" || name == "favorite songs" {
+		// so v1 only suppresses the synthetic playlist for known localized names.
+		switch name {
+		case "favorites", "favorite songs", "brani preferiti", "preferiti", "lieblingstitel", "favoriten", "starred", "starred songs", "favoritas", "favoritos", "canciones favoritas", "músicas favoritas", "morceaux préférés":
 			return true
 		}
 	}
@@ -589,41 +732,28 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 	if playlistID == favoritesPlaylistID {
 		return a.getFavoriteTracks(ctx)
 	}
-	var tracks []provider.Track
+
 	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", url.PathEscape(playlistID))
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedSongs
-		if err := a.do(req, &page); err != nil {
-			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-				break
+	tracks, err := a.fetchSongsPaginated(ctx, endpoint, false)
+	if err != nil {
+		if strings.Contains(err.Error(), "404 Not Found") {
+			fallbackReq, reqErr := a.newRequest(ctx, http.MethodGet, fmt.Sprintf("/me/library/playlists/%s?include=tracks", url.PathEscape(playlistID)))
+			if reqErr != nil {
+				return nil, reqErr
 			}
-			if strings.Contains(err.Error(), "404 Not Found") {
-				fallbackReq, reqErr := a.newRequest(ctx, http.MethodGet, fmt.Sprintf("/me/library/playlists/%s?include=tracks", url.PathEscape(playlistID)))
-				if reqErr != nil {
-					return nil, reqErr
-				}
-				var playlistResp playlistWithTracksResponse
-				if doErr := a.do(fallbackReq, &playlistResp); doErr != nil {
-					return nil, err
-				}
-				if len(playlistResp.Data) == 0 {
-					return nil, err
-				}
-				for _, s := range playlistResp.Data[0].Relationships.Tracks.Data {
-					tracks = append(tracks, toTrack(s))
-				}
-				return tracks, nil
+			var playlistResp playlistWithTracksResponse
+			if doErr := a.do(fallbackReq, &playlistResp); doErr != nil {
+				return nil, err
 			}
-			return nil, err
+			if len(playlistResp.Data) == 0 {
+				return nil, err
+			}
+			for _, s := range playlistResp.Data[0].Relationships.Tracks.Data {
+				tracks = append(tracks, toTrack(s))
+			}
+			return tracks, nil
 		}
-		for _, s := range page.Data {
-			tracks = append(tracks, toTrack(s))
-		}
-		endpoint = page.Next
+		return nil, err
 	}
 	return tracks, nil
 }
@@ -633,49 +763,13 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 	if err != nil {
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
-	var tracks []provider.Track
 	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, url.PathEscape(albumID))
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedSongs
-		if err := a.do(req, &page); err != nil {
-			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-				break
-			}
-			return nil, fmt.Errorf("GetAlbumTracks: %w", err)
-		}
-		for _, s := range page.Data {
-			tracks = append(tracks, toTrack(s))
-		}
-		endpoint = page.Next
-	}
-	return tracks, nil
+	return a.fetchSongsPaginated(ctx, endpoint, true)
 }
 
 func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
-	var tracks []provider.Track
 	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=100", url.PathEscape(albumID))
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedSongs
-		if err := a.do(req, &page); err != nil {
-			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-				break
-			}
-			return nil, fmt.Errorf("GetLibraryAlbumTracks: %w", err)
-		}
-		for _, s := range page.Data {
-			tracks = append(tracks, toTrack(s))
-		}
-		endpoint = page.Next
-	}
-	return tracks, nil
+	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
 func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
@@ -683,26 +777,8 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 	if err != nil {
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
-	var tracks []provider.Track
 	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, url.PathEscape(playlistID))
-	for endpoint != "" {
-		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
-		if err != nil {
-			return nil, err
-		}
-		var page paginatedSongs
-		if err := a.do(req, &page); err != nil {
-			if len(tracks) > 0 && (strings.Contains(err.Error(), "404 Not Found") || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil) {
-				break
-			}
-			return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
-		}
-		for _, s := range page.Data {
-			tracks = append(tracks, toTrack(s))
-		}
-		endpoint = page.Next
-	}
-	return tracks, nil
+	return a.fetchSongsPaginated(ctx, endpoint, true)
 }
 
 func (a *AppleProvider) getFavoriteTracks(ctx context.Context) ([]provider.Track, error) {
