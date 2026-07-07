@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-07-07
+
 ### Fixed
 - **Playwright driver installation on Linux** — Upgraded `playwright-go` dependency to `v0.6000.0` to resolve `404 Not Found` errors when fetching the Linux x86_64 driver binary. Closes #75.
 
@@ -542,7 +544,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/simonepelosi/vibez/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/simonepelosi/vibez/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/simonepelosi/vibez/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/simonepelosi/vibez/compare/v0.1.0...v0.2.0
