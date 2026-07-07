@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Parallel pagination page fetching** — Fetch collection pages in parallel rather than sequentially, achieving up to a 10x-30x speedup when loading large playlists and library views.
+
+### Fixed
+- **Double path duplication in pagination** — Trim duplicate `/v1` prefix from relative endpoint paths during pagination to prevent double `/v1/v1/` routing errors (which caused pagination loops to stop early at exactly 100 tracks).
+- **Graceful timeout/cancellation handling** — Return already-accumulated tracks when a pagination query times out or is cancelled, and display a clean `"request timed out"` error message instead of raw HTTP logs.
+- **Localized Favorites suppression** — Suppress synthetic Favorites playlist generation when localized favorites playlists (e.g. Italian `"Brani preferiti"`, `"Preferiti"`, French `"Morceaux préférés"`, Spanish `"Canciones favoritas"`, Portuguese `"Músicas favoritas"`, or custom `"Favorite/Starred Songs"`, etc.) are already present in the library. Closes #74.
+
 ## [0.3.1] — 2026-07-07
 
 ### Fixed
