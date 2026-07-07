@@ -1705,11 +1705,6 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		}
 	}
 
-	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
-		m.lastKey = ""
-		return nil
-	}
-
 	// Player control keys always work, even when other panels are active.
 	switch k {
 	case "space":
