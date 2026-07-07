@@ -315,7 +315,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		}
 	case paneTracks:
 		switch msg.String() {
-		case "esc", "backspace", "left", "h":
+		case "esc", "backspace":
 			m.Back()
 			return m, nil
 		case "enter":

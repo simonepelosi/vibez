@@ -182,19 +182,58 @@
           const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
           const sf = _m().storefrontId || 'us';
           let items = [];
+          const batchSize = 100;
+
           if (catalogIds.length > 0) {
-            try {
-              const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
-              items = items.concat(r && r.data && r.data.data ? r.data.data : []);
-            } catch(e) { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); }
+            const batches = [];
+            for (let i = 0; i < catalogIds.length; i += batchSize) {
+              batches.push(catalogIds.slice(i, i + batchSize));
+            }
+            const results = await Promise.all(batches.map(async (batch) => {
+              try {
+                const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: batch });
+                return r && r.data && r.data.data ? r.data.data : [];
+              } catch(e) {
+                goError('[resolve] catalog batch: '+errName(e)).catch(()=>{});
+                return [];
+              }
+            }));
+            for (const res of results) {
+              items = items.concat(res);
+            }
           }
+
           if (libraryIds.length > 0) {
-            try {
-              const r = await _m().api.music('/v1/me/library/songs', { ids: libraryIds });
-              items = items.concat(r && r.data && r.data.data ? r.data.data : []);
-            } catch(e) { goError('[resolve] library: '+errName(e)).catch(()=>{}); }
+            const batches = [];
+            for (let i = 0; i < libraryIds.length; i += batchSize) {
+              batches.push(libraryIds.slice(i, i + batchSize));
+            }
+            const results = await Promise.all(batches.map(async (batch) => {
+              try {
+                const r = await _m().api.music('/v1/me/library/songs', { ids: batch });
+                return r && r.data && r.data.data ? r.data.data : [];
+              } catch(e) {
+                goError('[resolve] library batch: '+errName(e)).catch(()=>{});
+                return [];
+              }
+            }));
+            for (const res of results) {
+              items = items.concat(res);
+            }
           }
-          return items;
+
+          const itemMap = {};
+          for (const item of items) {
+            itemMap[item.id] = item;
+          }
+          const orderedItems = [];
+          for (const id of allIds) {
+            const matched = itemMap[id];
+            if (matched) {
+              orderedItems.push(matched);
+            }
+          }
+          return orderedItems;
         }
 
         // Actually play the item at idx.  Never called recursively by itself;

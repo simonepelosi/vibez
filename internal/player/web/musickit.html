@@ -241,34 +241,71 @@
           const libraryIds = allIds.filter(id =>  id.startsWith('i.'));
           const sf = _m().storefrontId || 'us';
           let items = [];
+          const batchSize = 100;
+
           if (catalogIds.length > 0) {
-            try {
-              const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds, include: 'library' });
-              const songs = r?.data?.data ?? [];
-              for (const song of songs) {
-                // Cache the user's library ID for this catalog song if present.
-                const libId = song.relationships?.library?.data?.[0]?.id;
-                if (libId) _libMap[song.id] = libId;
+            const batches = [];
+            for (let i = 0; i < catalogIds.length; i += batchSize) {
+              batches.push(catalogIds.slice(i, i + batchSize));
+            }
+            const results = await Promise.all(batches.map(async (batch) => {
+              try {
+                const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: batch, include: 'library' });
+                const songs = r?.data?.data ?? [];
+                for (const song of songs) {
+                  const libId = song.relationships?.library?.data?.[0]?.id;
+                  if (libId) _libMap[song.id] = libId;
+                }
+                const playable = songs.filter(s => {
+                  const pp = s.attributes?.playParams;
+                  return pp && pp.id && pp.kind === 'song';
+                });
+                const dropped = songs.length - playable.length;
+                if (dropped > 0) _log(`[js:resolve] dropped ${dropped} non-playable song(s)`);
+                return playable;
+              } catch(e) {
+                if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); }
+                else { goError('[resolve] catalog batch: '+errName(e)).catch(()=>{}); }
+                return [];
               }
-              // Pre-filter: drop songs without playParams or with an empty
-              // playParams.id — they cannot be streamed (radio-only, region-locked
-              // or removed from the catalog).
-              const playable = songs.filter(s => {
-                const pp = s.attributes?.playParams;
-                return pp && pp.id && pp.kind === 'song';
-              });
-              const dropped  = songs.length - playable.length;
-              if (dropped > 0) _log(`[js:resolve] dropped ${dropped} non-playable song(s)`);
-              items = items.concat(playable);
-            } catch(e) { if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); } else { goError('[resolve] catalog: '+errName(e)).catch(()=>{}); } }
+            }));
+            for (const res of results) {
+              items = items.concat(res);
+            }
           }
+
           if (libraryIds.length > 0) {
-            try {
-              const r = await _m().api.music('/v1/me/library/songs', { ids: libraryIds });
-              items = items.concat(r && r.data && r.data.data ? r.data.data : []);
-            } catch(e) { if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); } else { goError('[resolve] library: '+errName(e)).catch(()=>{}); } }
+            const batches = [];
+            for (let i = 0; i < libraryIds.length; i += batchSize) {
+              batches.push(libraryIds.slice(i, i + batchSize));
+            }
+            const results = await Promise.all(batches.map(async (batch) => {
+              try {
+                const r = await _m().api.music('/v1/me/library/songs', { ids: batch });
+                return r && r.data && r.data.data ? r.data.data : [];
+              } catch(e) {
+                if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); }
+                else { goError('[resolve] library batch: '+errName(e)).catch(()=>{}); }
+                return [];
+              }
+            }));
+            for (const res of results) {
+              items = items.concat(res);
+            }
           }
-          return items;
+
+          const itemMap = {};
+          for (const item of items) {
+            itemMap[item.id] = item;
+          }
+          const orderedItems = [];
+          for (const id of allIds) {
+            const matched = itemMap[id];
+            if (matched) {
+              orderedItems.push(matched);
+            }
+          }
+          return orderedItems;
         }
 
         // Wait (event-driven) for MusicKit to leave a mid-seek state before
