@@ -3,6 +3,7 @@ package tui
 import (
 	"image"
 	"image/color"
+	"math"
 	"strings"
 	"testing"
 
@@ -102,6 +103,30 @@ func TestNowPlayingLines_NoArtWhenNarrow(t *testing.T) {
 	// Too narrow to fit the cover plus a usable text column.
 	if got := strings.Join(m.nowPlayingLines(30, 12), "\n"); strings.Contains(got, "▀") {
 		t.Error("art should not render when the panel is too narrow")
+	}
+}
+
+// TestNowPlayingLines_ArtWidthMatchesCellAspect verifies the cover column width
+// tracks the measured cell aspect ratio, so the art renders as a true square on
+// terminals whose cells aren't exactly 2:1.
+func TestNowPlayingLines_ArtWidthMatchesCellAspect(t *testing.T) {
+	m := newArtModel(t)
+	m.artCellAsp = 1.7
+	const contentW, h = 96, 12
+	lines := m.nowPlayingLines(contentW, h)
+
+	// The cover fills the panel height (h rows), so its width should be
+	// round(h * aspect) half-block columns at the start of a middle row.
+	want := int(math.Round(float64(h) * 1.7))
+	got := 0
+	for _, r := range ansi.Strip(lines[h/2]) {
+		if r != '▀' {
+			break
+		}
+		got++
+	}
+	if got != want {
+		t.Errorf("art column width = %d, want %d (h=%d, aspect=1.7)", got, want, h)
 	}
 }
 

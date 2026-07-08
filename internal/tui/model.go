@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -295,6 +296,7 @@ type Model struct {
 	// (keyed by artLinesKey = "url|cols|rows") so they only re-render on a track
 	// change or a resize.
 	artColorOK  bool
+	artCellAsp  float64     // terminal cell height/width ratio, for square art
 	artworkURL  string      // ArtworkURL of the cover currently loaded/loading
 	artworkImg  image.Image // decoded cover, nil until the fetch completes
 	artLines    []string    // cached rendered half-block lines
@@ -364,6 +366,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		artColorOK: colorprofile.Detect(os.Stdout, os.Environ()) >= colorprofile.ANSI256,
+		// Measured cell height/width ratio, so album art renders as a true square.
+		artCellAsp: cellAspect(),
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -2838,15 +2842,23 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 	showArt := m.artColorOK && m.cfg.AlbumArtEnabled() && m.artworkImg != nil &&
 		m.artworkURL != "" && t.ArtworkURL == m.artworkURL
 	if showArt {
-		artRows = h           // fill the panel height for maximum resolution
-		artCols = artRows * 2 // square cover: terminal cells are ~2:1 tall:wide
+		// artCols is derived from the measured cell aspect (height/width) so a
+		// square cover renders square: physical width artCols*cellW equals
+		// physical height artRows*cellH when artCols = artRows*(cellH/cellW).
+		aspect := m.artCellAsp
+		if aspect <= 0 {
+			aspect = 2.0
+		}
+		artColsFor := func(rows int) int { return int(math.Round(float64(rows) * aspect)) }
+		artRows = h // fill the panel height for maximum resolution
+		artCols = artColsFor(artRows)
 		gap = 2
 		// Shrink to fit: the cover takes at most ~45% of the width and must
 		// leave at least 24 columns for the track info, else we fall back to
 		// the plain centred layout.
 		for artRows >= 4 && (artCols > contentW*9/20 || contentW-artCols-gap < 24) {
 			artRows--
-			artCols = artRows * 2
+			artCols = artColsFor(artRows)
 		}
 		if artRows < 4 || contentW-artCols-gap < 24 {
 			showArt = false

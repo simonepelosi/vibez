@@ -32,9 +32,11 @@ func Decode(data []byte) (image.Image, error) {
 }
 
 // Render converts img into exactly rows strings, each of visual width cols,
-// drawn with 24-bit colour half-blocks. The image is nearest-neighbour scaled
-// to fill a cols × (rows*2) pixel grid, so callers should size cols/rows to the
-// image's aspect ratio (for a square cover, cols == rows*2).
+// drawn with 24-bit colour half-blocks. The image is scaled to fill a
+// cols × (rows*2) pixel grid, so callers pick cols/rows to match the image's
+// aspect ratio and the terminal's cell proportions (for a square cover, set
+// cols = round(rows * cellHeight/cellWidth); the source is stretched into the
+// grid and the cell shape stretches it back, netting a square).
 //
 // Colours are emitted through lipgloss, so the active renderer down-samples them
 // to the terminal's colour profile automatically. Render returns nil for a nil
