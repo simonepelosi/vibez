@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	playwright "github.com/playwright-community/playwright-go"
+	playwright "github.com/mxschmitt/playwright-go"
 )
 
 // buildAr writes a minimal ar(1) archive from an ordered list of (name, data)
