@@ -33,6 +33,9 @@ type Config struct {
 	// WSL enables audio tuning workarounds for WSL2 environments where Hyper-V
 	// scheduler jitter causes audio underruns with default Chrome buffer sizes.
 	WSL bool `json:"wsl,omitempty"`
+	// AlbumArt toggles the half-block album artwork shown in the now-playing
+	// panel. Absent (nil) means enabled; set it to false to hide the artwork.
+	AlbumArt *bool `json:"album_art,omitempty"`
 }
 
 type EQBand struct {
@@ -52,6 +55,12 @@ func (c *Config) VolumeOrDefault() float64 {
 // SetVolume updates the in-memory volume field. Call Save to persist it.
 func (c *Config) SetVolume(v float64) {
 	c.Volume = &v
+}
+
+// AlbumArtEnabled reports whether the now-playing panel should render album
+// artwork. It defaults to true when the config field is unset.
+func (c *Config) AlbumArtEnabled() bool {
+	return c.AlbumArt == nil || *c.AlbumArt
 }
 
 func defaults() *Config {
