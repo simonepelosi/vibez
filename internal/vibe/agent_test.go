@@ -320,6 +320,29 @@ func TestToSearchQueries_NeverReturnsNil(t *testing.T) {
 	}
 }
 
+func TestToSearchQueries_WithModifiers(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("workout with metal")
+
+	if v.RawInput != "workout with metal" {
+		t.Errorf("expected RawInput to be 'workout with metal', got %q", v.RawInput)
+	}
+
+	queries := a.ToSearchQueries(v)
+
+	// Verify that the queries contain combined search terms containing the modifier "metal"
+	foundMetal := false
+	for _, q := range queries {
+		if strings.Contains(q, "metal") {
+			foundMetal = true
+			break
+		}
+	}
+	if !foundMetal {
+		t.Errorf("expected queries to contain modifier 'metal', got: %v", queries)
+	}
+}
+
 // --- helpers ---
 
 func containsGenre(genres []string, want string) bool {

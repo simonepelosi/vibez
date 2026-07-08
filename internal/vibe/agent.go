@@ -12,6 +12,7 @@ type Vibe struct {
 	Genres   []string
 	Keywords []string
 	Query    string // final search query
+	RawInput string // raw user input description
 }
 
 // Agent parses natural language input into a Vibe and produces search queries.
@@ -24,6 +25,34 @@ type Agent interface {
 
 // KeywordAgent implements a simple keyword → vibe mapping.
 type KeywordAgent struct{}
+
+var stopwords = map[string]bool{
+	"with":      true,
+	"a":         true,
+	"an":        true,
+	"the":       true,
+	"on":        true,
+	"for":       true,
+	"to":        true,
+	"in":        true,
+	"at":        true,
+	"and":       true,
+	"or":        true,
+	"some":      true,
+	"music":     true,
+	"songs":     true,
+	"beats":     true,
+	"playlist":  true,
+	"vibes":     true,
+	"vibe":      true,
+	"session":   true,
+	"tonight":   true,
+	"afternoon": true,
+	"morning":   true,
+	"evening":   true,
+	"day":       true,
+	"night":     true,
+}
 
 // LLMAgent is a placeholder for a future LLM-powered implementation.
 type LLMAgent struct {
@@ -127,6 +156,7 @@ func (a *KeywordAgent) Parse(input string) *Vibe {
 						Energy:   r.energy,
 						Genres:   r.genres,
 						Keywords: r.keywords,
+						RawInput: input,
 					}
 					v.Query = a.ToSearchQuery(v)
 					return v
@@ -141,6 +171,7 @@ func (a *KeywordAgent) Parse(input string) *Vibe {
 		Energy:   0.5,
 		Keywords: words,
 		Query:    input,
+		RawInput: input,
 	}
 }
 
@@ -174,11 +205,57 @@ func (a *KeywordAgent) ToSearchQueries(v *Vibe) []string {
 		}
 	}
 
-	queries := make([]string, 0, len(v.Genres)+len(extraTerms))
+	// Extract custom modifiers from RawInput
+	var mods []string
+	if v.RawInput != "" {
+		lowerInput := strings.ToLower(v.RawInput)
+		words := strings.Fields(lowerInput)
+
+		kwMap := make(map[string]bool)
+		for _, kw := range v.Keywords {
+			kwMap[kw] = true
+		}
+
+		for _, w := range words {
+			wClean := strings.Trim(w, ",.?!;:()\"'-")
+			if wClean == "" {
+				continue
+			}
+			if !kwMap[wClean] && !stopwords[wClean] {
+				mods = append(mods, wClean)
+			}
+		}
+	}
+
+	queries := make([]string, 0, len(v.Genres)+len(extraTerms)+len(mods)*3)
+
+	if len(mods) > 0 {
+		modStr := strings.Join(mods, " ")
+		queries = append(queries, modStr)
+
+		for _, g := range v.Genres {
+			queries = append(queries, modStr+" "+g)
+			queries = append(queries, g+" "+modStr)
+		}
+		queries = append(queries, modStr+" "+v.Mood)
+		queries = append(queries, v.Mood+" "+modStr)
+	}
+
 	queries = append(queries, v.Genres...)
 	queries = append(queries, extraTerms...)
 
+	// Deduplicate queries
+	seen := make(map[string]bool)
+	var uniqueQueries []string
+	for _, q := range queries {
+		q = strings.TrimSpace(q)
+		if q != "" && !seen[q] {
+			seen[q] = true
+			uniqueQueries = append(uniqueQueries, q)
+		}
+	}
+
 	// Shuffle so different queries are tried each call. //nolint:gosec
-	rand.Shuffle(len(queries), func(i, j int) { queries[i], queries[j] = queries[j], queries[i] })
-	return queries
+	rand.Shuffle(len(uniqueQueries), func(i, j int) { uniqueQueries[i], uniqueQueries[j] = uniqueQueries[j], uniqueQueries[i] })
+	return uniqueQueries
 }
