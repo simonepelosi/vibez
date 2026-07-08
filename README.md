@@ -20,7 +20,8 @@
 </p>
 
 <p align="center">
-  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br>
+  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br><br>
+  <img src="https://geps.dev/progress/0?label=Apple%20Dev%20Key%20Goal%20($0/$100)&barColor=ff5e5b" alt="Apple Developer Key Progress"><br><br>
   <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
 </p>
 
