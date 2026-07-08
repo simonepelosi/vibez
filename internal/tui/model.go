@@ -15,6 +15,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
+	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
@@ -112,6 +113,21 @@ func (p *eqPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 }
 func (p *eqPanel) View() string { return p.m.View() }
 func (p *eqPanel) Back() bool   { return false }
+
+// aboutPanel wraps views.AboutModel to satisfy ContentView.
+type aboutPanel struct{ m *views.AboutModel }
+
+func (p *aboutPanel) NavKey() string   { return "?" }
+func (p *aboutPanel) NavLabel() string { return "about" }
+func (p *aboutPanel) SetSize(w, h int) { p.m.SetSize(w, h) }
+func (p *aboutPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
+	if msg.String() == "?" {
+		return nil
+	}
+	return p.m.Update(msg)
+}
+func (p *aboutPanel) View() string { return p.m.View() }
+func (p *aboutPanel) Back() bool   { return false }
 
 // ── Messages ──────────────────────────────────────────────────────────────
 
@@ -249,6 +265,7 @@ type Model struct {
 	lyricsP     *lyricsPanel
 	feedP       *feedPanel
 	eqP         *eqPanel
+	aboutP      *aboutPanel
 
 	// Lyrics
 	lyricsClient      *lyrics.Client
@@ -332,7 +349,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP}
+	m.aboutP = &aboutPanel{m: views.NewAbout()}
+	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
@@ -411,6 +429,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lyricsP.SetSize(contentW, panelH)
 		m.feedP.SetSize(contentW, panelH)
 		m.eqP.SetSize(contentW, panelH)
+		m.aboutP.SetSize(contentW, panelH)
 
 	case tickMsg:
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
@@ -1165,6 +1184,8 @@ var allCommands = []cmdEntry{
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"mute", "mute", "Toggle mute"},
+	{"about", "about", "Show information about vibez"},
+	{"donate", "donate", "Support vibez development by donating"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
@@ -1240,6 +1261,21 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			_ = m.player.Close()
 		}
 		return tea.Quit
+	case cmd == "about":
+		for i, p := range m.panels {
+			if p == m.aboutP {
+				m.activePanel = i
+				break
+			}
+		}
+		return nil
+	case cmd == "donate":
+		m.errMsg = "✓ Opening donation link..."
+		m.errExpiry = time.Now().Add(5 * time.Second)
+		return func() tea.Msg {
+			_ = openurl.Open("https://ko-fi.com/pelpsi")
+			return nil
+		}
 	case cmd == "debug-logs":
 		m.debugView = !m.debugView
 		m.debugScroll = 0
@@ -2523,7 +2559,8 @@ func (m *Model) renderBoxLayout() string {
 	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
 	feedActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP
 	eqActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP
-	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
+	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
+	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -2585,6 +2622,11 @@ func (m *Model) renderBoxLayout() string {
 	case eqActive:
 		m.eqP.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.eqP.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case aboutActive:
+		m.aboutP.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.aboutP.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
@@ -2691,6 +2733,7 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		lines := make([]string, h)
 		mid := h / 2
 		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
+		lines[h-2] = centerStr(muted.Render("made with ❤️ by simonepelosi · press ? for about"), contentW)
 		if m.errMsg != "" {
 			var errRendered string
 			if strings.HasPrefix(m.errMsg, "✓") {
@@ -2991,6 +3034,12 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("r") + muted.Render(" reset all"),
 				accent.Render("e") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP:
+			parts = []string{
+				styles.ModeNormal.Render("ABOUT"),
+				accent.Render("Enter/d") + muted.Render(" donate"),
+				accent.Render("esc/?") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
@@ -3002,6 +3051,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("F") + muted.Render(" feed"),
 				accent.Render("e") + muted.Render(" equalizer"),
 				accent.Render("v") + muted.Render(" vibe"),
+				accent.Render("?") + muted.Render(" about"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
