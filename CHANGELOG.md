@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Catalog playlist and album queueing (401 error)** — Route track fetching requests for catalog playlists and catalog albums through the standard API URL host rather than `amp-api.music.apple.com`. This resolves the `401 Unauthorized` regression introduced in v0.4.0. Closes #81.
+
+
 ## [0.4.0] — 2026-07-07
 
 ### Added
