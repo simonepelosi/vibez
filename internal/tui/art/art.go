@@ -52,13 +52,36 @@ func Render(img image.Image, cols, rows int) []string {
 
 	pxW, pxH := cols, rows*2
 
-	// sample returns the 8-bit RGB of the source pixel nearest to grid cell
-	// (px, py) in the pxW × pxH target grid.
+	// sample returns the average 8-bit RGB of every source pixel that maps to
+	// grid cell (px, py) in the pxW × pxH target grid. Area-averaging (a box
+	// filter) is what keeps a heavily downscaled cover smooth and recognisable;
+	// picking a single nearest pixel per cell instead produces a harsh, aliased
+	// result at this size.
 	sample := func(px, py int) (uint8, uint8, uint8) {
-		sx := b.Min.X + px*srcW/pxW
-		sy := b.Min.Y + py*srcH/pxH
-		r, g, bl, _ := img.At(sx, sy).RGBA()
-		return uint8(r >> 8), uint8(g >> 8), uint8(bl >> 8) //nolint:gosec // 16-bit → 8-bit
+		x0 := b.Min.X + px*srcW/pxW
+		x1 := b.Min.X + (px+1)*srcW/pxW
+		y0 := b.Min.Y + py*srcH/pxH
+		y1 := b.Min.Y + (py+1)*srcH/pxH
+		if x1 <= x0 {
+			x1 = x0 + 1
+		}
+		if y1 <= y0 {
+			y1 = y0 + 1
+		}
+		var rs, gs, bs, n uint64
+		for y := y0; y < y1; y++ {
+			for x := x0; x < x1; x++ {
+				r, g, bl, _ := img.At(x, y).RGBA()
+				rs += uint64(r >> 8)
+				gs += uint64(g >> 8)
+				bs += uint64(bl >> 8)
+				n++
+			}
+		}
+		if n == 0 {
+			n = 1
+		}
+		return uint8(rs / n), uint8(gs / n), uint8(bs / n) //nolint:gosec // averaged 8-bit channels
 	}
 
 	lines := make([]string, rows)

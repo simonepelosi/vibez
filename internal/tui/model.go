@@ -2838,8 +2838,8 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 	showArt := m.artColorOK && m.cfg.AlbumArtEnabled() && m.artworkImg != nil &&
 		m.artworkURL != "" && t.ArtworkURL == m.artworkURL
 	if showArt {
-		artRows = min(10, h-2) // one-row margin top and bottom
-		artCols = artRows * 2  // square cover: terminal cells are ~2:1 tall:wide
+		artRows = h           // fill the panel height for maximum resolution
+		artCols = artRows * 2 // square cover: terminal cells are ~2:1 tall:wide
 		gap = 2
 		// Shrink to fit: the cover takes at most ~45% of the width and must
 		// leave at least 24 columns for the track info, else we fall back to
