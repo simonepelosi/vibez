@@ -905,7 +905,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
 	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, url.PathEscape(albumID))
-	return a.fetchSongsPaginated(ctx, endpoint, true)
+	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
 func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
@@ -919,7 +919,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
 	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, url.PathEscape(playlistID))
-	return a.fetchSongsPaginated(ctx, endpoint, true)
+	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
 func (a *AppleProvider) getFavoriteTracks(ctx context.Context) ([]provider.Track, error) {
