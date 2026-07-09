@@ -1723,11 +1723,13 @@ func TestHandleNormalKey_R_StartRadio_DroppedTracksExcludedFromRefill(t *testing
 	}
 }
 
-// TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation covers the
-// case where the seed track isn't present in the local queue at all (e.g.
-// radio started from a search result rather than something already queued)
-// — there's nothing to drop, and the existing queue should be untouched.
-func TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation(t *testing.T) {
+// TestHandleNormalKey_R_StartRadio_SeedNotInQueue_InsertsAsPlayNext covers
+// the case where the seed track isn't present in the local queue at all
+// (e.g. radio started from a search result rather than something already
+// queued). dropQueueAfter has nothing to drop, but the seed must still be
+// queued up next so it actually plays — previously it was silently
+// dropped and radio picks were just appended after the existing queue.
+func TestHandleNormalKey_R_StartRadio_SeedNotInQueue_InsertsAsPlayNext(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
 	m.queueTracks = []provider.Track{
@@ -1743,14 +1745,33 @@ func TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation(t *testing.T) 
 	if cmd == nil {
 		t.Fatal("R key with a playing track should start radio and return a cmd")
 	}
-	// dropQueueAfter's truncation runs synchronously inside startRadioFrom,
-	// before the returned cmd is ever invoked — no need to drive it here.
-
-	if len(m.queueTracks) != 2 {
-		t.Errorf("queueTracks = %+v, want unchanged (seed absent from queue)", m.queueTracks)
+	// The local insertion runs synchronously inside startRadioFrom, before
+	// the returned cmd is ever invoked.
+	if len(m.queueTracks) != 3 || m.queueTracks[0].ID != "seed" {
+		t.Fatalf("queueTracks = %+v, want seed inserted at front", m.queueTracks)
 	}
 	if len(mp.removeFromQueueIdx) != 0 {
 		t.Errorf("RemoveFromQueue calls = %v, want none", mp.removeFromQueueIdx)
+	}
+
+	// startRadioFrom batches dropQueueAfter's play-next command with
+	// runRadioSearch's — drive both from the resulting BatchMsg.
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want tea.BatchMsg", msg)
+	}
+	for _, sub := range batch {
+		if sub != nil {
+			sub()
+		}
+	}
+
+	if len(mp.appendQueueIDs) != 1 || mp.appendQueueIDs[0][0] != "seedcat" {
+		t.Errorf("AppendQueue calls = %v, want [[seedcat]]", mp.appendQueueIDs)
+	}
+	if len(mp.moveInQueueCalls) != 1 || mp.moveInQueueCalls[0].From != 2 || mp.moveInQueueCalls[0].To != 0 {
+		t.Errorf("MoveInQueue calls = %v, want [{From:2 To:0}]", mp.moveInQueueCalls)
 	}
 }
 
@@ -1774,6 +1795,41 @@ func TestHandleNormalKey_R_StopRadio(t *testing.T) {
 	_ = cmd
 	if m.radio.enabled {
 		t.Error("R key when radio is on should stop radio")
+	}
+}
+
+// TestHandleNormalKey_R_StopRadio_ClearsSkipped guards against the
+// regression where m.radio.skipped was never cleared: tracks dropped
+// during one radio session stayed blacklisted forever across every
+// subsequent radio session in the run.
+func TestHandleNormalKey_R_StopRadio_ClearsSkipped(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	m.radio.skipped = map[string]bool{"blocked": true}
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if m.radio.skipped != nil {
+		t.Errorf("radio.skipped = %v, want nil after stopping radio", m.radio.skipped)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_ResetsStaleSkipped guards against the
+// same regression from the other direction: starting a fresh radio
+// session must not inherit a blacklist left over from a previous one.
+func TestHandleNormalKey_R_StartRadio_ResetsStaleSkipped(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	seed := &provider.Track{Title: "New Seed", ID: "new-seed", CatalogID: "newcat"}
+	m.playerState.Track = seed
+	m.radio.skipped = map[string]bool{"stale-from-last-session": true}
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	if m.radio.skipped["stale-from-last-session"] {
+		t.Error("radio.skipped carried a stale entry into the new radio session")
 	}
 }
 

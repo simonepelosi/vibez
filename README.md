@@ -80,6 +80,13 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 - **Seed-aware** — the currently playing track is used as the seed; searches adapt progressively from same artist → same genre → completely random as similarity decreases
 - **Toggle anytime** — press `d` again to stop discovery and return to a manual queue
 
+### 📻 Radio Mode
+
+- **Seed a station from any track** — press `R` on the currently playing track, a highlighted queue track, or `ctrl+r` on a search result to start an endless station built around it
+- **Auto-refills like discovery** — vibez queues up new picks from the seed's station as the queue runs low, so the music never stops
+- **Clears the runway** — starting radio drops any tracks still queued after the seed (e.g. the rest of an album or playlist) so the station takes over immediately instead of waiting for them to finish
+- **Toggle anytime** — press `R` again to stop radio and return to a manual queue
+
 ### ⌨️ Terminal UI
 
 - **Fully keyboard-driven** — every action reachable without touching the mouse
@@ -244,6 +251,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `v` | Open vibe input (mood-driven search) |
 | `e` | Toggle equalizer panel |
 | `d` | Toggle discovery mode |
+| `R` | Toggle radio mode (seeded by the currently playing track) |
 | `/` | Open search |
 | `l` | Toggle library panel |
 | `q` | Toggle queue panel |
@@ -258,6 +266,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `enter` | Play now |
 | `tab` | Add to queue |
 | `shift+tab` | Play next (insert after current track) |
+| `ctrl+r` | Start radio seeded by the selected track |
 | `esc` | Close |
 
 ### Library (`l`)
@@ -281,6 +290,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `J` / `shift+down` | Move track down |
 | `c` | Clear entire queue |
 | `s` | Save queue as playlist (opens command prompt) |
+| `R` | Toggle radio mode (seeded by the highlighted track) |
 | `esc` | Close |
 
 ### Command mode (`:`)

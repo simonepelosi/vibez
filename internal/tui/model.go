@@ -1640,6 +1640,7 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 	m.radio.generation++
 	m.radio.enabled = true
 	m.radio.seed = seed
+	m.radio.skipped = nil
 	m.radio.refilling = true // guard against double-trigger while search is in flight
 	m.radio.triggeredForID = ""
 	m.radio.retries = 0
@@ -1652,7 +1653,8 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 // whatever was already lined up (e.g. the rest of an album) to finish —
 // the last-track refill trigger otherwise never fires until that happens.
 // Tracks up to and including seed are left alone. If seed isn't in the
-// queue at all (e.g. seeded from a search result), this is a no-op.
+// queue at all (e.g. seeded from a search result), it's inserted as the
+// next track to play instead.
 func (m *Model) dropQueueAfter(seed *provider.Track) tea.Cmd {
 	seedID := views.PlaybackID(*seed)
 	seedIdx := -1
@@ -1662,8 +1664,11 @@ func (m *Model) dropQueueAfter(seed *provider.Track) tea.Cmd {
 			break
 		}
 	}
+	if seedIdx < 0 {
+		return m.playNextCmd(seed.Artist+" — "+seed.Title, []provider.Track{*seed}, []string{seedID})
+	}
 	origLen := len(m.queueTracks)
-	if seedIdx < 0 || seedIdx == origLen-1 {
+	if seedIdx == origLen-1 {
 		return nil
 	}
 	// Blacklist the dropped tracks so the imminent radio refill can't hand
@@ -1698,6 +1703,7 @@ func (m *Model) stopRadio() {
 	}
 	m.radio.enabled = false
 	m.radio.seed = nil
+	m.radio.skipped = nil
 	m.radio.refilling = false
 	m.radio.triggeredForID = ""
 	m.radio.generation++
