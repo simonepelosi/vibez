@@ -10,7 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Radio mode (`R`)** — press `R` on the currently playing track, a selected queue track, or a selected search result to start an Apple Music radio station seeded from it. Related tracks are appended to the queue and playback continues into them; the queue auto-refills as it runs low, and a `📻 radio` badge shows in the now-playing status bar while active. Press `R` again to stop. Closes #32.
+- **Radio mode (`R`)** — press `R` on the currently playing track, a selected queue track, or a selected search result to start an Apple Music radio station seeded from it. Starting radio drops anything already queued after the seed track so its picks play next, and the queue auto-refills as it runs low; a `📻 radio` badge shows in the now-playing status bar while active. Press `R` again to stop. Closes #32.
+
+### Fixed
+- **Radio mode had no effect mid-album/playlist** — enabling radio while an album or playlist was already queued did nothing until the very last queued track played, since refills only triggered once the current track became the last item in the queue. Radio now drops the rest of the queued album/playlist as soon as it starts, so its picks actually play next.
 
 ## [0.4.1] — 2026-07-08
 

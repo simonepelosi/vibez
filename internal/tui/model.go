@@ -1644,7 +1644,40 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 	m.radio.triggeredForID = ""
 	m.radio.retries = 0
 	m.appendLog(fmt.Sprintf("[radio] started from %q", seed.Title))
-	return m.runRadioSearch()
+	return tea.Batch(m.dropQueueAfter(seed), m.runRadioSearch())
+}
+
+// dropQueueAfter removes any tracks queued after seed's position so a
+// freshly started radio session plays next, rather than waiting for
+// whatever was already lined up (e.g. the rest of an album) to finish —
+// the last-track refill trigger otherwise never fires until that happens.
+// Tracks up to and including seed are left alone. If seed isn't in the
+// queue at all (e.g. seeded from a search result), this is a no-op.
+func (m *Model) dropQueueAfter(seed *provider.Track) tea.Cmd {
+	seedID := views.PlaybackID(*seed)
+	seedIdx := -1
+	for i, t := range m.queueTracks {
+		if views.PlaybackID(t) == seedID {
+			seedIdx = i
+			break
+		}
+	}
+	origLen := len(m.queueTracks)
+	if seedIdx < 0 || seedIdx == origLen-1 {
+		return nil
+	}
+	m.queueTracks = m.queueTracks[:seedIdx+1]
+	m.queueIDs = m.queueIDs[:seedIdx+1]
+	m.queue.SetTracks(m.queueTracks)
+	m.appendLog(fmt.Sprintf("[radio] dropped %d queued track(s) ahead of the seed", origLen-seedIdx-1))
+	return m.playerCmd(func(p player.Player) error {
+		for i := origLen - 1; i > seedIdx; i-- {
+			if err := p.RemoveFromQueue(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // stopRadio disables radio mode and clears its state.

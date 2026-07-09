@@ -18,20 +18,21 @@ import (
 // --- mock player ---
 
 type mockPlayer struct {
-	state            player.State
-	playCalled       bool
-	pauseCalled      bool
-	nextCalled       bool
-	prevCalled       bool
-	closeCalled      bool
-	seekCalled       bool
-	seekPos          time.Duration
-	bitrateKbps      int
-	setQueueIDs      []string   // last IDs passed to SetQueue
-	appendQueueIDs   [][]string // all calls to AppendQueue (each call appended)
-	moveInQueueCalls []struct{ From, To int }
-	err              error
-	stateCh          chan player.State
+	state              player.State
+	playCalled         bool
+	pauseCalled        bool
+	nextCalled         bool
+	prevCalled         bool
+	closeCalled        bool
+	seekCalled         bool
+	seekPos            time.Duration
+	bitrateKbps        int
+	setQueueIDs        []string   // last IDs passed to SetQueue
+	appendQueueIDs     [][]string // all calls to AppendQueue (each call appended)
+	moveInQueueCalls   []struct{ From, To int }
+	removeFromQueueIdx []int // all calls to RemoveFromQueue, in call order
+	err                error
+	stateCh            chan player.State
 }
 
 func newMockPlayer() *mockPlayer {
@@ -62,7 +63,10 @@ func (m *mockPlayer) AppendQueue(ids []string) error {
 	m.appendQueueIDs = append(m.appendQueueIDs, ids)
 	return m.err
 }
-func (m *mockPlayer) RemoveFromQueue(_ int) error { return m.err }
+func (m *mockPlayer) RemoveFromQueue(idx int) error {
+	m.removeFromQueueIdx = append(m.removeFromQueueIdx, idx)
+	return m.err
+}
 func (m *mockPlayer) MoveInQueue(from, to int) error {
 	m.moveInQueueCalls = append(m.moveInQueueCalls, struct{ From, To int }{from, to})
 	return m.err
@@ -1614,6 +1618,88 @@ func TestHandleNormalKey_R_StartRadio(t *testing.T) {
 	}
 	if m.radio.seed != track {
 		t.Errorf("radio.seed = %+v, want %+v", m.radio.seed, track)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_DropsRestOfQueue guards against the
+// regression where starting radio mid-album (or mid-playlist) had no
+// visible effect: the rest of the already-queued tracks kept playing
+// because radio only appended new tracks once the current track became the
+// *last* queued item. Radio should instead drop everything queued after the
+// seed so its picks play next.
+func TestHandleNormalKey_R_StartRadio_DropsRestOfQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track2 := provider.Track{Title: "Track 2", Artist: "Artist", ID: "t2", CatalogID: "cat2"}
+	m.queueTracks = []provider.Track{
+		{Title: "Track 1", Artist: "Artist", ID: "t1", CatalogID: "cat1"},
+		track2,
+		{Title: "Track 3", Artist: "Artist", ID: "t3", CatalogID: "cat3"},
+		{Title: "Track 4", Artist: "Artist", ID: "t4", CatalogID: "cat4"},
+	}
+	m.queueIDs = []string{"cat1", "cat2", "cat3", "cat4"}
+	m.queue.SetTracks(m.queueTracks)
+	m.playerState.Track = &track2 // currently playing the 2nd (of 4) queued tracks
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	// startRadioFrom batches dropQueueAfter's RemoveFromQueue command with
+	// runRadioSearch's — drive both from the resulting BatchMsg.
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want tea.BatchMsg", msg)
+	}
+	for _, sub := range batch {
+		if sub != nil {
+			sub()
+		}
+	}
+
+	if len(m.queueTracks) != 2 || m.queueTracks[1].ID != "t2" {
+		t.Errorf("queueTracks = %+v, want only the played-through tracks (t1, t2) kept", m.queueTracks)
+	}
+	if len(m.queueIDs) != 2 {
+		t.Errorf("queueIDs = %v, want 2 remaining", m.queueIDs)
+	}
+	if len(mp.removeFromQueueIdx) != 2 {
+		t.Fatalf("RemoveFromQueue calls = %v, want 2 (indices 3 then 2)", mp.removeFromQueueIdx)
+	}
+	if mp.removeFromQueueIdx[0] != 3 || mp.removeFromQueueIdx[1] != 2 {
+		t.Errorf("RemoveFromQueue calls = %v, want [3, 2] (highest index first)", mp.removeFromQueueIdx)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation covers the
+// case where the seed track isn't present in the local queue at all (e.g.
+// radio started from a search result rather than something already queued)
+// — there's nothing to drop, and the existing queue should be untouched.
+func TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.queueTracks = []provider.Track{
+		{Title: "Queued 1", ID: "q1", CatalogID: "qcat1"},
+		{Title: "Queued 2", ID: "q2", CatalogID: "qcat2"},
+	}
+	m.queueIDs = []string{"qcat1", "qcat2"}
+	m.queue.SetTracks(m.queueTracks)
+	seed := &provider.Track{Title: "Seed Song", ID: "seed", CatalogID: "seedcat"}
+	m.playerState.Track = seed // playing a track that isn't in m.queueTracks
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	// dropQueueAfter's truncation runs synchronously inside startRadioFrom,
+	// before the returned cmd is ever invoked — no need to drive it here.
+
+	if len(m.queueTracks) != 2 {
+		t.Errorf("queueTracks = %+v, want unchanged (seed absent from queue)", m.queueTracks)
+	}
+	if len(mp.removeFromQueueIdx) != 0 {
+		t.Errorf("RemoveFromQueue calls = %v, want none", mp.removeFromQueueIdx)
 	}
 }
 
