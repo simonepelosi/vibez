@@ -112,6 +112,9 @@ func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }
+func (m *mockProvider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}
 
 // --- helpers ---
 
@@ -1080,6 +1083,51 @@ func TestModel_Update_VibeResultMsg_Discovery(t *testing.T) {
 	_ = cmd
 }
 
+func TestModel_Update_VibeResultMsg_Radio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	tracks := []provider.Track{{Title: "Radio Song", ID: "888", CatalogID: "cat888"}}
+	_, cmd := m.Update(vibeResultMsg{tracks: tracks, radio: true})
+	_ = cmd
+	if m.radio.refilling {
+		t.Error("radio.refilling should be cleared after a successful refill")
+	}
+	if len(m.queueTracks) != 1 || m.queueTracks[0].Title != "Radio Song" {
+		t.Errorf("queueTracks = %+v, want the radio track appended", m.queueTracks)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_Radio_EmptyAfterFilterRetries(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	m.radio.seed = &provider.Track{ID: "seed", CatalogID: "seedcat"}
+	m.radio.skipped = map[string]bool{"blocked": true}
+	tracks := []provider.Track{{Title: "Blocked", ID: "blocked"}}
+	_, cmd := m.Update(vibeResultMsg{radio: true, tracks: tracks})
+	if cmd == nil {
+		t.Fatal("all-filtered radio result should retry via runRadioSearch, expected non-nil cmd")
+	}
+	if m.radio.retries != 1 {
+		t.Errorf("radio.retries = %d, want 1", m.radio.retries)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_Radio_SearchError(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	_, cmd := m.Update(vibeResultMsg{radio: true, err: errors.New("network error")})
+	_ = cmd
+	if m.radio.refilling {
+		t.Error("radio.refilling should be cleared after a search error")
+	}
+}
+
 func TestModel_Update_LoveSongMsg_Success(t *testing.T) {
 	m := newModel(nil)
 	_, cmd := m.Update(loveSongMsg{title: "Song", loved: true})
@@ -1488,6 +1536,104 @@ func TestHandleNormalKey_D_StopDiscovery(t *testing.T) {
 	_ = cmd
 	if m.discovery.enabled {
 		t.Error("d key when discovery is on should stop discovery")
+	}
+}
+
+func TestHandleNormalKey_R_StartRadio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed", CatalogID: "seedcat"}
+	m.playerState.Track = track
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a search cmd")
+	}
+	if !m.radio.enabled {
+		t.Error("R key with a playing track should enable radio")
+	}
+	if m.radio.seed != track {
+		t.Errorf("radio.seed = %+v, want %+v", m.radio.seed, track)
+	}
+}
+
+func TestHandleNormalKey_R_NoTrackPlaying_NoOp(t *testing.T) {
+	m := newModel(nil)
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd != nil {
+		t.Error("R key with nothing playing should not start radio")
+	}
+	if m.radio.enabled {
+		t.Error("radio should not be enabled with no track playing")
+	}
+}
+
+func TestHandleNormalKey_R_StopRadio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	_ = cmd
+	if m.radio.enabled {
+		t.Error("R key when radio is on should stop radio")
+	}
+}
+
+func TestHandleNormalKey_R_StopsDiscovery(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.discovery.enabled = true
+	m.discovery.seed = &provider.Track{ID: "old-seed"}
+	m.playerState.Track = &provider.Track{Title: "New Seed", ID: "new-seed", CatalogID: "newcat"}
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if m.discovery.enabled {
+		t.Error("starting radio should stop discovery — both compete for the last-track refill trigger")
+	}
+	if !m.radio.enabled {
+		t.Error("R key should have started radio")
+	}
+}
+
+func TestHandleNormalKey_QueuePanel_R_StartRadioFromSelected(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.queueTracks = []provider.Track{
+		{Title: "A", Artist: "AA", ID: "a1", CatalogID: "cat1"},
+		{Title: "B", Artist: "BB", ID: "b1", CatalogID: "cat2"},
+	}
+	m.queueIDs = []string{"cat1", "cat2"}
+	m.queue.SetTracks(m.queueTracks)
+
+	// Open queue panel.
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R on a selected queue track should start radio")
+	}
+	if !m.radio.enabled {
+		t.Error("radio should be enabled after R on a queue track")
+	}
+	if m.radio.seed == nil || m.radio.seed.Title != "A" {
+		t.Errorf("radio.seed = %+v, want the selected queue track", m.radio.seed)
+	}
+}
+
+func TestHandleSearchKey_CtrlR_StartRadioFromSelected(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := provider.Track{Title: "Search Hit", Artist: "Artist", CatalogID: "cat-search"}
+	seedSearchResults(m, track)
+
+	cmd := m.handleSearchKey("ctrl+r", tea.KeyPressMsg{})
+	if cmd == nil {
+		t.Fatal("ctrl+r on a selected search track should start radio")
+	}
+	if !m.radio.enabled {
+		t.Error("radio should be enabled after ctrl+r in search")
+	}
+	if m.mode != modeSearch {
+		t.Error("ctrl+r should not close the search overlay, matching tab/shift+tab")
 	}
 }
 
