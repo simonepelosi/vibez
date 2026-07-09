@@ -1672,6 +1672,57 @@ func TestHandleNormalKey_R_StartRadio_DropsRestOfQueue(t *testing.T) {
 	}
 }
 
+// TestHandleNormalKey_R_StartRadio_DroppedTracksExcludedFromRefill guards
+// against the regression where dropQueueAfter's truncation had no lasting
+// effect: it removed the rest of the album/playlist from the queue, but the
+// very next refill's dedup only checked what was *still* queued, so a
+// station response containing those same tracks (common, since they share
+// the seed's album/playlist context) handed them right back — radio looked
+// like it was doing nothing. Dropped tracks must be blacklisted so a refill
+// can't re-add them.
+func TestHandleNormalKey_R_StartRadio_DroppedTracksExcludedFromRefill(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track2 := provider.Track{Title: "Track 2", Artist: "Artist", ID: "t2", CatalogID: "cat2"}
+	track3 := provider.Track{Title: "Track 3", Artist: "Artist", ID: "t3", CatalogID: "cat3"}
+	track4 := provider.Track{Title: "Track 4", Artist: "Artist", ID: "t4", CatalogID: "cat4"}
+	m.queueTracks = []provider.Track{
+		{Title: "Track 1", Artist: "Artist", ID: "t1", CatalogID: "cat1"},
+		track2,
+		track3,
+		track4,
+	}
+	m.queueIDs = []string{"cat1", "cat2", "cat3", "cat4"}
+	m.queue.SetTracks(m.queueTracks)
+	m.playerState.Track = &track2 // currently playing the 2nd (of 4) queued tracks
+
+	if cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R"); cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+
+	for _, dropped := range []provider.Track{track3, track4} {
+		if !m.radio.skipped[views.PlaybackID(dropped)] {
+			t.Errorf("radio.skipped missing dropped track %q (id=%s)", dropped.Title, views.PlaybackID(dropped))
+		}
+	}
+
+	// Simulate the imminent refill's station response echoing the two
+	// dropped tracks back alongside one genuinely new pick.
+	newTrack := provider.Track{Title: "New Pick", Artist: "Artist", ID: "t5", CatalogID: "cat5"}
+	m.Update(vibeResultMsg{
+		radio:    true,
+		radioGen: m.radio.generation,
+		tracks:   []provider.Track{track3, track4, newTrack},
+	})
+
+	if len(m.queueTracks) != 3 {
+		t.Fatalf("queueTracks = %+v, want 3 (t1, t2, New Pick) — dropped tracks must not return", m.queueTracks)
+	}
+	if got := m.queueTracks[2].Title; got != "New Pick" {
+		t.Errorf("queueTracks[2] = %q, want %q", got, "New Pick")
+	}
+}
+
 // TestHandleNormalKey_R_StartRadio_SeedNotInQueue_NoTruncation covers the
 // case where the seed track isn't present in the local queue at all (e.g.
 // radio started from a search result rather than something already queued)

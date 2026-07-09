@@ -1666,6 +1666,17 @@ func (m *Model) dropQueueAfter(seed *provider.Track) tea.Cmd {
 	if seedIdx < 0 || seedIdx == origLen-1 {
 		return nil
 	}
+	// Blacklist the dropped tracks so the imminent radio refill can't hand
+	// them right back — station results are often the very same tracks
+	// (same album/playlist context as the seed), and the refill's dedup
+	// only checks what's still in the queue.
+	if m.radio.skipped == nil {
+		m.radio.skipped = make(map[string]bool)
+	}
+	for _, t := range m.queueTracks[seedIdx+1:] {
+		m.radio.skipped[views.PlaybackID(t)] = true
+		m.radio.skipped[strings.ToLower(t.Artist+"||"+t.Title)] = true
+	}
 	m.queueTracks = m.queueTracks[:seedIdx+1]
 	m.queueIDs = m.queueIDs[:seedIdx+1]
 	m.queue.SetTracks(m.queueTracks)

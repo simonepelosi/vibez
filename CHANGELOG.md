@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Radio mode had no effect mid-album/playlist** — enabling radio while an album or playlist was already queued did nothing until the very last queued track played, since refills only triggered once the current track became the last item in the queue. Radio now drops the rest of the queued album/playlist as soon as it starts, so its picks actually play next.
+- **Dropped album/playlist tracks came right back on refill** — the tracks dropped when radio started were only removed from the queue, not blacklisted, so the very next refill's dedup (which only checks what's still queued) let the station API hand them straight back — since station results are often from the same album/playlist context as the seed. Radio now blacklists dropped tracks so they can't be re-added.
 
 ## [0.4.1] — 2026-07-08
 
