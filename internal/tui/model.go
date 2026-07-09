@@ -150,6 +150,7 @@ type vibeResultMsg struct {
 	err       error
 	discovery bool // true when result is from a discovery auto-refill
 	radio     bool // true when result is from a radio auto-refill
+	radioGen  int  // radio generation that produced this result
 }
 type loveSongMsg struct {
 	title string
@@ -253,6 +254,7 @@ type radioMode struct {
 	triggeredForID string          // ID of track for which we already fired a search
 	skipped        map[string]bool // IDs/keys of tracks skipped due to unavailability
 	retries        int             // consecutive failed refill attempts (circuit breaker)
+	generation     int             // increments whenever radio starts/stops to ignore stale results
 }
 
 const radioMaxRetries = 5 // give up re-arming after this many consecutive failures
@@ -700,6 +702,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case vibeResultMsg:
+		if msg.radio && (!m.radio.enabled || msg.radioGen != m.radio.generation) {
+			break
+		}
 		if msg.err != nil {
 			if msg.radio {
 				m.appendLog(fmt.Sprintf("[radio] search error: %v", msg.err))
@@ -1632,6 +1637,7 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 		return nil
 	}
 	m.discovery.enabled = false // discovery and radio are mutually exclusive
+	m.radio.generation++
 	m.radio.enabled = true
 	m.radio.seed = seed
 	m.radio.refilling = true // guard against double-trigger while search is in flight
@@ -1650,6 +1656,7 @@ func (m *Model) stopRadio() {
 	m.radio.seed = nil
 	m.radio.refilling = false
 	m.radio.triggeredForID = ""
+	m.radio.generation++
 	m.appendLog("[radio] stopped")
 }
 
@@ -1666,6 +1673,7 @@ func (m *Model) runRadioSearch() tea.Cmd {
 		catalogID = seed.ID
 	}
 	prov := m.provider
+	radioGen := m.radio.generation
 
 	exclude := make(map[string]bool, len(m.radio.skipped)+len(m.queueIDs))
 	for k := range m.radio.skipped {
@@ -1683,7 +1691,7 @@ func (m *Model) runRadioSearch() tea.Cmd {
 		defer cancel()
 		res, err := prov.GetStationTracks(ctx, catalogID)
 		if err != nil {
-			return vibeResultMsg{radio: true, err: err}
+			return vibeResultMsg{radio: true, radioGen: radioGen, err: err}
 		}
 		var merged []provider.Track
 		seen := map[string]bool{}
@@ -1697,9 +1705,9 @@ func (m *Model) runRadioSearch() tea.Cmd {
 			merged = append(merged, t)
 		}
 		if len(merged) == 0 {
-			return vibeResultMsg{radio: true, err: fmt.Errorf("no results")}
+			return vibeResultMsg{radio: true, radioGen: radioGen}
 		}
-		return vibeResultMsg{radio: true, tracks: merged}
+		return vibeResultMsg{radio: true, radioGen: radioGen, tracks: merged}
 	}
 }
 
@@ -1875,6 +1883,10 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				return m.openPlaylistPicker(t)
 			}
 		case "R":
+			if m.radio.enabled {
+				m.stopRadio()
+				return nil
+			}
 			// Start radio seeded by the highlighted queue track.
 			if _, t := m.queue.SelectedTrack(); t != nil {
 				return m.startRadioFrom(t)

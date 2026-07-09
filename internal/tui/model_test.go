@@ -116,6 +116,16 @@ func (m *mockProvider) GetStationTracks(_ context.Context, _ string) ([]provider
 	return nil, nil
 }
 
+type stationMockProvider struct {
+	mockProvider
+	tracks []provider.Track
+	err    error
+}
+
+func (m *stationMockProvider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return m.tracks, m.err
+}
+
 // --- helpers ---
 
 func testCfg() *config.Config {
@@ -1099,6 +1109,25 @@ func TestModel_Update_VibeResultMsg_Radio(t *testing.T) {
 	}
 }
 
+func TestModel_Update_VibeResultMsg_Radio_StaleResultIgnored(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.generation = 2
+	m.radio.refilling = true
+
+	tracks := []provider.Track{{Title: "Old Radio Song", ID: "old", CatalogID: "oldcat"}}
+	_, cmd := m.Update(vibeResultMsg{tracks: tracks, radio: true, radioGen: 1})
+	_ = cmd
+
+	if len(m.queueTracks) != 0 {
+		t.Errorf("stale radio result appended queueTracks = %+v, want none", m.queueTracks)
+	}
+	if len(mp.appendQueueIDs) != 0 {
+		t.Errorf("stale radio result called AppendQueue with %v, want no call", mp.appendQueueIDs)
+	}
+}
+
 func TestModel_Update_VibeResultMsg_Radio_EmptyAfterFilterRetries(t *testing.T) {
 	mp := newMockPlayer()
 	m := newModel(mp)
@@ -1113,6 +1142,38 @@ func TestModel_Update_VibeResultMsg_Radio_EmptyAfterFilterRetries(t *testing.T) 
 	}
 	if m.radio.retries != 1 {
 		t.Errorf("radio.retries = %d, want 1", m.radio.retries)
+	}
+}
+
+func TestRunRadioSearch_EmptyFilteredBatchReturnsEmptyResultForRetry(t *testing.T) {
+	mp := newMockPlayer()
+	prov := &stationMockProvider{
+		tracks: []provider.Track{{Title: "Already Queued", Artist: "Artist", ID: "queued", CatalogID: "queuedcat"}},
+	}
+	m := New(testCfg(), prov, mp, Options{})
+	m.radio.enabled = true
+	m.radio.generation = 3
+	m.radio.seed = &provider.Track{ID: "seed", CatalogID: "seedcat"}
+	m.queueTracks = []provider.Track{{Title: "Already Queued", Artist: "Artist", ID: "queued", CatalogID: "queuedcat"}}
+	m.queueIDs = []string{"queuedcat"}
+
+	cmd := m.runRadioSearch()
+	if cmd == nil {
+		t.Fatal("runRadioSearch returned nil cmd")
+	}
+	raw := cmd()
+	msg, ok := raw.(vibeResultMsg)
+	if !ok {
+		t.Fatalf("runRadioSearch msg = %T, want vibeResultMsg", raw)
+	}
+	if msg.err != nil {
+		t.Fatalf("empty filtered radio batch err = %v, want nil so Update can retry", msg.err)
+	}
+	if !msg.radio || msg.radioGen != 3 {
+		t.Fatalf("radio result flags = radio:%v gen:%d, want radio:true gen:3", msg.radio, msg.radioGen)
+	}
+	if len(msg.tracks) != 0 {
+		t.Fatalf("tracks = %+v, want empty result", msg.tracks)
 	}
 }
 
@@ -1616,6 +1677,27 @@ func TestHandleNormalKey_QueuePanel_R_StartRadioFromSelected(t *testing.T) {
 	}
 	if m.radio.seed == nil || m.radio.seed.Title != "A" {
 		t.Errorf("radio.seed = %+v, want the selected queue track", m.radio.seed)
+	}
+}
+
+func TestHandleNormalKey_QueuePanel_R_StopRadioWhenActive(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	m.queueTracks = []provider.Track{{Title: "A", Artist: "AA", ID: "a1", CatalogID: "cat1"}}
+	m.queueIDs = []string{"cat1"}
+	m.queue.SetTracks(m.queueTracks)
+
+	// Open queue panel.
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd != nil {
+		t.Error("R in queue panel while radio is active should stop radio without starting a search")
+	}
+	if m.radio.enabled {
+		t.Error("R in queue panel should stop active radio")
 	}
 }
 
