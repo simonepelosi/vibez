@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Playwright driver installation (404 error)** — Upgraded `playwright-go` dependency to `v0.6100.0` and migrated the module import path to `github.com/mxschmitt/playwright-go`. This resolves `404 Not Found` errors when fetching the driver because Microsoft deprecated pre-packaged driver zips on the old CDN, switching to npm and Node.js-based assembly. Closes #84.
+
 ## [0.4.1] — 2026-07-08
 
 ### Fixed
