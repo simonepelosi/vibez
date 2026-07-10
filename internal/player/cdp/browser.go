@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"strings"
 
-	playwright "github.com/playwright-community/playwright-go"
+	playwright "github.com/mxschmitt/playwright-go"
 )
 
 const chromeDebURL = "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb"

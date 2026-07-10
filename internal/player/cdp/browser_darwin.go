@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	playwright "github.com/playwright-community/playwright-go"
+	playwright "github.com/mxschmitt/playwright-go"
 )
 
 const chromeInstallHelp = "install Google Chrome from https://www.google.com/chrome/ or set VIBEZ_CHROME_PATH/CHROME_PATH"
