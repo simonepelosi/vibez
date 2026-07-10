@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"math"
 	"math/rand"
 	"net/http"
 	"slices"
@@ -14,6 +15,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
@@ -284,15 +286,21 @@ type Model struct {
 
 	width, height int
 
-	playerState       player.State
-	stateCh           <-chan player.State
-	artwork           artworkCache
-	artworkGen        int
-	artHTTP           *http.Client
-	supportsTrueColor func() bool
-	queueIDs          []string         // current playback queue (for "add to queue")
-	queueTracks       []provider.Track // full track objects parallel to queueIDs
-	queueMiniOffset   int              // scroll offset for the mini-queue in the split view
+	playerState player.State
+	stateCh     <-chan player.State
+
+	// Album art view (:art). artMode mirrors cfg.AlbumArt; the cover is
+	// fetched per track and the rendered half-block lines are cached per size
+	// so they only re-render on a track change or a resize.
+	artMode          bool
+	artwork          artworkCache
+	artworkGen       int
+	artHTTP          *http.Client
+	supportsArtColor func() bool
+	artCellAsp       float64          // terminal cell height/width ratio, for square art
+	queueIDs         []string         // current playback queue (for "add to queue")
+	queueTracks      []provider.Track // full track objects parallel to queueIDs
+	queueMiniOffset  int              // scroll offset for the mini-queue in the split view
 
 	// Discovery mode
 	discovery discoveryMode
@@ -372,15 +380,20 @@ type Model struct {
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
 	m := &Model{
-		cfg:               cfg,
-		provider:          prov,
-		player:            plyr,
-		activePanel:       -1,
-		memProfiling:      opts.MemProfiling,
-		preMuteVol:        -1,
-		artwork:           artworkCache{rendered: map[art.Size][]string{}},
-		artHTTP:           &http.Client{Timeout: 5 * time.Second},
-		supportsTrueColor: art.SupportsTrueColor,
+		cfg:          cfg,
+		provider:     prov,
+		player:       plyr,
+		activePanel:  -1,
+		memProfiling: opts.MemProfiling,
+		preMuteVol:   -1,
+		artMode:      cfg.AlbumArt,
+		artwork:      artworkCache{rendered: map[art.Size][]string{}},
+		artHTTP:      &http.Client{Timeout: 5 * time.Second},
+		// Album art needs at least a 256-colour terminal to look reasonable;
+		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
+		supportsArtColor: art.SupportsColor,
+		// Measured cell height/width ratio, so album art renders as a true square.
+		artCellAsp: cellAspect(),
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -573,7 +586,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if s.Track.ArtworkURL != m.artwork.url {
 			m.artworkGen++
 			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
-			if m.supportsTrueColor != nil && m.supportsTrueColor() {
+			// Only download covers while the art view is active; toggling
+			// :art on fetches the current track's cover on demand.
+			if m.artMode {
 				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
 			}
 		}
@@ -1311,6 +1326,7 @@ var allCommands = []cmdEntry{
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
+	{"art", "art", "Toggle album-art view (cover + track info instead of the bar)"},
 	{"mute", "mute", "Toggle mute"},
 	{"about", "about", "Show information about vibez"},
 	{"donate", "donate", "Support vibez development by donating"},
@@ -1420,6 +1436,26 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			return nil
 		}
 		return m.startDiscovery(false, n)
+	case cmd == "art":
+		if !m.artMode && (m.supportsArtColor == nil || !m.supportsArtColor()) {
+			m.errMsg = "album art needs a terminal with at least 256 colours"
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			return nil
+		}
+		m.artMode = !m.artMode
+		m.cfg.AlbumArt = m.artMode
+		if err := m.cfg.Save(""); err != nil {
+			m.appendLog(fmt.Sprintf("[art] config save error: %v", err))
+		}
+		if m.artMode {
+			m.appendLog("[art] album-art view on")
+			// Covers aren't downloaded while the art view is off, so fetch
+			// the current track's cover now if we don't have it yet.
+			return m.fetchArtworkCmd(m.artwork.url, m.artworkGen)
+		}
+		m.appendLog("[art] album-art view off")
+		return nil
+
 	case cmd == "mute":
 		if m.preMuteVol >= 0 {
 			// Currently muted — restore previous volume.
@@ -1565,7 +1601,7 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 }
 
 func (m *Model) fetchArtworkCmd(url string, gen int) tea.Cmd {
-	if url == "" || m.supportsTrueColor == nil || !m.supportsTrueColor() {
+	if url == "" || m.supportsArtColor == nil || !m.supportsArtColor() {
 		return nil
 	}
 	if m.artwork.url == url && gen == m.artworkGen && (m.artwork.img != nil || m.artwork.failed) {
@@ -3017,31 +3053,71 @@ func (m *Model) renderBoxHeader(inner int) string {
 	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + rightStr + " │"
 }
 
+// artModeActive reports whether the now-playing panel is currently showing
+// (or loading) the album-art view rather than the progress bar. Art mode
+// falls back to the bar layout when the current track has no artwork, the
+// fetch failed, or the terminal can't show enough colours.
+func (m *Model) artModeActive() bool {
+	if !m.artMode || m.supportsArtColor == nil || !m.supportsArtColor() {
+		return false
+	}
+	t := m.playerState.Track
+	// m.artwork.url must match the current track so a cover left over from
+	// the previous track is never shown while the next one is in flight.
+	return t != nil && t.ArtworkURL != "" && m.artwork.url == t.ArtworkURL && !m.artwork.failed
+}
+
 func (m *Model) nowPlayingHeight() int {
-	if m.height <= 30 {
+	if !m.artModeActive() {
 		return 12
 	}
-	return min(18, max(12, m.height/3))
+	// The art view trades panel rows for a bigger cover: grow with the
+	// terminal, but always leave the split panels a usable height.
+	return min(24, max(12, m.height-14))
 }
 
 // nowPlayingLines returns exactly h lines for the Now Playing section.
 func (m *Model) nowPlayingLines(contentW, h int) []string {
-	if m.supportsTrueColor == nil || !m.supportsTrueColor() || m.artwork.img == nil || m.artwork.failed || contentW < 42 || h < 8 || m.playerState.Track == nil || m.artwork.url != m.playerState.Track.ArtworkURL {
+	if m.artModeActive() && h >= 8 {
+		return m.nowPlayingArtLines(contentW, h)
+	}
+	return m.nowPlayingTextLines(contentW, h)
+}
+
+// nowPlayingArtLines renders the album-art view: the cover centred, with the
+// track line and elapsed time beneath it — no progress bar or controls. The
+// bottom four rows hold a separator, "Artist — Title", "Album • elapsed /
+// total", and the status line; the rows above are the cover, vertically
+// centred, sized square via the measured cell aspect ratio. While the cover
+// is still downloading its rows stay blank and it pops in when loaded.
+func (m *Model) nowPlayingArtLines(contentW, h int) []string {
+	t := m.playerState.Track
+	if t == nil {
 		return m.nowPlayingTextLines(contentW, h)
 	}
 
-	artRows := min(h-2, 16)
-	artCols := min(min(max(12, contentW/3), artRows*2), 40)
-	rightW := contentW - artCols - 2
-	if rightW < 28 {
+	aspect := m.artCellAsp
+	if aspect <= 0 {
+		aspect = 2.0
+	}
+	artColsFor := func(rows int) int { return int(math.Round(float64(rows) * aspect)) }
+	artRegion := h - 4
+	artRows := artRegion
+	artCols := artColsFor(artRows)
+	for artRows > 2 && artCols > contentW {
+		artRows--
+		artCols = artColsFor(artRows)
+	}
+	if artRows < 2 || artCols < 4 {
 		return m.nowPlayingTextLines(contentW, h)
 	}
+
 	size := art.Size{Width: artCols, Height: artRows}
 	if m.artwork.rendered == nil {
 		m.artwork.rendered = map[art.Size][]string{}
 	}
 	artLines := m.artwork.rendered[size]
-	if artLines == nil {
+	if artLines == nil && m.artwork.img != nil {
 		const maxRenderedArtworkSizes = 16
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
 			m.artwork.rendered = map[art.Size][]string{}
@@ -3049,17 +3125,54 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 		artLines = art.RenderHalfBlocks(m.artwork.img, size)
 		m.artwork.rendered[size] = artLines
 	}
-	rightLines := m.nowPlayingTextLines(rightW, h)
-	lines := make([]string, h)
-	for i := range h {
-		left := ""
-		if i < len(artLines) {
-			left = artLines[i]
+
+	lines := make([]string, 0, h)
+	artTop := max(0, (artRegion-artRows)/2)
+	for i := range artRegion {
+		if ai := i - artTop; ai >= 0 && ai < len(artLines) {
+			lines = append(lines, centerStr(artLines[ai], contentW))
+		} else {
+			lines = append(lines, "")
 		}
-		right := clipVisualLine(safeIdx(rightLines, i), rightW)
-		lines[i] = padRight(left, artCols) + "  " + padRight(right, rightW)
 	}
+
+	muted := styles.QueueItemMuted
+	var titleStr string
+	if m.playerState.Playing || m.playerState.Loading {
+		titleStr = styles.NowPlayingTitlePlaying.Render(t.Title)
+	} else {
+		titleStr = styles.NowPlayingTitle.Render(t.Title)
+	}
+	// Long metadata is truncated (ANSI-aware) so no row can overflow the
+	// panel and break the box border.
+	trackLine := centerStr(
+		ansi.Truncate(styles.NowPlayingArtist.Render(t.Artist)+muted.Render(" — ")+titleStr, contentW, "…"),
+		contentW,
+	)
+	elapsed := views.FormatDuration(m.playerState.Position)
+	total := views.FormatDuration(t.Duration)
+	albumLine := centerStr(
+		ansi.Truncate(styles.NowPlayingAlbum.Render(t.Album+" • ")+styles.TimeStyle.Render(elapsed+" / "+total), contentW, "…"),
+		contentW,
+	)
+	lines = append(lines, "", trackLine, albumLine, m.statusLine(contentW))
 	return lines
+}
+
+// statusLine renders the centred error/status line, or "" when there is no
+// message. Messages prefixed with '✓' are rendered as success (green); all
+// others are treated as warnings/errors (red with ⚠ prefix).
+func (m *Model) statusLine(contentW int) string {
+	if m.errMsg == "" {
+		return ""
+	}
+	if strings.HasPrefix(m.errMsg, "✓") {
+		text := truncateStr(m.errMsg, max(10, contentW))
+		return centerStr(styles.ControlActive.Render(text), contentW)
+	}
+	const prefix = "⚠  "
+	errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
+	return centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
 }
 
 func (m *Model) nowPlayingTextLines(contentW, h int) []string {
@@ -3150,22 +3263,7 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 		contentW,
 	)
 
-	// Error / status line — centred, or blank.
-	// Messages prefixed with '✓' are rendered as success (green); all others
-	// are treated as warnings/errors (red with ⚠ prefix).
-	errLine := ""
-	if m.errMsg != "" {
-		var rendered string
-		if strings.HasPrefix(m.errMsg, "✓") {
-			text := truncateStr(m.errMsg, max(10, contentW))
-			rendered = centerStr(styles.ControlActive.Render(text), contentW)
-		} else {
-			const prefix = "⚠  "
-			errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
-			rendered = centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
-		}
-		errLine = rendered
-	}
+	errLine := m.statusLine(contentW)
 
 	lines := []string{
 		"",
@@ -3475,16 +3573,6 @@ func padRight(s string, w int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", w-sw)
-}
-
-func clipVisualLine(s string, w int) string {
-	if w <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= w {
-		return s
-	}
-	return lipgloss.NewStyle().MaxWidth(w).Render(s)
 }
 
 // toLines splits s into exactly h lines, padding/truncating as needed.

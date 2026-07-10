@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Album-art view (`:art`)** — toggle the now-playing panel between the progress bar and the album cover rendered as coloured Unicode half-blocks, centred above the track name, album, and elapsed time. Covers are downloaded per track (bounded, dimension-checked) and down-sampled with area averaging so they stay smooth at terminal size; the cover is sized square using the terminal's measured cell aspect ratio and re-renders are cached per size. Falls back to the bar view when the track has no artwork or the terminal has fewer than 256 colours, and the choice persists across restarts. Closes #33.
 - **Radio mode (`R`)** — press `R` on the currently playing track, a selected queue track, or a selected search result to start an Apple Music radio station seeded from it. Starting radio drops anything already queued after the seed track so its picks play next, and the queue auto-refills as it runs low; a `📻 radio` badge shows in the now-playing status bar while active. Press `R` again to stop. Closes #32.
 
 ### Fixed
