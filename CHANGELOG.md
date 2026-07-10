@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Thanks
 
-- Thanks to @ian-swope for implementing radio mode seeded from any track.
+- Thanks to @ianswope for implementing radio mode seeded from any track.
 - Thanks to @useterm for upgrading playwright-go to v0.6100.0 to resolve the driver CDN 404 error.
 
 ## [0.4.1] — 2026-07-08
