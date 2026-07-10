@@ -3,6 +3,7 @@ package apple_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1015,6 +1016,55 @@ func TestCreatePlaylist_ServerError(t *testing.T) {
 	_, err := p.CreatePlaylist(context.Background(), "Failing Playlist", []string{})
 	if err == nil {
 		t.Error("CreatePlaylist: expected error for 500 response, got nil")
+	}
+}
+
+// --- GetStationTracks ---
+
+func TestGetStationTracks_Success(t *testing.T) {
+	resp := map[string]any{
+		"data": []any{
+			songJSON("1001", "Related Song", "Related Artist", "Related Album", 200000, ""),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if !strings.Contains(r.URL.Path, "stations/next-tracks/ra.500") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if strings.TrimSpace(string(body)) != "{}" {
+			t.Errorf("unexpected request body: %s", body)
+		}
+		writeJSON(t, w, resp)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetStationTracks(context.Background(), "500")
+	if err != nil {
+		t.Fatalf("GetStationTracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("tracks: got %d, want 1", len(tracks))
+	}
+	if tracks[0].ID != "1001" || tracks[0].Title != "Related Song" {
+		t.Errorf("unexpected track: %+v", tracks[0])
+	}
+}
+
+func TestGetStationTracks_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	_, err := p.GetStationTracks(context.Background(), "500")
+	if err == nil {
+		t.Error("GetStationTracks: expected error for 500 response, got nil")
 	}
 }
 

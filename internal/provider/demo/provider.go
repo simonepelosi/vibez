@@ -119,6 +119,17 @@ func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { retur
 
 func (Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
 
+func (Provider) GetStationTracks(_ context.Context, seedCatalogID string) ([]provider.Track, error) {
+	out := make([]provider.Track, 0, len(Tracks))
+	for _, t := range Tracks {
+		if t.ID == seedCatalogID || t.CatalogID == seedCatalogID {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
 func (Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return []provider.RecommendationGroup{
 		{

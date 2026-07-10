@@ -75,3 +75,6 @@ func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }
+func (m *mockProvider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}

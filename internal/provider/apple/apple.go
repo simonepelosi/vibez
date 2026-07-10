@@ -1159,6 +1159,38 @@ func (a *AppleProvider) AddToPlaylist(ctx context.Context, playlistID, trackID s
 	return a.do(req, nil)
 }
 
+type stationTracksResponse struct {
+	Data []songResource `json:"data"`
+}
+
+// GetStationTracks fetches a batch of tracks for an Apple Music radio
+// station seeded by the given catalog song ID. "ra.<songID>" is Apple's
+// synthetic per-song radio station ID — POSTing to its next-tracks endpoint
+// starts/continues that station without a separately created station
+// resource. Verified against the live API: next-tracks without an ID only
+// accepts GET, and next-tracks/{id} only accepts POST with a body (an empty
+// object is sufficient — the ID alone carries the seed).
+func (a *AppleProvider) GetStationTracks(ctx context.Context, seedCatalogID string) ([]provider.Track, error) {
+	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(seedCatalogID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+endpoint, strings.NewReader("{}")) //nolint:gosec // G107: URL is constructed from config, not user input
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	var resp stationTracksResponse
+	if err := a.do(req, &resp); err != nil {
+		return nil, fmt.Errorf("GetStationTracks: %w", err)
+	}
+	tracks := make([]provider.Track, 0, len(resp.Data))
+	for _, s := range resp.Data {
+		tracks = append(tracks, toTrack(s))
+	}
+	return tracks, nil
+}
+
 // ratingRequest is the body for PUT /v1/me/ratings/songs/{id}.
 type ratingRequest struct {
 	Type       string           `json:"type"`
