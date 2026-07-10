@@ -1,0 +1,141 @@
+name: Dev Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to build (leave empty to build from main)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get PR ref
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ github.event.inputs.pr_number }}"
+          if [ -z "$PR_NUM" ]; then
+            echo "is_pr=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "version=dev-main-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "name_suffix=dev-main" >> "$GITHUB_OUTPUT"
+          else
+            PR_DATA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUM --jq '{head_sha: .head.sha, head_ref: .head.ref, title: .title}')
+            SHA=$(echo "$PR_DATA" | jq -r .head_sha)
+            echo "is_pr=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+            echo "ref=$(echo "$PR_DATA" | jq -r .head_ref)" >> "$GITHUB_OUTPUT"
+            echo "version=dev-pr${PR_NUM}-$(echo $SHA | cut -c1-7)" >> "$GITHUB_OUTPUT"
+            echo "name_suffix=dev-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install garble
+        run: go install mvdan.cc/garble@v0.15.0
+
+      - name: Generate Apple Developer Token
+        id: devtoken
+        env:
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
+        run: |
+          TOKEN=$(go run ./scripts/gen-devtoken)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Build (linux/amd64)
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          CGO_ENABLED: "1"
+          PKG_CONFIG_PATH: ${{ github.workspace }}/pkg-config
+          GOTOOLCHAIN: local
+        run: |
+          go build -o vibez-linux-amd64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            .
+
+      - name: Build (darwin/amd64)
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+          GOOS: darwin
+          GOARCH: amd64
+        run: |
+          go build -o vibez-darwin-amd64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            .
+
+      - name: Build (darwin/arm64)
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+          GOOS: darwin
+          GOARCH: arm64
+        run: |
+          go build -o vibez-darwin-arm64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            .
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64
+          path: vibez-linux-amd64
+          retention-days: 14
+
+      - name: Upload Darwin AMD64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64
+          path: vibez-darwin-amd64
+          retention-days: 14
+
+      - name: Upload Darwin ARM64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64
+          path: vibez-darwin-arm64
+          retention-days: 14
+
+      - name: Comment on PR
+        if: steps.pr.outputs.is_pr == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment ${{ github.event.inputs.pr_number }} --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
+
+          **Download:** Go to the [workflow run]($RUN_URL) → Artifacts:
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64\`
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64\`
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64\` (for Apple Silicon Macs)
+
+          <sub>Built from ${{ steps.pr.outputs.sha }} • expires in 14 days</sub>"

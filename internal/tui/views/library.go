@@ -140,6 +140,13 @@ func (m *LibraryModel) Height() int     { return m.height }
 func (m *LibraryModel) DrillErr() error { return m.drillErr }
 func (m *LibraryModel) LoadErr() error  { return m.loadErr }
 
+func (m *LibraryModel) ResetTopLevel() {
+	m.invalidateLibraryRequest()
+	m.invalidatePlaylistRequest()
+	m.pane = paneSections
+	m.showSections()
+}
+
 func (m *LibraryModel) Back() bool {
 	switch m.pane {
 	case paneSections:
@@ -280,6 +287,9 @@ func (m *LibraryModel) Update(msg tea.Msg) (*LibraryModel, tea.Cmd) {
 func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 	switch m.pane {
 	case paneSections:
+		if msg.String() == "tab" {
+			return m, nil
+		}
 		if msg.String() == "enter" {
 			if item, ok := m.list.SelectedItem().(sectionItem); ok {
 				m.selectedSection = item.section
@@ -290,7 +300,7 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 		}
 	case paneItems:
 		switch msg.String() {
-		case "esc", "backspace":
+		case "esc", "backspace", "b":
 			m.invalidatePlaylistRequest()
 			m.loadErr = nil
 			m.pane = paneSections
@@ -298,14 +308,22 @@ func (m *LibraryModel) handleKey(msg tea.KeyPressMsg) (*LibraryModel, tea.Cmd) {
 			return m, nil
 		case "enter":
 			return m.openSelectedItem()
+		case "tab":
+			return m.queueSelectedItem(false)
+		case "shift+tab":
+			return m.queueSelectedItem(true)
 		}
 	case paneTracks:
 		switch msg.String() {
-		case "esc", "backspace", "left", "h":
+		case "esc", "backspace", "b":
 			m.Back()
 			return m, nil
 		case "enter":
 			return m, m.playTracksFromSelection()
+		case "tab":
+			return m, m.queueTracksFromSelection(false)
+		case "shift+tab":
+			return m, m.queueTracksFromSelection(true)
 		}
 	}
 	return m.updateActiveList(msg)
@@ -406,6 +424,27 @@ func (m *LibraryModel) openSelectedItem() (*LibraryModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m *LibraryModel) queueSelectedItem(playNext bool) (*LibraryModel, tea.Cmd) {
+	switch item := m.list.SelectedItem().(type) {
+	case albumItem:
+		return m, queueTracksCmd(item.group.title, item.group.tracks, playNext)
+	case artistItem:
+		return m, queueTracksCmd(item.group.title, item.group.tracks, playNext)
+	case playlistItem:
+		pl := provider.Playlist(item)
+		m.drillPlaylist = pl
+		m.drillTitle = pl.Name
+		m.pane = paneTracks
+		m.tracksBackPane = paneItems
+		m.drillTracks = nil
+		m.drillErr = nil
+		m.drillList.SetItems(nil)
+		return m, tea.Batch(m.spinner.Tick, m.loadPlaylistTracks(pl))
+	default:
+		return m, nil
+	}
+}
+
 func (m *LibraryModel) playTracksFromSelection() tea.Cmd {
 	if selected := m.drillList.SelectedItem(); selected == nil {
 		return nil
@@ -422,6 +461,32 @@ func (m *LibraryModel) playTracksFromSelection() tea.Cmd {
 	first := allTracks[0]
 	tracks := append([]provider.Track{}, allTracks...)
 	return func() tea.Msg { return PlayTracksMsg{IDs: ids, Tracks: tracks, Track: &first} }
+}
+
+func (m *LibraryModel) queueTracksFromSelection(playNext bool) tea.Cmd {
+	if selected := m.drillList.SelectedItem(); selected == nil {
+		return nil
+	}
+	idx := m.drillList.Index()
+	if idx < 0 || idx >= len(m.drillTracks) {
+		return nil
+	}
+	if m.tracksBackPane == paneSections && m.drillTitle == "Songs" {
+		return queueTracksCmd(m.drillTracks[idx].Title, m.drillTracks[idx:idx+1], playNext)
+	}
+	return queueTracksCmd(m.drillTitle, m.drillTracks[idx:], playNext)
+}
+
+func queueTracksCmd(label string, tracks []provider.Track, playNext bool) tea.Cmd {
+	if len(tracks) == 0 {
+		return nil
+	}
+	queued := append([]provider.Track{}, tracks...)
+	ids := make([]string, len(queued))
+	for i, track := range queued {
+		ids[i] = PlaybackID(track)
+	}
+	return func() tea.Msg { return QueueTracksMsg{IDs: ids, Tracks: queued, Label: label, PlayNext: playNext} }
 }
 
 func (m *LibraryModel) showSections() {
@@ -502,7 +567,7 @@ func (m *LibraryModel) renderDrillView() string {
 	if m.drillTitle == "" {
 		name = styles.SidebarActive.Render("Tracks")
 	}
-	hint := styles.QueueItemMuted.Render("  ←/h/esc back · enter play")
+	hint := styles.QueueItemMuted.Render("  b/esc back · enter play · tab queue · shift+tab next")
 	header := name + hint + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", m.width))
 	if m.drillLoading {
 		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"

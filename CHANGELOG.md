@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Radio mode (`R`)** — press `R` on the currently playing track, a selected queue track, or a selected search result to start an Apple Music radio station seeded from it. Starting radio drops anything already queued after the seed track so its picks play next, and the queue auto-refills as it runs low; a `📻 radio` badge shows in the now-playing status bar while active. Press `R` again to stop. Closes #32.
+
+### Fixed
+- **Radio mode had no effect mid-album/playlist** — enabling radio while an album or playlist was already queued did nothing until the very last queued track played, since refills only triggered once the current track became the last item in the queue. Radio now drops the rest of the queued album/playlist as soon as it starts, so its picks actually play next.
+- **Dropped album/playlist tracks came right back on refill** — the tracks dropped when radio started were only removed from the queue, not blacklisted, so the very next refill's dedup (which only checks what's still queued) let the station API hand them straight back — since station results are often from the same album/playlist context as the seed. Radio now blacklists dropped tracks so they can't be re-added.
+- **Playwright driver installation (404 error)** — Upgraded `playwright-go` dependency to `v0.6100.0` and migrated the module import path to `github.com/mxschmitt/playwright-go`. This resolves `404 Not Found` errors when fetching the driver because Microsoft deprecated pre-packaged driver zips on the old CDN, switching to npm and Node.js-based assembly. Closes #84.
+
+## [0.4.1] — 2026-07-08
+
+### Fixed
+- **Catalog playlist and album queueing (401 error)** — Route track fetching requests for catalog playlists and catalog albums through the standard API URL host rather than `amp-api.music.apple.com`. This resolves the `401 Unauthorized` regression introduced in v0.4.0. Closes #81.
+
+
+## [0.4.0] — 2026-07-07
+
+### Added
+- **Parallel pagination page fetching** — Fetch collection pages in parallel rather than sequentially, achieving up to a 10x-30x speedup when loading large playlists and library views.
+
+### Changed
+- **Navigation keys in panels** — Allow `"left"` and `"right"` arrow keys to navigate pages/cursors in the active panels (e.g., library lists, search cursor) rather than globally triggering seeking. Use the `"b"` key (along with `"esc"` and `"backspace"`) to go back in lists.
+
+### Fixed
+- **Queue resolution limits** — Batch track resolution requests in parallel blocks of 100 to support playing large lists/queues (like library Songs and large Favorites list) without hitting Apple Music's 300 IDs batch query limit.
+- **Playwright driver upgrade validation** — Ensure the Playwright driver in the local cache is always verified and updated when the dependency version changes, even if Chrome is already cached/installed.
+- **Double path duplication in pagination** — Trim duplicate `/v1` prefix from relative endpoint paths during pagination to prevent double `/v1/v1/` routing errors (which caused pagination loops to stop early at exactly 100 tracks).
+- **Graceful timeout/cancellation handling** — Return already-accumulated tracks when a pagination query times out or is cancelled, and display a clean `"request timed out"` error message instead of raw HTTP logs.
+- **Localized Favorites suppression** — Suppress synthetic Favorites playlist generation when localized favorites playlists (e.g. Italian `"Brani preferiti"`, `"Preferiti"`, French `"Morceaux préférés"`, Spanish `"Canciones favoritas"`, Portuguese `"Músicas favoritas"`, or custom `"Favorite/Starred Songs"`, etc.) are already present in the library. Closes #74.
+- **MPRIS `Seeked` signal:** Emit `org.mpris.MediaPlayer2.Player.Seeked` when the playback position jumps within a track, so external MPRIS clients (media panels, presence daemons) resync immediately after a seek instead of drifting on a stale, extrapolated position.
+
+## [0.3.1] — 2026-07-07
+
+### Fixed
+- **Playwright driver installation on Linux** — Upgraded `playwright-go` dependency to `v0.6000.0` to resolve `404 Not Found` errors when fetching the Linux x86_64 driver binary. Closes #75.
+
+## [0.3.0] — 2026-07-02
+
+### Added
+- **Optional PR input for Dev Build action** — The Dev Build workflow can now be triggered from any branch (e.g. `main`) without specifying a PR number, enabling quick ad-hoc builds of the latest development version.
+- **Play Next feature (`Shift+Tab`)** — press `Shift+Tab` on albums, artists, recommendations, or tracks to insert them to play immediately after the currently playing song. Closes #63.
+- **Queue view reordering improvements** — support `Shift+Up/Down` (and `Ctrl+Up/Down`) to move songs up and down in the queue panel. The track selection cursor now automatically follows the moved track.
+- **Documentation for keyboard shortcuts** — documented `Tab` (add to queue), `Shift+Tab` (play next), and `Shift+Up/Down` (move in queue) shortcuts in the README and inline TUI help hints.
+
+### Fixed
+- **Headless Widevine DRM support** — Launch Playwright Chrome in headless mode (`Headless: true`) with the `"--headless=new"` command-line parameter, and ignore Playwright's default `"--disable-component-update"` flag. This enables Google Chrome to run in its native headless mode and correctly load the Widevine CDM, resolving `CONTENT_UNSUPPORTED` / `"no DRM"` errors during headless background streaming on macOS and Linux.
+- **Expired token initialization handling** — Catch expired user token errors thrown during player initialization (both Chrome/CDP and WebKit backends) and trigger the terminal re-authentication flow, preventing the app from hanging on a broken token.
+- **macOS Apple Music playback** — Enable Google Chrome component updates on macOS by removing the `--disable-component-update` launch flag, allowing Chrome to correctly load and initialize the Widevine Content Decryption Module (CDM) for DRM playback. Closes #54.
+- **Empty library 404 error handling** — Handle `404 Not Found` API errors gracefully when fetching tracks or playlists from an empty Apple Music library (or when opening Favorites), returning empty collections instead of failing.
+- **Equalizer key conflicts** — Intercept equalizer-specific key presses (arrow keys, `h`/`j`/`k`/`l`, `0`, `r`) when the equalizer panel is open, resolving a conflict where arrow keys would seek playback and `r` would toggle repeat mode. Closes #64.
+
+---
+
+## [0.2.1] — 2026-05-29
+
+### Added
+- **Top-level library nav (`L`)** — press capital `L` from anywhere to jump
+  directly to the library sections menu (Songs, Albums, Artists, Playlists).
+- **Queue hotkey (`Tab`)** — press `Tab` on albums, artists, or tracks inside
+  the library to append them to the queue without leaving the panel.
+- **Dev build workflow** — maintainers can trigger a dev build from any open PR
+  via the Actions tab. A comment with the download link is posted on the PR.
+
+### Fixed
+- **Compositor stutter on GNOME/Wayland** — the CDP player's JS bridge fired
+  state updates every 200ms unconditionally, causing ~30 D-Bus signals/sec that
+  flooded Mutter's main loop. State notifications are now deduplicated in JS and
+  MPRIS emissions are debounced (100ms window, only on status/track changes).
+- **Demo player queue removal** — removing the final track from the queue now
+  correctly stops playback instead of leaving a dangling state.
+
 ---
 
 ## [0.2.0] — 2026-05-22
@@ -504,7 +574,16 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/simonepelosi/vibez/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/simonepelosi/vibez/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/simonepelosi/vibez/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/simonepelosi/vibez/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/simonepelosi/vibez/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/simonepelosi/vibez/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/simonepelosi/vibez/compare/v0.0.9...v0.1.0
+[0.0.9]: https://github.com/simonepelosi/vibez/compare/v0.0.8...v0.0.9
+[0.0.8]: https://github.com/simonepelosi/vibez/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/simonepelosi/vibez/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/simonepelosi/vibez/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/simonepelosi/vibez/compare/v0.0.4...v0.0.5

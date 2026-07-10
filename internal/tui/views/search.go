@@ -26,6 +26,15 @@ type PlayTracksMsg struct {
 	StartIdx   int              // start position within the playlist
 }
 
+// QueueTracksMsg is emitted when the user appends library tracks without
+// interrupting playback.
+type QueueTracksMsg struct {
+	IDs      []string
+	Tracks   []provider.Track
+	Label    string
+	PlayNext bool
+}
+
 // PlaybackID returns the best ID to use for MusicKit queue descriptors.
 // Library tracks (IDs prefixed with "i.") must use their library ID directly
 // so MusicKit never encounters a CONTENT_RESTRICTED error — the catalog copy

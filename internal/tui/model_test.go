@@ -27,19 +27,21 @@ import (
 // --- mock player ---
 
 type mockPlayer struct {
-	state          player.State
-	playCalled     bool
-	pauseCalled    bool
-	nextCalled     bool
-	prevCalled     bool
-	closeCalled    bool
-	seekCalled     bool
-	seekPos        time.Duration
-	bitrateKbps    int
-	setQueueIDs    []string   // last IDs passed to SetQueue
-	appendQueueIDs [][]string // all calls to AppendQueue (each call appended)
-	err            error
-	stateCh        chan player.State
+	state              player.State
+	playCalled         bool
+	pauseCalled        bool
+	nextCalled         bool
+	prevCalled         bool
+	closeCalled        bool
+	seekCalled         bool
+	seekPos            time.Duration
+	bitrateKbps        int
+	setQueueIDs        []string   // last IDs passed to SetQueue
+	appendQueueIDs     [][]string // all calls to AppendQueue (each call appended)
+	moveInQueueCalls   []struct{ From, To int }
+	removeFromQueueIdx []int // all calls to RemoveFromQueue, in call order
+	err                error
+	stateCh            chan player.State
 }
 
 func newMockPlayer() *mockPlayer {
@@ -70,9 +72,15 @@ func (m *mockPlayer) AppendQueue(ids []string) error {
 	m.appendQueueIDs = append(m.appendQueueIDs, ids)
 	return m.err
 }
-func (m *mockPlayer) RemoveFromQueue(_ int) error { return m.err }
-func (m *mockPlayer) MoveInQueue(_, _ int) error  { return m.err }
-func (m *mockPlayer) ClearQueue() error           { return m.err }
+func (m *mockPlayer) RemoveFromQueue(idx int) error {
+	m.removeFromQueueIdx = append(m.removeFromQueueIdx, idx)
+	return m.err
+}
+func (m *mockPlayer) MoveInQueue(from, to int) error {
+	m.moveInQueueCalls = append(m.moveInQueueCalls, struct{ From, To int }{from, to})
+	return m.err
+}
+func (m *mockPlayer) ClearQueue() error { return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
@@ -116,6 +124,19 @@ func (m *mockProvider) IsAuthenticated() bool                                   
 func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
+}
+func (m *mockProvider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}
+
+type stationMockProvider struct {
+	mockProvider
+	tracks []provider.Track
+	err    error
+}
+
+func (m *stationMockProvider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return m.tracks, m.err
 }
 
 // --- helpers ---
@@ -782,6 +803,48 @@ func TestHandleSearchKey_Tab_MultipleTabsAccumulate(t *testing.T) {
 	}
 }
 
+func TestModel_QueueTracksMsg_AppendsWithoutLeavingLibrary(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.activePanel = 0
+	tracks := []provider.Track{{ID: "i.1", Title: "One"}, {ID: "i.2", Title: "Two"}}
+
+	_, cmd := m.Update(views.QueueTracksMsg{IDs: []string{"i.1", "i.2"}, Tracks: tracks, Label: "Artist"})
+	if cmd == nil {
+		t.Fatal("QueueTracksMsg returned nil cmd")
+	}
+	cmd()
+	if len(mp.appendQueueIDs) != 1 || strings.Join(mp.appendQueueIDs[0], ",") != "i.1,i.2" {
+		t.Fatalf("AppendQueue calls = %#v, want [[i.1 i.2]]", mp.appendQueueIDs)
+	}
+	if m.activePanel != 0 {
+		t.Fatalf("activePanel = %d, want library still active", m.activePanel)
+	}
+	if len(m.queueTracks) != 2 {
+		t.Fatalf("queueTracks len = %d, want 2", len(m.queueTracks))
+	}
+}
+
+func TestHandleNormalKey_CapitalLOpensTopLevelLibrary(t *testing.T) {
+	m := newModel(nil)
+	m.activePanel = -1
+	m.library.SetSize(80, 24)
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Text: "L"}, "L")
+	if cmd != nil {
+		t.Fatal("capital L should not return a command")
+	}
+	if m.activePanel < 0 || m.panels[m.activePanel] != m.library {
+		t.Fatalf("activePanel = %d, want library", m.activePanel)
+	}
+	view := m.library.View()
+	for _, want := range []string{"Songs", "Albums", "Artists", "Playlists"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("library view missing %q: %q", want, view)
+		}
+	}
+}
+
 func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
@@ -1041,6 +1104,102 @@ func TestModel_Update_VibeResultMsg_Discovery(t *testing.T) {
 	tracks := []provider.Track{{Title: "Discovery Song", ID: "999", CatalogID: "cat999"}}
 	_, cmd := m.Update(vibeResultMsg{tracks: tracks, discovery: true})
 	_ = cmd
+}
+
+func TestModel_Update_VibeResultMsg_Radio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	tracks := []provider.Track{{Title: "Radio Song", ID: "888", CatalogID: "cat888"}}
+	_, cmd := m.Update(vibeResultMsg{tracks: tracks, radio: true})
+	_ = cmd
+	if m.radio.refilling {
+		t.Error("radio.refilling should be cleared after a successful refill")
+	}
+	if len(m.queueTracks) != 1 || m.queueTracks[0].Title != "Radio Song" {
+		t.Errorf("queueTracks = %+v, want the radio track appended", m.queueTracks)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_Radio_StaleResultIgnored(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.generation = 2
+	m.radio.refilling = true
+
+	tracks := []provider.Track{{Title: "Old Radio Song", ID: "old", CatalogID: "oldcat"}}
+	_, cmd := m.Update(vibeResultMsg{tracks: tracks, radio: true, radioGen: 1})
+	_ = cmd
+
+	if len(m.queueTracks) != 0 {
+		t.Errorf("stale radio result appended queueTracks = %+v, want none", m.queueTracks)
+	}
+	if len(mp.appendQueueIDs) != 0 {
+		t.Errorf("stale radio result called AppendQueue with %v, want no call", mp.appendQueueIDs)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_Radio_EmptyAfterFilterRetries(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	m.radio.seed = &provider.Track{ID: "seed", CatalogID: "seedcat"}
+	m.radio.skipped = map[string]bool{"blocked": true}
+	tracks := []provider.Track{{Title: "Blocked", ID: "blocked"}}
+	_, cmd := m.Update(vibeResultMsg{radio: true, tracks: tracks})
+	if cmd == nil {
+		t.Fatal("all-filtered radio result should retry via runRadioSearch, expected non-nil cmd")
+	}
+	if m.radio.retries != 1 {
+		t.Errorf("radio.retries = %d, want 1", m.radio.retries)
+	}
+}
+
+func TestRunRadioSearch_EmptyFilteredBatchReturnsEmptyResultForRetry(t *testing.T) {
+	mp := newMockPlayer()
+	prov := &stationMockProvider{
+		tracks: []provider.Track{{Title: "Already Queued", Artist: "Artist", ID: "queued", CatalogID: "queuedcat"}},
+	}
+	m := New(testCfg(), prov, mp, Options{})
+	m.radio.enabled = true
+	m.radio.generation = 3
+	m.radio.seed = &provider.Track{ID: "seed", CatalogID: "seedcat"}
+	m.queueTracks = []provider.Track{{Title: "Already Queued", Artist: "Artist", ID: "queued", CatalogID: "queuedcat"}}
+	m.queueIDs = []string{"queuedcat"}
+
+	cmd := m.runRadioSearch()
+	if cmd == nil {
+		t.Fatal("runRadioSearch returned nil cmd")
+	}
+	raw := cmd()
+	msg, ok := raw.(vibeResultMsg)
+	if !ok {
+		t.Fatalf("runRadioSearch msg = %T, want vibeResultMsg", raw)
+	}
+	if msg.err != nil {
+		t.Fatalf("empty filtered radio batch err = %v, want nil so Update can retry", msg.err)
+	}
+	if !msg.radio || msg.radioGen != 3 {
+		t.Fatalf("radio result flags = radio:%v gen:%d, want radio:true gen:3", msg.radio, msg.radioGen)
+	}
+	if len(msg.tracks) != 0 {
+		t.Fatalf("tracks = %+v, want empty result", msg.tracks)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_Radio_SearchError(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.refilling = true
+	_, cmd := m.Update(vibeResultMsg{radio: true, err: errors.New("network error")})
+	_ = cmd
+	if m.radio.refilling {
+		t.Error("radio.refilling should be cleared after a search error")
+	}
 }
 
 func TestModel_Update_LoveSongMsg_Success(t *testing.T) {
@@ -1451,6 +1610,314 @@ func TestHandleNormalKey_D_StopDiscovery(t *testing.T) {
 	_ = cmd
 	if m.discovery.enabled {
 		t.Error("d key when discovery is on should stop discovery")
+	}
+}
+
+func TestHandleNormalKey_R_StartRadio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := &provider.Track{Title: "Seed Song", Artist: "Artist", ID: "seed", CatalogID: "seedcat"}
+	m.playerState.Track = track
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a search cmd")
+	}
+	if !m.radio.enabled {
+		t.Error("R key with a playing track should enable radio")
+	}
+	if m.radio.seed != track {
+		t.Errorf("radio.seed = %+v, want %+v", m.radio.seed, track)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_DropsRestOfQueue guards against the
+// regression where starting radio mid-album (or mid-playlist) had no
+// visible effect: the rest of the already-queued tracks kept playing
+// because radio only appended new tracks once the current track became the
+// *last* queued item. Radio should instead drop everything queued after the
+// seed so its picks play next.
+func TestHandleNormalKey_R_StartRadio_DropsRestOfQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track2 := provider.Track{Title: "Track 2", Artist: "Artist", ID: "t2", CatalogID: "cat2"}
+	m.queueTracks = []provider.Track{
+		{Title: "Track 1", Artist: "Artist", ID: "t1", CatalogID: "cat1"},
+		track2,
+		{Title: "Track 3", Artist: "Artist", ID: "t3", CatalogID: "cat3"},
+		{Title: "Track 4", Artist: "Artist", ID: "t4", CatalogID: "cat4"},
+	}
+	m.queueIDs = []string{"cat1", "cat2", "cat3", "cat4"}
+	m.queue.SetTracks(m.queueTracks)
+	m.playerState.Track = &track2 // currently playing the 2nd (of 4) queued tracks
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	// startRadioFrom batches dropQueueAfter's RemoveFromQueue command with
+	// runRadioSearch's — drive both from the resulting BatchMsg.
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want tea.BatchMsg", msg)
+	}
+	for _, sub := range batch {
+		if sub != nil {
+			sub()
+		}
+	}
+
+	if len(m.queueTracks) != 2 || m.queueTracks[1].ID != "t2" {
+		t.Errorf("queueTracks = %+v, want only the played-through tracks (t1, t2) kept", m.queueTracks)
+	}
+	if len(m.queueIDs) != 2 {
+		t.Errorf("queueIDs = %v, want 2 remaining", m.queueIDs)
+	}
+	if len(mp.removeFromQueueIdx) != 2 {
+		t.Fatalf("RemoveFromQueue calls = %v, want 2 (indices 3 then 2)", mp.removeFromQueueIdx)
+	}
+	if mp.removeFromQueueIdx[0] != 3 || mp.removeFromQueueIdx[1] != 2 {
+		t.Errorf("RemoveFromQueue calls = %v, want [3, 2] (highest index first)", mp.removeFromQueueIdx)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_DroppedTracksExcludedFromRefill guards
+// against the regression where dropQueueAfter's truncation had no lasting
+// effect: it removed the rest of the album/playlist from the queue, but the
+// very next refill's dedup only checked what was *still* queued, so a
+// station response containing those same tracks (common, since they share
+// the seed's album/playlist context) handed them right back — radio looked
+// like it was doing nothing. Dropped tracks must be blacklisted so a refill
+// can't re-add them.
+func TestHandleNormalKey_R_StartRadio_DroppedTracksExcludedFromRefill(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track2 := provider.Track{Title: "Track 2", Artist: "Artist", ID: "t2", CatalogID: "cat2"}
+	track3 := provider.Track{Title: "Track 3", Artist: "Artist", ID: "t3", CatalogID: "cat3"}
+	track4 := provider.Track{Title: "Track 4", Artist: "Artist", ID: "t4", CatalogID: "cat4"}
+	m.queueTracks = []provider.Track{
+		{Title: "Track 1", Artist: "Artist", ID: "t1", CatalogID: "cat1"},
+		track2,
+		track3,
+		track4,
+	}
+	m.queueIDs = []string{"cat1", "cat2", "cat3", "cat4"}
+	m.queue.SetTracks(m.queueTracks)
+	m.playerState.Track = &track2 // currently playing the 2nd (of 4) queued tracks
+
+	if cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R"); cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+
+	for _, dropped := range []provider.Track{track3, track4} {
+		if !m.radio.skipped[views.PlaybackID(dropped)] {
+			t.Errorf("radio.skipped missing dropped track %q (id=%s)", dropped.Title, views.PlaybackID(dropped))
+		}
+	}
+
+	// Simulate the imminent refill's station response echoing the two
+	// dropped tracks back alongside one genuinely new pick.
+	newTrack := provider.Track{Title: "New Pick", Artist: "Artist", ID: "t5", CatalogID: "cat5"}
+	m.Update(vibeResultMsg{
+		radio:    true,
+		radioGen: m.radio.generation,
+		tracks:   []provider.Track{track3, track4, newTrack},
+	})
+
+	if len(m.queueTracks) != 3 {
+		t.Fatalf("queueTracks = %+v, want 3 (t1, t2, New Pick) — dropped tracks must not return", m.queueTracks)
+	}
+	if got := m.queueTracks[2].Title; got != "New Pick" {
+		t.Errorf("queueTracks[2] = %q, want %q", got, "New Pick")
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_SeedNotInQueue_InsertsAsPlayNext covers
+// the case where the seed track isn't present in the local queue at all
+// (e.g. radio started from a search result rather than something already
+// queued). dropQueueAfter has nothing to drop, but the seed must still be
+// queued up next so it actually plays — previously it was silently
+// dropped and radio picks were just appended after the existing queue.
+func TestHandleNormalKey_R_StartRadio_SeedNotInQueue_InsertsAsPlayNext(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.queueTracks = []provider.Track{
+		{Title: "Queued 1", ID: "q1", CatalogID: "qcat1"},
+		{Title: "Queued 2", ID: "q2", CatalogID: "qcat2"},
+	}
+	m.queueIDs = []string{"qcat1", "qcat2"}
+	m.queue.SetTracks(m.queueTracks)
+	seed := &provider.Track{Title: "Seed Song", ID: "seed", CatalogID: "seedcat"}
+	m.playerState.Track = seed // playing a track that isn't in m.queueTracks
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	// The local insertion runs synchronously inside startRadioFrom, before
+	// the returned cmd is ever invoked.
+	if len(m.queueTracks) != 3 || m.queueTracks[0].ID != "seed" {
+		t.Fatalf("queueTracks = %+v, want seed inserted at front", m.queueTracks)
+	}
+	if len(mp.removeFromQueueIdx) != 0 {
+		t.Errorf("RemoveFromQueue calls = %v, want none", mp.removeFromQueueIdx)
+	}
+
+	// startRadioFrom batches dropQueueAfter's play-next command with
+	// runRadioSearch's — drive both from the resulting BatchMsg.
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want tea.BatchMsg", msg)
+	}
+	for _, sub := range batch {
+		if sub != nil {
+			sub()
+		}
+	}
+
+	if len(mp.appendQueueIDs) != 1 || mp.appendQueueIDs[0][0] != "seedcat" {
+		t.Errorf("AppendQueue calls = %v, want [[seedcat]]", mp.appendQueueIDs)
+	}
+	if len(mp.moveInQueueCalls) != 1 || mp.moveInQueueCalls[0].From != 2 || mp.moveInQueueCalls[0].To != 0 {
+		t.Errorf("MoveInQueue calls = %v, want [{From:2 To:0}]", mp.moveInQueueCalls)
+	}
+}
+
+func TestHandleNormalKey_R_NoTrackPlaying_NoOp(t *testing.T) {
+	m := newModel(nil)
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd != nil {
+		t.Error("R key with nothing playing should not start radio")
+	}
+	if m.radio.enabled {
+		t.Error("radio should not be enabled with no track playing")
+	}
+}
+
+func TestHandleNormalKey_R_StopRadio(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	_ = cmd
+	if m.radio.enabled {
+		t.Error("R key when radio is on should stop radio")
+	}
+}
+
+// TestHandleNormalKey_R_StopRadio_ClearsSkipped guards against the
+// regression where m.radio.skipped was never cleared: tracks dropped
+// during one radio session stayed blacklisted forever across every
+// subsequent radio session in the run.
+func TestHandleNormalKey_R_StopRadio_ClearsSkipped(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	m.radio.skipped = map[string]bool{"blocked": true}
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if m.radio.skipped != nil {
+		t.Errorf("radio.skipped = %v, want nil after stopping radio", m.radio.skipped)
+	}
+}
+
+// TestHandleNormalKey_R_StartRadio_ResetsStaleSkipped guards against the
+// same regression from the other direction: starting a fresh radio
+// session must not inherit a blacklist left over from a previous one.
+func TestHandleNormalKey_R_StartRadio_ResetsStaleSkipped(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	seed := &provider.Track{Title: "New Seed", ID: "new-seed", CatalogID: "newcat"}
+	m.playerState.Track = seed
+	m.radio.skipped = map[string]bool{"stale-from-last-session": true}
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R key with a playing track should start radio and return a cmd")
+	}
+	if m.radio.skipped["stale-from-last-session"] {
+		t.Error("radio.skipped carried a stale entry into the new radio session")
+	}
+}
+
+func TestHandleNormalKey_R_StopsDiscovery(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.discovery.enabled = true
+	m.discovery.seed = &provider.Track{ID: "old-seed"}
+	m.playerState.Track = &provider.Track{Title: "New Seed", ID: "new-seed", CatalogID: "newcat"}
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if m.discovery.enabled {
+		t.Error("starting radio should stop discovery — both compete for the last-track refill trigger")
+	}
+	if !m.radio.enabled {
+		t.Error("R key should have started radio")
+	}
+}
+
+func TestHandleNormalKey_QueuePanel_R_StartRadioFromSelected(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.queueTracks = []provider.Track{
+		{Title: "A", Artist: "AA", ID: "a1", CatalogID: "cat1"},
+		{Title: "B", Artist: "BB", ID: "b1", CatalogID: "cat2"},
+	}
+	m.queueIDs = []string{"cat1", "cat2"}
+	m.queue.SetTracks(m.queueTracks)
+
+	// Open queue panel.
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd == nil {
+		t.Fatal("R on a selected queue track should start radio")
+	}
+	if !m.radio.enabled {
+		t.Error("radio should be enabled after R on a queue track")
+	}
+	if m.radio.seed == nil || m.radio.seed.Title != "A" {
+		t.Errorf("radio.seed = %+v, want the selected queue track", m.radio.seed)
+	}
+}
+
+func TestHandleNormalKey_QueuePanel_R_StopRadioWhenActive(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.radio.enabled = true
+	m.radio.seed = &provider.Track{ID: "seed"}
+	m.queueTracks = []provider.Track{{Title: "A", Artist: "AA", ID: "a1", CatalogID: "cat1"}}
+	m.queueIDs = []string{"cat1"}
+	m.queue.SetTracks(m.queueTracks)
+
+	// Open queue panel.
+	m.handleNormalKey(tea.KeyPressMsg{Code: 'q', Text: "q"}, "q")
+
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'R', Text: "R"}, "R")
+	if cmd != nil {
+		t.Error("R in queue panel while radio is active should stop radio without starting a search")
+	}
+	if m.radio.enabled {
+		t.Error("R in queue panel should stop active radio")
+	}
+}
+
+func TestHandleSearchKey_CtrlR_StartRadioFromSelected(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := provider.Track{Title: "Search Hit", Artist: "Artist", CatalogID: "cat-search"}
+	seedSearchResults(m, track)
+
+	cmd := m.handleSearchKey("ctrl+r", tea.KeyPressMsg{})
+	if cmd == nil {
+		t.Fatal("ctrl+r on a selected search track should start radio")
+	}
+	if !m.radio.enabled {
+		t.Error("radio should be enabled after ctrl+r in search")
+	}
+	if m.mode != modeSearch {
+		t.Error("ctrl+r should not close the search overlay, matching tab/shift+tab")
 	}
 }
 
@@ -3033,5 +3500,188 @@ func TestModel_ActivePanelEscCallsBackBeforeClose(t *testing.T) {
 	}
 	if m.activePanel != 0 {
 		t.Fatalf("activePanel = %d, want still open after Back handled", m.activePanel)
+	}
+}
+
+func TestEqualizerKeyPriority(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	// Set up track state for seeking checks
+	m.playerState.Track = &provider.Track{ID: "t1", Title: "Song", Duration: 100 * time.Second}
+	m.playerState.Position = 50 * time.Second
+
+	// Open equalizer panel
+	eqIdx := -1
+	for i, p := range m.panels {
+		if p == m.eqP {
+			eqIdx = i
+			break
+		}
+	}
+	if eqIdx == -1 {
+		t.Fatal("eqP not found in panels")
+	}
+	m.activePanel = eqIdx
+
+	// Verify equalizer cursor is initially at 0
+	if m.eqP.m.Cursor() != 0 {
+		t.Fatalf("expected equalizer cursor to be 0, got %d", m.eqP.m.Cursor())
+	}
+
+	// 1. Send "right" arrow key. It should move equalizer cursor to 1, and NOT seek player.
+	m2, _ := m.Update(tea.KeyPressMsg{Text: "right"})
+	m = m2.(*Model)
+	if m.eqP.m.Cursor() != 1 {
+		t.Errorf("expected equalizer cursor to move to 1, got %d", m.eqP.m.Cursor())
+	}
+	if plyr.seekCalled {
+		t.Error("player seek was incorrectly called when pressing right key in equalizer")
+	}
+
+	// Reset mock player call tracking
+	plyr.seekCalled = false
+
+	// 2. Send "r" key. It should reset equalizer bands, and NOT cycle player repeat mode.
+	m.eqP.m.Bands()[0].Gain = 5.0
+	m.playerState.RepeatMode = player.RepeatModeAll
+
+	m3, _ := m.Update(tea.KeyPressMsg{Text: "r"})
+	m = m3.(*Model)
+	if m.eqP.m.Bands()[0].Gain != 0.0 {
+		t.Errorf("expected bands to reset to 0, got %f", m.eqP.m.Bands()[0].Gain)
+	}
+	// RepeatMode is managed by state update in the actual app, but locally it shouldn't have changed
+	if m.playerState.RepeatMode != player.RepeatModeAll {
+		t.Error("player repeat mode was incorrectly changed when pressing r in equalizer")
+	}
+
+	// 3. Send "space" key. It should fall through and toggle play/pause.
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	if cmd != nil {
+		cmd()
+	}
+	if !plyr.playCalled && !plyr.pauseCalled {
+		t.Error("player play/pause was NOT called when pressing space in equalizer")
+	}
+}
+
+func TestPlayNextCmd(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	// Case 1: Play next on empty queue
+	tracks := []provider.Track{{ID: "x1", Title: "X1", Artist: "ArtX"}}
+	ids := []string{"x1"}
+	cmd1 := m.playNextCmd("X1", tracks, ids)
+	if cmd1 != nil {
+		cmd1()
+	}
+	if len(plyr.setQueueIDs) == 0 || plyr.setQueueIDs[0] != "x1" {
+		t.Errorf("expected SetQueue with x1, got %v", plyr.setQueueIDs)
+	}
+
+	// Reset mock player
+	plyr.setQueueIDs = nil
+	plyr.appendQueueIDs = nil
+	plyr.moveInQueueCalls = nil
+
+	// Case 2: Play next on non-empty queue, when song B is playing in queue [A, B, C]
+	m.queueTracks = []provider.Track{
+		{ID: "a", Title: "A"},
+		{ID: "b", Title: "B"},
+		{ID: "c", Title: "C"},
+	}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.playerState.Track = &provider.Track{ID: "b", Title: "B"}
+
+	newTracks := []provider.Track{
+		{ID: "x2", Title: "X2"},
+		{ID: "y2", Title: "Y2"},
+	}
+	newIDs := []string{"x2", "y2"}
+
+	cmd2 := m.playNextCmd("Collection", newTracks, newIDs)
+	if cmd2 != nil {
+		cmd2()
+	}
+
+	// Verify local queueIDs insertion: [A, B, X2, Y2, C]
+	expectedIDs := []string{"a", "b", "x2", "y2", "c"}
+	if len(m.queueIDs) != len(expectedIDs) {
+		t.Fatalf("expected queueIDs length %d, got %d", len(expectedIDs), len(m.queueIDs))
+	}
+	for i, id := range m.queueIDs {
+		if id != expectedIDs[i] {
+			t.Errorf("expected local queueIDs[%d] to be %s, got %s", i, expectedIDs[i], id)
+		}
+	}
+
+	// Verify backend calls: AppendQueue followed by MoveInQueue calls
+	if len(plyr.appendQueueIDs) != 1 || plyr.appendQueueIDs[0][0] != "x2" || plyr.appendQueueIDs[0][1] != "y2" {
+		t.Errorf("expected AppendQueue([x2, y2]), got %v", plyr.appendQueueIDs)
+	}
+
+	// Track was originally 3 elements. New tracks appended at index 3 and 4.
+	// B is at index 1. Target insert index is 2.
+	// So we expect MoveInQueue(3, 2) followed by MoveInQueue(4, 3).
+	if len(plyr.moveInQueueCalls) != 2 {
+		t.Fatalf("expected 2 MoveInQueue calls, got %d", len(plyr.moveInQueueCalls))
+	}
+	if plyr.moveInQueueCalls[0].From != 3 || plyr.moveInQueueCalls[0].To != 2 {
+		t.Errorf("expected first MoveInQueue(3, 2), got MoveInQueue(%d, %d)", plyr.moveInQueueCalls[0].From, plyr.moveInQueueCalls[0].To)
+	}
+	if plyr.moveInQueueCalls[1].From != 4 || plyr.moveInQueueCalls[1].To != 3 {
+		t.Errorf("expected second MoveInQueue(4, 3), got MoveInQueue(%d, %d)", plyr.moveInQueueCalls[1].From, plyr.moveInQueueCalls[1].To)
+	}
+}
+
+func TestQueueReordering(t *testing.T) {
+	plyr := newMockPlayer()
+	m := newModel(plyr)
+
+	m.queueTracks = []provider.Track{
+		{ID: "a", Title: "A"},
+		{ID: "b", Title: "B"},
+		{ID: "c", Title: "C"},
+	}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.queue.SetTracks(m.queueTracks)
+
+	m.activePanel = 0
+	m.panels = []ContentView{m.queue}
+
+	m.queue.Select(1)
+
+	// Move B up using "shift+up"
+	m2, cmd := m.Update(tea.KeyPressMsg{Text: "shift+up"})
+	m = m2.(*Model)
+	if cmd != nil {
+		cmd()
+	}
+
+	if m.queueTracks[0].ID != "b" || m.queueTracks[1].ID != "a" {
+		t.Errorf("expected B at index 0 and A at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ := m.queue.SelectedTrack()
+	if idx != 0 {
+		t.Errorf("expected selected index to be 0 after moving up, got %d", idx)
+	}
+
+	// Move B down using "shift+down"
+	m3, cmd2 := m.Update(tea.KeyPressMsg{Text: "shift+down"})
+	m = m3.(*Model)
+	if cmd2 != nil {
+		cmd2()
+	}
+
+	if m.queueTracks[0].ID != "a" || m.queueTracks[1].ID != "b" {
+		t.Errorf("expected A at index 0 and B at index 1, got queue: %v", m.queueTracks)
+	}
+
+	idx, _ = m.queue.SelectedTrack()
+	if idx != 1 {
+		t.Errorf("expected selected index to be 1 after moving down, got %d", idx)
 	}
 }

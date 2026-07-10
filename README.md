@@ -20,7 +20,8 @@
 </p>
 
 <p align="center">
-  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br>
+  If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br><br>
+  <img src="https://progress-bar.xyz/0/?title=Apple%20Dev%20Key%20Goal%20%28%240%2F%24100%29&color=ff5e5b&width=400" alt="Apple Developer Key Progress"><br><br>
   <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
 </p>
 
@@ -52,7 +53,8 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 
 ### 📋 Queue Management
 
-- **Add tracks to queue** with `tab` from search or library
+- **Add tracks to queue** with `tab` from search, library, or recommendation feed
+- **Play next** — insert any song, album, playlist, or recommendation next in the queue with `shift+tab`
 - **Navigate the queue** — jump to any track or let it auto-advance
 - **Persistent queue panel** — toggle it on/off without losing your place
 
@@ -77,6 +79,13 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 - **Adjustable similarity** — use `+`/`-` to dial between "same artist" (0.9) and "pure discovery" (0.0), giving you full control over how adventurous the next pick is
 - **Seed-aware** — the currently playing track is used as the seed; searches adapt progressively from same artist → same genre → completely random as similarity decreases
 - **Toggle anytime** — press `d` again to stop discovery and return to a manual queue
+
+### 📻 Radio Mode
+
+- **Seed a station from any track** — press `R` on the currently playing track, a highlighted queue track, or `ctrl+r` on a search result to start an endless station built around it
+- **Auto-refills like discovery** — vibez queues up new picks from the seed's station as the queue runs low, so the music never stops
+- **Clears the runway** — starting radio drops any tracks still queued after the seed (e.g. the rest of an album or playlist) so the station takes over immediately instead of waiting for them to finish
+- **Toggle anytime** — press `R` again to stop radio and return to a manual queue
 
 ### ⌨️ Terminal UI
 
@@ -242,6 +251,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `v` | Open vibe input (mood-driven search) |
 | `e` | Toggle equalizer panel |
 | `d` | Toggle discovery mode |
+| `R` | Toggle radio mode (seeded by the currently playing track) |
 | `/` | Open search |
 | `l` | Toggle library panel |
 | `q` | Toggle queue panel |
@@ -255,6 +265,8 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `↑` / `↓` | Navigate results |
 | `enter` | Play now |
 | `tab` | Add to queue |
+| `shift+tab` | Play next (insert after current track) |
+| `ctrl+r` | Start radio seeded by the selected track |
 | `esc` | Close |
 
 ### Library (`l`)
@@ -263,7 +275,8 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 |-----|--------|
 | `↑` / `↓` | Navigate list |
 | `enter` | Open / play |
-| `tab` | Switch tab (Playlists / Albums / Tracks) |
+| `tab` | Add selected item/track to queue (when viewing albums/artists/playlists/tracks) or switch tab (when viewing library sections pane) |
+| `shift+tab` | Play next (insert selected item/track after current track) |
 | `esc` | Back / close |
 
 ### Queue (`q`)
@@ -273,10 +286,11 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `↑` / `↓` | Navigate list |
 | `enter` | Play selected track |
 | `d` | Remove track from queue |
-| `K` | Move track up |
-| `J` | Move track down |
+| `K` / `shift+up` | Move track up |
+| `J` / `shift+down` | Move track down |
 | `c` | Clear entire queue |
 | `s` | Save queue as playlist (opens command prompt) |
+| `R` | Toggle radio mode (seeded by the highlighted track) |
 | `esc` | Close |
 
 ### Command mode (`:`)

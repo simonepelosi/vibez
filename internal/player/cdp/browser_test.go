@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	playwright "github.com/mxschmitt/playwright-go"
 )
 
 // buildAr writes a minimal ar(1) archive from an ordered list of (name, data)
@@ -304,8 +307,24 @@ func TestEnsureBrowser_AlreadyInstalled(t *testing.T) {
 		t.Fatalf("write chrome: %v", err)
 	}
 
+	// Mock the playwright driver as also already installed and up-to-date.
+	driver, err := playwright.NewDriver(&playwright.RunOptions{
+		DriverDirectory: driverDir(),
+	})
+	if err != nil {
+		t.Fatalf("new driver: %v", err)
+	}
+	pkgDir := filepath.Join(driverDir(), "package")
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatalf("mkdir driver package: %v", err)
+	}
+	pkgJSON := fmt.Sprintf(`{"version": %q}`, driver.Version)
+	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(pkgJSON), 0o600); err != nil { //nolint:gosec // test fixture
+		t.Fatalf("write driver package.json: %v", err)
+	}
+
 	var progress []string
-	err := EnsureBrowser(func(s string) { progress = append(progress, s) })
+	err = EnsureBrowser(func(s string) { progress = append(progress, s) })
 	if err != nil {
 		t.Errorf("EnsureBrowser when already installed should return nil, got: %v", err)
 	}
@@ -327,5 +346,24 @@ func TestExtractDeb_TruncatedArHeader(t *testing.T) {
 	// extractDeb should return an error (missing data.tar.*), not panic.
 	if err := extractDeb(path, t.TempDir()); err == nil {
 		t.Error("expected error for truncated ar, got nil")
+	}
+}
+
+func TestChromeLaunchArgs_HasDisableComponentUpdate(t *testing.T) {
+	args := chromeLaunchArgs(false, false)
+	if !slices.Contains(args, "--disable-component-update") {
+		t.Error("chromeLaunchArgs does not contain --disable-component-update, which is expected on Linux for network isolation")
+	}
+}
+
+func TestChromeLaunchArgs_HasHeadlessNew(t *testing.T) {
+	args := chromeLaunchArgs(true, false)
+	if !slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should contain --headless=new when headless=true on Linux")
+	}
+
+	args = chromeLaunchArgs(false, false)
+	if slices.Contains(args, "--headless=new") {
+		t.Error("chromeLaunchArgs should not contain --headless=new when headless=false on Linux")
 	}
 }

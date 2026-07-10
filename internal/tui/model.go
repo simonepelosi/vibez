@@ -17,6 +17,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
+	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/art"
@@ -79,6 +80,7 @@ func (p *queuePanel) View() string                          { return p.m.View() 
 func (p *queuePanel) Back() bool                            { return false }
 func (p *queuePanel) SetTracks(tracks []provider.Track)     { p.m.SetTracks(tracks) }
 func (p *queuePanel) SelectedTrack() (int, *provider.Track) { return p.m.SelectedTrack() }
+func (p *queuePanel) Select(idx int)                        { p.m.Select(idx) }
 
 // lyricsPanel wraps views.LyricsModel to satisfy ContentView.
 type lyricsPanel struct{ m *views.LyricsModel }
@@ -115,6 +117,21 @@ func (p *eqPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
 func (p *eqPanel) View() string { return p.m.View() }
 func (p *eqPanel) Back() bool   { return false }
 
+// aboutPanel wraps views.AboutModel to satisfy ContentView.
+type aboutPanel struct{ m *views.AboutModel }
+
+func (p *aboutPanel) NavKey() string   { return "?" }
+func (p *aboutPanel) NavLabel() string { return "about" }
+func (p *aboutPanel) SetSize(w, h int) { p.m.SetSize(w, h) }
+func (p *aboutPanel) Update(msg tea.KeyPressMsg) tea.Cmd {
+	if msg.String() == "?" {
+		return nil
+	}
+	return p.m.Update(msg)
+}
+func (p *aboutPanel) View() string { return p.m.View() }
+func (p *aboutPanel) Back() bool   { return false }
+
 // ── Messages ──────────────────────────────────────────────────────────────
 
 type playerStateMsg player.State
@@ -141,6 +158,8 @@ type vibeResultMsg struct {
 	tracks    []provider.Track
 	err       error
 	discovery bool // true when result is from a discovery auto-refill
+	radio     bool // true when result is from a radio auto-refill
+	radioGen  int  // radio generation that produced this result
 }
 type loveSongMsg struct {
 	title string
@@ -184,16 +203,18 @@ type feedResultMsg struct {
 	err    error
 }
 type feedTracksMsg struct {
-	item   provider.RecommendationItem
-	tracks []provider.Track
-	play   bool // true = replace queue & play; false = append
-	err    error
+	item     provider.RecommendationItem
+	tracks   []provider.Track
+	play     bool // true = replace queue & play; false = append
+	playNext bool
+	err      error
 }
 type searchCollectionTracksMsg struct {
-	label  string // album/playlist name for log messages
-	tracks []provider.Track
-	play   bool // true = replace queue & play; false = append
-	err    error
+	label    string // album/playlist name for log messages
+	tracks   []provider.Track
+	play     bool // true = replace queue & play; false = append
+	playNext bool
+	err      error
 }
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
@@ -236,6 +257,24 @@ const (
 	discoverySimilarityStep = 0.1
 )
 
+// ── Radio mode ──────────────────────────────────────────────────────────────
+
+// radioMode holds state for the continuous radio feature: an Apple Music
+// station seeded from a track, auto-refilled as the queue runs low. Mutually
+// exclusive with discoveryMode — starting one stops the other, since both
+// compete for the same last-track refill trigger.
+type radioMode struct {
+	enabled        bool
+	seed           *provider.Track
+	refilling      bool            // background search in progress
+	triggeredForID string          // ID of track for which we already fired a search
+	skipped        map[string]bool // IDs/keys of tracks skipped due to unavailability
+	retries        int             // consecutive failed refill attempts (circuit breaker)
+	generation     int             // increments whenever radio starts/stops to ignore stale results
+}
+
+const radioMaxRetries = 5 // give up re-arming after this many consecutive failures
+
 // ── Model ─────────────────────────────────────────────────────────────────
 
 type Model struct {
@@ -258,6 +297,9 @@ type Model struct {
 	// Discovery mode
 	discovery discoveryMode
 
+	// Radio mode
+	radio radioMode
+
 	// Panels
 	panels      []ContentView // registered content panels; add new ones in New()
 	activePanel int           // index into panels; -1 = none active
@@ -266,6 +308,7 @@ type Model struct {
 	lyricsP     *lyricsPanel
 	feedP       *feedPanel
 	eqP         *eqPanel
+	aboutP      *aboutPanel
 
 	// Lyrics
 	lyricsClient      *lyrics.Client
@@ -352,7 +395,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
 	m.favorites = make(map[string]bool)
-	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP}
+	m.aboutP = &aboutPanel{m: views.NewAbout()}
+	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
@@ -431,6 +475,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lyricsP.SetSize(contentW, panelH)
 		m.feedP.SetSize(contentW, panelH)
 		m.eqP.SetSize(contentW, panelH)
+		m.aboutP.SetSize(contentW, panelH)
 
 	case tickMsg:
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
@@ -495,6 +540,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.discovery.skipped = make(map[string]bool)
 			}
 			m.discovery.skipped[skippedID] = true
+			if m.radio.skipped == nil {
+				m.radio.skipped = make(map[string]bool)
+			}
+			m.radio.skipped[skippedID] = true
 			m.purgeSkippedFromQueue()
 			if m.discovery.enabled && !m.discovery.refilling &&
 				m.discovery.retries < discoveryMaxRetries {
@@ -505,6 +554,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.runDiscoverySearch())
 			} else if m.discovery.retries >= discoveryMaxRetries {
 				m.appendLog("[discovery] max retries reached — giving up")
+			}
+			if m.radio.enabled && !m.radio.refilling &&
+				m.radio.retries < radioMaxRetries {
+				m.radio.retries++
+				m.radio.triggeredForID = ""
+				m.radio.refilling = true
+				cmds = append(cmds, m.runRadioSearch())
+			} else if m.radio.retries >= radioMaxRetries {
+				m.appendLog("[radio] max retries reached — giving up")
 			}
 		}
 		if s.Track == nil || s.Track.ArtworkURL == "" {
@@ -574,6 +632,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.discovery.refilling = true
 			m.syncDiscoveryView()
 			cmds = append(cmds, m.runDiscoverySearch())
+		}
+		// Radio: same last-track refill trigger as discovery, but always
+		// continuous (no one-shot mode).
+		if m.radio.enabled && !m.radio.refilling &&
+			isLastQueued &&
+			m.radio.triggeredForID != s.Track.ID {
+			m.radio.triggeredForID = s.Track.ID
+			m.radio.refilling = true
+			cmds = append(cmds, m.runRadioSearch())
 		}
 		m.playerState = s
 		if !wasPlaying && m.playerState.Playing {
@@ -663,6 +730,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[feed] playing %q (%d tracks)", msg.item.Title, len(ids)))
 			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
+		if msg.playNext {
+			return m, m.playNextCmd(msg.item.Title, msg.tracks, ids)
+		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
@@ -684,7 +754,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case vibeResultMsg:
+		if msg.radio && (!m.radio.enabled || msg.radioGen != m.radio.generation) {
+			break
+		}
 		if msg.err != nil {
+			if msg.radio {
+				m.appendLog(fmt.Sprintf("[radio] search error: %v", msg.err))
+				m.radio.refilling = false
+				break
+			}
 			if !msg.discovery {
 				m.vibe.SetResult(0, msg.err)
 			}
@@ -695,17 +773,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
-		// For discovery results, drop any track that arrived in the blacklist
-		// while the search was in flight (race between search goroutine and a
-		// concurrent goSkipped notification), and also drop any track already
-		// present in the queue (dedup by ID and artist||title).
+		// For discovery/radio results, drop any track that arrived in the
+		// blacklist while the search was in flight (race between search
+		// goroutine and a concurrent goSkipped notification), and also drop
+		// any track already present in the queue (dedup by ID and
+		// artist||title).
 		tracks := msg.tracks
-		if msg.discovery {
+		if msg.discovery || msg.radio {
+			skipped := m.discovery.skipped
+			if msg.radio {
+				skipped = m.radio.skipped
+			}
 			filtered := tracks[:0]
 			for _, t := range tracks {
 				id := views.PlaybackID(t)
 				key := strings.ToLower(t.Artist + "||" + t.Title)
-				if m.discovery.skipped[id] {
+				if skipped[id] {
 					continue
 				}
 				dup := slices.Contains(m.queueIDs, id)
@@ -724,18 +807,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			tracks = filtered
 		}
 		if len(tracks) == 0 {
-			if msg.discovery && m.discovery.retries < discoveryMaxRetries {
+			switch {
+			case msg.discovery && m.discovery.retries < discoveryMaxRetries:
 				m.discovery.retries++
 				m.discovery.refilling = true
 				m.syncDiscoveryView()
 				cmds = append(cmds, m.runDiscoverySearch())
-			} else {
-				if msg.discovery {
-					m.discovery.refilling = false
-					m.syncDiscoveryView()
-				} else {
-					m.vibe.SetResult(0, fmt.Errorf("no streamable results"))
-				}
+			case msg.radio && m.radio.retries < radioMaxRetries:
+				m.radio.retries++
+				m.radio.refilling = true
+				cmds = append(cmds, m.runRadioSearch())
+			case msg.discovery:
+				m.discovery.refilling = false
+				m.syncDiscoveryView()
+			case msg.radio:
+				m.radio.refilling = false
+			default:
+				m.vibe.SetResult(0, fmt.Errorf("no streamable results"))
 			}
 			break
 		}
@@ -745,7 +833,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.player != nil {
 			if err := m.player.AppendQueue(ids); err != nil {
-				if !msg.discovery {
+				if !msg.discovery && !msg.radio {
 					m.vibe.SetResult(0, err)
 				}
 				break
@@ -754,7 +842,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.queueTracks = append(m.queueTracks, tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
-		if msg.discovery {
+		switch {
+		case msg.discovery:
 			m.discovery.refilling = false
 			m.discovery.retries = 0 // successful refill — reset circuit breaker
 			if !m.discovery.autoMode {
@@ -764,7 +853,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncDiscoveryView()
 			m.appendLog(fmt.Sprintf("[discovery] refilled %d tracks", len(tracks)))
-		} else {
+		case msg.radio:
+			m.radio.refilling = false
+			m.radio.retries = 0 // successful refill — reset circuit breaker
+			m.appendLog(fmt.Sprintf("[radio] refilled %d tracks", len(tracks)))
+		default:
 			m.vibe.SetResult(len(tracks), nil)
 			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(tracks), msg.query))
 		}
@@ -834,11 +927,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerState.Position = 0
 			return m, m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
 		}
+		if msg.playNext {
+			m.mode = modeNormal
+			return m, m.playNextCmd(msg.label, msg.tracks, ids)
+		}
 		m.queueTracks = append(m.queueTracks, msg.tracks...)
 		m.queueIDs = append(m.queueIDs, ids...)
 		m.queue.SetTracks(m.queueTracks)
 		m.appendLog(fmt.Sprintf("[search] queued %q (%d tracks)", msg.label, len(ids)))
 		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(ids) })
+
+	case views.QueueTracksMsg:
+		if len(msg.Tracks) == 0 || len(msg.IDs) == 0 {
+			break
+		}
+		if msg.PlayNext {
+			return m, m.playNextCmd(msg.Label, msg.Tracks, msg.IDs)
+		}
+		m.queueTracks = append(m.queueTracks, msg.Tracks...)
+		m.queueIDs = append(m.queueIDs, msg.IDs...)
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[library] queued %q (%d tracks)", msg.Label, len(msg.IDs)))
+		return m, m.playerCmd(func(p player.Player) error { return p.AppendQueue(msg.IDs) })
 
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
@@ -1055,12 +1165,12 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		// Album: fetch all tracks then play.
 		if a := m.search.SelectedAlbum(); a != nil {
 			m.playerState.Loading = true
-			return m.fetchSearchCollectionCmd(a, nil, true)
+			return m.fetchSearchCollectionCmd(a, nil, true, false)
 		}
 		// Playlist: fetch all tracks then play.
 		if p := m.search.SelectedPlaylist(); p != nil {
 			m.playerState.Loading = true
-			return m.fetchSearchCollectionCmd(nil, p, true)
+			return m.fetchSearchCollectionCmd(nil, p, true, false)
 		}
 		return nil
 	case "tab":
@@ -1075,11 +1185,34 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		}
 		// Album: fetch all tracks then add to queue.
 		if a := m.search.SelectedAlbum(); a != nil {
-			return m.fetchSearchCollectionCmd(a, nil, false)
+			return m.fetchSearchCollectionCmd(a, nil, false, false)
 		}
 		// Playlist: fetch all tracks then add to queue.
 		if p := m.search.SelectedPlaylist(); p != nil {
-			return m.fetchSearchCollectionCmd(nil, p, false)
+			return m.fetchSearchCollectionCmd(nil, p, false, false)
+		}
+		return nil
+	case "shift+tab":
+		// Track: play next.
+		if t := m.search.SelectedTrack(); t != nil {
+			tc := *t
+			return m.playNextCmd(tc.Artist+" — "+tc.Title, []provider.Track{tc}, []string{views.PlaybackID(tc)})
+		}
+		// Album: fetch all tracks then play next.
+		if a := m.search.SelectedAlbum(); a != nil {
+			return m.fetchSearchCollectionCmd(a, nil, false, true)
+		}
+		// Playlist: fetch all tracks then play next.
+		if p := m.search.SelectedPlaylist(); p != nil {
+			return m.fetchSearchCollectionCmd(nil, p, false, true)
+		}
+		return nil
+	case "ctrl+r":
+		// Start radio seeded by the selected search track. A bare "r" would
+		// steal a letter from the live search query, so this mirrors ctrl+p
+		// (playlist picker) below.
+		if t := m.search.SelectedTrack(); t != nil {
+			return m.startRadioFrom(t)
 		}
 		return nil
 	case "up", "down", "pgup", "pgdown":
@@ -1179,6 +1312,8 @@ var allCommands = []cmdEntry{
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"mute", "mute", "Toggle mute"},
+	{"about", "about", "Show information about vibez"},
+	{"donate", "donate", "Support vibez development by donating"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
@@ -1254,6 +1389,21 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			_ = m.player.Close()
 		}
 		return tea.Quit
+	case cmd == "about":
+		for i, p := range m.panels {
+			if p == m.aboutP {
+				m.activePanel = i
+				break
+			}
+		}
+		return nil
+	case cmd == "donate":
+		m.errMsg = "✓ Opening donation link..."
+		m.errExpiry = time.Now().Add(5 * time.Second)
+		return func() tea.Msg {
+			_ = openurl.Open("https://ko-fi.com/pelpsi")
+			return nil
+		}
 	case cmd == "debug-logs":
 		m.debugView = !m.debugView
 		m.debugScroll = 0
@@ -1463,7 +1613,7 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 //
 // Playlist routing: IDs starting with "p." are library playlists; everything else
 // uses the catalog endpoint.
-func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool) tea.Cmd {
+func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool, playNext bool) tea.Cmd {
 	prov := m.provider
 	if album != nil {
 		snap := *album
@@ -1472,7 +1622,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			tracks, err := prov.GetAlbumTracks(ctx, snap.ID)
-			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, err: err}
+			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, playNext: playNext, err: err}
 		}
 	}
 	if playlist != nil {
@@ -1489,7 +1639,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 			} else {
 				tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
 			}
-			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, err: err}
+			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, playNext: playNext, err: err}
 		}
 	}
 	return nil
@@ -1497,7 +1647,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 
 // fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
 // plays them (play=true) or appends them to the queue.
-func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool) tea.Cmd {
+func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool, playNext bool) tea.Cmd {
 	snap := *item
 	prov := m.provider
 	m.appendLog(fmt.Sprintf("[feed] loading %q (%s)…", snap.Title, snap.Kind))
@@ -1514,7 +1664,7 @@ func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play b
 		default:
 			err = fmt.Errorf("unknown kind %q", snap.Kind)
 		}
-		return feedTracksMsg{item: snap, tracks: tracks, play: play, err: err}
+		return feedTracksMsg{item: snap, tracks: tracks, play: play, playNext: playNext, err: err}
 	}
 }
 
@@ -1530,6 +1680,7 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	if sim == 0 {
 		sim = 0.7 // default if no metric was selected yet
 	}
+	m.stopRadio() // discovery and radio both refill on the last-track trigger — mutually exclusive
 	m.discovery.enabled = true
 	m.discovery.autoMode = autoMode
 	m.discovery.refillCap = n
@@ -1545,6 +1696,168 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 	m.appendLog(fmt.Sprintf("[discovery] started from %q (similarity %.0f%%, mode=%s)",
 		m.playerState.Track.Title, sim*100, mode))
 	return m.runDiscoverySearch()
+}
+
+// startRadioFrom activates radio mode seeded by the given track, replacing
+// any radio session already in progress.
+func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
+	if seed == nil {
+		return nil
+	}
+	m.discovery.enabled = false // discovery and radio are mutually exclusive
+	m.radio.generation++
+	m.radio.enabled = true
+	m.radio.seed = seed
+	m.radio.skipped = nil
+	m.radio.refilling = true // guard against double-trigger while search is in flight
+	m.radio.triggeredForID = ""
+	m.radio.retries = 0
+	m.appendLog(fmt.Sprintf("[radio] started from %q", seed.Title))
+	return tea.Batch(m.dropQueueAfter(seed), m.runRadioSearch())
+}
+
+// dropQueueAfter removes any tracks queued after seed's position so a
+// freshly started radio session plays next, rather than waiting for
+// whatever was already lined up (e.g. the rest of an album) to finish —
+// the last-track refill trigger otherwise never fires until that happens.
+// Tracks up to and including seed are left alone. If seed isn't in the
+// queue at all (e.g. seeded from a search result), it's inserted as the
+// next track to play instead.
+func (m *Model) dropQueueAfter(seed *provider.Track) tea.Cmd {
+	seedID := views.PlaybackID(*seed)
+	seedIdx := -1
+	for i, t := range m.queueTracks {
+		if views.PlaybackID(t) == seedID {
+			seedIdx = i
+			break
+		}
+	}
+	if seedIdx < 0 {
+		return m.playNextCmd(seed.Artist+" — "+seed.Title, []provider.Track{*seed}, []string{seedID})
+	}
+	origLen := len(m.queueTracks)
+	if seedIdx == origLen-1 {
+		return nil
+	}
+	// Blacklist the dropped tracks so the imminent radio refill can't hand
+	// them right back — station results are often the very same tracks
+	// (same album/playlist context as the seed), and the refill's dedup
+	// only checks what's still in the queue.
+	if m.radio.skipped == nil {
+		m.radio.skipped = make(map[string]bool)
+	}
+	for _, t := range m.queueTracks[seedIdx+1:] {
+		m.radio.skipped[views.PlaybackID(t)] = true
+		m.radio.skipped[strings.ToLower(t.Artist+"||"+t.Title)] = true
+	}
+	m.queueTracks = m.queueTracks[:seedIdx+1]
+	m.queueIDs = m.queueIDs[:seedIdx+1]
+	m.queue.SetTracks(m.queueTracks)
+	m.appendLog(fmt.Sprintf("[radio] dropped %d queued track(s) ahead of the seed", origLen-seedIdx-1))
+	return m.playerCmd(func(p player.Player) error {
+		for i := origLen - 1; i > seedIdx; i-- {
+			if err := p.RemoveFromQueue(i); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// stopRadio disables radio mode and clears its state.
+func (m *Model) stopRadio() {
+	if !m.radio.enabled {
+		return
+	}
+	m.radio.enabled = false
+	m.radio.seed = nil
+	m.radio.skipped = nil
+	m.radio.refilling = false
+	m.radio.triggeredForID = ""
+	m.radio.generation++
+	m.appendLog("[radio] stopped")
+}
+
+// runRadioSearch fetches the next batch of tracks for the active radio
+// station and returns a vibeResultMsg tagged as a radio refill, mirroring
+// runDiscoverySearch's dedup/exclude handling.
+func (m *Model) runRadioSearch() tea.Cmd {
+	if !m.radio.enabled || m.radio.seed == nil {
+		return nil
+	}
+	seed := m.radio.seed
+	catalogID := seed.CatalogID
+	if catalogID == "" {
+		catalogID = seed.ID
+	}
+	prov := m.provider
+	radioGen := m.radio.generation
+
+	exclude := make(map[string]bool, len(m.radio.skipped)+len(m.queueIDs))
+	for k := range m.radio.skipped {
+		exclude[k] = true
+	}
+	for _, id := range m.queueIDs {
+		exclude[id] = true
+	}
+	for _, t := range m.queueTracks {
+		exclude[strings.ToLower(t.Artist+"||"+t.Title)] = true
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		res, err := prov.GetStationTracks(ctx, catalogID)
+		if err != nil {
+			return vibeResultMsg{radio: true, radioGen: radioGen, err: err}
+		}
+		var merged []provider.Track
+		seen := map[string]bool{}
+		for _, t := range res {
+			id := views.PlaybackID(t)
+			key := strings.ToLower(t.Artist + "||" + t.Title)
+			if exclude[id] || exclude[key] || seen[key] {
+				continue
+			}
+			seen[key] = true
+			merged = append(merged, t)
+		}
+		if len(merged) == 0 {
+			return vibeResultMsg{radio: true, radioGen: radioGen}
+		}
+		return vibeResultMsg{radio: true, radioGen: radioGen, tracks: merged}
+	}
+}
+
+func (m *Model) forwardToActivePanel(msg tea.KeyPressMsg) tea.Cmd {
+	if m.activePanel < 0 {
+		return nil
+	}
+	k := msg.String()
+	if m.panels[m.activePanel] == m.feedP {
+		switch k {
+		case "r":
+			m.feedP.m.SetLoading()
+			return m.fetchFeedCmd()
+		case "enter":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				m.playerState.Loading = true
+				return m.fetchFeedItemTracksCmd(item, true, false)
+			}
+		case "tab":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				return m.fetchFeedItemTracksCmd(item, false, false)
+			}
+		case "shift+tab":
+			if item := m.feedP.m.SelectedItem(); item != nil {
+				return m.fetchFeedItemTracksCmd(item, false, true)
+			}
+		default:
+			return m.feedP.m.Update(msg)
+		}
+		return nil
+	}
+	return m.panels[m.activePanel].Update(msg)
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
@@ -1571,6 +1884,17 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	// When vibe panel has text-input focus or picker is open, route all keys to it.
 	if m.vibe.IsFocused() || m.vibe.PickerActive() {
 		return m.vibe.Update(msg)
+	}
+
+	if k == "L" {
+		m.library.m.ResetTopLevel()
+		for i, p := range m.panels {
+			if p == m.library {
+				m.activePanel = i
+				m.lastKey = ""
+				return nil
+			}
+		}
 	}
 
 	// Panel nav keys toggle their panel (always checked first).
@@ -1641,20 +1965,22 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				i := idx
 				return m.playerCmd(func(p player.Player) error { return p.RemoveFromQueue(i) })
 			}
-		case "K":
+		case "K", "shift+up", "ctrl+up":
 			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
 				m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
 				m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx - 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d up", idx+1))
 				from, to := idx, idx-1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
-		case "J":
+		case "J", "shift+down", "ctrl+down":
 			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
 				m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
 				m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
 				m.queue.SetTracks(m.queueTracks)
+				m.queue.Select(idx + 1)
 				m.appendLog(fmt.Sprintf("[queue] moved #%d down", idx+1))
 				from, to := idx, idx+1
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
@@ -1674,15 +2000,30 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			if _, t := m.queue.SelectedTrack(); t != nil {
 				return m.openPlaylistPicker(t)
 			}
+		case "R":
+			if m.radio.enabled {
+				m.stopRadio()
+				return nil
+			}
+			// Start radio seeded by the highlighted queue track.
+			if _, t := m.queue.SelectedTrack(); t != nil {
+				return m.startRadioFrom(t)
+			}
 		default:
 			return m.queue.Update(msg)
 		}
 		return nil
 	}
 
-	if m.activePanel >= 0 && k == "left" && m.panels[m.activePanel].Back() {
-		m.lastKey = ""
-		return nil
+	if m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP {
+		switch k {
+		case "esc":
+			m.activePanel = -1
+			m.lastKey = ""
+			return nil
+		case "left", "h", "right", "l", "up", "k", "down", "j", "0", "r":
+			return m.eqP.Update(msg)
+		}
 	}
 
 	// Player control keys always work, even when other panels are active.
@@ -1785,8 +2126,19 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		m.vibe.Focus()
 		return nil
 
+	case "R":
+		m.lastKey = ""
+		if m.radio.enabled {
+			m.stopRadio()
+			return nil
+		}
+		return m.startRadioFrom(m.playerState.Track)
+
 	case "left":
 		m.lastKey = ""
+		if m.activePanel >= 0 {
+			return m.forwardToActivePanel(msg)
+		}
 		if m.playerState.Track != nil {
 			newPos := max(0, m.playerState.Position-10*time.Second)
 			m.appendLog(fmt.Sprintf("[player] seek ← %s", views.FormatDuration(newPos)))
@@ -1796,6 +2148,9 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 	case "right":
 		m.lastKey = ""
+		if m.activePanel >= 0 {
+			return m.forwardToActivePanel(msg)
+		}
 		if m.playerState.Track != nil {
 			newPos := m.playerState.Position + 10*time.Second
 			if dur := m.playerState.Track.Duration; dur > 0 && newPos > dur {
@@ -1818,27 +2173,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 			m.lastKey = ""
 			return nil
 		}
-		// Feed panel special keys.
-		if m.panels[m.activePanel] == m.feedP {
-			switch k {
-			case "r":
-				m.feedP.m.SetLoading()
-				return m.fetchFeedCmd()
-			case "enter":
-				if item := m.feedP.m.SelectedItem(); item != nil {
-					m.playerState.Loading = true
-					return m.fetchFeedItemTracksCmd(item, true)
-				}
-			case "tab":
-				if item := m.feedP.m.SelectedItem(); item != nil {
-					return m.fetchFeedItemTracksCmd(item, false)
-				}
-			default:
-				return m.feedP.m.Update(msg)
-			}
-			return nil
-		}
-		return m.panels[m.activePanel].Update(msg)
+		return m.forwardToActivePanel(msg)
 	}
 
 	// Keys that only work when no panel is covering the content area.
@@ -2049,12 +2384,12 @@ func (m *Model) syncDiscoveryView() {
 // slots so both sides stay in sync. Iterates from the end so index removal
 // doesn't shift the positions of entries not yet processed.
 func (m *Model) purgeSkippedFromQueue() {
-	if len(m.discovery.skipped) == 0 {
+	if len(m.discovery.skipped) == 0 && len(m.radio.skipped) == 0 {
 		return
 	}
 	changed := false
 	for i := len(m.queueIDs) - 1; i >= 0; i-- {
-		if !m.discovery.skipped[m.queueIDs[i]] {
+		if !m.discovery.skipped[m.queueIDs[i]] && !m.radio.skipped[m.queueIDs[i]] {
 			continue
 		}
 		m.appendLog(fmt.Sprintf("[skip] removing from queue: %s — %s",
@@ -2407,6 +2742,56 @@ func (m *Model) playerCmd(fn func(player.Player) error) tea.Cmd {
 	}
 }
 
+func (m *Model) playNextCmd(label string, tracks []provider.Track, ids []string) tea.Cmd {
+	insertIdx := 0
+	if m.playerState.Track != nil {
+		for i, t := range m.queueTracks {
+			if views.PlaybackID(t) == views.PlaybackID(*m.playerState.Track) {
+				insertIdx = i + 1
+				break
+			}
+		}
+	}
+
+	origLen := len(m.queueTracks)
+	if origLen == 0 {
+		m.queueTracks = tracks
+		m.queueIDs = ids
+		m.playerState.Track = &tracks[0]
+		m.playerState.Loading = true
+		m.playerState.Playing = false
+		m.playerState.Position = 0
+		m.queue.SetTracks(m.queueTracks)
+		m.appendLog(fmt.Sprintf("[queue] play now: %s", label))
+		return m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
+	}
+
+	if insertIdx > origLen {
+		insertIdx = origLen
+	}
+
+	// Insert locally
+	m.queueTracks = append(m.queueTracks[:insertIdx], append(tracks, m.queueTracks[insertIdx:]...)...)
+	m.queueIDs = append(m.queueIDs[:insertIdx], append(ids, m.queueIDs[insertIdx:]...)...)
+	m.queue.SetTracks(m.queueTracks)
+
+	m.appendLog(fmt.Sprintf("[queue] play next: %s (%d track(s))", label, len(tracks)))
+
+	return m.playerCmd(func(p player.Player) error {
+		if err := p.AppendQueue(ids); err != nil {
+			return err
+		}
+		for i := range len(ids) {
+			from := origLen + i
+			to := insertIdx + i
+			if err := p.MoveInQueue(from, to); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (m *Model) adjustVolume(delta float64) tea.Cmd {
 	return func() tea.Msg {
 		if m.player == nil {
@@ -2467,7 +2852,8 @@ func (m *Model) renderBoxLayout() string {
 	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
 	feedActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP
 	eqActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP
-	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
+	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
+	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
 	var sb strings.Builder
 
@@ -2529,6 +2915,11 @@ func (m *Model) renderBoxLayout() string {
 	case eqActive:
 		m.eqP.SetSize(inner-2, panelH)
 		for _, line := range toLines(m.eqP.View(), panelH) {
+			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		}
+	case aboutActive:
+		m.aboutP.SetSize(inner-2, panelH)
+		for _, line := range toLines(m.aboutP.View(), panelH) {
 			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
 		}
 	default:
@@ -2679,6 +3070,7 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 		lines := make([]string, h)
 		mid := h / 2
 		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
+		lines[h-2] = centerStr(muted.Render("made with ❤️ by simonepelosi · press ? for about"), contentW)
 		if m.errMsg != "" {
 			var errRendered string
 			if strings.HasPrefix(m.errMsg, "✓") {
@@ -2888,7 +3280,8 @@ func (m *Model) searchLines(contentW, h int) []string {
 		kind = "playlist"
 	}
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
-		"  ·  " + accent.Render("Tab") + muted.Render(" add "+kind+" to queue") +
+		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
+		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
 		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
@@ -2938,7 +3331,7 @@ func (m *Model) statusNavContent(_ int) string {
 				styles.ModeNormal.Render("QUEUE"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
-				accent.Render("K/J") + muted.Render(" move up/down"),
+				accent.Render("Shift+↑/↓ / K/J") + muted.Render(" move"),
 				accent.Render("p") + muted.Render(" add to playlist"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
@@ -2948,6 +3341,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("LIBRARY"),
 				accent.Render("Enter") + muted.Render(" browse/play"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("esc") + muted.Render(" back/close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
@@ -2961,7 +3356,8 @@ func (m *Model) statusNavContent(_ int) string {
 			parts = []string{
 				styles.ModeNormal.Render("FEED"),
 				accent.Render("Enter") + muted.Render(" play"),
-				accent.Render("Tab") + muted.Render(" add to queue"),
+				accent.Render("Tab") + muted.Render(" queue"),
+				accent.Render("Shift+Tab") + muted.Render(" next"),
 				accent.Render("j/k") + muted.Render(" navigate"),
 				accent.Render("r") + muted.Render(" refresh"),
 				accent.Render("esc") + muted.Render(" close"),
@@ -2975,6 +3371,12 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("r") + muted.Render(" reset all"),
 				accent.Render("e") + muted.Render(" close"),
 			}
+		case m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP:
+			parts = []string{
+				styles.ModeNormal.Render("ABOUT"),
+				accent.Render("Enter/d") + muted.Render(" donate"),
+				accent.Render("esc/?") + muted.Render(" close"),
+			}
 		default:
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
@@ -2986,6 +3388,7 @@ func (m *Model) statusNavContent(_ int) string {
 				accent.Render("F") + muted.Render(" feed"),
 				accent.Render("e") + muted.Render(" equalizer"),
 				accent.Render("v") + muted.Render(" vibe"),
+				accent.Render("?") + muted.Render(" about"),
 				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
@@ -3006,6 +3409,11 @@ func (m *Model) statusPlayContent(_ int) string {
 		discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
 	}
 
+	radioHint := accent.Render("R") + muted.Render(" radio")
+	if m.radio.enabled {
+		radioHint = accent.Render("R") + styles.Playing.Render(" 📻 radio")
+	}
+
 	parts := []string{
 		accent.Render("spc") + muted.Render(" play/pause"),
 		accent.Render("n/p") + muted.Render(" next/prev"),
@@ -3014,6 +3422,7 @@ func (m *Model) statusPlayContent(_ int) string {
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
 		discoverHint,
+		radioHint,
 	}
 	return strings.Join(parts, dot)
 }

@@ -43,6 +43,8 @@ func (m *EQModel) SetSize(w, h int) { m.width = w; m.height = h }
 
 func (m *EQModel) Bands() []player.EQBand { return m.bands }
 
+func (m *EQModel) Cursor() int { return m.cursor }
+
 func (m *EQModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "left", "h":
