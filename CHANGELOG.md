@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-10
+
 ### Added
 - **Radio mode (`R`)** — press `R` on the currently playing track, a selected queue track, or a selected search result to start an Apple Music radio station seeded from it. Starting radio drops anything already queued after the seed track so its picks play next, and the queue auto-refills as it runs low; a `📻 radio` badge shows in the now-playing status bar while active. Press `R` again to stop. Closes #32.
 
@@ -16,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Radio mode had no effect mid-album/playlist** — enabling radio while an album or playlist was already queued did nothing until the very last queued track played, since refills only triggered once the current track became the last item in the queue. Radio now drops the rest of the queued album/playlist as soon as it starts, so its picks actually play next.
 - **Dropped album/playlist tracks came right back on refill** — the tracks dropped when radio started were only removed from the queue, not blacklisted, so the very next refill's dedup (which only checks what's still queued) let the station API hand them straight back — since station results are often from the same album/playlist context as the seed. Radio now blacklists dropped tracks so they can't be re-added.
 - **Playwright driver installation (404 error)** — Upgraded `playwright-go` dependency to `v0.6100.0` and migrated the module import path to `github.com/mxschmitt/playwright-go`. This resolves `404 Not Found` errors when fetching the driver because Microsoft deprecated pre-packaged driver zips on the old CDN, switching to npm and Node.js-based assembly. Closes #84.
+
+### Thanks
+
+- Thanks to @ian-swope for implementing radio mode seeded from any track.
+- Thanks to @useterm for upgrading playwright-go to v0.6100.0 to resolve the driver CDN 404 error.
 
 ## [0.4.1] — 2026-07-08
 
@@ -574,7 +581,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/simonepelosi/vibez/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/simonepelosi/vibez/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/simonepelosi/vibez/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/simonepelosi/vibez/compare/v0.3.0...v0.3.1
