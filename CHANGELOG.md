@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Album-art view (`:art`)** — toggle the now-playing panel between the progress bar and the album cover rendered as coloured Unicode half-blocks, centred above the track name, album, and elapsed time. Covers are downloaded per track (bounded, dimension-checked) and down-sampled with area averaging so they stay smooth at terminal size; the cover is sized square using the terminal's measured cell aspect ratio and re-renders are cached per size. Falls back to the bar view when the track has no artwork or the terminal has fewer than 256 colours, and the choice persists across restarts. Closes #33.
+
 ## [0.5.0] — 2026-07-10
 
 ### Added
