@@ -1,7 +1,7 @@
 GOFLAGS=-tags webkit2gtk_4_1
 PKG_CONFIG_PATH=$(CURDIR)/pkg-config
 
-.PHONY: build run test lint clean release build-with-token
+.PHONY: build run test lint clean release build-with-token refresh-token
 
 build:
 	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go build -o vibez .
@@ -52,6 +52,28 @@ release:
 		          -X 'github.com/simone-vibes/vibez/internal/lastfm.apiKey=$$LASTFM_API_KEY' \
 		          -X 'github.com/simone-vibes/vibez/internal/lastfm.apiSecret=$$LASTFM_API_SECRET'" \
 		-o vibez . && echo "Done."
+
+# refresh-token generates a fresh Apple developer JWT and writes it into your
+# local vibez config (apple_developer_token). Use it when the token expires
+# (~30 days) and you build without an embedded token (plain `make build`).
+#
+# Credentials are read from the environment or a local .env file (gitignored):
+#   APPLE_KEY_ID, APPLE_TEAM_ID
+#   APPLE_PRIVATE_KEY       - PEM contents of the .p8 key, OR
+#   APPLE_PRIVATE_KEY_FILE  - path to the .p8 key (~ is expanded)
+# After refreshing, run `vibez auth login` if your user token is not set.
+refresh-token:
+	@set -e; \
+	if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
+	if [ -z "$$APPLE_PRIVATE_KEY" ] && [ -n "$$APPLE_PRIVATE_KEY_FILE" ]; then \
+		APPLE_PRIVATE_KEY="$$(cat "$$(eval echo $$APPLE_PRIVATE_KEY_FILE)")"; \
+		export APPLE_PRIVATE_KEY; \
+	fi; \
+	test -n "$$APPLE_KEY_ID"      || { echo "APPLE_KEY_ID is not set (env or .env)";      exit 1; }; \
+	test -n "$$APPLE_TEAM_ID"     || { echo "APPLE_TEAM_ID is not set (env or .env)";     exit 1; }; \
+	test -n "$$APPLE_PRIVATE_KEY" || { echo "APPLE_PRIVATE_KEY or APPLE_PRIVATE_KEY_FILE is not set (env or .env)"; exit 1; }; \
+	export APPLE_KEY_ID APPLE_TEAM_ID APPLE_PRIVATE_KEY; \
+	GOFLAGS= go run ./scripts/gen-devtoken -write
 
 run: build
 	./vibez

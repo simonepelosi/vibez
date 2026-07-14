@@ -120,6 +120,41 @@ func TestGeneratedTokenClaims(t *testing.T) {
 	_ = pemStr // consumed above via generateTestKey
 }
 
+func TestGenerateToken_SignsWithClaims(t *testing.T) {
+	key, pemStr := generateTestKey(t)
+
+	signed, err := generateToken("KEYIDABC12", "TEAMIDXYZ9", pemStr)
+	if err != nil {
+		t.Fatalf("generateToken: %v", err)
+	}
+
+	parsed, err := jwt.Parse(signed, func(*jwt.Token) (any, error) {
+		return &key.PublicKey, nil
+	})
+	if err != nil {
+		t.Fatalf("parsing generated token: %v", err)
+	}
+	if !parsed.Valid {
+		t.Error("token should be valid")
+	}
+	if kid := parsed.Header["kid"]; kid != "KEYIDABC12" {
+		t.Errorf("kid = %v, want KEYIDABC12", kid)
+	}
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		t.Fatal("unexpected claims type")
+	}
+	if claims["iss"] != "TEAMIDXYZ9" {
+		t.Errorf("iss = %v, want TEAMIDXYZ9", claims["iss"])
+	}
+}
+
+func TestGenerateToken_InvalidKey(t *testing.T) {
+	if _, err := generateToken("kid", "team", "not-a-pem"); err == nil {
+		t.Error("expected error for invalid private key, got nil")
+	}
+}
+
 func TestTokenHasCorrectHeader(t *testing.T) {
 	key, _ := generateTestKey(t)
 

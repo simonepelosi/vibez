@@ -1,6 +1,10 @@
 // gen-devtoken generates a short-lived Apple Music developer JWT.
-// It reads credentials from environment variables and prints the signed token
-// to stdout so CI can capture and inject it at build time.
+// It reads credentials from environment variables and, by default, prints the
+// signed token to stdout so CI can capture and inject it at build time.
+//
+// With -write it instead writes the token into apple_developer_token in the
+// vibez config file, which is handy for local (non-embedded) builds where the
+// token expires every 30 days.
 //
 // Required env vars:
 //
@@ -13,21 +17,51 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/simone-vibes/vibez/internal/config"
 )
 
 func main() {
+	write := flag.Bool("write", false, "write the token into apple_developer_token in the vibez config instead of printing it to stdout")
+	configPath := flag.String("config", "", "config file to update with -write (default: ~/.config/vibez/config.json)")
+	flag.Parse()
+
 	keyID := mustEnv("APPLE_KEY_ID")
 	teamID := mustEnv("APPLE_TEAM_ID")
 	privateKeyPEM := mustEnv("APPLE_PRIVATE_KEY")
 
+	signed, err := generateToken(keyID, teamID, privateKeyPEM)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	if !*write {
+		fmt.Print(signed)
+		return
+	}
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fatalf("loading config: %v", err)
+	}
+	cfg.AppleDeveloperToken = signed
+	if err := cfg.Save(*configPath); err != nil {
+		fatalf("saving config: %v", err)
+	}
+	path, _ := config.ConfigPath(*configPath)
+	fmt.Fprintf(os.Stderr, "wrote developer token to %s\n", path)
+}
+
+// generateToken signs an Apple Music developer JWT valid for 30 days.
+func generateToken(keyID, teamID, privateKeyPEM string) (string, error) {
 	ecKey, err := parsePrivateKey(privateKeyPEM)
 	if err != nil {
-		fatalf("parsing private key: %v", err)
+		return "", fmt.Errorf("parsing private key: %w", err)
 	}
 
 	token := jwt.New(jwt.SigningMethodES256)
@@ -42,10 +76,9 @@ func main() {
 
 	signed, err := token.SignedString(ecKey)
 	if err != nil {
-		fatalf("signing token: %v", err)
+		return "", fmt.Errorf("signing token: %w", err)
 	}
-
-	fmt.Print(signed)
+	return signed, nil
 }
 
 func parsePrivateKey(pem string) (*ecdsa.PrivateKey, error) {
