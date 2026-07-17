@@ -1163,16 +1163,46 @@ type stationTracksResponse struct {
 	Data []songResource `json:"data"`
 }
 
-// GetStationTracks fetches a batch of tracks for an Apple Music radio
-// station seeded by the given catalog song ID. "ra.<songID>" is Apple's
-// synthetic per-song radio station ID — POSTing to its next-tracks endpoint
-// starts/continues that station without a separately created station
-// resource. Verified against the live API: next-tracks without an ID only
-// accepts GET, and next-tracks/{id} only accepts POST with a body (an empty
-// object is sufficient — the ID alone carries the seed).
-func (a *AppleProvider) GetStationTracks(ctx context.Context, seedCatalogID string) ([]provider.Track, error) {
-	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(seedCatalogID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+endpoint, strings.NewReader("{}")) //nolint:gosec // G107: URL is constructed from config, not user input
+// stationBatchTarget/stationMaxCalls bound how many upcoming tracks a single
+// refill pulls. Apple's next-tracks endpoint returns only ~2 tracks per call,
+// so we page a few times (each POST advances the station) to give the queue
+// meaningful runway, without issuing an unbounded number of requests.
+const (
+	stationBatchTarget = 10
+	stationMaxCalls    = 6
+)
+
+// resolveCatalogSongID maps a library song ID ("i.XXXX") to its Apple Music
+// catalog song ID via the song's playParams.catalogId. A station can only be
+// seeded by a catalog ID — seeding with a library ID returns HTTP 500. Returns
+// an error if the song has no catalog equivalent (e.g. an uploaded/unmatched
+// track), for which no per-song station exists.
+func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID string) (string, error) {
+	endpoint := "/me/library/songs/" + url.PathEscape(libraryID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
+	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+
+	var resp stationTracksResponse // same shape: { data: [songResource] }
+	if err := a.do(req, &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Data) == 0 || resp.Data[0].Attributes.PlayParams == nil || resp.Data[0].Attributes.PlayParams.CatalogID == "" {
+		return "", fmt.Errorf("library song %q has no Apple Music catalog equivalent", libraryID)
+	}
+	return resp.Data[0].Attributes.PlayParams.CatalogID, nil
+}
+
+// stationNextTracksPage fetches one batch (~2 tracks) of upcoming tracks for the
+// per-song station ra.<catalogID>. Each POST advances the station. next-tracks
+// without an ID only accepts GET; next-tracks/{id} only accepts POST with a body
+// (an empty object suffices — the ID carries the seed).
+func (a *AppleProvider) stationNextTracksPage(ctx context.Context, catalogID string) ([]provider.Track, error) {
+	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(catalogID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+endpoint, strings.NewReader("{}")) //nolint:gosec // G107: URL is constructed from a resolved catalog ID, not user input
 	if err != nil {
 		return nil, err
 	}
@@ -1182,13 +1212,58 @@ func (a *AppleProvider) GetStationTracks(ctx context.Context, seedCatalogID stri
 
 	var resp stationTracksResponse
 	if err := a.do(req, &resp); err != nil {
-		return nil, fmt.Errorf("GetStationTracks: %w", err)
+		return nil, err
 	}
 	tracks := make([]provider.Track, 0, len(resp.Data))
 	for _, s := range resp.Data {
 		tracks = append(tracks, toTrack(s))
 	}
 	return tracks, nil
+}
+
+// GetStationTracks returns a batch of upcoming tracks for the Apple Music radio
+// station seeded by the given song. "ra.<catalogSongID>" is Apple's synthetic
+// per-song station ID. The seed MUST be a catalog song ID; a library ID
+// ("i.XXXX") is resolved to its catalog ID first (a raw library seed 500s).
+// Because each next-tracks call yields only ~2 tracks, several pages are
+// accumulated (deduped) up to stationBatchTarget so refills have runway.
+func (a *AppleProvider) GetStationTracks(ctx context.Context, seed string) ([]provider.Track, error) {
+	if strings.HasPrefix(seed, "i.") {
+		catalogID, err := a.resolveCatalogSongID(ctx, seed)
+		if err != nil {
+			return nil, fmt.Errorf("GetStationTracks: resolve catalog id: %w", err)
+		}
+		seed = catalogID
+	}
+
+	var out []provider.Track
+	seen := make(map[string]bool)
+	for calls := 0; len(out) < stationBatchTarget && calls < stationMaxCalls; calls++ {
+		page, err := a.stationNextTracksPage(ctx, seed)
+		if err != nil {
+			if len(out) > 0 {
+				break // return what we already have rather than fail the refill
+			}
+			return nil, fmt.Errorf("GetStationTracks: %w", err)
+		}
+		added := 0
+		for _, t := range page {
+			key := t.ID
+			if key == "" {
+				key = t.CatalogID
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, t)
+			added++
+		}
+		if added == 0 {
+			break // station returned nothing new — stop paging
+		}
+	}
+	return out, nil
 }
 
 // ratingRequest is the body for PUT /v1/me/ratings/songs/{id}.

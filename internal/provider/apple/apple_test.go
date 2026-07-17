@@ -1068,6 +1068,94 @@ func TestGetStationTracks_HTTPError(t *testing.T) {
 	}
 }
 
+func TestGetStationTracks_Batches(t *testing.T) {
+	// Apple returns ~2 tracks per next-tracks call; GetStationTracks should page
+	// several times and accumulate a larger, deduped batch.
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		n := calls.Add(1)
+		writeJSON(t, w, map[string]any{"data": []any{
+			songJSON("s"+strconv.FormatInt(n*2-1, 10), "T", "A", "Al", 200000, ""),
+			songJSON("s"+strconv.FormatInt(n*2, 10), "T", "A", "Al", 200000, ""),
+		}})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetStationTracks(context.Background(), "500")
+	if err != nil {
+		t.Fatalf("GetStationTracks: %v", err)
+	}
+	if len(tracks) != 10 {
+		t.Fatalf("expected 10 accumulated tracks, got %d (server calls=%d)", len(tracks), calls.Load())
+	}
+}
+
+func TestGetStationTracks_ResolvesLibraryID(t *testing.T) {
+	// A library seed ("i.XXXX") 500s at Apple, so it must be resolved to its
+	// catalog id (playParams.catalogId) before seeding the station.
+	var stationPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/me/library/songs/i.LIB1"):
+			writeJSON(t, w, map[string]any{"data": []any{
+				songJSONWithCatalog("i.LIB1", "777", "Lib Song", "Artist", "Album", 200000, ""),
+			}})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "stations/next-tracks/"):
+			stationPath = r.URL.Path
+			writeJSON(t, w, map[string]any{"data": []any{
+				songJSON("1001", "Related", "A", "Al", 200000, ""),
+			}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetStationTracks(context.Background(), "i.LIB1")
+	if err != nil {
+		t.Fatalf("GetStationTracks: %v", err)
+	}
+	if !strings.Contains(stationPath, "ra.777") {
+		t.Errorf("station should be seeded with resolved catalog id ra.777, got path %q", stationPath)
+	}
+	if len(tracks) == 0 {
+		t.Error("expected tracks after resolving library id")
+	}
+}
+
+func TestGetStationTracks_LibraryNoCatalog(t *testing.T) {
+	// A library song with no catalog equivalent has no per-song station: error
+	// out cleanly instead of seeding with a doomed library id.
+	var stationCalled atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "stations/next-tracks/") {
+			stationCalled.Store(true)
+		}
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/me/library/songs/") {
+			writeJSON(t, w, map[string]any{"data": []any{
+				songJSON("i.LIB2", "Uploaded", "Artist", "Album", 200000, ""), // no catalogId
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if _, err := p.GetStationTracks(context.Background(), "i.LIB2"); err == nil {
+		t.Error("expected error for library song with no catalog equivalent")
+	}
+	if stationCalled.Load() {
+		t.Error("should not hit the station endpoint when the catalog id cannot be resolved")
+	}
+}
+
 // --- LoveSong ---
 
 func TestLoveSong_LoveSuccess(t *testing.T) {
