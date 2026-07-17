@@ -9,8 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Radio refills pull a larger batch** — Apple's `next-tracks` endpoint returns only ~2 tracks per call, so `GetStationTracks` now pages several times (deduped, up to a target of 10) to give the queue more runway between refills.
+
 ### Fixed
 - **Search failures were reported as empty results** — `Search` queries the library, catalog songs, and catalog albums/playlists in parallel and only returned an error when all three failed, so one dead backend silently produced a thinner result set instead of a failure. Discovery refills then discarded the error entirely, leaving `[vibe] search error: no results` as the only clue. Partial failures are now carried on `SearchResult.Warnings`, logged as `[search] partial results: …`, and named in the "no results" message, so an unreachable backend is distinguishable from a query that genuinely matched nothing. Refs #93.
+- **Radio mode failed to start from a library song** — a per-song station can only be seeded by a catalog song ID; seeding with a library ID (`i.XXXX`) returns HTTP 500. `GetStationTracks` now resolves a library seed to its catalog ID (via the song's `playParams.catalogId`) before starting the station, and reports a clear error when a library song has no catalog equivalent. Radio seeded from a playlist already worked because those tracks carry catalog IDs.
 
 ## [0.5.0] — 2026-07-10
 
