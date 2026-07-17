@@ -31,7 +31,7 @@
 
 vibez is an open-source TUI Apple Music player for Linux and macOS. Search, queue, and control playback entirely from the keyboard.
 
-Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on other Linux builds, WebKit + GStreamer remains available as a 30-second preview backend. On macOS, install Google Chrome before using Apple Music playback.
+Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on Linux arm64, vibez uses a system-installed Chromium plus a system Widevine CDM (Google publishes no arm64 Chrome for Linux). Where neither is available, WebKit + GStreamer remains available as a 30-second preview backend. On macOS, install Google Chrome before using Apple Music playback.
 
 ---
 
@@ -146,7 +146,7 @@ cd vibez
 make build-with-token   # requires APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KEY
 ```
 
-**Requirements:** Linux x86-64 or macOS · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS · Apple Developer Account with a MusicKit key
+**Requirements:** Linux x86-64 or arm64, or macOS · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS · on Linux arm64, a system Chromium + Widevine CDM for full-track playback (e.g. `pacman -S chromium widevine`) · Apple Developer Account with a MusicKit key
 
 ---
 
@@ -336,10 +336,10 @@ Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `ta
 
 | Engine | Tracks | How it works |
 |--------|--------|--------------|
-| **Chrome + Widevine** | Full tracks | Chrome via Playwright; MusicKit JS + Widevine DRM |
+| **Chrome + Widevine** | Full tracks | Chrome (amd64) or system Chromium (arm64) via Playwright; MusicKit JS + Widevine DRM |
 | **WebKit + GStreamer** *(Linux fallback)* | 30 s previews | Embedded webkit2gtk-4.1; GStreamer decodes preview URLs |
 
-On Linux, Chrome is downloaded once to `~/.cache/vibez/chrome` and the Playwright driver is stored in `~/.cache/vibez/driver`. On macOS, vibez uses an installed Google Chrome app.
+On Linux amd64, Chrome is downloaded once to `~/.cache/vibez/chrome`. On Linux arm64, vibez uses the system Chromium with a persistent profile in `~/.cache/vibez/chromium-arm64` and a system-registered Widevine CDM (registered on a one-time warm-up launch). The Playwright driver is stored in `~/.cache/vibez/driver`. On macOS, vibez uses an installed Google Chrome app.
 
 ---
 

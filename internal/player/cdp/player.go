@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -32,10 +33,10 @@ type Player struct {
 	OnStorefront     func(sf string)
 	OnSessionExpired func()
 
-	pw      *playwright.Playwright
-	browser playwright.Browser
-	page    playwright.Page
-	srv     *http.Server
+	pw           *playwright.Playwright
+	closeBrowser func()
+	page         playwright.Page
+	srv          *http.Server
 
 	mu                 sync.RWMutex
 	state              player.State
@@ -86,37 +87,17 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	if _, err := os.Stat(chromePath); err != nil {
 		chromePath = ChromePath() // fall back if link not yet created
 	}
-	// Playwright injects --mute-audio into every headless Chromium launch.
-	// We must strip it so Chrome's audio service can route through
-	// PulseAudio/PipeWire normally. Use headless when we have a saved token
-	// (no auth UI needed); show a real window for first-run interactive login.
+	// Use headless when we have a saved token (no auth UI needed); show a real
+	// window for first-run interactive login.
 	headless := userToken != ""
 
-	// To ensure DRM (Widevine) playback works correctly in headless mode, we
-	// launch in headless mode (Headless = true) and pass "--headless=new" in
-	// the browser arguments. Playwright by default blocks Google Chrome component
-	// updates via the --disable-component-update flag; we must ignore this default
-	// argument to allow Chrome to download/load the Widevine CDM component.
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		ExecutablePath:    &chromePath,
-		Headless:          &headless,
-		IgnoreDefaultArgs: []string{"--mute-audio", "--disable-component-update"},
-		Args:              chromeLaunchArgs(headless, wsl),
-	})
+	pg, closeBrowser, err := launchBrowser(pw, chromePath, headless, wsl)
 	if err != nil {
 		_ = pw.Stop()
 		_ = srv.Close()
 		return nil, fmt.Errorf("cdp: launch browser: %w", err)
 	}
-	p.browser = browser
-
-	pg, err := browser.NewPage()
-	if err != nil {
-		_ = browser.Close()
-		_ = pw.Stop()
-		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: new page: %w", err)
-	}
+	p.closeBrowser = closeBrowser
 	p.page = pg
 
 	// Forward page crashes and unhandled JS errors to errCh so WaitReady
@@ -222,7 +203,7 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 
 	for name, fn := range bindings {
 		if err := pg.ExposeFunction(name, fn); err != nil {
-			_ = browser.Close()
+			closeBrowser()
 			_ = pw.Stop()
 			_ = srv.Close()
 			return nil, fmt.Errorf("cdp: expose %s: %w", name, err)
@@ -241,6 +222,55 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	}()
 
 	return p, nil
+}
+
+// launchBrowser starts Chromium and returns the page to drive plus a close
+// function. On linux/arm64 it uses a persistent profile (chromiumProfileDir) so
+// Chromium's Widevine component "hint file" — written during EnsureBrowser's
+// warm-up — is read and the CDM loads; every other platform uses an ephemeral
+// launch, where Google Chrome bundles Widevine directly.
+//
+// Playwright injects --mute-audio into every headless Chromium launch; we strip
+// it so audio routes through PulseAudio/PipeWire. Playwright also injects
+// --disable-component-update; we strip it so Chrome can load the Widevine CDM
+// component. DRM in headless mode is enabled via --headless=new (chromeLaunchArgs).
+func launchBrowser(pw *playwright.Playwright, chromePath string, headless, wsl bool) (playwright.Page, func(), error) {
+	ignore := []string{"--mute-audio", "--disable-component-update"}
+	args := chromeLaunchArgs(headless, wsl)
+
+	if runtime.GOARCH == "arm64" {
+		ctx, err := pw.Chromium.LaunchPersistentContext(chromiumProfileDir(), playwright.BrowserTypeLaunchPersistentContextOptions{
+			ExecutablePath:    &chromePath,
+			Headless:          &headless,
+			IgnoreDefaultArgs: ignore,
+			Args:              args,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		pg, err := ctx.NewPage()
+		if err != nil {
+			_ = ctx.Close()
+			return nil, nil, err
+		}
+		return pg, func() { _ = ctx.Close() }, nil
+	}
+
+	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
+		ExecutablePath:    &chromePath,
+		Headless:          &headless,
+		IgnoreDefaultArgs: ignore,
+		Args:              args,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	pg, err := browser.NewPage()
+	if err != nil {
+		_ = browser.Close()
+		return nil, nil, err
+	}
+	return pg, func() { _ = browser.Close() }, nil
 }
 
 func (p *Player) sendError(err error) {
@@ -365,7 +395,9 @@ func (p *Player) dispatch(js string) {
 
 func (p *Player) Run() {
 	<-p.doneCh
-	_ = p.browser.Close()
+	if p.closeBrowser != nil {
+		p.closeBrowser()
+	}
 	_ = p.pw.Stop()
 	_ = p.srv.Close()
 }

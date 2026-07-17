@@ -21,6 +21,11 @@ builds:
       - linux
     goarch:
       - amd64
+      # linux/arm64 works at runtime (internal/player/cdp discovers a system
+      # Chromium + Widevine CDM), but is not published here yet: this CGO/webkit
+      # build needs an aarch64 toolchain (CC=aarch64-linux-gnu-gcc + arm64
+      # webkit2gtk) or a native arm64 runner. Until then arm64 users build from
+      # source with `make build`.
 
   - id: vibez-darwin
     binary: vibez

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -20,10 +19,7 @@ import (
 )
 
 func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
-	_, chromeErr := os.Stat(cdp.ChromePath())
-	cdpAvailable := chromeErr == nil || runtime.GOARCH == "amd64"
-
-	if cdpAvailable {
+	if cdp.Available() {
 		return runCDPFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps, cdpPlatformHooks{
 			initStatus: "Initializing vibez...",
 			afterReady: func(cdpPlayer *cdp.Player) {
