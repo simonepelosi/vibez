@@ -86,8 +86,10 @@ type Provider interface {
 	// playlists) from Apple Music based on the user's library and history.
 	GetRecommendations(ctx context.Context) ([]RecommendationGroup, error)
 	// GetStationTracks fetches a batch of tracks for an Apple Music radio
-	// station seeded by the given catalog song ID.
-	GetStationTracks(ctx context.Context, seedCatalogID string) ([]Track, error)
+	// station seeded by the given song. The seed may be a catalog song ID or a
+	// library ID ("i.XXXX"); a library ID is resolved to its catalog ID first,
+	// since a station can only be seeded by a catalog ID.
+	GetStationTracks(ctx context.Context, seed string) ([]Track, error)
 	// AddToPlaylist adds a track to an existing library playlist.
 	// playlistID must be a library playlist ID (e.g. "p.XXXXX").
 	// trackID should be a catalog song ID or a library song ID ("i.XXXXX").

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Radio mode failed to start from a library song** — a per-song station can only be seeded by a catalog song ID; seeding with a library ID (`i.XXXX`) returns HTTP 500. `GetStationTracks` now resolves a library seed to its catalog ID (via the song's `playParams.catalogId`) before starting the station, and reports a clear error when a library song has no catalog equivalent. Radio seeded from a playlist already worked because those tracks carry catalog IDs.
+
+### Changed
+- **Radio refills pull a larger batch** — Apple's `next-tracks` endpoint returns only ~2 tracks per call, so `GetStationTracks` now pages several times (deduped, up to a target of 10) to give the queue more runway between refills.
+
 ## [0.5.0] — 2026-07-10
 
 ### Added
