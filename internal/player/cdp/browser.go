@@ -108,7 +108,7 @@ func systemBrowserRealBinaries() []string {
 }
 
 func usableExecutable(p string) bool {
-	st, err := os.Stat(p)
+	st, err := os.Stat(p) //nolint:gosec // G703: path is an operator-provided (VIBEZ_CHROME_PATH) or fixed system browser path, not attacker input
 	return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
 }
 
@@ -237,7 +237,7 @@ func ensureBrowserARM64(onProgress func(string)) error {
 	}
 	onProgress(fmt.Sprintf("Using system browser: %s", browser))
 	if widevineCDMDir() == "" {
-		return fmt.Errorf("Widevine CDM not found (required for full-track playback); %s", chromeInstallHelpARM64)
+		return fmt.Errorf("no Widevine CDM found (required for full-track playback); %s", chromeInstallHelpARM64)
 	}
 
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
@@ -301,7 +301,7 @@ func warmUpWidevineARM64(onProgress func(string)) error {
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("Widevine CDM did not register within timeout; %s", chromeInstallHelpARM64)
+	return fmt.Errorf("timed out waiting for the Widevine CDM to register; %s", chromeInstallHelpARM64)
 }
 
 // ensureBrowserAMD64 downloads and extracts Google Chrome into vibez's private
