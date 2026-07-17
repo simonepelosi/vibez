@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Linux/arm64 (aarch64) full-track playback** — the Chrome/CDP backend now runs on arm64 Linux, where Google publishes no Chrome build. vibez discovers a system Chromium and a system-registered Widevine CDM instead of downloading a browser, warms up the CDM once (Chromium registers it via a component-updater hint file that needs a persistent profile at `~/.cache/vibez/chromium-arm64`), and falls back to the WebKit 30 s preview backend when a browser or CDM is missing. Requires building from source (`make build`) plus a system Chromium + Widevine CDM (e.g. `pacman -S chromium widevine`). Addresses #11.
+
 ### Fixed
 - **Search failures were reported as empty results** — `Search` queries the library, catalog songs, and catalog albums/playlists in parallel and only returned an error when all three failed, so one dead backend silently produced a thinner result set instead of a failure. Discovery refills then discarded the error entirely, leaving `[vibe] search error: no results` as the only clue. Partial failures are now carried on `SearchResult.Warnings`, logged as `[search] partial results: …`, and named in the "no results" message, so an unreachable backend is distinguishable from a query that genuinely matched nothing. Refs #93.
 
