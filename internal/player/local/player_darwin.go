@@ -148,32 +148,29 @@ static void vibez_destroy(vibez_audio_state *s){
 import "C"
 
 import (
-	"flag"
 	"fmt"
 	"sync"
 	"time"
 	"unsafe"
 
-	"github.com/golangci/golangci-lint/pkg/golinters/nilerr"
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
-	"golang.org/x/exp/slog/benchmarks"
 )
 
 // Player implements player.Player for local audio files using CoreAudio
 type Player struct {
-	mu sync.RWMutex
+	mu    sync.RWMutex
 	state player.State
-	subs []chan player.State
+	subs  []chan player.State
 	queue []provider.Track
-	idx int
+	idx   int
 	audio *C.vibez_audio_state
-	done chan struct{}
+	done  chan struct{}
 }
 
 // New creates a local Player backed by CoreAudio
-func New() (*Player, error){
+func New() (*Player, error) {
 	p := &Player{done: make(chan struct{})}
 	go p.pollState()
 	return p, nil
@@ -184,7 +181,7 @@ func (p *Player) pollState() {
 	defer ticker.Stop()
 	for {
 		select {
-		case <- ticker.C:
+		case <-ticker.C:
 			p.mu.RLock()
 			playing := p.state.Playing
 			p.mu.RUnlock()
@@ -195,13 +192,13 @@ func (p *Player) pollState() {
 			s := p.state
 			p.mu.Unlock()
 			p.broadcast(s)
-		case <- p.done:
+		case <-p.done:
 			return
 		}
 	}
 }
 
-func (p *Player) broadcast(s player.State){
+func (p *Player) broadcast(s player.State) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, ch := range p.subs {
@@ -219,7 +216,7 @@ func (p *Player) playTrack(t provider.Track) {
 
 	p.mu.Lock()
 
-	if(p.audio != nil) {
+	if p.audio != nil {
 		C.vibez_destroy(p.audio)
 		p.audio = nil
 	}
@@ -229,7 +226,7 @@ func (p *Player) playTrack(t provider.Track) {
 	defer C.free(unsafe.Pointer(cs))
 
 	audio := C.vibez_open(cs)
-	if(audio == nil) {
+	if audio == nil {
 		p.mu.Lock()
 		p.state.Error = fmt.Sprintf("failed to open: %s", path)
 		s := p.state
@@ -249,7 +246,7 @@ func (p *Player) playTrack(t provider.Track) {
 	p.state.Track = &t
 	p.state.Playing = true
 	p.state.Position = 0
-	if(duration > 0) {
+	if duration > 0 {
 		p.state.Track.Duration = duration
 	}
 	s := p.state
@@ -361,7 +358,7 @@ func (p *Player) SetAudioBitrate(kbps int) error {
 }
 
 func (p *Player) SetQueue(ids []string) error {
-	if len(ids) == 0{
+	if len(ids) == 0 {
 		return nil
 	}
 	p.mu.Lock()
@@ -389,7 +386,7 @@ func (p *Player) SetPlaylist(_ string, startIdx int) error {
 		p.mu.Unlock()
 		return nil
 	}
-	if startIdx >=0 && startIdx < len(p.queue) {
+	if startIdx >= 0 && startIdx < len(p.queue) {
 		p.idx = startIdx
 	} else {
 		p.idx = 0
@@ -415,12 +412,12 @@ func (p *Player) SetRepeat(mode int) error {
 	return nil
 }
 
-func (p *Player) SetEqualizer(_ []Player.EQBand) error {return nil}
+func (p *Player) SetEqualizer(_ []player.EQBand) error { return nil }
 
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
-	if idx >=0 && idx < len(p.queue) {
-		p.queue = append(p.queue[:idx], p.queue[idx+1]...)
+	if idx >= 0 && idx < len(p.queue) {
+		p.queue = append(p.queue[:idx], p.queue[idx+1:]...)
 		switch {
 		case idx == p.idx:
 			p.state.Track = nil
@@ -440,13 +437,13 @@ func (p *Player) RemoveFromQueue(idx int) error {
 
 func (p *Player) MoveInQueue(from, to int) error {
 	p.mu.Lock()
-	if from >=0 && from < len(p.queue) && to >=0 && to <len(p.queue) {
+	if from >= 0 && from < len(p.queue) && to >= 0 && to < len(p.queue) {
 		t := p.queue[from]
 		p.queue = append(p.queue[:from], p.queue[from+1:]...)
 		if from < to {
 			to--
 		}
-		p.queue = append(p.queue[:to], append([]provider.Track{t}, p.queue...[to:]...)...)
+		p.queue = append(p.queue[:to], append([]provider.Track{t}, p.queue[to:]...)...)
 		switch {
 		case from == p.idx:
 			p.idx = to
@@ -510,6 +507,20 @@ func (p *Player) Close() error {
 func (p *Player) LoadTracks(tracks []provider.Track) {
 	p.mu.Lock()
 	p.queue = append([]provider.Track{}, tracks...)
-	p.idx = 0;
+	p.idx = 0
 	p.mu.Unlock()
+}
+
+func tracksForIDs(tracks []provider.Track, ids []string) []provider.Track {
+	byID := make(map[string]provider.Track, len(tracks))
+	for _, t := range tracks {
+		byID[t.ID] = t
+	}
+	out := make([]provider.Track, 0, len(ids))
+	for _, id := range ids {
+		if t, ok := byID[id]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
 }
