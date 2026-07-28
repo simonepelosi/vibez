@@ -46,6 +46,9 @@ func (p *Provider) scan() error {
 	p.tracks = nil
 	return filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsPermission(err) {
+				return filepath.SkipDir
+			}
 			return err
 		}
 		if info.IsDir() {

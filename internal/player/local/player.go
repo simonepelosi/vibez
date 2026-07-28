@@ -233,8 +233,18 @@ func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
 	if idx >= 0 && idx < len(p.queue) {
 		p.queue = append(p.queue[:idx], p.queue[idx+1:]...)
+		switch {
+		case idx == p.idx:
+			p.state.Track = nil
+			p.state.Playing = false
+			p.gst.Stop()
+		case idx < p.idx:
+			p.idx--
+		}
 	}
+	s := p.state
 	p.mu.Unlock()
+	p.broadcast(s)
 	return nil
 }
 
@@ -247,6 +257,15 @@ func (p *Player) MoveInQueue(from, to int) error {
 			to--
 		}
 		p.queue = append(p.queue[:to], append([]provider.Track{t}, p.queue[to:]...)...)
+
+		switch {
+		case from == p.idx:
+			p.idx = to
+		case from < p.idx && to >= p.idx:
+			p.idx--
+		case from > p.idx && to <= p.idx:
+			p.idx++
+		}
 	}
 	p.mu.Unlock()
 	return nil
