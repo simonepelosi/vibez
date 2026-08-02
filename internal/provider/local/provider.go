@@ -204,3 +204,7 @@ func (p *Provider) GetRecommendations(_ context.Context) ([]provider.Recommendat
 	}
 	return groups, nil
 }
+
+func (p *Provider) GetStationTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}

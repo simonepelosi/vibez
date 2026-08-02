@@ -25,6 +25,9 @@ typedef struct {
 	void* goPlayer;
 } vibez_audio_state;
 
+// This is called from C back into GO when the track ends
+extern void vibezOnEOS(void* player);
+
 // forward declaration
 static void vibez_audio_callback(void* ctx, AudioQueueRef queue, AudioQueueBufferRef buf);
 
@@ -49,6 +52,7 @@ static void vibez_audio_callback(void *ctx, AudioQueueRef queue, AudioQueueBuffe
 	if(vibez_fill_buffer(s, buf)) {
 		s->done = 1;
 		AudioQueueStop(queue, false);
+		vibezOnEOS(s->goPlayer);
 		return;
 	}
 	AudioQueueEnqueueBuffer(queue, buf, 0, NULL);
@@ -61,7 +65,7 @@ static vibez_audio_state* vibez_open(const char *uri){
 	if(!s) return NULL;
 
 	CFStringRef cfPath = CFStringCreateWithCString(NULL, uri, kCFStringEncodingUTF8);
-	CFURLRef url = CFURLCreateWithString(NULL, cfPath, NULL);
+	CFURLRef url = CFURLCreateWithFileSystemPath(NULL, cfPath, kCFURLPOSIXPathStyle, false);
 	CFRelease(cfPath);
 
 	OSStatus err = ExtAudioFileOpenURL(url, &s->file);
@@ -209,10 +213,16 @@ func (p *Player) broadcast(s player.State) {
 	}
 }
 
+// export vibezOnEOS
+func vibezOnEOS(ptr unsafe.Pointer) {
+	p := (*Player)(ptr)
+	_ = p.Next()
+}
+
 func (p *Player) playTrack(t provider.Track) {
 	// Stripping the "local:" prefix to get the raw fle path
 	path := t.ID[len("local:"):]
-	uri := "file://" + path
+	uri := path
 
 	p.mu.Lock()
 
@@ -235,6 +245,7 @@ func (p *Player) playTrack(t provider.Track) {
 		return
 	}
 
+	audio.goPlayer = unsafe.Pointer(p)
 	C.vibez_start(audio)
 
 	// Read duration
