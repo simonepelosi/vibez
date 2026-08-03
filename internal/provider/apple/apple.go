@@ -464,6 +464,19 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 
 	result := &provider.SearchResult{}
 
+	// A single failing leg is not fatal: the other two still carry usable
+	// results. Record it so callers can report an incomplete search instead of
+	// presenting it as an empty one.
+	if lib.err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("library search: %v", lib.err))
+	}
+	if catSongs.err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("catalog song search: %v", catSongs.err))
+	}
+	if catColl.err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("catalog album/playlist search: %v", catColl.err))
+	}
+
 	// Library songs first — guaranteed playable.
 	seen := make(map[string]bool)
 	if lib.err == nil {

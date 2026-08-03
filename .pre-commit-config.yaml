@@ -46,7 +46,7 @@ repos:
     hooks:
       - id: musickit-js-test
         name: musickit js test
-        language: node
+        language: system
         entry: node internal/player/web/musickit_test.mjs
         files: '^internal/player/(web|webkit/web)/musickit'
         pass_filenames: false

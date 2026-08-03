@@ -53,6 +53,12 @@ type SearchResult struct {
 	Tracks    []Track
 	Albums    []Album
 	Playlists []Playlist
+
+	// Warnings carries non-fatal failures from providers that query several
+	// backends in parallel and return whatever succeeded. Without it a caller
+	// cannot distinguish "nothing matched the query" from "one backend is
+	// down and these results are incomplete".
+	Warnings []string
 }
 
 type Provider interface {

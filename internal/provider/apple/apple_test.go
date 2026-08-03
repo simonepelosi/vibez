@@ -263,6 +263,65 @@ func TestSearch_EmptyResults(t *testing.T) {
 	}
 }
 
+func TestSearch_PartialFailureRecordedAsWarning(t *testing.T) {
+	// One failing leg must not look like an empty catalog. When the catalog-song
+	// search fails but the library and album/playlist legs succeed, Search still
+	// returns the library results — and must say the result is incomplete.
+	libSong := songJSON("i.AbCdEf", "Humble", "Kendrick Lamar", "DAMN.", 212000, "")
+	libResp := map[string]any{
+		"results": map[string]any{
+			"library-songs":     map[string]any{"data": []any{libSong}},
+			"library-playlists": map[string]any{"data": []any{}},
+		},
+	}
+	empty := map[string]any{"results": map[string]any{}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/me/library/search"):
+			writeJSON(t, w, libResp)
+		case r.URL.Query().Get("types") == "songs":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			writeJSON(t, w, empty)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	result, err := p.Search(context.Background(), "humble")
+	if err != nil {
+		t.Fatalf("Search: got error %v, want nil (two legs succeeded)", err)
+	}
+	if len(result.Tracks) != 1 || result.Tracks[0].ID != "i.AbCdEf" {
+		t.Errorf("Tracks: got %+v, want the library song", result.Tracks)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("Warnings: got %d (%v), want 1", len(result.Warnings), result.Warnings)
+	}
+	if !strings.Contains(result.Warnings[0], "catalog song search") {
+		t.Errorf("Warnings[0] = %q, want it to name the catalog song search", result.Warnings[0])
+	}
+}
+
+func TestSearch_NoWarningsWhenAllLegsSucceed(t *testing.T) {
+	empty := map[string]any{"results": map[string]any{}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		searchHandler(t, w, r, empty, empty)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	result, err := p.Search(context.Background(), "zzznoresults")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("Warnings: got %v, want none — an empty result is not a failure", result.Warnings)
+	}
+}
+
 func TestSearch_QueryEncoded(t *testing.T) {
 	var gotURLs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

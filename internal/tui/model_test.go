@@ -3857,3 +3857,52 @@ func TestQueueReordering(t *testing.T) {
 		t.Errorf("expected selected index to be 1 after moving down, got %d", idx)
 	}
 }
+
+func TestDedupeStrings(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil input", nil, nil},
+		{"empty input", []string{}, nil},
+		{"drops repeats, keeps order", []string{"b", "a", "b", "a"}, []string{"b", "a"}},
+		{"drops empty strings", []string{"", "a", ""}, []string{"a"}},
+		{"all empty", []string{"", ""}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dedupeStrings(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("dedupeStrings(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("dedupeStrings(%v)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestNoResultsError(t *testing.T) {
+	// Without reasons the message stays as it was.
+	if got := noResultsError("jazz", nil).Error(); got != `no results for "jazz"` {
+		t.Errorf("noResultsError with no reasons = %q", got)
+	}
+
+	// With reasons the cause has to survive into the message — that is the whole
+	// point: a backend failure and an empty catalog match are otherwise identical
+	// from the log.
+	err := noResultsError("jazz", []string{"catalog song search: 401", "catalog song search: 401"})
+	got := err.Error()
+	if !strings.Contains(got, `no results for "jazz"`) {
+		t.Errorf("noResultsError = %q, want it to keep the query", got)
+	}
+	if !strings.Contains(got, "catalog song search: 401") {
+		t.Errorf("noResultsError = %q, want it to name the failing backend", got)
+	}
+	if strings.Count(got, "catalog song search") != 1 {
+		t.Errorf("noResultsError = %q, want the repeated reason collapsed to one", got)
+	}
+}

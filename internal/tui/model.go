@@ -159,9 +159,10 @@ type vibeResultMsg struct {
 	query     string
 	tracks    []provider.Track
 	err       error
-	discovery bool // true when result is from a discovery auto-refill
-	radio     bool // true when result is from a radio auto-refill
-	radioGen  int  // radio generation that produced this result
+	warnings  []string // non-fatal provider failures behind an incomplete result
+	discovery bool     // true when result is from a discovery auto-refill
+	radio     bool     // true when result is from a radio auto-refill
+	radioGen  int      // radio generation that produced this result
 }
 type loveSongMsg struct {
 	title string
@@ -788,6 +789,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			break
 		}
+		// A result can succeed and still be incomplete when one provider backend
+		// failed. Say so: otherwise a thin result set reads as a sparse catalog
+		// rather than a broken backend.
+		if len(msg.warnings) > 0 {
+			m.appendLog(fmt.Sprintf("[search] partial results: %s", strings.Join(msg.warnings, "; ")))
+		}
+
 		// For discovery/radio results, drop any track that arrived in the
 		// blacklist while the search was in flight (race between search
 		// goroutine and a concurrent goSkipped notification), and also drop
@@ -909,6 +917,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.SetResults(nil, false, msg.err)
 		} else {
 			if msg.result != nil {
+				if len(msg.result.Warnings) > 0 {
+					m.appendLog(fmt.Sprintf("[search] partial results: %s",
+						strings.Join(msg.result.Warnings, "; ")))
+				}
 				m.appendLog(fmt.Sprintf("[search] %d track(s), %d album(s), %d playlist(s)",
 					len(msg.result.Tracks), len(msg.result.Albums), len(msg.result.Playlists)))
 			}
@@ -2310,8 +2322,9 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 		defer cancel()
 
 		type searchOut struct {
-			tracks []provider.Track
-			err    error
+			tracks   []provider.Track
+			warnings []string
+			err      error
 		}
 		chs := make([]chan searchOut, len(allQueries))
 		for i, q := range allQueries {
@@ -2323,15 +2336,22 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 					out <- searchOut{err: err}
 					return
 				}
-				out <- searchOut{tracks: res.Tracks}
+				out <- searchOut{tracks: res.Tracks, warnings: res.Warnings}
 			}(q, ch)
 		}
 
-		// Merge results and deduplicate by (artist, title).
+		// Merge results and deduplicate by (artist, title). Failures and
+		// partial-result warnings are collected rather than dropped: when the
+		// merge comes back empty they are the only explanation available.
 		seen := map[string]bool{}
 		var merged []provider.Track
+		var reasons []string
 		for _, ch := range chs {
 			r := <-ch
+			if r.err != nil {
+				reasons = append(reasons, r.err.Error())
+			}
+			reasons = append(reasons, r.warnings...)
 			for _, t := range r.tracks {
 				key := strings.ToLower(t.Artist + "||" + t.Title)
 				if !seen[key] {
@@ -2344,8 +2364,18 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 		if len(merged) == 0 {
 			// Fallback to raw input.
 			res, err := prov.Search(ctx, query)
+			if err != nil {
+				reasons = append(reasons, err.Error())
+			}
+			if res != nil {
+				reasons = append(reasons, res.Warnings...)
+			}
 			if err != nil || res == nil || len(res.Tracks) == 0 {
-				return vibeResultMsg{query: query, err: fmt.Errorf("no results for %q", query)}
+				return vibeResultMsg{
+					query:    query,
+					err:      noResultsError(query, reasons),
+					warnings: dedupeStrings(reasons),
+				}
 			}
 			merged = res.Tracks
 		}
@@ -2357,8 +2387,38 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 		if len(merged) > cap {
 			merged = merged[:cap]
 		}
-		return vibeResultMsg{query: query, tracks: merged}
+		return vibeResultMsg{query: query, tracks: merged, warnings: dedupeStrings(reasons)}
 	}
+}
+
+// noResultsError builds the error shown when a search yields nothing. The
+// reasons, when present, distinguish an empty catalog match from a backend
+// that failed — the two are indistinguishable to a user otherwise.
+func noResultsError(query string, reasons []string) error {
+	reasons = dedupeStrings(reasons)
+	if len(reasons) == 0 {
+		return fmt.Errorf("no results for %q", query)
+	}
+	return fmt.Errorf("no results for %q (%s)", query, strings.Join(reasons, "; "))
+}
+
+// dedupeStrings returns s without duplicates, preserving order. Parallel
+// searches against one provider report the same backend failure once per
+// query, so the raw list is mostly repetition.
+func dedupeStrings(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
@@ -2479,7 +2539,11 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		type out struct{ tracks []provider.Track }
+		type out struct {
+			tracks   []provider.Track
+			warnings []string
+			err      error
+		}
 		chs := make([]chan out, len(queries))
 		for i, q := range queries {
 			ch := make(chan out, 1)
@@ -2487,17 +2551,22 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 			go func(term string, c chan out) {
 				res, err := prov.Search(ctx, term)
 				if err != nil || res == nil {
-					c <- out{}
+					c <- out{err: err}
 					return
 				}
-				c <- out{tracks: res.Tracks}
+				c <- out{tracks: res.Tracks, warnings: res.Warnings}
 			}(q, ch)
 		}
 
 		seen := map[string]bool{}
 		var merged []provider.Track
+		var reasons []string
 		for _, ch := range chs {
 			r := <-ch
+			if r.err != nil {
+				reasons = append(reasons, r.err.Error())
+			}
+			reasons = append(reasons, r.warnings...)
 			for _, t := range r.tracks {
 				id := views.PlaybackID(t)
 				key := strings.ToLower(t.Artist + "||" + t.Title)
@@ -2518,9 +2587,17 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 			merged = merged[:refillCap]
 		}
 		if len(merged) == 0 {
-			return vibeResultMsg{discovery: true, err: fmt.Errorf("no results")}
+			reasons := dedupeStrings(reasons)
+			if len(reasons) == 0 {
+				return vibeResultMsg{discovery: true, err: errors.New("no results")}
+			}
+			return vibeResultMsg{
+				discovery: true,
+				err:       fmt.Errorf("no results (%s)", strings.Join(reasons, "; ")),
+				warnings:  reasons,
+			}
 		}
-		return vibeResultMsg{discovery: true, tracks: merged}
+		return vibeResultMsg{discovery: true, tracks: merged, warnings: dedupeStrings(reasons)}
 	}
 }
 
