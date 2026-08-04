@@ -26,7 +26,7 @@ typedef struct {
 } vibez_audio_state;
 
 // This is called from C back into GO when the track ends
-extern void vibezOnEOS(void* player);
+extern void vibezOnEOS(uintptr_t handle);
 
 // forward declaration
 static void vibez_audio_callback(void* ctx, AudioQueueRef queue, AudioQueueBufferRef buf);
@@ -52,7 +52,7 @@ static void vibez_audio_callback(void *ctx, AudioQueueRef queue, AudioQueueBuffe
 	if(vibez_fill_buffer(s, buf)) {
 		s->done = 1;
 		AudioQueueStop(queue, false);
-		vibezOnEOS(s->goPlayer);
+		vibezOnEOS((uintptr_t)s->goPlayer);
 		return;
 	}
 	AudioQueueEnqueueBuffer(queue, buf, 0, NULL);
@@ -153,6 +153,7 @@ import "C"
 
 import (
 	"fmt"
+	"runtime/cgo"
 	"sync"
 	"time"
 	"unsafe"
@@ -171,12 +172,18 @@ type Player struct {
 	idx   int
 	audio *C.vibez_audio_state
 	done  chan struct{}
+	eosCh chan struct{}
+	handle cgo.Handle
 }
 
 // New creates a local Player backed by CoreAudio
 func New() (*Player, error) {
-	p := &Player{done: make(chan struct{})}
+	p := &Player{
+		done: make(chan struct{}),
+		eosCh: make(chan struct{}, 1),
+	}
 	go p.pollState()
+	go p.eosLoop()
 	return p, nil
 }
 
@@ -213,10 +220,25 @@ func (p *Player) broadcast(s player.State) {
 	}
 }
 
-// export vibezOnEOS
+func (p *Player) eosLoop(){
+	for{
+		select{
+		case <-p.eosCh:
+			_ = p.Next()
+		case <-p.done:
+			return
+		}
+	}
+}
+
+//export vibezOnEOS
 func vibezOnEOS(ptr unsafe.Pointer) {
-	p := (*Player)(ptr)
-	_ = p.Next()
+	handle := cgo.Handle(h)
+	p := handle.Value().(*Player)
+	select {
+	case p.eosCh <- struct{}{}:
+	default:
+	}
 }
 
 func (p *Player) playTrack(t provider.Track) {
@@ -245,7 +267,11 @@ func (p *Player) playTrack(t provider.Track) {
 		return
 	}
 
-	audio.goPlayer = unsafe.Pointer(p)
+	if p.handle != 0 {
+		p.handle.Delete()
+	}
+	p.handle = cgo.NewHandle(p)
+	audio.goPlayer = unsafe.Pointer(uintptr(p.handle))
 	C.vibez_start(audio)
 
 	// Read duration
@@ -510,6 +536,10 @@ func (p *Player) Close() error {
 	if p.audio != nil {
 		C.vibez_destroy(p.audio)
 		p.audio = nil
+	}
+	if p.handle != 0 {
+		p.handle.Delete()
+		p.handle = 0
 	}
 	p.mu.Unlock()
 	return nil
