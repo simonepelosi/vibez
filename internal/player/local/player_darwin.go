@@ -22,7 +22,7 @@ typedef struct {
 	ExtAudioFileRef file;
 	AudioStreamBasicDescription format;
 	int done;
-	void* goPlayer;
+	uintptr_t goPlayer;
 } vibez_audio_state;
 
 // This is called from C back into GO when the track ends
@@ -165,21 +165,21 @@ import (
 
 // Player implements player.Player for local audio files using CoreAudio
 type Player struct {
-	mu    sync.RWMutex
-	state player.State
-	subs  []chan player.State
-	queue []provider.Track
-	idx   int
-	audio *C.vibez_audio_state
-	done  chan struct{}
-	eosCh chan struct{}
+	mu     sync.RWMutex
+	state  player.State
+	subs   []chan player.State
+	queue  []provider.Track
+	idx    int
+	audio  *C.vibez_audio_state
+	done   chan struct{}
+	eosCh  chan struct{}
 	handle cgo.Handle
 }
 
 // New creates a local Player backed by CoreAudio
 func New() (*Player, error) {
 	p := &Player{
-		done: make(chan struct{}),
+		done:  make(chan struct{}),
 		eosCh: make(chan struct{}, 1),
 	}
 	go p.pollState()
@@ -220,9 +220,9 @@ func (p *Player) broadcast(s player.State) {
 	}
 }
 
-func (p *Player) eosLoop(){
-	for{
-		select{
+func (p *Player) eosLoop() {
+	for {
+		select {
 		case <-p.eosCh:
 			_ = p.Next()
 		case <-p.done:
@@ -233,8 +233,7 @@ func (p *Player) eosLoop(){
 
 //export vibezOnEOS
 func vibezOnEOS(ptr unsafe.Pointer) {
-	handle := cgo.Handle(h)
-	p := handle.Value().(*Player)
+	p := cgo.Handle(uintptr(h)).Value().(*Player)
 	select {
 	case p.eosCh <- struct{}{}:
 	default:
@@ -271,7 +270,7 @@ func (p *Player) playTrack(t provider.Track) {
 		p.handle.Delete()
 	}
 	p.handle = cgo.NewHandle(p)
-	audio.goPlayer = unsafe.Pointer(uintptr(p.handle))
+	audio.goPlayer = C.uintptr_t(p.handle)
 	C.vibez_start(audio)
 
 	// Read duration
