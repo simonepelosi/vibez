@@ -68,6 +68,8 @@ func linkHelper() {
 func isDriverUpToDate() bool {
 	driver, err := playwright.NewDriver(&playwright.RunOptions{
 		DriverDirectory: driverDir(),
+		Stdout:          driverOutput(),
+		Stderr:          driverOutput(),
 	})
 	if err != nil {
 		return false
@@ -104,6 +106,8 @@ func EnsureBrowser(onProgress func(string)) error {
 	if err := playwright.Install(&playwright.RunOptions{
 		DriverDirectory:     driverDir(),
 		SkipInstallBrowsers: true,
+		Stdout:              driverOutput(),
+		Stderr:              driverOutput(),
 	}); err != nil {
 		return fmt.Errorf("playwright driver: %w", err)
 	}
@@ -212,6 +216,8 @@ func runPlaywright() (*playwright.Playwright, error) {
 	pw, err := playwright.Run(&playwright.RunOptions{
 		DriverDirectory:     driverDir(),
 		SkipInstallBrowsers: true,
+		Stdout:              driverOutput(),
+		Stderr:              driverOutput(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("playwright driver: %w", err)
