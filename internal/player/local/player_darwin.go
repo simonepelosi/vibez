@@ -232,7 +232,7 @@ func (p *Player) eosLoop() {
 }
 
 //export vibezOnEOS
-func vibezOnEOS(ptr unsafe.Pointer) {
+func vibezOnEOS(h C.uintptr_t) {
 	p := cgo.Handle(uintptr(h)).Value().(*Player)
 	select {
 	case p.eosCh <- struct{}{}:
@@ -437,6 +437,13 @@ func (p *Player) AppendQueue(ids []string) error {
 	extra := tracksForIDs(p.queue, ids)
 	p.mu.Lock()
 	p.queue = append(p.queue, extra...)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *Player) SetShuffle(on bool) error {
+	p.mu.Lock()
+	p.state.ShuffleMode = on
 	p.mu.Unlock()
 	return nil
 }
