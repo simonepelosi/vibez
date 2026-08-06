@@ -83,14 +83,10 @@ func EnsureBrowser(onProgress func(string)) error {
 		return err
 	}
 
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress(fmt.Sprintf("Using Google Chrome: %s", chromePath))
 	onProgress("Fetching browser driver...")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-	}); err != nil {
-		return fmt.Errorf("playwright driver: %w", err)
+	if err := installPlaywrightDriver(); err != nil {
+		return err
 	}
 	return nil
 }
