@@ -86,27 +86,19 @@ func EnsureBrowser(onProgress func(string)) error {
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress(fmt.Sprintf("Using Google Chrome: %s", chromePath))
 	onProgress("Fetching browser driver...")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	}); err != nil {
-		return fmt.Errorf("playwright driver: %w", err)
+	driverOptions, driverOutput := newDriverRunOptions(driverDir())
+	if err := playwright.Install(driverOptions); err != nil {
+		return fmt.Errorf("playwright driver: %w", addDriverOutput(err, driverOutput))
 	}
 	return nil
 }
 
 func runPlaywright() (*playwright.Playwright, error) {
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
-	pw, err := playwright.Run(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	})
+	driverOptions, driverOutput := newDriverRunOptions(driverDir())
+	pw, err := playwright.Run(driverOptions)
 	if err != nil {
-		return nil, fmt.Errorf("playwright driver: %w", err)
+		return nil, fmt.Errorf("playwright driver: %w", addDriverOutput(err, driverOutput))
 	}
 	return pw, nil
 }
