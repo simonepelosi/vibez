@@ -139,6 +139,37 @@ func TestInstallPlaywrightDriverReplacesOutdatedCache(t *testing.T) {
 	}
 }
 
+func TestPreparePlaywrightDriverInstallRemovesCacheWithStaleCLI(t *testing.T) {
+	setTestCacheHome(t)
+
+	driver, err := playwright.NewDriver(&playwright.RunOptions{DriverDirectory: driverDir()})
+	if err != nil {
+		t.Fatalf("create Playwright driver: %v", err)
+	}
+	if driver.Version == outdatedPlaywrightVersion {
+		t.Fatalf("test requires an outdated version, current version is %q", driver.Version)
+	}
+	packageDir := filepath.Join(driverDir(), "package")
+	if err := os.MkdirAll(packageDir, 0o750); err != nil {
+		t.Fatalf("create inconsistent driver cache: %v", err)
+	}
+	packageJSON := fmt.Sprintf(`{"version":%q}`, driver.Version)
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(packageJSON), 0o600); err != nil {
+		t.Fatalf("write current driver metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "cli.js"), []byte(outdatedPlaywrightVersion), 0o600); err != nil {
+		t.Fatalf("write stale driver CLI: %v", err)
+	}
+	setVersionReportingNode(t)
+
+	if err := preparePlaywrightDriverInstall(); err != nil {
+		t.Fatalf("prepare driver install: %v", err)
+	}
+	if _, err := os.Stat(driverDir()); !os.IsNotExist(err) {
+		t.Fatalf("inconsistent driver cache still exists: %v", err)
+	}
+}
+
 func TestPreparePlaywrightDriverInstallPreservesCurrentCache(t *testing.T) {
 	setTestCacheHome(t)
 

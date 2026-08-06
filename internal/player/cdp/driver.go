@@ -3,10 +3,9 @@
 package cdp
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	playwright "github.com/mxschmitt/playwright-go"
 )
@@ -18,18 +17,11 @@ func isDriverUpToDate() bool {
 	if err != nil {
 		return false
 	}
-	packageJSONPath := filepath.Join(driverDir(), "package", "package.json")
-	data, err := os.ReadFile(packageJSONPath) //nolint:gosec // path constructed from cache dir
+	output, err := driver.Command("--version").Output()
 	if err != nil {
 		return false
 	}
-	var pkg struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
-		return false
-	}
-	return pkg.Version == driver.Version
+	return bytes.Contains(output, []byte(driver.Version))
 }
 
 func preparePlaywrightDriverInstall() error {

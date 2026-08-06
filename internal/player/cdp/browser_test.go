@@ -322,6 +322,10 @@ func TestEnsureBrowser_AlreadyInstalled(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(pkgJSON), 0o600); err != nil { //nolint:gosec // test fixture
 		t.Fatalf("write driver package.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "cli.js"), []byte(driver.Version), 0o600); err != nil { //nolint:gosec // test fixture
+		t.Fatalf("write driver CLI: %v", err)
+	}
+	setVersionReportingNode(t)
 
 	var progress []string
 	err = EnsureBrowser(func(s string) { progress = append(progress, s) })
