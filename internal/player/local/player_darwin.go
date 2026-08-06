@@ -129,6 +129,16 @@ static SInt64 vibez_get_position(vibez_audio_state *s){
 	return frame;
 }
 
+static double vibez_get_playback_time(vibez_audio_state *s) {
+	AudioTimeStamp ts;
+	Boolean discontinuity;
+	OSStatus err = AudioQueueGetCurrentTime(s->queue, NULL, &ts, &discontinuity);
+	if (err != noErr || !(ts.mFlags & kAudioTimeStampSampleTimeValid)) {
+		return -1.0;
+	}
+	return ts.mSampleTime / s->format.mSampleRate;
+}
+
 static void vibez_seek(vibez_audio_state *s, SInt64 frame){
 	AudioQueueStop(s->queue, true);
 	ExtAudioFileSeek(s->file, frame);
@@ -217,13 +227,15 @@ func (p *Player) pollState() {
 			p.mu.RLock()
 			playing := p.state.Playing
 			audio := p.audio
-			sampleRate := p.sampleRate
 			p.mu.RUnlock()
 			if !playing || audio == nil {
 				continue
 			}
-			frames := int64(C.vibez_get_position(audio))
-			pos := time.Duration(float64(frames) / sampleRate * float64(time.Second))
+			secs := float64(C.vibez_get_playback_time(audio))
+			if secs < 0 {
+				continue
+			}
+			pos := time.Duration(secs * float64(time.Second))
 			p.mu.Lock()
 			p.state.Position = pos
 			s := p.state
@@ -269,17 +281,8 @@ func vibezOnEOS(h C.uintptr_t) {
 func (p *Player) playTrack(t provider.Track) {
 	// Stripping the "local:" prefix to get the raw fle path
 	path := t.ID[len("local:"):]
-	uri := path
 
-	p.mu.Lock()
-
-	if p.audio != nil {
-		C.vibez_destroy(p.audio)
-		p.audio = nil
-	}
-	p.mu.Unlock()
-
-	cs := C.CString(uri)
+	cs := C.CString(path)
 	defer C.free(unsafe.Pointer(cs))
 
 	audio := C.vibez_open(cs)
@@ -292,18 +295,26 @@ func (p *Player) playTrack(t provider.Track) {
 		return
 	}
 
+	sampleRate := float64(C.vibez_get_sample_rate(audio))
+	if sampleRate <= 0 {
+		sampleRate = 44100.0
+	}
+
+	frames := int64(C.vibez_get_duration(audio))
+	duration := time.Duration(float64(frames) / sampleRate * float64(time.Second))
+
+	p.mu.Lock()
+	if p.audio != nil {
+		C.vibez_destroy(p.audio)
+		p.audio = nil
+	}
+
 	if p.handle != 0 {
 		p.handle.Delete()
 	}
 	p.handle = cgo.NewHandle(p)
 	audio.goPlayer = C.uintptr_t(p.handle)
-	C.vibez_start(audio)
-
-	// Read duration
-	frames := int64(C.vibez_get_duration(audio))
-	duration := time.Duration(frames) * time.Second / 44100
-
-	p.mu.Lock()
+	p.sampleRate = sampleRate
 	p.audio = audio
 	p.state.Track = &t
 	p.state.Playing = true
@@ -313,6 +324,7 @@ func (p *Player) playTrack(t provider.Track) {
 	}
 	s := p.state
 	p.mu.Unlock()
+	C.vibez_start(audio)
 	p.broadcast(s)
 }
 
@@ -557,8 +569,10 @@ func (p *Player) ClearQueue() error {
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.Lock()
 	if p.audio != nil {
-		frames := int64(C.vibez_get_position(p.audio))
-		p.state.Position = time.Duration(frames) * time.Second / 44100
+		secs := float64(C.vibez_get_playback_time(p.audio))
+		if secs >= 0 {
+			p.state.Position = time.Duration(secs * float64(time.Second))
+		}
 	}
 	s := p.state
 	p.mu.Unlock()
