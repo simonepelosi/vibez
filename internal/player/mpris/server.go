@@ -14,8 +14,9 @@ package mpris
 //	go func() { for st := range audioEngine.Subscribe() { srv.Update(st) } }()
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 
 	"github.com/simone-vibes/vibez/internal/player"
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 const (
@@ -49,25 +51,57 @@ type Server struct {
 	conn  *dbus.Conn
 	props *prop.Properties
 
-	mu          sync.Mutex
-	pos         time.Duration
-	lastStatus  string
-	lastTrackID string
-	lastPos     time.Duration // position at the previous flush, for seek detection
-	lastPosAt   time.Time     // wall-clock time lastPos was sampled
-	debounce    *time.Timer
-	pending     *player.State
+	mu                   sync.Mutex
+	flushMu              sync.Mutex
+	pos                  time.Duration
+	lastStatus           string
+	lastTrackID          string
+	lastPos              time.Duration // position at the previous flush, for seek detection
+	lastPosAt            time.Time     // wall-clock time lastPos was sampled
+	currentTrackPath     dbus.ObjectPath
+	currentTrackDuration time.Duration
+	hasCurrentTrack      bool
+	debounce             *time.Timer
+	pending              *player.State
+	unavailable          bool
+	closed               bool
 }
 
-// sanitizePathElement replaces any character that is not a valid D-Bus object
-// path element character ([A-Za-z0-9_]) with an underscore.
-func sanitizePathElement(s string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
-			return r
+// MusicKit can expose a partial now-playing item with no ID during a track
+// transition. Hashing the strongest available identity keeps paths valid and
+// bounded without conflating IDs that differ only by D-Bus path punctuation.
+func trackObjectPath(track *provider.Track) dbus.ObjectPath {
+	if track == nil {
+		return noTrackPath
+	}
+
+	namespace := "id"
+	identity := track.ID
+	if identity == "" {
+		namespace = "catalog"
+		identity = track.CatalogID
+	}
+	var sum [sha256.Size]byte
+	if identity == "" {
+		namespace = "unknown"
+		hash := sha256.New()
+		var fieldLength [8]byte
+		for _, field := range []string{track.Title, track.Artist, track.Album} {
+			binary.BigEndian.PutUint64(fieldLength[:], uint64(len(field)))
+			_, _ = hash.Write(fieldLength[:])
+			_, _ = hash.Write([]byte(field))
 		}
-		return '_'
-	}, s)
+		binary.BigEndian.PutUint64(fieldLength[:], uint64(track.Duration))
+		_, _ = hash.Write(fieldLength[:])
+		copy(sum[:], hash.Sum(nil))
+	} else {
+		sum = sha256.Sum256([]byte(identity))
+	}
+	path := dbus.ObjectPath(fmt.Sprintf("/org/vibez/track/%s_%x", namespace, sum))
+	if !path.IsValid() {
+		panic(fmt.Sprintf("mpris: generated invalid track path %q", path))
+	}
+	return path
 }
 
 // ── D-Bus method objects ──────────────────────────────────────────────────
@@ -107,9 +141,22 @@ func (p *playerObj) seekRelative(offsetUs int64) *dbus.Error {
 	return nil
 }
 
-// setPosition seeks to an absolute position (µs) for the given track ID.
-func (p *playerObj) setPosition(_ dbus.ObjectPath, posUs int64) *dbus.Error {
-	_ = p.ctrl.Seek(time.Duration(posUs) * time.Microsecond)
+// setPosition seeks to an absolute position (µs) only when the supplied track
+// is still current. MPRIS clients can race a track transition with this call.
+func (p *playerObj) setPosition(trackPath dbus.ObjectPath, posUs int64) *dbus.Error {
+	const maxPositionUs = int64(time.Duration(1<<63-1) / time.Microsecond)
+	if posUs < 0 || posUs > maxPositionUs {
+		return nil
+	}
+	position := time.Duration(posUs) * time.Microsecond
+
+	p.srv.mu.Lock()
+	isCurrent := p.srv.hasCurrentTrack && trackPath == p.srv.currentTrackPath
+	withinTrack := p.srv.currentTrackDuration == 0 || position <= p.srv.currentTrackDuration
+	p.srv.mu.Unlock()
+	if isCurrent && withinTrack {
+		_ = p.ctrl.Seek(position)
+	}
 	return nil
 }
 
@@ -240,7 +287,18 @@ func NewServer(ctrl Controller) (*Server, error) {
 // the audio engine emits a new State on its Subscribe channel.
 func (s *Server) Update(st player.State) {
 	s.mu.Lock()
+	if s.closed || s.unavailable {
+		s.mu.Unlock()
+		return
+	}
 	s.pos = st.Position
+	s.currentTrackPath = trackObjectPath(st.Track)
+	s.hasCurrentTrack = st.Track != nil
+	if st.Track == nil {
+		s.currentTrackDuration = 0
+	} else {
+		s.currentTrackDuration = st.Track.Duration
+	}
 	s.pending = &st
 	if s.debounce == nil {
 		s.debounce = time.AfterFunc(100*time.Millisecond, s.flush)
@@ -275,10 +333,38 @@ func isSeek(playing bool, lastPos time.Duration, lastAt time.Time, newPos time.D
 	return delta > seekThreshold
 }
 
+// trySetProperty contains godbus's panic-on-error API. MPRIS is optional, so
+// malformed provider metadata or a lost session bus must not terminate vibez.
+func (s *Server) trySetProperty(name string, value any) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			s.markUnavailable()
+			ok = false
+		}
+	}()
+	s.props.SetMust(mprisPlayerIface, name, value)
+	return true
+}
+
+func (s *Server) markUnavailable() {
+	s.mu.Lock()
+	s.unavailable = true
+	if s.debounce != nil {
+		s.debounce.Stop()
+		s.debounce = nil
+	}
+	s.pending = nil
+	s.mu.Unlock()
+	_ = s.conn.Close()
+}
+
 func (s *Server) flush() {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
 	st := s.pending
-	if st == nil {
+	if st == nil || s.closed {
 		s.mu.Unlock()
 		return
 	}
@@ -288,10 +374,8 @@ func (s *Server) flush() {
 	if st.Playing {
 		status = "Playing"
 	}
-	trackID := ""
-	if st.Track != nil {
-		trackID = st.Track.ID
-	}
+	trackPath := trackObjectPath(st.Track)
+	trackID := string(trackPath)
 
 	statusChanged := status != s.lastStatus
 	trackChanged := trackID != s.lastTrackID
@@ -315,8 +399,13 @@ func (s *Server) flush() {
 	// Seeked signal (the Position property does not emit PropertiesChanged).
 	// Refresh Position first so a client reading it in response gets the new value.
 	if seeked {
-		s.props.SetMust(mprisPlayerIface, "Position", st.Position.Microseconds())
-		_ = s.conn.Emit(mprisObjectPath, mprisPlayerIface+".Seeked", st.Position.Microseconds())
+		if !s.trySetProperty("Position", st.Position.Microseconds()) {
+			return
+		}
+		if err := s.conn.Emit(mprisObjectPath, mprisPlayerIface+".Seeked", st.Position.Microseconds()); err != nil {
+			s.markUnavailable()
+			return
+		}
 		if !statusChanged && !trackChanged {
 			return
 		}
@@ -326,7 +415,7 @@ func (s *Server) flush() {
 		"mpris:trackid": dbus.MakeVariant(noTrackPath),
 	}
 	if t := st.Track; t != nil {
-		meta["mpris:trackid"] = dbus.MakeVariant(dbus.ObjectPath("/org/vibez/track/" + sanitizePathElement(t.ID)))
+		meta["mpris:trackid"] = dbus.MakeVariant(trackPath)
 		meta["xesam:title"] = dbus.MakeVariant(t.Title)
 		meta["xesam:artist"] = dbus.MakeVariant([]string{t.Artist})
 		meta["xesam:album"] = dbus.MakeVariant(t.Album)
@@ -336,11 +425,17 @@ func (s *Server) flush() {
 		}
 	}
 
-	s.props.SetMust(mprisPlayerIface, "PlaybackStatus", status)
-	s.props.SetMust(mprisPlayerIface, "Metadata", meta)
-	s.props.SetMust(mprisPlayerIface, "Position", st.Position.Microseconds())
-	if st.Volume > 0 {
-		s.props.SetMust(mprisPlayerIface, "Volume", st.Volume)
+	if !s.trySetProperty("PlaybackStatus", status) {
+		return
+	}
+	if !s.trySetProperty("Metadata", meta) {
+		return
+	}
+	if !s.trySetProperty("Position", st.Position.Microseconds()) {
+		return
+	}
+	if st.Volume > 0 && !s.trySetProperty("Volume", st.Volume) {
+		return
 	}
 
 	loopStatus := "None"
@@ -350,11 +445,28 @@ func (s *Server) flush() {
 	case player.RepeatModeAll:
 		loopStatus = "Playlist"
 	}
-	s.props.SetMust(mprisPlayerIface, "LoopStatus", loopStatus)
-	s.props.SetMust(mprisPlayerIface, "Shuffle", st.ShuffleMode)
+	if !s.trySetProperty("LoopStatus", loopStatus) {
+		return
+	}
+	_ = s.trySetProperty("Shuffle", st.ShuffleMode)
 }
 
 // Close releases the session bus connection.
 func (s *Server) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	if s.debounce != nil {
+		s.debounce.Stop()
+		s.debounce = nil
+	}
+	s.pending = nil
+	s.mu.Unlock()
+
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	return s.conn.Close()
 }

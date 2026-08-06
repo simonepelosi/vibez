@@ -775,13 +775,132 @@ func TestServer_Update_TrackWithArtwork(t *testing.T) {
 	srv.Update(player.State{Playing: true, Track: track})
 }
 
+func TestServer_Update_TrackWithoutID(t *testing.T) {
+	ctrl := &mockController{}
+	srv, err := NewServer(ctrl)
+	if err != nil {
+		t.Skipf("NewServer failed: %v", err)
+	}
+	defer srv.Close() //nolint:errcheck
+
+	track := &provider.Track{Title: "Partial Track"}
+	srv.Update(player.State{Playing: true, Track: track})
+	time.Sleep(300 * time.Millisecond)
+
+	metadata, ok := srv.props.GetMust(mprisPlayerIface, "Metadata").(map[string]dbus.Variant)
+	if !ok {
+		t.Fatal("Metadata property has unexpected type")
+	}
+	trackID, ok := metadata["mpris:trackid"].Value().(dbus.ObjectPath)
+	if !ok {
+		t.Fatal("mpris:trackid has unexpected type")
+	}
+	want := trackObjectPath(track)
+	if trackID != want {
+		t.Fatalf("mpris:trackid = %q, want %q", trackID, want)
+	}
+}
+
 func TestServer_Close(t *testing.T) {
 	ctrl := &mockController{}
 	srv, err := NewServer(ctrl)
 	if err != nil {
 		t.Skipf("NewServer failed: %v", err)
 	}
-	if err := srv.Close(); err != nil {
+	srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "pending"}})
+
+	// Holding flushMu models a callback already publishing. Close must mark the
+	// server closed immediately, then wait before closing the D-Bus connection.
+	srv.flushMu.Lock()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		srv.mu.Lock()
+		closed := srv.closed
+		srv.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			srv.flushMu.Unlock()
+			t.Fatal("Close did not mark the server closed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-closeDone:
+		srv.flushMu.Unlock()
+		t.Fatalf("Close returned before the in-flight flush completed: %v", err)
+	default:
+	}
+	srv.flushMu.Unlock()
+	if err := <-closeDone; err != nil {
 		t.Errorf("Close() error: %v", err)
 	}
+
+	// Pending and post-close updates must not flush against the closed D-Bus connection.
+	srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "closed"}})
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestServer_Update_DistinguishesCollidingTrackIDs(t *testing.T) {
+	ctrl := &mockController{}
+	srv, err := NewServer(ctrl)
+	if err != nil {
+		t.Skipf("NewServer failed: %v", err)
+	}
+	defer srv.Close() //nolint:errcheck
+
+	first := &provider.Track{ID: "i.track/1", Title: "First"}
+	srv.Update(player.State{Playing: true, Track: first})
+	srv.flush()
+
+	second := &provider.Track{ID: "i_track_1", Title: "Second"}
+	srv.Update(player.State{Playing: true, Track: second})
+	srv.flush()
+
+	metadata, ok := srv.props.GetMust(mprisPlayerIface, "Metadata").(map[string]dbus.Variant)
+	if !ok {
+		t.Fatal("Metadata property has unexpected type")
+	}
+	title, ok := metadata["xesam:title"].Value().(string)
+	if !ok {
+		t.Fatal("xesam:title has unexpected type")
+	}
+	if title != second.Title {
+		t.Fatalf("xesam:title = %q, want %q", title, second.Title)
+	}
+}
+
+func TestServer_UpdateAfterBusLossDoesNotPanic(t *testing.T) {
+	ctrl := &mockController{}
+	srv, err := NewServer(ctrl)
+	if err != nil {
+		t.Skipf("NewServer failed: %v", err)
+	}
+
+	srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "track"}})
+	if err := srv.conn.Close(); err != nil {
+		t.Fatalf("close D-Bus connection: %v", err)
+	}
+
+	// flush runs synchronously so any panic fails this test directly.
+	srv.flush()
+
+	srv.mu.Lock()
+	unavailable := srv.unavailable
+	srv.mu.Unlock()
+	if !unavailable {
+		t.Fatal("server remained available after losing its D-Bus connection")
+	}
+
+	srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "ignored"}})
+	srv.mu.Lock()
+	pending := srv.pending
+	srv.mu.Unlock()
+	if pending != nil {
+		t.Fatal("server accepted an update after losing its D-Bus connection")
+	}
+	_ = srv.Close()
 }
