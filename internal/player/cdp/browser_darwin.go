@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	playwright "github.com/mxschmitt/playwright-go"
 )
 
 const chromeInstallHelp = "install Google Chrome from https://www.google.com/chrome/ or set VIBEZ_CHROME_PATH/CHROME_PATH"
@@ -86,29 +84,10 @@ func EnsureBrowser(onProgress func(string)) error {
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress(fmt.Sprintf("Using Google Chrome: %s", chromePath))
 	onProgress("Fetching browser driver...")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	}); err != nil {
+	if err := installPlaywright(driverDir()); err != nil {
 		return fmt.Errorf("playwright driver: %w", err)
 	}
 	return nil
-}
-
-func runPlaywright() (*playwright.Playwright, error) {
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
-	pw, err := playwright.Run(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("playwright driver: %w", err)
-	}
-	return pw, nil
 }
 
 func chromeLaunchArgs(headless bool, _ bool) []string {

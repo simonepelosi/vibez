@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -31,7 +32,7 @@ type cdpPlatformHooks struct {
 func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int, hooks cdpPlatformHooks) error {
 	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *cdp.Player, 1)
-	runDone := make(chan struct{})
+	runDone := make(chan error, 1)
 	restartExe := make(chan string, 1)
 
 	go func() {
@@ -98,8 +99,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 
 		playerCh <- cdpPlayer
 		go func() {
-			defer close(runDone)
-			cdpPlayer.Run()
+			runDone <- cdpPlayer.Run()
 		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -125,10 +125,11 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 
 	_, err := prog.Run()
 
+	var shutdownErr error
 	select {
 	case p := <-playerCh:
 		p.Terminate()
-		<-runDone
+		shutdownErr = <-runDone
 	default:
 	}
 
@@ -138,7 +139,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 	default:
 	}
 
-	return err
+	return errors.Join(err, shutdownErr)
 }
 
 func startLastfmScrobbler(cfg *config.Config, player interface {

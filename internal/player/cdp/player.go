@@ -5,6 +5,7 @@ package cdp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -32,10 +33,11 @@ type Player struct {
 	OnStorefront     func(sf string)
 	OnSessionExpired func()
 
-	pw      *playwright.Playwright
-	browser playwright.Browser
-	page    playwright.Page
-	srv     *http.Server
+	pw           *managedPlaywright
+	driverOutput *boundedDriverOutput
+	browser      playwright.Browser
+	page         playwright.Page
+	srv          *http.Server
 
 	mu                 sync.RWMutex
 	state              player.State
@@ -75,12 +77,13 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 		doneCh:  make(chan struct{}),
 	}
 
-	pw, err := runPlaywright()
+	pw, driverOutput, err := runPlaywright()
 	if err != nil {
 		_ = srv.Close()
 		return nil, err
 	}
 	p.pw = pw
+	p.driverOutput = driverOutput
 
 	chromePath := HelperPath()
 	if _, err := os.Stat(chromePath); err != nil {
@@ -106,7 +109,7 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	if err != nil {
 		_ = pw.Stop()
 		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: launch browser: %w", err)
+		return nil, p.withDriverOutput(fmt.Errorf("cdp: launch browser: %w", err))
 	}
 	p.browser = browser
 
@@ -115,17 +118,17 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 		_ = browser.Close()
 		_ = pw.Stop()
 		_ = srv.Close()
-		return nil, fmt.Errorf("cdp: new page: %w", err)
+		return nil, p.withDriverOutput(fmt.Errorf("cdp: new page: %w", err))
 	}
 	p.page = pg
 
 	// Forward page crashes and unhandled JS errors to errCh so WaitReady
 	// returns immediately instead of waiting for the full timeout.
 	pg.On("crash", func() {
-		p.sendError(fmt.Errorf("cdp: Chrome page crashed"))
+		p.sendError(p.withDriverOutput(fmt.Errorf("cdp: Chrome page crashed")))
 	})
 	pg.On("pageerror", func(err error) {
-		p.sendError(fmt.Errorf("cdp: page JS error: %w", err))
+		p.sendError(p.withDriverOutput(fmt.Errorf("cdp: page JS error: %w", err)))
 	})
 	// Route browser console messages through the TUI debug log.
 	// Non-fatal 403s from resource loads (artwork, fonts) are filtered out
@@ -225,7 +228,7 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 			_ = browser.Close()
 			_ = pw.Stop()
 			_ = srv.Close()
-			return nil, fmt.Errorf("cdp: expose %s: %w", name, err)
+			return nil, p.withDriverOutput(fmt.Errorf("cdp: expose %s: %w", name, err))
 		}
 	}
 
@@ -235,12 +238,16 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 			select {
 			case <-p.doneCh:
 			default:
-				p.sendError(fmt.Errorf("cdp navigate: %w", err))
+				p.sendError(p.withDriverOutput(fmt.Errorf("cdp navigate: %w", err)))
 			}
 		}
 	}()
 
 	return p, nil
+}
+
+func (p *Player) withDriverOutput(err error) error {
+	return addDriverOutput(err, p.driverOutput)
 }
 
 func (p *Player) sendError(err error) {
@@ -363,11 +370,19 @@ func (p *Player) dispatch(js string) {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-func (p *Player) Run() {
+func (p *Player) Run() error {
 	<-p.doneCh
-	_ = p.browser.Close()
-	_ = p.pw.Stop()
-	_ = p.srv.Close()
+	var shutdownErrors []error
+	if err := p.browser.Close(); err != nil {
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("cdp: close browser: %w", err))
+	}
+	if err := p.pw.Stop(); err != nil {
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("cdp: stop Playwright: %w", err))
+	}
+	if err := p.srv.Close(); err != nil {
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("cdp: stop local server: %w", err))
+	}
+	return p.withDriverOutput(errors.Join(shutdownErrors...))
 }
 
 func (p *Player) Terminate() {
@@ -385,7 +400,7 @@ func (p *Player) WaitReady(ctx context.Context) error {
 	case err := <-p.errCh:
 		return err
 	case <-ctx.Done():
-		return fmt.Errorf("cdp player: %w", ctx.Err())
+		return p.withDriverOutput(fmt.Errorf("cdp player: %w", ctx.Err()))
 	}
 }
 

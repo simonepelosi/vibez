@@ -68,8 +68,6 @@ func linkHelper() {
 func isDriverUpToDate() bool {
 	driver, err := playwright.NewDriver(&playwright.RunOptions{
 		DriverDirectory: driverDir(),
-		Stdout:          driverOutput(),
-		Stderr:          driverOutput(),
 	})
 	if err != nil {
 		return false
@@ -103,12 +101,7 @@ func EnsureBrowser(onProgress func(string)) error {
 	// Also ensure the playwright driver is available (no browser install via playwright).
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress("Fetching dependencies…")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	}); err != nil {
+	if err := installPlaywright(driverDir()); err != nil {
 		return fmt.Errorf("playwright driver: %w", err)
 	}
 
@@ -208,21 +201,6 @@ func extractDeb(debPath, destDir string) error {
 		}
 	}
 	return fmt.Errorf("data.tar.* member not found in %s", filepath.Base(debPath))
-}
-
-// runPlaywright starts the Playwright driver backed by our cached Chrome.
-func runPlaywright() (*playwright.Playwright, error) {
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
-	pw, err := playwright.Run(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-		Stdout:              driverOutput(),
-		Stderr:              driverOutput(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("playwright driver: %w", err)
-	}
-	return pw, nil
 }
 
 func chromeLaunchArgs(headless bool, wsl bool) []string {
