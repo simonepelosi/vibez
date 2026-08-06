@@ -132,7 +132,19 @@ static SInt64 vibez_get_position(vibez_audio_state *s){
 static void vibez_seek(vibez_audio_state *s, SInt64 frame){
 	AudioQueueStop(s->queue, true);
 	ExtAudioFileSeek(s->file, frame);
-	AudioQueueStart(s->queue, NULL);
+	s->done = 0;
+	for (int i=0; i< kNumBuffers; i++) {
+		AudioQueueBufferRef buf;
+		AudioQueueAllocateBuffer(s->queue, kBufferSize, &buf);
+		if (vibez_fill_buffer(s, buf)) {
+			s->done = 1;
+			break;
+		}
+		AudioQueueEnqueueBuffer(s->queue, buf, 0, NULL);
+	}
+	if (!s->done) {
+		AudioQueueStart(s->queue, NULL);
+	}
 }
 
 static SInt64 vibez_get_duration(vibez_audio_state *s) {
@@ -140,6 +152,13 @@ static SInt64 vibez_get_duration(vibez_audio_state *s) {
 	UInt32 size = sizeof(frames);
 	ExtAudioFileGetProperty(s->file, kExtAudioFileProperty_FileLengthFrames, &size, &frames);
 	return frames;
+}
+
+static double vibez_get_sample_rate(vibez_audio_state *s) {
+	AudioStreamBasicDescription fileFormat;
+	UInt32 size = sizeof(fileFormat);
+	ExtAudioFileGetProperty(s->file, kExtAudioFileProperty_FileDataFormat, &size, &fileFormat);
+		return fileFormat.mSampleRate;
 }
 
 static void vibez_destroy(vibez_audio_state *s){
@@ -171,9 +190,11 @@ type Player struct {
 	queue  []provider.Track
 	idx    int
 	audio  *C.vibez_audio_state
+	sampleRate float64
 	done   chan struct{}
 	eosCh  chan struct{}
 	handle cgo.Handle
+	allTracks []provider.Track
 }
 
 // New creates a local Player backed by CoreAudio
@@ -195,11 +216,16 @@ func (p *Player) pollState() {
 		case <-ticker.C:
 			p.mu.RLock()
 			playing := p.state.Playing
+			audio := p.audio
+			sampleRate := p.sampleRate
 			p.mu.RUnlock()
-			if !playing {
+			if !playing || audio == nil {
 				continue
 			}
+			frames := int64(C.vibez_get_position(audio))
+			pos := time.Duration(float64(frames) / sampleRate * float64(time.Second))
 			p.mu.Lock()
+			p.state.Position = pos
 			s := p.state
 			p.mu.Unlock()
 			p.broadcast(s)
@@ -332,6 +358,22 @@ func (p *Player) Next() error {
 		p.mu.Unlock()
 		return nil
 	}
+	// RepeatModeOne (restart the current track.)
+	if p.state.RepeatMode == player.RepeatModeOne {
+		t := p.queue[p.idx]
+		p.mu.Unlock()
+		p.playTrack(t)
+		return nil
+	}
+
+	// RepeatModeOff (stop at the end of queue)
+	if p.state.RepeatMode == player.RepeatModeOff && p.idx == len(p.queue)-1 {
+		p.state.Playing = false
+		s := p.state
+		p.mu.Unlock()
+		p.broadcast(s)
+		return nil
+	}
 	p.idx = (p.idx + 1) % len(p.queue)
 	t := p.queue[p.idx]
 	p.mu.Unlock()
@@ -398,19 +440,14 @@ func (p *Player) SetQueue(ids []string) error {
 		return nil
 	}
 	p.mu.Lock()
-	found := false
-	for i, t := range p.queue {
-		if t.ID == ids[0] {
-			p.idx = i
-			found = true
-			break
-		}
-	}
-	if !found || len(p.queue) == 0 {
+	newQueue := tracksForIDs(p.allTracks, ids)
+	if len(newQueue) == 0 {
 		p.mu.Unlock()
 		return nil
 	}
-	t := p.queue[p.idx]
+	p.queue = newQueue
+	p.idx = 0
+	t := p.queue[0]
 	p.mu.Unlock()
 	p.playTrack(t)
 	return nil
@@ -434,7 +471,7 @@ func (p *Player) SetPlaylist(_ string, startIdx int) error {
 }
 
 func (p *Player) AppendQueue(ids []string) error {
-	extra := tracksForIDs(p.queue, ids)
+	extra := tracksForIDs(p.allTracks, ids)
 	p.mu.Lock()
 	p.queue = append(p.queue, extra...)
 	p.mu.Unlock()
@@ -553,6 +590,7 @@ func (p *Player) Close() error {
 
 func (p *Player) LoadTracks(tracks []provider.Track) {
 	p.mu.Lock()
+	p.allTracks = append([]provider.Track{}, tracks...)
 	p.queue = append([]provider.Track{}, tracks...)
 	p.idx = 0
 	p.mu.Unlock()

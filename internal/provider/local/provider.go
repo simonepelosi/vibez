@@ -16,13 +16,6 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-var supportedExts = map[string]bool{
-	".mp3":  true,
-	".flac": true,
-	".m4a":  true,
-	".ogg":  true,
-}
-
 // Provider scans a local directory and exposes tracks via the provider interface.
 type Provider struct {
 	dir    string
