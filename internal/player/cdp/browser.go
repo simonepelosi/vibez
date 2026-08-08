@@ -218,13 +218,9 @@ func ensureBrowserARM64(onProgress func(string)) error {
 		return fmt.Errorf("no Widevine CDM found (required for full-track playback); %s", chromeInstallHelpARM64)
 	}
 
-	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress("Fetching dependencies…")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-	}); err != nil {
-		return fmt.Errorf("playwright driver: %w", err)
+	if err := installPlaywrightDriver(); err != nil {
+		return err
 	}
 	if err := warmUpWidevineARM64(onProgress); err != nil {
 		return err
