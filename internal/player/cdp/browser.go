@@ -321,11 +321,9 @@ func ensureBrowserAMD64(onProgress func(string)) error {
 	// Also ensure the playwright driver is available (no browser install via playwright).
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
 	onProgress("Fetching dependencies…")
-	if err := playwright.Install(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-	}); err != nil {
-		return fmt.Errorf("playwright driver: %w", err)
+	driverOptions, driverOutput := newDriverRunOptions(driverDir())
+	if err := playwright.Install(driverOptions); err != nil {
+		return fmt.Errorf("playwright driver: %w", addDriverOutput(err, driverOutput))
 	}
 
 	if chromeInstalled {
@@ -429,12 +427,10 @@ func extractDeb(debPath, destDir string) error {
 // runPlaywright starts the Playwright driver backed by our cached Chrome.
 func runPlaywright() (*playwright.Playwright, error) {
 	_ = os.Setenv("PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS", "1")
-	pw, err := playwright.Run(&playwright.RunOptions{
-		DriverDirectory:     driverDir(),
-		SkipInstallBrowsers: true,
-	})
+	driverOptions, driverOutput := newDriverRunOptions(driverDir())
+	pw, err := playwright.Run(driverOptions)
 	if err != nil {
-		return nil, fmt.Errorf("playwright driver: %w", err)
+		return nil, fmt.Errorf("playwright driver: %w", addDriverOutput(err, driverOutput))
 	}
 	return pw, nil
 }
