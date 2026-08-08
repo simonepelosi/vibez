@@ -11,9 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Album-art view (`:art`)** — toggle the now-playing panel between the progress bar and the album cover rendered as coloured Unicode half-blocks, centred above the track name, album, and elapsed time. Covers are downloaded per track (bounded, dimension-checked) and down-sampled with area averaging so they stay smooth at terminal size; the cover is sized square using the terminal's measured cell aspect ratio and re-renders are cached per size. Falls back to the bar view when the track has no artwork or the terminal has fewer than 256 colours, and the choice persists across restarts. Closes #33.
+- **Linux/arm64 (aarch64) full-track playback** — the Chrome/CDP backend now runs on arm64 Linux, where Google publishes no Chrome build. vibez discovers a system Chromium and a system-registered Widevine CDM instead of downloading a browser, warms up the CDM once (Chromium registers it via a component-updater hint file that needs a persistent profile at `~/.cache/vibez/chromium-arm64`), and falls back to the WebKit 30 s preview backend when a browser or CDM is missing. Requires building from source (`make build`) plus a system Chromium + Widevine CDM (e.g. `pacman -S chromium widevine`). Addresses #11.
+
+### Changed
+- **Radio refills pull a larger batch** — Apple's `next-tracks` endpoint returns only ~2 tracks per call, so `GetStationTracks` now pages several times (deduped, up to a target of 10) to give the queue more runway between refills.
 
 ### Fixed
 - **Search failures were reported as empty results** — `Search` queries the library, catalog songs, and catalog albums/playlists in parallel and only returned an error when all three failed, so one dead backend silently produced a thinner result set instead of a failure. Discovery refills then discarded the error entirely, leaving `[vibe] search error: no results` as the only clue. Partial failures are now carried on `SearchResult.Warnings`, logged as `[search] partial results: …`, and named in the "no results" message, so an unreachable backend is distinguishable from a query that genuinely matched nothing. Refs #93.
+- **Radio mode failed to start from a library song** — a per-song station can only be seeded by a catalog song ID; seeding with a library ID (`i.XXXX`) returns HTTP 500. `GetStationTracks` now resolves a library seed to its catalog ID (via the song's `playParams.catalogId`) before starting the station, and reports a clear error when a library song has no catalog equivalent. Radio seeded from a playlist already worked because those tracks carry catalog IDs.
 
 ## [0.5.0] — 2026-07-10
 
