@@ -33,6 +33,9 @@ type Config struct {
 	// WSL enables audio tuning workarounds for WSL2 environments where Hyper-V
 	// scheduler jitter causes audio underruns with default Chrome buffer sizes.
 	WSL bool `json:"wsl,omitempty"`
+	// AlbumArt starts the now-playing panel in the album-art view (the :art
+	// command toggles it at runtime and persists the choice here).
+	AlbumArt bool `json:"album_art,omitempty"`
 }
 
 type EQBand struct {

@@ -91,7 +91,11 @@ case "${ARCH_RAW}" in
 esac
 
 [ "${OS}" = "linux" ] || die "vibez currently supports Linux only (got: ${OS})"
-[ "${ARCH}" = "amd64" ] || die "vibez currently ships amd64 binaries only (got: ${ARCH_RAW})"
+if [ "${ARCH}" = "arm64" ]; then
+    die "no prebuilt Linux/arm64 binary is published yet — build from source: git clone https://github.com/simonepelosi/vibez && cd vibez && make build (arm64 full-track playback needs a system Chromium + Widevine CDM installed)"
+elif [ "${ARCH}" != "amd64" ]; then
+    die "vibez ships amd64 binaries only (got: ${ARCH_RAW})"
+fi
 
 need_cmd tar
 need_cmd grep

@@ -43,6 +43,25 @@ func TestProvider_GetLibraryTracks_ReturnsAllTracks(t *testing.T) {
 	}
 }
 
+func TestProvider_GetLibraryTracks_ReturnsHTTPArtwork(t *testing.T) {
+	p := newProvider()
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 10 {
+		t.Fatalf("track count = %d, want 10", len(tracks))
+	}
+	for _, tr := range tracks {
+		if tr.ArtworkURL == "" {
+			t.Fatalf("track %s artwork URL is empty", tr.ID)
+		}
+		if !strings.HasPrefix(tr.ArtworkURL, "https://") && !strings.HasPrefix(tr.ArtworkURL, "http://") {
+			t.Fatalf("track %s artwork URL = %q, want http(s)", tr.ID, tr.ArtworkURL)
+		}
+	}
+}
+
 func TestProvider_GetLibraryTracks_ReturnsCopy(t *testing.T) {
 	p := newProvider()
 	tracks, _ := p.GetLibraryTracks(context.Background())

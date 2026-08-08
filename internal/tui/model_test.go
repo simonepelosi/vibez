@@ -1,17 +1,26 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/tui/art"
 	"github.com/simone-vibes/vibez/internal/tui/views"
 )
 
@@ -2315,6 +2324,383 @@ func TestNowPlayingLines_WithTrack_Paused(t *testing.T) {
 	if len(lines) != 12 {
 		t.Errorf("nowPlayingLines returned %d lines, want 12", len(lines))
 	}
+}
+
+func TestFetchArtworkCmd_NoColorReturnsNil(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.supportsArtColor = func() bool { return false }
+	m.artwork = artworkCache{url: "https://example.invalid/a.png", rendered: map[art.Size][]string{}}
+	m.artworkGen = 1
+
+	if cmd := m.fetchArtworkCmd("https://example.invalid/a.png", m.artworkGen); cmd != nil {
+		t.Fatal("fetchArtworkCmd without colour support returned command, want nil")
+	}
+}
+
+func TestNowPlayingLines_NoColorFallsBackToText(t *testing.T) {
+	m := newModel(nil)
+	m.artMode = true
+	m.supportsArtColor = func() bool { return false }
+	m.playerState.Track = &provider.Track{Title: "Text Song", Artist: "Text Artist", Album: "Album", ArtworkURL: "https://example.invalid/a.png", Duration: time.Minute}
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "Text Song") || !strings.Contains(joined, "Text Artist") {
+		t.Fatalf("fallback missing metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("fallback rendered artwork: %q", joined)
+	}
+}
+
+func TestNowPlayingLines_ArtModeOffShowsBarWithoutArt(t *testing.T) {
+	m := newModel(nil)
+	m.supportsArtColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/a.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 2, 2)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing: true,
+		Track:   &provider.Track{Title: "Bar Song", Artist: "Bar Artist", Album: "Album", ArtworkURL: "https://example.invalid/a.png", Duration: time.Minute},
+	}
+
+	joined := strings.Join(m.nowPlayingLines(100, 12), "\n")
+	if !strings.Contains(joined, "Now Playing") || !strings.Contains(joined, "Bar Song") {
+		t.Fatalf("bar layout missing metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("art mode off but artwork rendered: %q", joined)
+	}
+	if h := m.nowPlayingHeight(); h != 12 {
+		t.Fatalf("nowPlayingHeight() with art mode off = %d, want 12", h)
+	}
+}
+
+func TestPlayerStateMsg_NoArtworkFetchWhenArtModeOff(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testArtworkPNG(t))
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsArtColor = func() bool { return true }
+	track := &provider.Track{Title: "Quiet Song", Artist: "Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
+	if cmd != nil {
+		runArtworkCommand(t, cmd)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("artwork requests with art mode off = %d, want 0", got)
+	}
+	if m.artwork.url != server.URL {
+		t.Fatalf("artwork cache url = %q, want %q (tracked even while off)", m.artwork.url, server.URL)
+	}
+}
+
+func TestNowPlayingArtworkFetchAndResizeUsesCachedImage(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testArtworkPNG(t))
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	track := &provider.Track{Title: "Art Song", Artist: "Art Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
+	if cmd == nil {
+		t.Fatal("playerStateMsg with artwork returned nil cmd")
+	}
+	msg := runArtworkCommand(t, cmd)
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+
+	first := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	second := strings.Join(m.nowPlayingLines(120, 16), "\n")
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("artwork requests = %d, want 1", got)
+	}
+	for name, view := range map[string]string{"first": first, "second": second} {
+		if !strings.Contains(view, "▀") || !strings.Contains(view, "Art Song") || !strings.Contains(view, "Art Artist") {
+			t.Fatalf("%s render missing artwork or metadata: %q", name, view)
+		}
+	}
+}
+
+func TestNowPlayingArtworkDownloadFailureFallsBack(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	track := &provider.Track{Title: "Fallback Song", Artist: "Fallback Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
+	if cmd == nil {
+		t.Fatal("playerStateMsg with artwork returned nil cmd")
+	}
+	updated, _ := m.Update(runArtworkCommand(t, cmd))
+	m = updated.(*Model)
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "Fallback Song") || !strings.Contains(joined, "Fallback Artist") {
+		t.Fatalf("fallback missing metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("failed artwork rendered art glyphs: %q", joined)
+	}
+}
+
+func TestArtworkLoadedMsg_DiscardStaleSameURLFailureAfterABA(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	a := "https://example.invalid/a.png"
+	b := "https://example.invalid/b.png"
+
+	updated, _ := m.Update(playerStateMsg{Track: &provider.Track{Title: "A1", Artist: "Artist", Album: "Album", ArtworkURL: a, Duration: time.Minute}})
+	m = updated.(*Model)
+	oldAGen := m.artworkGen
+	updated, _ = m.Update(playerStateMsg{Track: &provider.Track{Title: "B", Artist: "Artist", Album: "Album", ArtworkURL: b, Duration: time.Minute}})
+	m = updated.(*Model)
+	updated, _ = m.Update(playerStateMsg{Track: &provider.Track{Title: "A2", Artist: "Artist", Album: "Album", ArtworkURL: a, Duration: time.Minute}})
+	m = updated.(*Model)
+	newAGen := m.artworkGen
+	if oldAGen == newAGen {
+		t.Fatalf("artwork generation did not advance across A→B→A: %d", newAGen)
+	}
+
+	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	updated, _ = m.Update(artworkLoadedMsg{url: a, gen: newAGen, img: img})
+	m = updated.(*Model)
+	if m.artwork.img == nil || m.artwork.failed {
+		t.Fatalf("new artwork success not applied: img=%v failed=%v", m.artwork.img, m.artwork.failed)
+	}
+
+	updated, _ = m.Update(artworkLoadedMsg{url: a, gen: oldAGen, err: errors.New("old failure")})
+	m = updated.(*Model)
+	if m.artwork.img == nil || m.artwork.failed {
+		t.Fatalf("stale same-URL failure cleared newer success: img=%v failed=%v", m.artwork.img, m.artwork.failed)
+	}
+}
+
+func TestNowPlayingLines_DoesNotRenderStaleArtworkForNewTrack(t *testing.T) {
+	m := newModel(nil)
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/old.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 2, 2)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing: true,
+		Track: &provider.Track{
+			Title:      "New Song",
+			Artist:     "New Artist",
+			Album:      "New Album",
+			ArtworkURL: "https://example.invalid/new.png",
+			Duration:   time.Minute,
+		},
+	}
+
+	joined := strings.Join(m.nowPlayingLines(100, 14), "\n")
+	if !strings.Contains(joined, "New Song") || !strings.Contains(joined, "New Artist") {
+		t.Fatalf("fallback missing new metadata: %q", joined)
+	}
+	if strings.Contains(joined, "▀") {
+		t.Fatalf("rendered stale artwork beside new metadata: %q", joined)
+	}
+}
+
+func TestNowPlayingArtModeClipsLongMetadata(t *testing.T) {
+	m := newModel(nil)
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/a.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 2, 2)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing: true,
+		Track: &provider.Track{
+			ID:         "long",
+			Title:      strings.Repeat("Title", 80),
+			Artist:     strings.Repeat("Artist", 80),
+			Album:      strings.Repeat("Album", 80),
+			ArtworkURL: "https://example.invalid/a.png",
+			Duration:   time.Minute,
+		},
+	}
+
+	contentW := 100
+	lines := m.nowPlayingLines(contentW, 14)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "▀") {
+		t.Fatalf("art mode did not render artwork: %q", joined)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got > contentW {
+			t.Fatalf("line %d width = %d, want <= %d: %q", i, got, contentW, line)
+		}
+	}
+}
+
+// TestNowPlayingArtMode_LayoutIsMinimal checks Simone's requested art view:
+// the cover with just track, album, and elapsed time — no progress bar or
+// control icons.
+func TestNowPlayingArtMode_LayoutIsMinimal(t *testing.T) {
+	m := newModel(nil)
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	m.artwork = artworkCache{
+		url:      "https://example.invalid/a.png",
+		img:      image.NewNRGBA(image.Rect(0, 0, 4, 4)),
+		rendered: map[art.Size][]string{},
+	}
+	m.playerState = player.State{
+		Playing:  true,
+		Position: 42 * time.Second,
+		Track: &provider.Track{
+			Title:      "Minimal Song",
+			Artist:     "Minimal Artist",
+			Album:      "Minimal Album",
+			ArtworkURL: "https://example.invalid/a.png",
+			Duration:   3 * time.Minute,
+		},
+	}
+
+	joined := strings.Join(m.nowPlayingLines(100, 20), "\n")
+	for _, want := range []string{"▀", "Minimal Song", "Minimal Artist", "Minimal Album", "0:42 / 3:00"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("art view missing %q: %q", want, joined)
+		}
+	}
+	for _, unwanted := range []string{"╱", "╲", "⏸", "⇄"} {
+		if strings.Contains(joined, unwanted) {
+			t.Fatalf("art view should not contain %q: %q", unwanted, joined)
+		}
+	}
+	if h := m.nowPlayingHeight(); h < 12 {
+		t.Fatalf("nowPlayingHeight() in art mode = %d, want >= 12", h)
+	}
+}
+
+func TestExecuteCommand_ArtTogglesAndPersists(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := newModel(nil)
+	m.supportsArtColor = func() bool { return true }
+
+	_ = m.executeCommand("art")
+	if !m.artMode || !m.cfg.AlbumArt {
+		t.Fatalf("after :art artMode=%v cfg.AlbumArt=%v, want true/true", m.artMode, m.cfg.AlbumArt)
+	}
+	saved, err := config.Load("")
+	if err != nil {
+		t.Fatalf("loading saved config: %v", err)
+	}
+	if !saved.AlbumArt {
+		t.Fatal("saved config album_art = false, want true")
+	}
+
+	_ = m.executeCommand("art")
+	if m.artMode || m.cfg.AlbumArt {
+		t.Fatalf("after second :art artMode=%v cfg.AlbumArt=%v, want false/false", m.artMode, m.cfg.AlbumArt)
+	}
+}
+
+func TestExecuteCommand_ArtRejectedWithoutColorSupport(t *testing.T) {
+	m := newModel(nil)
+	m.supportsArtColor = func() bool { return false }
+
+	if cmd := m.executeCommand("art"); cmd != nil {
+		t.Fatal(":art without colour support returned a command, want nil")
+	}
+	if m.artMode {
+		t.Fatal(":art without colour support enabled art mode")
+	}
+	if m.errMsg == "" {
+		t.Fatal(":art without colour support left no user-facing message")
+	}
+}
+
+func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testArtworkPNG(t))
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsArtColor = func() bool { return true }
+	track := &provider.Track{Title: "Late Song", Artist: "Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
+	_, _ = m.Update(playerStateMsg{Track: track, Playing: true})
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("artwork fetched while art mode off: %d requests", got)
+	}
+
+	cmd := m.executeCommand("art")
+	if cmd == nil {
+		t.Fatal(":art with a playing track returned nil cmd, want artwork fetch")
+	}
+	msg := runArtworkCommand(t, cmd)
+	updated, _ := m.Update(msg)
+	m = updated.(*Model)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("artwork requests after toggle = %d, want 1", got)
+	}
+	if !strings.Contains(strings.Join(m.nowPlayingLines(100, 16), "\n"), "▀") {
+		t.Fatal("cover not rendered after toggling art mode on")
+	}
+}
+
+func runArtworkCommand(t *testing.T, cmd tea.Cmd) tea.Msg {
+	t.Helper()
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, batched := range batch {
+			if batched == nil {
+				continue
+			}
+			msg = batched()
+			if _, ok := msg.(artworkLoadedMsg); ok {
+				return msg
+			}
+		}
+	}
+	return msg
+}
+
+func testArtworkPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 255, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{G: 255, A: 255})
+	img.SetNRGBA(0, 1, color.NRGBA{B: 255, A: 255})
+	img.SetNRGBA(1, 1, color.NRGBA{R: 255, G: 255, A: 255})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
 
 func TestNowPlayingLines_WithErrMsg(t *testing.T) {
