@@ -68,9 +68,9 @@ func TestProvider_GetLibraryTracks_OnlyAudioFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLibraryTracks: %v", err)
 	}
-	// 4 audio files, 2 non-audio files should be ignored.
-	if len(tracks) != 4 {
-		t.Errorf("GetLibraryTracks = %d tracks, want 4", len(tracks))
+
+	if len(tracks) != wantAudioFileCount {
+		t.Errorf("GetLibraryTracks = %d tracks, want %d", len(tracks), wantAudioFileCount)
 	}
 }
 
