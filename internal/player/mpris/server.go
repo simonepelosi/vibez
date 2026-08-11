@@ -91,7 +91,10 @@ func trackObjectPath(track *provider.Track) dbus.ObjectPath {
 			_, _ = hash.Write(fieldLength[:])
 			_, _ = hash.Write([]byte(field))
 		}
-		binary.BigEndian.PutUint64(fieldLength[:], uint64(track.Duration))
+		// int64 -> uint64 reinterprets the bits rather than losing them, so the
+		// hash stays injective over Duration. Clamping a negative value would
+		// instead fold distinct tracks onto the same digest.
+		binary.BigEndian.PutUint64(fieldLength[:], uint64(track.Duration)) //nolint:gosec // bijective conversion; hash input only
 		_, _ = hash.Write(fieldLength[:])
 		copy(sum[:], hash.Sum(nil))
 	} else {

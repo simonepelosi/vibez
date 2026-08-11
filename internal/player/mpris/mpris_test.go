@@ -785,7 +785,7 @@ func TestServer_Update_TrackWithoutID(t *testing.T) {
 
 	track := &provider.Track{Title: "Partial Track"}
 	srv.Update(player.State{Playing: true, Track: track})
-	time.Sleep(300 * time.Millisecond)
+	srv.flush()
 
 	metadata, ok := srv.props.GetMust(mprisPlayerIface, "Metadata").(map[string]dbus.Variant)
 	if !ok {

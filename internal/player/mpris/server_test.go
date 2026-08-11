@@ -161,7 +161,9 @@ func TestPlayerObj_SetPositionValidatesTrackAndPosition(t *testing.T) {
 				hasCurrentTrack:      true,
 			}
 			obj := &playerObj{ctrl: ctrl, srv: srv}
-			obj.setPosition(test.trackPath, test.position)
+			if err := obj.setPosition(test.trackPath, test.position); err != nil {
+				t.Fatalf("SetPosition returned error: %v", err)
+			}
 			if ctrl.seekDuration != 0 {
 				t.Fatalf("invalid SetPosition sought to %s", ctrl.seekDuration)
 			}
@@ -175,7 +177,9 @@ func TestPlayerObj_SetPositionValidatesTrackAndPosition(t *testing.T) {
 		hasCurrentTrack:      true,
 	}
 	obj := &playerObj{ctrl: ctrl, srv: srv}
-	obj.setPosition(currentPath, int64((5 * time.Second).Microseconds()))
+	if err := obj.setPosition(currentPath, int64((5 * time.Second).Microseconds())); err != nil {
+		t.Fatalf("SetPosition returned error: %v", err)
+	}
 	if ctrl.seekDuration != 5*time.Second {
 		t.Fatalf("current SetPosition sought to %s, want 5s", ctrl.seekDuration)
 	}
