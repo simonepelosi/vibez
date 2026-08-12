@@ -194,17 +194,17 @@ import (
 
 // Player implements player.Player for local audio files using CoreAudio
 type Player struct {
-	mu     sync.RWMutex
-	state  player.State
-	subs   []chan player.State
-	queue  []provider.Track
-	idx    int
-	audio  *C.vibez_audio_state
+	mu         sync.RWMutex
+	state      player.State
+	subs       []chan player.State
+	queue      []provider.Track
+	idx        int
+	audio      *C.vibez_audio_state
 	sampleRate float64
-	done   chan struct{}
-	eosCh  chan struct{}
-	handle cgo.Handle
-	allTracks []provider.Track
+	done       chan struct{}
+	eosCh      chan struct{}
+	handle     cgo.Handle
+	allTracks  []provider.Track
 }
 
 // New creates a local Player backed by CoreAudio
