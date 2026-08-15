@@ -418,7 +418,7 @@ func (p *Player) Previous() error {
 func (p *Player) Seek(pos time.Duration) error {
 	p.mu.Lock()
 	if p.audio != nil {
-		frames := C.SInt64(pos.Seconds() * 44100)
+		frames := C.SInt64(pos.Seconds() * p.sampleRate)
 		C.vibez_seek(p.audio, frames)
 	}
 	p.state.Position = pos

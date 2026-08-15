@@ -1,5 +1,5 @@
 // Package local provides a Provider that serves tracks from a local music
-// directory. It scans recursively for MP3, FLAC, M4A and OGG files and reads
+// directory. It scans recursively for MP3, FLAC, M4A (plus OGG files for Linux) and reads
 // their metadata using the dhowden/tag library. No network or credentials
 // are required.
 

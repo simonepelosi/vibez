@@ -18,7 +18,7 @@ Items are roughly ordered by expected implementation complexity.
 
 Stream audio files from your local filesystem without any external service account.
 
-- M4A, FLAC, MP3, OGG support via GStreamer or the system audio stack
+- M4A, FLAC, MP3 support on all platforms; OGG on Linux only (GStreamer)
 - Auto-scan a configured music directory and surface tracks in the Library panel
 - Works offline; no DRM or authentication required
 

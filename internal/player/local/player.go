@@ -17,13 +17,14 @@ import (
 
 // Player implements player.Player for local audio files using GStreamer.
 type Player struct {
-	gst   *gst.Player
-	mu    sync.RWMutex
-	state player.State
-	subs  []chan player.State
-	queue []provider.Track
-	idx   int
-	done  chan struct{}
+	gst       *gst.Player
+	mu        sync.RWMutex
+	state     player.State
+	subs      []chan player.State
+	queue     []provider.Track
+	allTracks []provider.Track
+	idx       int
+	done      chan struct{}
 }
 
 // New creates a local Player backed by a GStreamer pipeline.
@@ -118,6 +119,19 @@ func (p *Player) Next() error {
 		p.mu.Unlock()
 		return nil
 	}
+	if p.state.RepeatMode == player.RepeatModeOne {
+		t := p.queue[p.idx]
+		p.mu.Unlock()
+		p.playTrack(t)
+		return nil
+	}
+	if p.state.RepeatMode == player.RepeatModeOff && p.idx == len(p.queue)-1 {
+		p.state.Playing = false
+		s := p.state
+		p.mu.Unlock()
+		p.broadcast(s)
+		return nil
+	}
 	p.idx = (p.idx + 1) % len(p.queue)
 	t := p.queue[p.idx]
 	p.mu.Unlock()
@@ -168,21 +182,15 @@ func (p *Player) SetQueue(ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	// Finding the first ID in the full queue and starting from there.
 	p.mu.Lock()
-	found := false
-	for i, t := range p.queue {
-		if t.ID == ids[0] {
-			p.idx = i
-			found = true
-			break
-		}
-	}
-	if !found || len(p.queue) == 0 {
+	newQueue := tracksForIDs(p.allTracks, ids)
+	if len(newQueue) == 0 {
 		p.mu.Unlock()
 		return nil
 	}
-	t := p.queue[p.idx]
+	p.queue = newQueue
+	p.idx = 0
+	t := p.queue[0]
 	p.mu.Unlock()
 	p.playTrack(t)
 	return nil
@@ -206,7 +214,7 @@ func (p *Player) SetPlaylist(_ string, startIdx int) error {
 }
 
 func (p *Player) AppendQueue(ids []string) error {
-	extra := tracksForIDs(p.queue, ids)
+	extra := tracksForIDs(p.allTracks, ids)
 	p.mu.Lock()
 	p.queue = append(p.queue, extra...)
 	p.mu.Unlock()
@@ -307,6 +315,7 @@ func (p *Player) Close() error {
 // the provider scans the music directory
 func (p *Player) LoadTracks(tracks []provider.Track) {
 	p.mu.Lock()
+	p.allTracks = append([]provider.Track{}, tracks...)
 	p.queue = append([]provider.Track{}, tracks...)
 	p.idx = 0
 	p.mu.Unlock()
