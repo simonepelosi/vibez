@@ -204,6 +204,7 @@ type Player struct {
 	done       chan struct{}
 	eosCh      chan struct{}
 	handle     cgo.Handle
+	audioWg    sync.WaitGroup
 	allTracks  []provider.Track
 }
 
@@ -214,6 +215,7 @@ func New() (*Player, error) {
 		eosCh: make(chan struct{}, 1),
 	}
 	go p.pollState()
+	p.audioWg.Add(1)
 	go p.eosLoop()
 	return p, nil
 }
@@ -259,6 +261,7 @@ func (p *Player) broadcast(s player.State) {
 }
 
 func (p *Player) eosLoop() {
+	defer p.audioWg.Done()
 	for {
 		select {
 		case <-p.eosCh:
@@ -589,6 +592,7 @@ func (p *Player) Subscribe() <-chan player.State {
 
 func (p *Player) Close() error {
 	close(p.done)
+	p.audioWg.Wait()
 	p.mu.Lock()
 	if p.audio != nil {
 		C.vibez_destroy(p.audio)
