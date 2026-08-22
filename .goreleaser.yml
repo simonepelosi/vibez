@@ -9,6 +9,9 @@ builds:
   - id: vibez-linux
     binary: vibez
     gobinary: ./scripts/garble-go
+    # Set to 1 by the darwin release job, which runs this same config on a
+    # macOS runner and cannot build the webkit/gstreamer CGO target.
+    skip: '{{ eq (index .Env "VIBEZ_SKIP_LINUX") "1" }}'
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
@@ -30,18 +33,32 @@ builds:
   - id: vibez-darwin
     binary: vibez
     gobinary: ./scripts/garble-go
+    # Set to 1 by the linux release job. Darwin is built on a macOS runner so
+    # that CGO_ENABLED=1 below has a working clang and the macOS SDK; the two
+    # jobs each skip the other's target.
+    skip: '{{ eq (index .Env "VIBEZ_SKIP_DARWIN") "1" }}'
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
       - GOTOOLCHAIN=local
     goos:
       - darwin
     goarch:
       - amd64
       - arm64
+    overrides:
+      # macos-latest is arm64, so darwin/amd64 is a cgo cross-compile and clang
+      # has to be told which architecture to emit. Only the compiler vars belong
+      # here: this env is merged into the build's rather than replacing it, so
+      # CGO_ENABLED=1 above still reaches the amd64 target.
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CC=clang -arch x86_64
+          - CXX=clang++ -arch x86_64
 
 archives:
   - id: vibez
@@ -59,6 +76,10 @@ archives:
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
+  # Darwin archives are built on the macOS job and handed to this one as
+  # ./dist-darwin, outside the dist/ that --clean wipes.
+  extra_files:
+    - glob: ./dist-darwin/*.tar.gz
 
 changelog:
   sort: asc
@@ -78,3 +99,5 @@ release:
   draft: false
   prerelease: auto
   replace_existing_artifacts: true
+  extra_files:
+    - glob: ./dist-darwin/*.tar.gz

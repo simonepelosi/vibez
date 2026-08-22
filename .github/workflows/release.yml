@@ -12,7 +12,64 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Darwin is built here rather than in the release job below because its
+  # native backends are CGO: a macOS runner is the only place clang and the
+  # macOS SDK are available. The archives are handed to the release job, which
+  # attaches them to the same release via extra_files.
+  darwin:
+    name: build-darwin
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # Signed here as well as in the release job: a masked value cannot be
+      # handed between jobs, and two tokens signed from the same key are
+      # equivalent. garble installs via the goreleaser before-hook.
+      - name: Generate Apple Developer Token
+        id: devtoken
+        env:
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
+        run: |
+          TOKEN=$(go run ./scripts/gen-devtoken)
+          # Mask the token so it never appears in logs
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Build darwin archives
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: '~> v2'
+          args: release --clean --skip=publish
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          VIBEZ_SKIP_LINUX: '1'
+          # Prevent Go from downloading a different toolchain into GOMODCACHE,
+          # which garble cannot patch (overlay restrictions on GOMODCACHE).
+          GOTOOLCHAIN: local
+
+      - name: Upload darwin archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-archives
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          # Consumed by the next job; the same bytes ship on the release.
+          retention-days: 1
+
   release:
+    name: release
+    needs: darwin
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,6 +101,23 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
+      - name: Download darwin archives
+        uses: actions/download-artifact@v4
+        with:
+          name: darwin-archives
+          path: dist-darwin
+
+      - name: Check darwin archives
+        run: |
+          # extra_files globs quietly when nothing matches, so without this the
+          # release would publish with no macOS binaries and no error anywhere.
+          for arch in amd64 arm64; do
+            f="dist-darwin/vibez_darwin_${arch}.tar.gz"
+            [ -s "$f" ] || { echo "missing $f"; exit 1; }
+            tar tzf "$f" | grep -qx vibez || { echo "$f contains no vibez binary"; exit 1; }
+          done
+          ls -l dist-darwin
+
       - name: Extract CHANGELOG entry
         id: changelog
         run: |
@@ -64,6 +138,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
           PROJECT_DIR: ${{ github.workspace }}
+          VIBEZ_SKIP_DARWIN: '1'
           # Prevent Go from downloading a different toolchain into GOMODCACHE,
           # which garble cannot patch (overlay restrictions on GOMODCACHE).
           GOTOOLCHAIN: local

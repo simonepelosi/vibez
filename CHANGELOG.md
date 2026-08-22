@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **macOS release binaries are now built on a macOS runner with CGo enabled** — `.goreleaser.yml` built the darwin artefacts with `CGO_ENABLED=0` on the Linux release runner, so a native macOS backend would compile in CI and work for anyone running `make build`, then silently fall back to its no-cgo stub in every published binary. Darwin now builds on `macos-latest` with `CGO_ENABLED=1`, and those archives are attached to the same release as the Linux ones. Nothing changes for the current feature set — every cgo package in the tree is `//go:build linux` — but the macOS local-tracks player in #62 cannot ship without it. Refs #117.
+
 ## [0.6.1] — 2026-08-21
 
 ### Fixed
