@@ -184,6 +184,7 @@ import (
 	"fmt"
 	"runtime/cgo"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -192,6 +193,36 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+// audioRef wraps a C audio state with an atomic reference count.
+type audioRef struct {
+	s    *C.vibez_audio_state
+	refs int32
+}
+
+func newAudioRef(s *C.vibez_audio_state) *audioRef {
+	return &audioRef{s: s, refs: 1}
+}
+
+// acquire increments the reference count and returns true if the object is still active.
+func (r *audioRef) acquire() bool {
+	for {
+		old := atomic.LoadInt32(&r.refs)
+		if old <= 0 {
+			return false
+		}
+		if atomic.CompareAndSwapInt32(&r.refs, old, old+1) {
+			return true
+		}
+	}
+}
+
+// release decrements the reference count and destroys the C object when it reaches zero
+func (r *audioRef) release() {
+	if atomic.AddInt32(&r.refs, -1) == 0 {
+		C.vibez_destroy(r.s)
+	}
+}
+
 // Player implements player.Player for local audio files using CoreAudio
 type Player struct {
 	mu         sync.RWMutex
@@ -199,7 +230,7 @@ type Player struct {
 	subs       []chan player.State
 	queue      []provider.Track
 	idx        int
-	audio      *C.vibez_audio_state
+	audio      *audioRef
 	sampleRate float64
 	done       chan struct{}
 	eosCh      chan struct{}
@@ -228,12 +259,16 @@ func (p *Player) pollState() {
 		case <-ticker.C:
 			p.mu.RLock()
 			playing := p.state.Playing
-			audio := p.audio
+			ref := p.audio
 			p.mu.RUnlock()
-			if !playing || audio == nil {
+			if !playing || ref == nil {
+				continue
+			}
+			if !ref.acquire() {
 				continue
 			}
 			secs := float64(C.vibez_get_playback_time(audio))
+			ref.release()
 			if secs < 0 {
 				continue
 			}
@@ -288,8 +323,8 @@ func (p *Player) playTrack(t provider.Track) {
 	cs := C.CString(path)
 	defer C.free(unsafe.Pointer(cs))
 
-	audio := C.vibez_open(cs)
-	if audio == nil {
+	raw := C.vibez_open(cs)
+	if raw == nil {
 		p.mu.Lock()
 		p.state.Error = fmt.Sprintf("failed to open: %s", path)
 		s := p.state
@@ -306,19 +341,17 @@ func (p *Player) playTrack(t provider.Track) {
 	frames := int64(C.vibez_get_duration(audio))
 	duration := time.Duration(float64(frames) / sampleRate * float64(time.Second))
 
-	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_destroy(p.audio)
-		p.audio = nil
-	}
+	ref := newAudioRef(raw)
 
+	p.mu.Lock()
+	old := p.audio
 	if p.handle != 0 {
 		p.handle.Delete()
 	}
 	p.handle = cgo.NewHandle(p)
-	audio.goPlayer = C.uintptr_t(p.handle)
+	raw.goPlayer = C.uintptr_t(p.handle)
 	p.sampleRate = sampleRate
-	p.audio = audio
+	p.audio = ref
 	p.state.Track = &t
 	p.state.Playing = true
 	p.state.Position = 0
@@ -327,42 +360,56 @@ func (p *Player) playTrack(t provider.Track) {
 	}
 	s := p.state
 	p.mu.Unlock()
+
+	if old != nil {
+		old.release()
+	}
+	if !ref.acquire() {
+		return
+	}
 	C.vibez_start(audio)
+	ref.release()
 	p.broadcast(s)
 }
 
 func (p *Player) Play() error {
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_resume(p.audio)
-	}
+	ref := p.audio
 	p.state.Playing = true
 	s := p.state
 	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		C.vibez_resume(ref.s)
+		ref.release()
+	}
 	p.broadcast(s)
 	return nil
 }
 
 func (p *Player) Pause() error {
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_pause(p.audio)
-	}
+	ref := p.audio
 	p.state.Playing = false
 	s := p.state
 	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		C.vibez_pause(ref.s)
+		ref.release()
+	}
 	p.broadcast(s)
 	return nil
 }
 
 func (p *Player) Stop() error {
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_stop(p.audio)
-	}
+	ref := p.audio
 	p.state.Playing = false
 	s := p.state
 	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		C.vibez_stop(ref.s)
+		ref.release()
+	}
 	p.broadcast(s)
 	return nil
 }
@@ -420,25 +467,29 @@ func (p *Player) Previous() error {
 
 func (p *Player) Seek(pos time.Duration) error {
 	p.mu.Lock()
-	if p.audio != nil {
-		frames := C.SInt64(pos.Seconds() * p.sampleRate)
-		C.vibez_seek(p.audio, frames)
-	}
+	ref := p.audio
+	frames := C.SInt64(pos.Seconds() * p.sampleRate)
 	p.state.Position = pos
 	s := p.state
 	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		C.vibez_seek(ref.s, frames)
+		ref.release()
+	}
 	p.broadcast(s)
 	return nil
 }
 
 func (p *Player) SetVolume(v float64) error {
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_set_volume(p.audio, C.float(v))
-	}
+	ref := p.audio
 	p.state.Volume = v
 	s := p.state
 	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		C.vibez_set_volume(ref.s, C.float(v))
+		ref.release()
+	}
 	p.broadcast(s)
 	return nil
 }
@@ -517,8 +568,10 @@ func (p *Player) RemoveFromQueue(idx int) error {
 		case idx == p.idx:
 			p.state.Track = nil
 			p.state.Playing = false
-			if p.audio != nil {
-				C.vibez_stop(p.audio)
+			ref := p.audio
+			p.audio = nil
+			if ref != nil {
+				defer ref.release()
 			}
 		case idx < p.idx:
 			p.idx--
@@ -554,29 +607,35 @@ func (p *Player) MoveInQueue(from, to int) error {
 
 func (p *Player) ClearQueue() error {
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_stop(p.audio)
-		C.vibez_destroy(p.audio)
-		p.audio = nil
-	}
+	old := p.audio
+	p.audio = nil
 	p.queue = nil
 	p.idx = 0
 	p.state.Track = nil
 	p.state.Playing = false
 	s := p.state
 	p.mu.Unlock()
+	if old != nil {
+		old.release()
+	}
 	p.broadcast(s)
 	return nil
 }
 
 func (p *Player) GetState() (*player.State, error) {
 	p.mu.Lock()
-	if p.audio != nil {
-		secs := float64(C.vibez_get_playback_time(p.audio))
+	ref := p.audio
+	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		secs := float64(C.vibez_get_playback_time(ref.s))
+		ref.release()
 		if secs >= 0 {
+			p.mu.Lock()
 			p.state.Position = time.Duration(secs * float64(time.Second))
+			p.mu.Unlock()
 		}
 	}
+	p.mu.RLock()
 	s := p.state
 	p.mu.Unlock()
 	return &s, nil
@@ -594,15 +653,16 @@ func (p *Player) Close() error {
 	close(p.done)
 	p.audioWg.Wait()
 	p.mu.Lock()
-	if p.audio != nil {
-		C.vibez_destroy(p.audio)
-		p.audio = nil
-	}
+	old := p.audio
+	p.audio = nil
 	if p.handle != 0 {
 		p.handle.Delete()
 		p.handle = 0
 	}
 	p.mu.Unlock()
+	if old != nil {
+		old.release()
+	}
 	return nil
 }
 
