@@ -204,6 +204,7 @@ func (p *Player) Destroy() {
 	p.wg.Wait()
 	p.mu.Lock()
 	C.vibez_gst_destroy(p.pipeline)
+	p.pipeline = nil
 	p.mu.Unlock()
 }
 
