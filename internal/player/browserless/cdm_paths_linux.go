@@ -10,7 +10,7 @@ import (
 // Standard locations where libwidevinecdm.so may exist on Linux.
 func candidatePaths() []string {
 	home, _ := os.UserHomeDir()
-	return []string{
+	res := []string{
 		filepath.Join(home, ".cache", "vibez", "cdm", "libwidevinecdm.so"),
 		filepath.Join(home, ".cache", "vibez", "chrome", "opt", "google", "chrome", "WidevineCdm", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
 		"/usr/lib/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
@@ -20,6 +20,10 @@ func candidatePaths() []string {
 		"/usr/lib/firefox/gmp-widevinecdm/system-installed/libwidevinecdm.so",
 		"/var/lib/flatpak/app/org.chromium.Chromium/current/active/files/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
 	}
+	if matches, err := filepath.Glob(filepath.Join(home, ".mozilla", "firefox", "*", "gmp-widevinecdm", "*", "libwidevinecdm.so")); err == nil {
+		res = append(res, matches...)
+	}
+	return res
 }
 
 // DefaultCDMPath returns the destination path for the cached standalone CDM library on Linux.

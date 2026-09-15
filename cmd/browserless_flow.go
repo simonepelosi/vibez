@@ -55,7 +55,11 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			}
 		}
 
-		prog.Send(tui.InitStatusMsg("Starting browserless audio engine..."))
+		if browserless.FindCDM() == "" {
+			prog.Send(tui.InitStatusMsg("Downloading Widevine CDM component..."))
+		} else {
+			prog.Send(tui.InitStatusMsg("Starting browserless audio engine..."))
+		}
 		prov := apple.New(cfg)
 		blPlayer, err := browserless.New(cfg, prov)
 		if err != nil {

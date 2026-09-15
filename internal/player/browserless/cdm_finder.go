@@ -3,9 +3,11 @@
 package browserless
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // FindCDM searches the host for an existing Widevine CDM library binary.
@@ -19,8 +21,8 @@ func FindCDM() string {
 	return ""
 }
 
-// EnsureCDM returns an existing CDM library path, or attempts to download
-// and extract the official standalone libwidevinecdm.so into ~/.cache/vibez/cdm/.
+// EnsureCDM returns an existing CDM library path, or automatically downloads
+// and extracts the official Widevine CDM component into the user cache directory.
 func EnsureCDM() (string, error) {
 	if p := FindCDM(); p != "" {
 		return p, nil
@@ -31,7 +33,7 @@ func EnsureCDM() (string, error) {
 		return "", fmt.Errorf("failed to create cdm cache directory: %w", err)
 	}
 
-	// We can check if a user placed it in ~/.config/vibez/libwidevinecdm.so
+	// We can check if a user placed it in ~/.config/vibez/libwidevinecdm.<ext>
 	libName := filepath.Base(dest)
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config", "vibez", libName)
@@ -43,5 +45,13 @@ func EnsureCDM() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("%s not found on system. Please place %s in %s", libName, libName, dest)
+	// Automatically download official Google Widevine package (mirroring Firefox's mechanism)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	downloaded, err := DownloadCDM(ctx, dest)
+	if err != nil {
+		return "", fmt.Errorf("%s not found and auto-download failed: %w (place %s manually in %s)", libName, err, libName, dest)
+	}
+	return downloaded, nil
 }

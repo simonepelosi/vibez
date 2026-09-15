@@ -12,7 +12,7 @@ import (
 )
 
 func runPlatform(cfg *config.Config, _ string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
-	if browserless.FindCDM() != "" {
+	if browserless.Available() {
 		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
 	}
 	return runCDPFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps, cdpPlatformHooks{
