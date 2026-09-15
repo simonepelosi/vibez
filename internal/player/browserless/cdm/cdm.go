@@ -118,8 +118,19 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 	return nil
 }
 
+// Subsample specifies the clear and encrypted byte counts in an audio sample.
+type Subsample struct {
+	ClearBytes  uint16
+	CipherBytes uint32
+}
+
 // Decrypt decrypts an encrypted audio frame using AES-CTR (cenc).
 func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
+	return c.DecryptSubsamples(keyID, iv, ciphertext, nil)
+}
+
+// DecryptSubsamples decrypts an audio frame with a subsample table using AES-CTR (cenc).
+func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -127,8 +138,22 @@ func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
 		return nil, errors.New("cdm context is closed")
 	}
 
-	decrypted := make([]byte, len(ciphertext))
+	decrypted := make([]byte, len(input))
 	var outSize C.uint32_t
+
+	var clearPtr *C.uint16_t
+	var cipherPtr *C.uint32_t
+	numSubs := C.uint32_t(len(subsamples))
+	if len(subsamples) > 0 {
+		clearBytes := make([]C.uint16_t, len(subsamples))
+		cipherBytes := make([]C.uint32_t, len(subsamples))
+		for i, sub := range subsamples {
+			clearBytes[i] = C.uint16_t(sub.ClearBytes)
+			cipherBytes[i] = C.uint32_t(sub.CipherBytes)
+		}
+		clearPtr = &clearBytes[0]
+		cipherPtr = &cipherBytes[0]
+	}
 
 	ret := C.cdm_context_decrypt(
 		c.ctx,
@@ -136,8 +161,11 @@ func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
 		C.uint32_t(len(keyID)),
 		(*C.uint8_t)(unsafe.Pointer(&iv[0])),
 		C.uint32_t(len(iv)),
-		(*C.uint8_t)(unsafe.Pointer(&ciphertext[0])),
-		C.uint32_t(len(ciphertext)),
+		(*C.uint8_t)(unsafe.Pointer(&input[0])),
+		C.uint32_t(len(input)),
+		clearPtr,
+		cipherPtr,
+		numSubs,
 		(*C.uint8_t)(unsafe.Pointer(&decrypted[0])),
 		&outSize,
 	)

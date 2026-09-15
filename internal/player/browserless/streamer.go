@@ -4,9 +4,12 @@ package browserless
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,6 +46,7 @@ type StreamServer struct {
 	listener  net.Listener
 	server    *http.Server
 	port      int
+	authToken string
 
 	mu         sync.RWMutex
 	streams    map[string]*trackStream
@@ -56,12 +60,20 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 		return nil, fmt.Errorf("failed to bind loopback stream listener: %w", err)
 	}
 
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("failed to generate stream auth token: %w", err)
+	}
+	authToken := hex.EncodeToString(tokenBytes)
+
 	port := ln.Addr().(*net.TCPAddr).Port
 	s := &StreamServer{
 		cdmEngine: cdmEngine,
 		licClient: licClient,
 		listener:  ln,
 		port:      port,
+		authToken: authToken,
 		streams:   make(map[string]*trackStream),
 	}
 
@@ -71,6 +83,8 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	s.server = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		// Silence broken-pipe and connection-reset logs on skip so they don't corrupt the TUI.
+		ErrorLog: log.New(io.Discard, "", 0),
 	}
 
 	go func() {
@@ -82,9 +96,9 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
 // parses the HLS manifest, and returns a local HTTP streaming URL and total duration.
-func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string) (string, time.Duration, error) {
+func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer256k bool) (string, time.Duration, error) {
 	// 1. Fetch playback info via MZPlay
-	info, err := s.licClient.FetchPlaybackInfo(ctx, trackID, true)
+	info, err := s.licClient.FetchPlaybackInfo(ctx, trackID, prefer256k)
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch playback info: %w", err)
 	}
@@ -115,6 +129,10 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string) (string
 		return "", 0, fmt.Errorf("fetch playlist: %w", err)
 	}
 	defer func() { _ = hlsResp.Body.Close() }()
+
+	if hlsResp.StatusCode != http.StatusOK {
+		return "", 0, fmt.Errorf("fetch playlist status %d: %s", hlsResp.StatusCode, hlsResp.Status)
+	}
 
 	playlistBytes, err := io.ReadAll(hlsResp.Body)
 	if err != nil {
@@ -150,10 +168,12 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string) (string
 				}
 			}
 		case strings.HasPrefix(line, "#EXTINF:"):
-			if val, _, ok := strings.Cut(strings.TrimPrefix(line, "#EXTINF:"), ","); ok {
-				dur, _ := strconv.ParseFloat(strings.TrimSpace(val), 64)
-				currDuration = dur
+			val := strings.TrimPrefix(line, "#EXTINF:")
+			if idx := strings.IndexByte(val, ','); idx != -1 {
+				val = val[:idx]
 			}
+			dur, _ := strconv.ParseFloat(strings.TrimSpace(val), 64)
+			currDuration = dur
 		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
 			var l, o int64
 			_, _ = fmt.Sscanf(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"), "%d@%d", &l, &o)
@@ -214,7 +234,9 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string) (string
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", initOffset, initOffset+initLength-1))
 		}
 		if resp, err := http.DefaultClient.Do(req); err == nil {
-			initBytes, _ = io.ReadAll(resp.Body)
+			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+				initBytes, _ = io.ReadAll(resp.Body)
+			}
 			_ = resp.Body.Close()
 		}
 	}
@@ -239,17 +261,57 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string) (string
 	}
 
 	s.mu.Lock()
+	// Prune inactive/stale streams older than 2 hours
+	now := time.Now()
+	for id, stream := range s.streams {
+		if now.Sub(stream.createdAt) > 2*time.Hour {
+			delete(s.streams, id)
+		}
+	}
 	s.streams[streamID] = st
 	s.mu.Unlock()
 
-	streamURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s.aac", s.port, streamID)
+	streamURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s.aac", s.port, streamID, s.authToken)
 	return streamURL, totalDur, nil
 }
 
 func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
-	// Path format: /stream/{streamID}.aac
+	// Verify request is from loopback interface
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Verify Host header points to local loopback
+	reqHost := r.Host
+	if h, _, err := net.SplitHostPort(reqHost); err == nil {
+		reqHost = h
+	}
+	if reqHost != "127.0.0.1" && reqHost != "localhost" {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Path format: /stream/{streamID}/{token}.aac
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
-	streamID := strings.TrimSuffix(path, ".aac")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	streamID := parts[0]
+	filePart := parts[1]
+	token := strings.TrimSuffix(filePart, ".aac")
+	if token != s.authToken {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 
 	s.mu.RLock()
 	st, ok := s.streams[streamID]
@@ -312,14 +374,28 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			_ = resp.Body.Close()
+			return
+		}
+
 		segData, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
 			return
 		}
 
-		// Decrypt segment into ADTS AAC frames
-		aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, s.cdmEngine.Decrypt)
+		// Decrypt segment into ADTS AAC frames passing subsamples
+		aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
+			cdmSubs := make([]cdm.Subsample, len(subs))
+			for si, sb := range subs {
+				cdmSubs[si] = cdm.Subsample{
+					ClearBytes:  sb.ClearBytes,
+					CipherBytes: sb.CipherBytes,
+				}
+			}
+			return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
+		})
 		if err != nil {
 			return
 		}

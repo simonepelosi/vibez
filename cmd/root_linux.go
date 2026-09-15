@@ -23,7 +23,8 @@ import (
 )
 
 func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
-	if browserless.FindCDM() != "" {
+	wantBrowserless := browserlessFlag || os.Getenv("VIBEZ_BROWSERLESS") == "1"
+	if wantBrowserless && browserless.FindCDM() != "" {
 		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
 	}
 	if cdp.Available() {
@@ -45,6 +46,9 @@ func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserTo
 				return fmt.Sprintf("Chrome/CDP · provider: Apple Music · %d kbps AAC · helper: %s", audioBitrateKbps, cdp.HelperPath())
 			},
 		})
+	}
+	if browserless.FindCDM() != "" {
+		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
 	}
 	return runWebKitFlow(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
 }

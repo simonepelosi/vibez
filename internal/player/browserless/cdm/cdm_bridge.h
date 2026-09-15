@@ -41,6 +41,7 @@ int cdm_context_update_session(
 );
 
 // cdm_context_decrypt decrypts an audio sample buffer using AES-CTR (cenc).
+// If num_subsamples > 0, clear_bytes and cipher_bytes specify the subsample pattern.
 // out_decrypted must have at least in_size bytes allocated.
 // Returns 0 on success.
 int cdm_context_decrypt(
@@ -51,6 +52,9 @@ int cdm_context_decrypt(
     uint32_t iv_size,
     const uint8_t* in_data,
     uint32_t in_size,
+    const uint16_t* clear_bytes,
+    const uint32_t* cipher_bytes,
+    uint32_t num_subsamples,
     uint8_t* out_decrypted,
     uint32_t* out_size
 );

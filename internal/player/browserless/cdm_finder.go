@@ -40,8 +40,9 @@ func EnsureCDM() (string, error) {
 	if fi, err := os.Stat(cfgPath); err == nil && !fi.IsDir() && fi.Size() > 100000 {
 		// Copy to cache
 		if data, err := os.ReadFile(cfgPath); err == nil { //nolint:gosec // G304: user config path in home dir
-			_ = os.WriteFile(dest, data, 0600) //nolint:gosec // G703: fixed destination path inside user cache
-			return dest, nil
+			if err := os.WriteFile(dest, data, 0600); err == nil { //nolint:gosec // G306: destination path inside user cache
+				return dest, nil
+			}
 		}
 	}
 

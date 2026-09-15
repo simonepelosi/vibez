@@ -29,6 +29,7 @@ var demo bool
 var noUpdate bool
 var local bool
 var musicDir string
+var browserlessFlag bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -52,6 +53,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 	rootCmd.PersistentFlags().BoolVar(&local, "local", false, "run with local music files (no Apple account required)")
 	rootCmd.PersistentFlags().StringVar(&musicDir, "music-dir", "", "path to your music directory (saved to config)")
+	rootCmd.PersistentFlags().BoolVar(&browserlessFlag, "browserless", false, "use experimental in-process Widevine CDM player without Chrome")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {

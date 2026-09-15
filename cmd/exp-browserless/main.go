@@ -181,7 +181,7 @@ func main() {
 	}
 	defer func() { _ = streamServer.Close() }()
 
-	streamURL, duration, err := streamServer.PrepareTrack(ctx, songID)
+	streamURL, duration, err := streamServer.PrepareTrack(ctx, songID, true)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to prepare track stream: %v\n", err)
 		return
