@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package cmd
 
@@ -11,7 +11,6 @@ import (
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player/browserless"
-	"github.com/simone-vibes/vibez/internal/player/mpris"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 	"github.com/simone-vibes/vibez/internal/tui"
 	"github.com/simone-vibes/vibez/internal/updater"
@@ -66,19 +65,12 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 		playerCh <- blPlayer
 
-		// MPRIS Linux media key & status bar integration
-		if srv, mprisErr := mpris.NewServer(blPlayer); mprisErr == nil {
-			go func() {
-				for st := range blPlayer.Subscribe() {
-					srv.Update(st)
-				}
-			}()
-		}
+		setupBrowserlessPlatform(blPlayer)
 
 		// Last.fm scrobbler integration
 		startLastfmScrobbler(cfg, blPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 
-		backendLabel := fmt.Sprintf("Browserless (In-Process Widevine + GStreamer) · %d kbps AAC", audioBitrateKbps)
+		backendLabel := browserlessBackendLabel(audioBitrateKbps)
 		prog.Send(tui.EngineReadyMsg{
 			Player:   blPlayer,
 			Provider: prov,

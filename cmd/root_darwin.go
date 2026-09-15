@@ -6,11 +6,15 @@ import (
 	"fmt"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/player/browserless"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
 	"github.com/simone-vibes/vibez/internal/tui"
 )
 
 func runPlatform(cfg *config.Config, _ string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
+	if browserless.FindCDM() != "" {
+		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
+	}
 	return runCDPFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps, cdpPlatformHooks{
 		initStatus: "Checking Google Chrome...",
 		helperPaths: func() []string {
