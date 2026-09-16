@@ -1,29 +1,16 @@
-//go:build linux
+//go:build linux || darwin
 
 package browserless
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-// Standard locations where libwidevinecdm.so may exist on Linux.
-func candidatePaths() []string {
-	home, _ := os.UserHomeDir()
-	return []string{
-		filepath.Join(home, ".cache", "vibez", "cdm", "libwidevinecdm.so"),
-		filepath.Join(home, ".cache", "vibez", "chrome", "opt", "google", "chrome", "WidevineCdm", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
-		"/usr/lib/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/usr/lib/chromium-browser/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/opt/google/chrome/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/opt/google/chrome-unstable/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/usr/lib/firefox/gmp-widevinecdm/system-installed/libwidevinecdm.so",
-		"/var/lib/flatpak/app/org.chromium.Chromium/current/active/files/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-	}
-}
-
-// FindCDM searches the host for an existing libwidevinecdm.so binary.
+// FindCDM searches the host for an existing Widevine CDM library binary.
 // Returns the file path if found, or empty string.
 func FindCDM() string {
 	for _, p := range candidatePaths() {
@@ -34,13 +21,8 @@ func FindCDM() string {
 	return ""
 }
 
-// Destination path for the cached standalone CDM library.
-func DefaultCDMPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "vibez", "cdm", "libwidevinecdm.so")
-}
-
-// EnsureCDM returns an existing CDM library path from the host or user cache.
+// EnsureCDM returns an existing CDM library path, or automatically downloads
+// and extracts the official Widevine CDM component into the user cache directory.
 func EnsureCDM() (string, error) {
 	if p := FindCDM(); p != "" {
 		return p, nil
@@ -51,9 +33,10 @@ func EnsureCDM() (string, error) {
 		return "", fmt.Errorf("failed to create cdm cache directory: %w", err)
 	}
 
-	// We can check if a user placed it in ~/.config/vibez/libwidevinecdm.so
+	// We can check if a user placed it in ~/.config/vibez/libwidevinecdm.<ext>
+	libName := filepath.Base(dest)
 	home, _ := os.UserHomeDir()
-	cfgPath := filepath.Join(home, ".config", "vibez", "libwidevinecdm.so")
+	cfgPath := filepath.Join(home, ".config", "vibez", libName)
 	if fi, err := os.Stat(cfgPath); err == nil && !fi.IsDir() && fi.Size() > 100000 {
 		// Copy to cache
 		if data, err := os.ReadFile(cfgPath); err == nil { //nolint:gosec // G304: user config path in home dir
@@ -63,5 +46,13 @@ func EnsureCDM() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("libwidevinecdm.so not found on system. Please place libwidevinecdm.so in %s", dest)
+	// Automatically download official Google Widevine package (mirroring Firefox's mechanism)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	downloaded, err := DownloadCDM(ctx, dest)
+	if err != nil {
+		return "", fmt.Errorf("%s not found and auto-download failed: %w (place %s manually in %s)", libName, err, libName, dest)
+	}
+	return downloaded, nil
 }
