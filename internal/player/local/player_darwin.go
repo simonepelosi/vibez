@@ -197,14 +197,21 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-// audioRef wraps a C audio state with an atomic reference count.
+// audioRef wraps a C audio state with an atomic reference count. It owns the
+// cgo handle stored in s->goPlayer, so the handle lives exactly as long as the
+// C state that can pass it back through vibezOnEOS.
 type audioRef struct {
-	s    *C.vibez_audio_state
-	refs int32
+	s      *C.vibez_audio_state
+	p      *Player
+	handle cgo.Handle
+	refs   int32
 }
 
-func newAudioRef(s *C.vibez_audio_state) *audioRef {
-	return &audioRef{s: s, refs: 1}
+func newAudioRef(s *C.vibez_audio_state, p *Player) *audioRef {
+	r := &audioRef{s: s, p: p, refs: 1}
+	r.handle = cgo.NewHandle(r)
+	s.goPlayer = C.uintptr_t(r.handle)
+	return r
 }
 
 // acquire increments the reference count and returns true if the object is still active.
@@ -220,10 +227,13 @@ func (r *audioRef) acquire() bool {
 	}
 }
 
-// release decrements the reference count and destroys the C object when it reaches zero
+// release decrements the reference count and destroys the C object when it
+// reaches zero. The handle is deleted only after vibez_destroy has disposed of
+// the queue, so no callback can still be holding it.
 func (r *audioRef) release() {
 	if atomic.AddInt32(&r.refs, -1) == 0 {
 		C.vibez_destroy(r.s)
+		r.handle.Delete()
 	}
 }
 
@@ -238,7 +248,6 @@ type Player struct {
 	sampleRate float64
 	done       chan struct{}
 	eosCh      chan struct{}
-	handle     cgo.Handle
 	audioWg    sync.WaitGroup
 	allTracks  []provider.Track
 }
@@ -313,7 +322,16 @@ func (p *Player) eosLoop() {
 
 //export vibezOnEOS
 func vibezOnEOS(h C.uintptr_t) {
-	p := cgo.Handle(uintptr(h)).Value().(*Player)
+	r := cgo.Handle(uintptr(h)).Value().(*audioRef)
+	p := r.p
+	// A state that has already been swapped out can still reach its end
+	// before it is destroyed; that EOS belongs to no track now.
+	p.mu.RLock()
+	current := p.audio == r
+	p.mu.RUnlock()
+	if !current {
+		return
+	}
 	select {
 	case p.eosCh <- struct{}{}:
 	default:
@@ -345,15 +363,10 @@ func (p *Player) playTrack(t provider.Track) {
 	frames := int64(C.vibez_get_duration(raw))
 	duration := time.Duration(float64(frames) / sampleRate * float64(time.Second))
 
-	ref := newAudioRef(raw)
+	ref := newAudioRef(raw, p)
 
 	p.mu.Lock()
 	old := p.audio
-	if p.handle != 0 {
-		p.handle.Delete()
-	}
-	p.handle = cgo.NewHandle(p)
-	raw.goPlayer = C.uintptr_t(p.handle)
 	p.sampleRate = sampleRate
 	p.audio = ref
 	p.state.Track = &t
@@ -659,10 +672,6 @@ func (p *Player) Close() error {
 	p.mu.Lock()
 	old := p.audio
 	p.audio = nil
-	if p.handle != 0 {
-		p.handle.Delete()
-		p.handle = 0
-	}
 	p.mu.Unlock()
 	if old != nil {
 		old.release()
