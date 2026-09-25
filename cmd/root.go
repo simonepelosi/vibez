@@ -65,10 +65,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	if noDiscord {
-		f := false
-		cfg.DiscordRPC = &f
-	}
 
 	audioBitrateKbps, err := cfg.AudioBitrateKbps()
 	if err != nil {
@@ -142,7 +138,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		opts.IconPath = iconPath
 		opts.Backend = "Demo mode · built-in fake tracks, no credentials required"
 		prog := tea.NewProgram(tui.New(cfg, dp, p, opts))
-		startDiscordRPC(cfg, p, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 		_, err = prog.Run()
 		return err
 	}

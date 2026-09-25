@@ -167,3 +167,132 @@ func TestService_EndToEnd(t *testing.T) {
 		t.Fatal("timed out waiting for clear activity frame on close")
 	}
 }
+
+func TestService_SeekAndRepeatOneDrift(t *testing.T) {
+	sockPath, frames, cleanup := mockDiscordServer(t)
+	defer cleanup()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to dial mock server: %v", err)
+	}
+
+	svc := NewService(DefaultClientID)
+	svc.client = &IPCClient{conn: conn}
+	defer func() { _ = svc.Close() }()
+
+	tr := &provider.Track{
+		ID:       "track-seek",
+		Title:    "Sunflower",
+		Artist:   "Post Malone",
+		Duration: 200 * time.Second,
+	}
+
+	// 1. Initial play at position 10s
+	svc.Update(player.State{
+		Track:    tr,
+		Playing:  true,
+		Position: 10 * time.Second,
+	})
+
+	select {
+	case <-frames:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial frame")
+	}
+
+	// 2. Normal playback tick (position 11s, ~1s diff) -> should be deduplicated (no frame)
+	svc.Update(player.State{
+		Track:    tr,
+		Playing:  true,
+		Position: 11 * time.Second,
+	})
+
+	select {
+	case <-frames:
+		t.Fatal("expected frame to be deduplicated, but received one")
+	case <-time.After(100 * time.Millisecond):
+		// Expected deduplication
+	}
+
+	// 3. User seeks to position 80s (drift > 2s) -> should send new activity
+	svc.Update(player.State{
+		Track:    tr,
+		Playing:  true,
+		Position: 80 * time.Second,
+	})
+
+	select {
+	case payload := <-frames:
+		var cmd setActivityCmd
+		if err := json.Unmarshal(payload, &cmd); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		if cmd.Args.Activity == nil || cmd.Args.Activity.Timestamps == nil {
+			t.Fatal("expected non-nil timestamps after seek")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for seek frame")
+	}
+
+	// 4. Repeat-one loops back to position 0s -> should send new activity
+	svc.Update(player.State{
+		Track:    tr,
+		Playing:  true,
+		Position: 0 * time.Second,
+	})
+
+	select {
+	case payload := <-frames:
+		var cmd setActivityCmd
+		if err := json.Unmarshal(payload, &cmd); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		if cmd.Args.Activity == nil || cmd.Args.Activity.Timestamps == nil {
+			t.Fatal("expected non-nil timestamps after loop")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for loop frame")
+	}
+}
+
+func TestIPCClient_HandshakeTimeout(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "silent-socket")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen error: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	// Accept connection but do nothing (silent / hung server)
+	go func() {
+		conn, err := l.Accept()
+		if err == nil {
+			// Read handshake to keep buffer clear, but never reply
+			buf := make([]byte, 1024)
+			_, _ = conn.Read(buf)
+			// keep conn open until listener is closed
+			<-time.After(2 * defaultTimeout)
+			_ = conn.Close()
+		}
+	}()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	client := &IPCClient{conn: conn}
+	start := time.Now()
+	err = client.Handshake(DefaultClientID)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected Handshake to fail due to timeout, but it succeeded")
+	}
+	if elapsed > defaultTimeout+2*time.Second {
+		t.Fatalf("Handshake took too long to time out: %v", elapsed)
+	}
+}

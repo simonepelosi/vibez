@@ -32,8 +32,9 @@ var (
 
 // IPCClient handles communication with the local Discord client over IPC socket.
 type IPCClient struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn    net.Conn
+	mu      sync.Mutex
+	onFrame func(op uint32, payload []byte)
 }
 
 // DialIPC locates and connects to an active Discord IPC socket.
@@ -102,7 +103,20 @@ func (c *IPCClient) Handshake(clientID string) error {
 		return err
 	}
 
+	c.mu.Lock()
+	if c.conn != nil {
+		_ = c.conn.SetReadDeadline(time.Now().Add(defaultTimeout))
+	}
+	c.mu.Unlock()
+
 	op, resp, err := c.ReadFrame()
+
+	c.mu.Lock()
+	if c.conn != nil {
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}
+	c.mu.Unlock()
+
 	if err != nil {
 		return err
 	}
@@ -117,6 +131,13 @@ func (c *IPCClient) Handshake(clientID string) error {
 	return nil
 }
 
+// SetOnFrame registers a callback for frames received by the background reader.
+func (c *IPCClient) SetOnFrame(fn func(op uint32, payload []byte)) {
+	c.mu.Lock()
+	c.onFrame = fn
+	c.mu.Unlock()
+}
+
 // startReader drains incoming Discord frames and responds to Pings.
 func (c *IPCClient) startReader() {
 	go func() {
@@ -128,6 +149,13 @@ func (c *IPCClient) startReader() {
 			}
 			if op == OpPing {
 				_ = c.WriteFrame(OpPong, payload)
+			} else {
+				c.mu.Lock()
+				fn := c.onFrame
+				c.mu.Unlock()
+				if fn != nil {
+					fn(op, payload)
+				}
 			}
 		}
 	}()

@@ -26,9 +26,9 @@ type Service struct {
 	mu       sync.Mutex
 
 	nonceCounter atomic.Uint64
-	lastActivity *Activity
 	lastTrackID  string
 	lastPlaying  bool
+	lastStart    int64
 	lastConnErr  time.Time
 	closed       bool
 }
@@ -84,12 +84,23 @@ func (s *Service) Update(st player.State) {
 		trackID = st.Track.ID
 	}
 
-	// Avoid re-sending identical presence if track and playing status haven't changed
-	if trackID == s.lastTrackID && st.Playing == s.lastPlaying && s.client != nil {
-		return
+	act := BuildActivity(st)
+
+	var currentStart int64
+	if act != nil && act.Timestamps != nil {
+		currentStart = act.Timestamps.Start
 	}
 
-	act := BuildActivity(st)
+	drift := currentStart - s.lastStart
+	if drift < 0 {
+		drift = -drift
+	}
+
+	// Avoid re-sending identical presence if track and playing status haven't changed
+	// and timestamp hasn't drifted (e.g. from seek or repeat-one loop).
+	if trackID == s.lastTrackID && st.Playing == s.lastPlaying && drift <= 2 && s.client != nil {
+		return
+	}
 
 	// Ensure connection
 	if err := s.ensureConnected(); err != nil {
@@ -120,9 +131,9 @@ func (s *Service) Update(st player.State) {
 		return
 	}
 
-	s.lastActivity = act
 	s.lastTrackID = trackID
 	s.lastPlaying = st.Playing
+	s.lastStart = currentStart
 
 	if act != nil {
 		s.log(fmt.Sprintf("presence updated: %s — %s (%s)", act.State, act.Details, act.Assets.SmallText))
@@ -155,14 +166,28 @@ func (s *Service) ensureConnected() error {
 		return err
 	}
 
+	ipc.SetOnFrame(func(op uint32, payload []byte) {
+		if op != OpFrame {
+			return
+		}
+		var resp struct {
+			Cmd  string `json:"cmd"`
+			Evt  string `json:"evt"`
+			Data struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(payload, &resp); err == nil {
+			if resp.Evt == "ERROR" {
+				s.log(fmt.Sprintf("%s error (%d): %s", resp.Cmd, resp.Data.Code, resp.Data.Message))
+			}
+		}
+	})
+
 	s.client = ipc
 	s.log("connected to Discord IPC")
 	return nil
-}
-
-// Clear clears the current Discord activity.
-func (s *Service) Clear() {
-	s.Update(player.State{})
 }
 
 // Close closes the Discord IPC connection.
