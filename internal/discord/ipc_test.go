@@ -52,18 +52,19 @@ func mockDiscordServer(t *testing.T) (string, chan []byte, func()) {
 			frames <- payload
 
 			// Respond to handshake or frames
-			if op == OpHandshake {
+			switch op {
+			case OpHandshake:
 				resp := []byte(`{"cmd":"DISPATCH","evt":"READY","data":{"v":1}}`)
 				respHeader := make([]byte, 8)
 				binary.LittleEndian.PutUint32(respHeader[0:4], OpFrame)
-				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp)))
+				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp))) //nolint:gosec
 				_, _ = conn.Write(respHeader)
 				_, _ = conn.Write(resp)
-			} else if op == OpFrame {
+			case OpFrame:
 				resp := []byte(`{"cmd":"SET_ACTIVITY","data":{},"evt":null}`)
 				respHeader := make([]byte, 8)
 				binary.LittleEndian.PutUint32(respHeader[0:4], OpFrame)
-				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp)))
+				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp))) //nolint:gosec
 				_, _ = conn.Write(respHeader)
 				_, _ = conn.Write(resp)
 			}

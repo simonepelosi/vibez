@@ -21,11 +21,11 @@ const reconnectCooldown = 15 * time.Second
 type Service struct {
 	clientID string
 	client   *IPCClient
-	logMu        sync.RWMutex
-	logger       func(string)
-	mu           sync.Mutex
+	logMu    sync.RWMutex
+	logger   func(string)
+	mu       sync.Mutex
 
-	nonceCounter uint64
+	nonceCounter atomic.Uint64
 	lastActivity *Activity
 	lastTrackID  string
 	lastPlaying  bool
@@ -96,7 +96,7 @@ func (s *Service) Update(st player.State) {
 		return
 	}
 
-	nonce := fmt.Sprintf("%d", atomic.AddUint64(&s.nonceCounter, 1))
+	nonce := fmt.Sprintf("%d", s.nonceCounter.Add(1))
 	cmd := setActivityCmd{
 		Cmd: "SET_ACTIVITY",
 		Args: setActivityArgs{
@@ -173,7 +173,7 @@ func (s *Service) Close() error {
 	s.closed = true
 	if s.client != nil {
 		// Attempt to clear activity before disconnecting
-		nonce := fmt.Sprintf("%d", atomic.AddUint64(&s.nonceCounter, 1))
+		nonce := fmt.Sprintf("%d", s.nonceCounter.Add(1))
 		cmd := setActivityCmd{
 			Cmd: "SET_ACTIVITY",
 			Args: setActivityArgs{

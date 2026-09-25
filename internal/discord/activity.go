@@ -1,12 +1,10 @@
 package discord
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/player"
-	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 // ActivityTypeListening indicates "Listening to ..." in Discord.
@@ -120,46 +118,4 @@ func sanitizeStr(s string) string {
 		return string(runes[:128])
 	}
 	return string(runes)
-}
-
-// activityEqual reports whether two activities represent the same display state.
-func activityEqual(a, b *Activity) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	if a.Details != b.Details || a.State != b.State || a.Type != b.Type {
-		return false
-	}
-	if (a.Assets == nil) != (b.Assets == nil) {
-		return false
-	}
-	if a.Assets != nil && b.Assets != nil {
-		if a.Assets.LargeImage != b.Assets.LargeImage ||
-			a.Assets.LargeText != b.Assets.LargeText ||
-			a.Assets.SmallImage != b.Assets.SmallImage ||
-			a.Assets.SmallText != b.Assets.SmallText {
-			return false
-		}
-	}
-	if (a.Timestamps == nil) != (b.Timestamps == nil) {
-		return false
-	}
-	if a.Timestamps != nil && b.Timestamps != nil {
-		// Allow a 1-second drift so normal position ticks don't re-dispatch identical songs
-		diff := a.Timestamps.Start - b.Timestamps.Start
-		if diff < -1 || diff > 1 {
-			return false
-		}
-	}
-	return true
-}
-
-func trackIdent(t *provider.Track) string {
-	if t == nil {
-		return ""
-	}
-	return fmt.Sprintf("%s:%s:%s", t.ID, t.Title, t.Artist)
 }

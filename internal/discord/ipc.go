@@ -56,7 +56,7 @@ func candidateSocketPaths() []string {
 		if dir == "" {
 			continue
 		}
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			candidates = append(candidates, filepath.Join(dir, fmt.Sprintf("discord-ipc-%d", i)))
 		}
 	}
@@ -144,7 +144,7 @@ func (c *IPCClient) WriteFrame(op uint32, payload []byte) error {
 	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
 	header := make([]byte, 8)
 	binary.LittleEndian.PutUint32(header[0:4], op)
-	binary.LittleEndian.PutUint32(header[4:8], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(header[4:8], uint32(len(payload))) //nolint:gosec // payload length fits in uint32
 
 	if _, err := c.conn.Write(header); err != nil {
 		return err
