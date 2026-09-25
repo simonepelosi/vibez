@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
-	"path/filepath"
+	"os"
 	"testing"
 	"time"
 
@@ -13,11 +13,27 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+// shortTempSocketPath returns a short temporary unix socket path that fits within Darwin's 104-byte sun_path limit.
+func shortTempSocketPath(t *testing.T) string {
+	t.Helper()
+	f, err := os.CreateTemp("/tmp", "d-*.sock")
+	if err != nil {
+		f, err = os.CreateTemp("", "d-*.sock")
+		if err != nil {
+			t.Fatalf("failed to create temp socket path: %v", err)
+		}
+	}
+	p := f.Name()
+	_ = f.Close()
+	_ = os.Remove(p)
+	t.Cleanup(func() { _ = os.Remove(p) })
+	return p
+}
+
 // mockDiscordServer creates a fake Discord IPC listener on a unix socket.
 func mockDiscordServer(t *testing.T) (string, chan []byte, func()) {
 	t.Helper()
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "discord-ipc-0")
+	sockPath := shortTempSocketPath(t)
 
 	l, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -257,8 +273,7 @@ func TestService_SeekAndRepeatOneDrift(t *testing.T) {
 }
 
 func TestIPCClient_HandshakeTimeout(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "silent-socket")
+	sockPath := shortTempSocketPath(t)
 	l, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen error: %v", err)
