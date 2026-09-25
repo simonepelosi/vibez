@@ -64,6 +64,7 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 - **MPRIS D-Bus on Linux** — desktop media keys and notifications integrate with supported desktop environments
 - **No external music player needed** — vibez does not depend on Cider, VLC, or Music.app
 - **Last.fm scrobbling** — optional integration; connect with `vibez auth lastfm login` and your listening history is tracked automatically
+- **Discord Rich Presence** — broadcasts currently playing track, artist, album, artwork, and elapsed/remaining time to your Discord profile; enabled by default (disable with `--no-discord` or in config)
 - **WSL2 support** — set `"wsl": true` in config to enable audio workarounds for WSL2 environments
 
 ### 🌀 Vibe Mode

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Discord Rich Presence (RPC)** — vibez now displays your currently playing track, artist, album, album art, and listening time on Discord. Connects seamlessly to the local Discord desktop client on Linux and macOS; enabled by default and can be disabled via `--no-discord` or `"discord_rpc": false` in config. Closes #60.
+
 ## [0.9.2] — 2026-09-25
 
 ### Fixed

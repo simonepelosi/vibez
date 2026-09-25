@@ -142,6 +142,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 			hooks.afterReady(cdpPlayer)
 		}
 		startLastfmScrobbler(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		startDiscordRPC(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 
 		prog.Send(tui.EngineReadyMsg{
 			Player:      cdpPlayer,

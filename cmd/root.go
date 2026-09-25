@@ -29,6 +29,7 @@ var demo bool
 var noUpdate bool
 var local bool
 var musicDir string
+var noDiscord bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -52,6 +53,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 	rootCmd.PersistentFlags().BoolVar(&local, "local", false, "run with local music files (no Apple account required)")
 	rootCmd.PersistentFlags().StringVar(&musicDir, "music-dir", "", "path to your music directory (saved to config)")
+	rootCmd.PersistentFlags().BoolVar(&noDiscord, "no-discord", false, "disable Discord Rich Presence")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
@@ -62,6 +64,10 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+	if noDiscord {
+		f := false
+		cfg.DiscordRPC = &f
 	}
 
 	audioBitrateKbps, err := cfg.AudioBitrateKbps()
@@ -123,6 +129,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		opts.Backend = "Local mode · playing from " + cfg.MusicDir
 		opts.ScanNotice = prov.ScanNotice()
 		prog := tea.NewProgram(tui.New(cfg, prov, plyr, opts))
+		startDiscordRPC(cfg, plyr, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 		_, err = prog.Run()
 		return err
 	}
@@ -135,6 +142,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		opts.IconPath = iconPath
 		opts.Backend = "Demo mode · built-in fake tracks, no credentials required"
 		prog := tea.NewProgram(tui.New(cfg, dp, p, opts))
+		startDiscordRPC(cfg, p, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 		_, err = prog.Run()
 		return err
 	}
