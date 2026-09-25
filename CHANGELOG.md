@@ -9,8 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-09-25
+
 ### Fixed
-- **Local mode gave no sign when a file's format was unsupported on that platform**: `scan()` dropped every file whose extension was missing from the platform's `supportedExts` map and counted nothing, so a macOS user whose library is OGG got a TUI headed `Local mode · playing from ~/Music` with nothing in it. That is what a mistyped path, an empty directory and an unreadable file all look like too, and only the format case has a remedy the user can act on. The scan now counts what it left out and why, and the provider renders it as one line: `no playable tracks in /home/user/Music: macOS plays .flac, .m4a, .mp3; skipped 412 files (410 .ogg, 2 .jpg)`. It reaches the debug log on every local launch and the status bar when the library came back empty, with the playable set ahead of the detail because a status bar truncates from the right. The now-playing box renders that line through `statusLine` rather than its own copy of it, so a message long enough to explain itself is truncated to the width instead of overflowing the box. The supported set is named because it is not written down anywhere else a user would look: the README does not mention `--local`, and `--help` does not qualify it by platform. Closes #134.
+- **Switching local tracks on macOS could panic if the outgoing track reached its end** — `playTrack` deleted the player's cgo handle while the previous track's `AudioQueue` was still running on a CoreAudio thread and could invoke `vibezOnEOS` with it, crashing the process with a panic on deleted handle access. Each C audio state (`audioRef`) now owns its own cgo handle, deleted in `release()` only after `vibez_destroy` has fully stopped and disposed of the queue. `vibezOnEOS` also ignores stale EOS events from swapped-out queues so they cannot prematurely advance a new track. Closes #143, refs #144.
+- **Local mode gave no sign when a file's format was unsupported on that platform** — `scan()` dropped every file whose extension was missing from the platform's `supportedExts` map and counted nothing, so a macOS user whose library is OGG got a TUI headed `Local mode · playing from ~/Music` with nothing in it. That is what a mistyped path, an empty directory and an unreadable file all look like too, and only the format case has a remedy the user can act on. The scan now counts what it left out and why, and the provider renders it as one line: `no playable tracks in /home/user/Music: macOS plays .flac, .m4a, .mp3; skipped 412 files (410 .ogg, 2 .jpg)`. It reaches the debug log on every local launch and the status bar when the library came back empty, with the playable set ahead of the detail because a status bar truncates from the right. The now-playing box renders that line through `statusLine` rather than its own copy of it, so a message long enough to explain itself is truncated to the width instead of overflowing the box. Closes #134, refs #141.
+
+### Thanks
+- Thanks to @OvOhao for reporting the CoreAudio callback handle lifecycle issue (#143).
+- Thanks to @ianswope for fixing the Darwin audio state handle lifecycle (#144), implementing empty library format diagnostics (#141), and enabling CI on non-main pull requests (#142).
 
 ## [0.9.1] — 2026-09-15
 
@@ -666,7 +673,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/simonepelosi/vibez/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/simonepelosi/vibez/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/simonepelosi/vibez/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/simonepelosi/vibez/compare/v0.7.0...v0.8.0
