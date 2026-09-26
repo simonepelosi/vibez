@@ -118,6 +118,8 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 		p := tea.NewProgram(m)
 
 		startLastfmScrobbler(cfg, wkPlayer, func(msg string) { p.Send(tui.DebugLogMsg(msg)) })
+		stopRPC := startDiscordRPC(cfg, wkPlayer, func(msg string) { p.Send(tui.DebugLogMsg(msg)) })
+		defer stopRPC()
 
 		_, runErr := p.Run()
 		tuiErr <- runErr

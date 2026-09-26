@@ -44,6 +44,10 @@ type Config struct {
 	// MusicDir is the local directory to scan for audio files
 	// Supports MP3, FLAC, M4A. Scanned recursively.
 	MusicDir string `json:"music_dir,omitempty"`
+	// DiscordRPC enables Discord Rich Presence (defaults to true).
+	DiscordRPC *bool `json:"discord_rpc,omitempty"`
+	// DiscordClientID overrides the default Discord application client ID.
+	DiscordClientID string `json:"discord_client_id,omitempty"`
 }
 
 type EQBand struct {
@@ -58,6 +62,14 @@ func (c *Config) VolumeOrDefault() float64 {
 		return *c.Volume
 	}
 	return 1.0
+}
+
+// DiscordRPCEnabled reports whether Discord Rich Presence is enabled (default true).
+func (c *Config) DiscordRPCEnabled() bool {
+	if c.DiscordRPC != nil {
+		return *c.DiscordRPC
+	}
+	return true
 }
 
 // SetVolume updates the in-memory volume field. Call Save to persist it.
