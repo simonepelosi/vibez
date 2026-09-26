@@ -8,13 +8,16 @@ import (
 
 func startDiscordRPC(cfg *config.Config, player interface {
 	Subscribe() <-chan playerpkg.State
-}, log func(string)) *discord.Service {
+}, log func(string)) func() {
 	if noDiscord || !cfg.DiscordRPCEnabled() {
-		return nil
+		return func() {}
 	}
 	clientID := cfg.DiscordClientID
 	if clientID == "" {
 		clientID = discord.DefaultClientID
 	}
-	return discord.Start(clientID, player, log)
+	svc := discord.Start(clientID, player, log)
+	return func() {
+		_ = svc.Close()
+	}
 }

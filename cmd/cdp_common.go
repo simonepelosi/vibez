@@ -33,6 +33,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 	playerCh := make(chan *cdp.Player, 1)
 	runDone := make(chan struct{})
 	restartExe := make(chan string, 1)
+	var stopRPC func()
 
 	go func() {
 		if exe := updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
@@ -142,7 +143,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 			hooks.afterReady(cdpPlayer)
 		}
 		startLastfmScrobbler(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
-		startDiscordRPC(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		stopRPC = startDiscordRPC(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 
 		prog.Send(tui.EngineReadyMsg{
 			Player:      cdpPlayer,
@@ -153,6 +154,9 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 	}()
 
 	_, err := prog.Run()
+	if stopRPC != nil {
+		stopRPC()
+	}
 
 	select {
 	case p := <-playerCh:

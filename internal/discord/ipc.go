@@ -187,11 +187,15 @@ func (c *IPCClient) WriteFrame(op uint32, payload []byte) error {
 
 // ReadFrame reads an 8-byte little-endian header and payload from the socket.
 func (c *IPCClient) ReadFrame() (uint32, []byte, error) {
-	if c.conn == nil {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+
+	if conn == nil {
 		return 0, nil, ErrClosed
 	}
 	header := make([]byte, 8)
-	if _, err := io.ReadFull(c.conn, header); err != nil {
+	if _, err := io.ReadFull(conn, header); err != nil {
 		return 0, nil, err
 	}
 	op := binary.LittleEndian.Uint32(header[0:4])
@@ -199,7 +203,7 @@ func (c *IPCClient) ReadFrame() (uint32, []byte, error) {
 
 	payload := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(c.conn, payload); err != nil {
+		if _, err := io.ReadFull(conn, payload); err != nil {
 			return 0, nil, err
 		}
 	}

@@ -125,7 +125,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		opts.Backend = "Local mode · playing from " + cfg.MusicDir
 		opts.ScanNotice = prov.ScanNotice()
 		prog := tea.NewProgram(tui.New(cfg, prov, plyr, opts))
-		startDiscordRPC(cfg, plyr, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		stopRPC := startDiscordRPC(cfg, plyr, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		defer stopRPC()
 		_, err = prog.Run()
 		return err
 	}
