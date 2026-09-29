@@ -111,9 +111,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("local provider: %w", err)
 		}
-		plyr, err := localPlayer.New()
+		plyr, err := localPlayer.New(func(msg string) {
+			fmt.Fprintln(os.Stderr, msg)
+		})
 		if err != nil {
-			return fmt.Errorf("local player: %w", err)
+			return err
 		}
 		defer func() { _ = plyr.Close() }()
 		tracks, err := prov.GetLibraryTracks(context.Background())

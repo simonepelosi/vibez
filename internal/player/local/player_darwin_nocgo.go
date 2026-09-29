@@ -14,7 +14,7 @@ import (
 // New() always returns an error, so none of these methods are ever called.
 type Player struct{}
 
-func New() (*Player, error) {
+func New(_ func(string)) (*Player, error) {
 	return nil, fmt.Errorf("local playback requires CGo on macOS — build with CGO_ENABLED=1")
 }
 

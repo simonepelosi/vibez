@@ -66,9 +66,9 @@ go test ./...
 
 Install Node.js 22+ to run the local-audio JavaScript tests; they are also invoked by `go test`. Chrome is needed for real playback, not the unit tests. Use Windows Terminal for the interactive TUI. Repository text files use LF line endings on every platform.
 
-The Windows config path is `%APPDATA%\vibez\config.json`; the browser driver cache is `%LOCALAPPDATA%\vibez\driver`. `VIBEZ_CHROME_PATH` or `CHROME_PATH` can select a custom Chrome executable.
+The Windows config path is `%APPDATA%\vibez\config.json`; the browser driver cache is `%LOCALAPPDATA%\vibez\driver`. `VIBEZ_CHROME_PATH` or `CHROME_PATH` can select a custom Chrome executable. Local startup reports browser setup progress before opening the TUI. Installed Chrome sessions retain Chromium's sandbox on Windows and macOS.
 
-For Apple Music testing without your own MusicKit key, ask a maintainer to review the exact PR head and run **Dev Build** with its PR number. The workflow produces a `windows-amd64` artifact with a developer token embedded; it does not require giving contributors the private key. Windows sign-in and full-track playback remain an end-to-end verification requirement even after build, demo, local-audio, and Widevine-capability checks pass.
+For Apple Music testing without your own MusicKit key, coordinate with a maintainer on a test build after review of the exact PR head and the workflow's security. The current **Dev Build** executes PR code with Apple signing secrets available, so manual dispatch is not a safe shortcut for unreviewed code. Its `windows-amd64` artifact embeds a developer token; the private signing key must not be shared with contributors. Windows sign-in and full-track playback remain an end-to-end verification requirement even after build, demo, local-audio, and Widevine-capability checks pass.
 
 
 ## Full development setup (Apple credentials required)

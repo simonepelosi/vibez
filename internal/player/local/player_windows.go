@@ -69,9 +69,13 @@ type Player struct {
 }
 
 // New starts a headless Chrome session for local playback. Nothing plays
-// until the queue is loaded and started.
-func New() (*Player, error) {
-	if err := cdp.EnsureBrowser(func(string) {}); err != nil {
+// until the queue is loaded and started. onProgress reports browser setup
+// status before the TUI starts; nil disables progress reporting.
+func New(onProgress func(string)) (*Player, error) {
+	if onProgress == nil {
+		onProgress = func(string) {}
+	}
+	if err := cdp.EnsureBrowser(onProgress); err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
 	}
 	media, err := newMediaServer()

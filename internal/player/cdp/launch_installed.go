@@ -15,6 +15,7 @@ func launchBrowser(pw *playwright.Playwright, chromePath string, headless, wsl b
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
+		ChromiumSandbox:   new(true),
 		IgnoreDefaultArgs: []string{"--mute-audio", "--disable-component-update"},
 		Args:              chromeLaunchArgs(headless, wsl),
 	})

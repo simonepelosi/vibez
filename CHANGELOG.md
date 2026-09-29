@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Saved volume and equalizer settings are restored for players supplied at TUI startup, including local mode, not only engines initialized asynchronously.
 - Windows local and CDP player shutdown releases broadcast subscribers; the TUI stops consuming a closed state stream instead of spinning.
+- Local-player shutdown on Linux and macOS is idempotent, preventing a panic when TUI quit is followed by deferred cleanup.
+- Installed Chrome sessions on Windows and macOS enable Chromium's sandbox.
+- Windows local startup reports browser setup progress without repeating the local-player error prefix.
+- Native Go test runs execute the local JavaScript engine suite; Windows-specific Go sources are linted in CI.
 
 ### Verification
 - Windows CLI/TUI, local codec playback, equalization, Widevine capability, MusicKit invalid-token handling, and running-executable replacement have been exercised. Apple sign-in and full-track Apple Music streaming still require verification with an authorized developer token; no lossless Apple Music support is claimed.
