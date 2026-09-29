@@ -445,7 +445,29 @@ func (m *Model) Init() tea.Cmd {
 	if m.stateCh != nil {
 		cmds = append(cmds, waitForState(m.stateCh))
 	}
+	if m.player != nil {
+		cmds = append(cmds, m.restoreAudioSettings()...)
+	}
 	return tea.Batch(cmds...)
+}
+
+func (m *Model) restoreAudioSettings() []tea.Cmd {
+	var cmds []tea.Cmd
+	if m.cfg.Volume != nil {
+		v := m.cfg.VolumeOrDefault()
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+			return p.SetVolume(v)
+		}))
+		m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
+	}
+	if len(m.cfg.EQBands) > 0 {
+		bands := configEQBandsToPlayer(m.cfg.EQBands)
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+			return p.SetEqualizer(bands)
+		}))
+		m.appendLog("[eq] restored from config")
+	}
+	return cmds
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────
@@ -470,7 +492,10 @@ func memTick(helperPaths []string) tea.Cmd {
 
 func waitForState(ch <-chan player.State) tea.Cmd {
 	return func() tea.Msg {
-		s := <-ch
+		s, ok := <-ch
+		if !ok {
+			return nil
+		}
 		// Drain any additional buffered states, keeping only the most recent.
 		// During a track transition the player fires a rapid burst of events
 		// (paused → buffering → playing). Processing each one floods the event
@@ -478,7 +503,10 @@ func waitForState(ch <-chan player.State) tea.Cmd {
 		// the burst into a single Update cycle keeps the UI responsive.
 		for {
 			select {
-			case newer := <-ch:
+			case newer, ok := <-ch:
+				if !ok {
+					return playerStateMsg(s)
+				}
 				s = newer
 			default:
 				return playerStateMsg(s)
@@ -1034,20 +1062,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helperPaths = msg.HelperPaths
 		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
-		if m.cfg.Volume != nil {
-			v := m.cfg.VolumeOrDefault()
-			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
-				return p.SetVolume(v)
-			}))
-			m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
-		}
-		if len(m.cfg.EQBands) > 0 {
-			bands := configEQBandsToPlayer(m.cfg.EQBands)
-			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
-				return p.SetEqualizer(bands)
-			}))
-			m.appendLog("[eq] restored from config")
-		}
+		cmds = append(cmds, m.restoreAudioSettings()...)
 		if m.memProfiling {
 			cmds = append(cmds, memTick(m.helperPaths))
 		}

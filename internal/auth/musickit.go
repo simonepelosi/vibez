@@ -36,7 +36,7 @@ To get one:
   2. Create a key with "MusicKit" capability
   3. Download the .p8 key file
   4. Run: go run ./scripts/gen-devtoken with the required env vars
-  5. Set apple_developer_token in ~/.config/vibez/config.json`)
+  5. Set apple_developer_token in the vibez config file (see vibez --help for its platform path)`)
 	}
 
 	tokenCh := make(chan string, 1)

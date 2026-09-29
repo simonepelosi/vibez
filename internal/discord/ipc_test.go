@@ -3,9 +3,10 @@ package discord
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
-	"os"
 	"testing"
 	"time"
 
@@ -13,35 +14,60 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-// shortTempSocketPath returns a short temporary unix socket path that fits within Darwin's 104-byte sun_path limit.
-func shortTempSocketPath(t *testing.T) string {
-	t.Helper()
-	f, err := os.CreateTemp("/tmp", "d-*.sock")
-	if err != nil {
-		f, err = os.CreateTemp("", "d-*.sock")
-		if err != nil {
-			t.Fatalf("failed to create temp socket path: %v", err)
+// readTestFrame reads one Discord IPC frame from the peer side of a test connection.
+func readTestFrame(r io.Reader) (uint32, []byte, error) {
+	header := make([]byte, 8)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return 0, nil, err
+	}
+	op := binary.LittleEndian.Uint32(header[0:4])
+	length := binary.LittleEndian.Uint32(header[4:8])
+	payload := make([]byte, length)
+	if length > 0 {
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return 0, nil, err
 		}
 	}
-	p := f.Name()
-	_ = f.Close()
-	_ = os.Remove(p)
-	t.Cleanup(func() { _ = os.Remove(p) })
-	return p
+	return op, payload, nil
 }
 
-// mockDiscordServer creates a fake Discord IPC listener on a unix socket.
-func mockDiscordServer(t *testing.T) (string, chan []byte, func()) {
-	t.Helper()
-	sockPath := shortTempSocketPath(t)
-
-	l, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("failed to listen on mock socket: %v", err)
+// writeTestFrame writes one Discord IPC frame from the peer side of a test connection.
+func writeTestFrame(w io.Writer, op uint32, payload []byte) error {
+	header := make([]byte, 8)
+	binary.LittleEndian.PutUint32(header[0:4], op)
+	binary.LittleEndian.PutUint32(header[4:8], uint32(len(payload))) //nolint:gosec
+	if _, err := w.Write(header); err != nil {
+		return err
 	}
+	if len(payload) == 0 {
+		return nil
+	}
+	_, err := w.Write(payload)
+	return err
+}
 
+// dialTestIPC connects to a test IPC endpoint with the platform's production dialer.
+func dialTestIPC(t *testing.T, path string) net.Conn {
+	t.Helper()
+	conn, err := dialIPCPath(path)
+	if err != nil {
+		t.Fatalf("failed to dial mock server: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// mockDiscordServer creates a fake Discord IPC listener on the platform's IPC transport.
+func mockDiscordServer(t *testing.T) (string, chan []byte) {
+	t.Helper()
+	l, path := listenTestIPC(t)
+	return path, serveMockDiscord(l)
+}
+
+// serveMockDiscord accepts one connection on l and answers it like the Discord client,
+// publishing every received payload on the returned channel.
+func serveMockDiscord(l net.Listener) chan []byte {
 	frames := make(chan []byte, 10)
-	done := make(chan struct{})
 
 	go func() {
 		defer close(frames)
@@ -52,17 +78,9 @@ func mockDiscordServer(t *testing.T) (string, chan []byte, func()) {
 		defer func() { _ = conn.Close() }()
 
 		for {
-			header := make([]byte, 8)
-			if _, err := io.ReadFull(conn, header); err != nil {
+			op, payload, err := readTestFrame(conn)
+			if err != nil {
 				return
-			}
-			op := binary.LittleEndian.Uint32(header[0:4])
-			length := binary.LittleEndian.Uint32(header[4:8])
-			payload := make([]byte, length)
-			if length > 0 {
-				if _, err := io.ReadFull(conn, payload); err != nil {
-					return
-				}
 			}
 
 			frames <- payload
@@ -70,46 +88,19 @@ func mockDiscordServer(t *testing.T) (string, chan []byte, func()) {
 			// Respond to handshake or frames
 			switch op {
 			case OpHandshake:
-				resp := []byte(`{"cmd":"DISPATCH","evt":"READY","data":{"v":1}}`)
-				respHeader := make([]byte, 8)
-				binary.LittleEndian.PutUint32(respHeader[0:4], OpFrame)
-				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp))) //nolint:gosec
-				_, _ = conn.Write(respHeader)
-				_, _ = conn.Write(resp)
+				_ = writeTestFrame(conn, OpFrame, []byte(`{"cmd":"DISPATCH","evt":"READY","data":{"v":1}}`))
 			case OpFrame:
-				resp := []byte(`{"cmd":"SET_ACTIVITY","data":{},"evt":null}`)
-				respHeader := make([]byte, 8)
-				binary.LittleEndian.PutUint32(respHeader[0:4], OpFrame)
-				binary.LittleEndian.PutUint32(respHeader[4:8], uint32(len(resp))) //nolint:gosec
-				_, _ = conn.Write(respHeader)
-				_, _ = conn.Write(resp)
+				_ = writeTestFrame(conn, OpFrame, []byte(`{"cmd":"SET_ACTIVITY","data":{},"evt":null}`))
 			}
 		}
 	}()
 
-	cleanup := func() {
-		close(done)
-		_ = l.Close()
-	}
-
-	return sockPath, frames, cleanup
+	return frames
 }
 
-func TestIPCClient_Handshake(t *testing.T) {
-	sockPath, frames, cleanup := mockDiscordServer(t)
-	defer cleanup()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("failed to dial mock server: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	client := &IPCClient{conn: conn}
-	if err := client.Handshake(DefaultClientID); err != nil {
-		t.Fatalf("Handshake failed: %v", err)
-	}
-
+// expectHandshake asserts that the next payload the mock server received is a handshake for DefaultClientID.
+func expectHandshake(t *testing.T, frames <-chan []byte) {
+	t.Helper()
 	select {
 	case payload := <-frames:
 		var req map[string]any
@@ -124,17 +115,140 @@ func TestIPCClient_Handshake(t *testing.T) {
 	}
 }
 
-func TestService_EndToEnd(t *testing.T) {
-	sockPath, frames, cleanup := mockDiscordServer(t)
-	defer cleanup()
+func TestIPCClient_Handshake(t *testing.T) {
+	path, frames := mockDiscordServer(t)
 
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("failed to dial mock server: %v", err)
+	client := &IPCClient{conn: dialTestIPC(t, path)}
+	if err := client.Handshake(DefaultClientID); err != nil {
+		t.Fatalf("Handshake failed: %v", err)
 	}
 
+	expectHandshake(t, frames)
+}
+
+func TestIPCClient_PingPongAndPeerClose(t *testing.T) {
+	l, path := listenTestIPC(t)
+
+	pongs := make(chan []byte, 1)
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if op, _, err := readTestFrame(conn); err != nil || op != OpHandshake {
+			serverErr <- fmt.Errorf("handshake read: op=%d err=%v", op, err)
+			return
+		}
+		if err := writeTestFrame(conn, OpFrame, []byte(`{"cmd":"DISPATCH","evt":"READY"}`)); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeTestFrame(conn, OpPing, []byte(`{"nonce":"ping-1"}`)); err != nil {
+			serverErr <- err
+			return
+		}
+		op, payload, err := readTestFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if op != OpPong {
+			serverErr <- fmt.Errorf("reply opcode = %d, want OpPong", op)
+			return
+		}
+		pongs <- payload
+		// Returning closes the server end, as Discord does when it shuts down.
+	}()
+
+	client := &IPCClient{conn: dialTestIPC(t, path)}
+	if err := client.Handshake(DefaultClientID); err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	select {
+	case payload := <-pongs:
+		if string(payload) != `{"nonce":"ping-1"}` {
+			t.Fatalf("pong payload = %q, want the ping payload echoed", payload)
+		}
+	case err := <-serverErr:
+		t.Fatalf("mock server: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pong")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !errors.Is(client.WriteFrame(OpFrame, []byte(`{}`)), ErrClosed) {
+		if time.Now().After(deadline) {
+			t.Fatal("client stayed open after the peer closed the connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestIPCClient_CloseDisconnectsPeer(t *testing.T) {
+	l, path := listenTestIPC(t)
+
+	peerReadErr := make(chan error, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			peerReadErr <- err
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, _, err := readTestFrame(conn); err != nil {
+			peerReadErr <- err
+			return
+		}
+		if err := writeTestFrame(conn, OpFrame, []byte(`{"cmd":"DISPATCH","evt":"READY"}`)); err != nil {
+			peerReadErr <- err
+			return
+		}
+		_, _, err = readTestFrame(conn)
+		peerReadErr <- err
+	}()
+
+	client := &IPCClient{conn: dialTestIPC(t, path)}
+	if err := client.Handshake(DefaultClientID); err != nil {
+		t.Fatalf("Handshake failed: %v", err)
+	}
+
+	// The background reader is now blocked on the connection; Close must still return promptly.
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked while the background reader was active")
+	}
+
+	select {
+	case err := <-peerReadErr:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("peer read after client Close = %v, want io.EOF", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer did not observe the client closing the connection")
+	}
+
+	if err := client.WriteFrame(OpFrame, []byte(`{}`)); !errors.Is(err, ErrClosed) {
+		t.Fatalf("WriteFrame after Close = %v, want ErrClosed", err)
+	}
+}
+
+func TestService_EndToEnd(t *testing.T) {
+	path, frames := mockDiscordServer(t)
+
 	svc := NewService(DefaultClientID)
-	svc.client = &IPCClient{conn: conn}
+	svc.client = &IPCClient{conn: dialTestIPC(t, path)}
 
 	var logs []string
 	svc.SetLogger(func(msg string) {
@@ -185,16 +299,10 @@ func TestService_EndToEnd(t *testing.T) {
 }
 
 func TestService_SeekAndRepeatOneDrift(t *testing.T) {
-	sockPath, frames, cleanup := mockDiscordServer(t)
-	defer cleanup()
-
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("failed to dial mock server: %v", err)
-	}
+	path, frames := mockDiscordServer(t)
 
 	svc := NewService(DefaultClientID)
-	svc.client = &IPCClient{conn: conn}
+	svc.client = &IPCClient{conn: dialTestIPC(t, path)}
 	defer func() { _ = svc.Close() }()
 
 	tr := &provider.Track{
@@ -273,12 +381,7 @@ func TestService_SeekAndRepeatOneDrift(t *testing.T) {
 }
 
 func TestIPCClient_HandshakeTimeout(t *testing.T) {
-	sockPath := shortTempSocketPath(t)
-	l, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("listen error: %v", err)
-	}
-	defer func() { _ = l.Close() }()
+	l, path := listenTestIPC(t)
 
 	// Accept connection but do nothing (silent / hung server)
 	go func() {
@@ -293,15 +396,9 @@ func TestIPCClient_HandshakeTimeout(t *testing.T) {
 		}
 	}()
 
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		t.Fatalf("dial error: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	client := &IPCClient{conn: conn}
+	client := &IPCClient{conn: dialTestIPC(t, path)}
 	start := time.Now()
-	err = client.Handshake(DefaultClientID)
+	err := client.Handshake(DefaultClientID)
 	elapsed := time.Since(start)
 
 	if err == nil {

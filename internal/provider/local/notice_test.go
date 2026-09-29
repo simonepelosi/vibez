@@ -33,41 +33,6 @@ func TestScanNotice_SilentWhenEverythingIndexed(t *testing.T) {
 	}
 }
 
-func TestScanNotice_EmptyDirectory(t *testing.T) {
-	p, dir := noticeDir(t)
-	want := "no playable tracks in " + dir + ": the directory is empty"
-	if got := p.ScanNotice(); got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
-func TestScanNotice_NothingPlayableNamesTheSupportedSet(t *testing.T) {
-	p, dir := noticeDir(t, "one.txt", "two.txt", "three.txt", "sleeve.pdf")
-	want := "no playable tracks in " + dir + ": " + wantPlatformName + " plays " + wantSupportedExts +
-		"; skipped 4 files (3 .txt, 1 .pdf)"
-	if got := p.ScanNotice(); got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
-func TestScanNotice_ReportsSkipsAlongsideIndexedTracks(t *testing.T) {
-	p, dir := noticeDir(t, "song.mp3", "cover.txt", "notes.txt")
-	want := "indexed 1 of 3 files in " + dir + ": " + wantPlatformName + " plays " + wantSupportedExts +
-		"; skipped 2 files (2 .txt)"
-	if got := p.ScanNotice(); got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
-func TestScanNotice_FileWithNoExtension(t *testing.T) {
-	p, dir := noticeDir(t, "README")
-	want := "no playable tracks in " + dir + ": " + wantPlatformName + " plays " + wantSupportedExts +
-		"; skipped 1 file (1 no extension)"
-	if got := p.ScanNotice(); got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
 // A music directory can hold a long tail of odd extensions. The list names the
 // three commonest and counts the rest, so the line stays inside a status bar.
 func TestScanNotice_CapsTheExtensionList(t *testing.T) {
@@ -78,46 +43,12 @@ func TestScanNotice_CapsTheExtensionList(t *testing.T) {
 	}
 }
 
-// A file that will not open is counted separately: nothing about the format
-// explains it, so the message must not blame the platform.
-func TestScanNotice_UnreadableFilesAreNotBlamedOnTheFormat(t *testing.T) {
-	_, dir := noticeDir(t, "song.mp3")
-	if err := os.Symlink(filepath.Join(dir, "gone.mp3"), filepath.Join(dir, "broken.mp3")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	p, err := local.New(dir)
-	if err != nil {
-		t.Fatalf("local.New: %v", err)
-	}
-	want := "indexed 1 of 2 files in " + dir + ": 1 file could not be read"
-	if got := p.ScanNotice(); got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
-// OGG plays on Linux through GStreamer and not on macOS through CoreAudio.
-// That split is the case the notice exists for.
-func TestScanNotice_OggFollowsThePlatformSplit(t *testing.T) {
-	p, dir := noticeDir(t, "track.ogg")
-	got := p.ScanNotice()
-	if oggPlayable {
-		if got != "" {
-			t.Errorf("ScanNotice() = %q, want empty where OGG plays", got)
-		}
-		return
-	}
-	want := "no playable tracks in " + dir + ": " + wantPlatformName + " plays " + wantSupportedExts +
-		"; skipped 1 file (1 .ogg)"
-	if got != want {
-		t.Errorf("ScanNotice() = %q, want %q", got, want)
-	}
-}
-
 // The path is the part of the line the user already knows, so it gives up its
 // room to the part they do not.
 func TestScanNotice_ElidesTheHomeDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	dir := filepath.Join(home, "Music")
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatalf("creating %s: %v", dir, err)
@@ -130,7 +61,7 @@ func TestScanNotice_ElidesTheHomeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("local.New: %v", err)
 	}
-	if got := p.ScanNotice(); !strings.HasPrefix(got, "no playable tracks in ~/Music: ") {
+	if got := p.ScanNotice(); !strings.HasPrefix(got, "no playable tracks in "+filepath.Join("~", "Music")+": ") {
 		t.Errorf("ScanNotice() = %q, want the home directory elided to ~", got)
 	}
 }

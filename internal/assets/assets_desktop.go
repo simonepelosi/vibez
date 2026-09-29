@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin || windows
 
 package assets
 
@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 )
 
-// InstallIcon writes a user-cache copy of the icon for TUI metadata. macOS has
-// no MPRIS desktop-entry lookup, so no app database refresh is needed.
+// InstallIcon writes a user-cache copy of the icon for TUI metadata.
+// These platforms do not use Linux's MPRIS desktop-entry lookup.
 func InstallIcon() string {
-	home, err := os.UserHomeDir()
+	cache, err := os.UserCacheDir()
 	if err != nil {
 		return ""
 	}
-	dir := filepath.Join(home, "Library", "Caches", "vibez")
+	dir := filepath.Join(cache, "vibez")
 	if err := os.MkdirAll(dir, 0o750); err != nil { //nolint:gosec
 		return ""
 	}

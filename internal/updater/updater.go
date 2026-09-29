@@ -2,7 +2,9 @@ package updater
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -47,7 +49,7 @@ const (
 	// OutcomeCurrent means this build is already the newest release.
 	OutcomeCurrent
 	// OutcomeInstalled means a newer release was installed and the caller
-	// should re-exec Exe.
+	// should restart into Exe.
 	OutcomeInstalled
 	// OutcomeDisabled means a newer release exists and was left alone because
 	// updates were turned off.
@@ -64,7 +66,7 @@ type Result struct {
 	Outcome Outcome
 	// Tag is the newer release, when the check got far enough to learn it.
 	Tag string
-	// Exe is the binary to re-exec, set only for OutcomeInstalled.
+	// Exe is the binary to restart into, set only for OutcomeInstalled.
 	Exe string
 }
 
@@ -89,18 +91,28 @@ func (r Result) Advice() string {
 // instead of the test binary.
 var executable = os.Executable
 
+// rename is indirected so tests can make a replacement fail part way through.
+var rename = os.Rename
+
 // CheckAndUpdate checks GitHub for a newer release. If one is found it
 // downloads, verifies the SHA-256 checksum, and installs it in-place.
 // It returns the path of the updated binary when a restart is needed, or ""
 // when already up to date, on error, or when noUpdate is true.
 //
-// The caller is responsible for re-execing after cleaning up (e.g. after the
+// The caller is responsible for restarting after cleaning up (e.g. after the
 // TUI exits). All errors are handled internally — the function never blocks
 // startup fatally.
 //
 // It looks at most once every 24 hours. UpdateNow is for callers that cannot
-// wait for the next window.
+// wait for the next window. On Windows it first deletes the binaries earlier
+// updates moved aside, even when noUpdate is true, since they are there either
+// way.
 func CheckAndUpdate(current string, noUpdate bool, log func(string)) string {
+	if runtime.GOOS == "windows" {
+		if exe, err := selfPath(); err == nil {
+			removeAside(exe)
+		}
+	}
 	if noUpdate {
 		return ""
 	}
@@ -141,7 +153,7 @@ func update(api, current string, install bool, log func(string)) Result {
 	// is the only way to come back with something better than OutcomeManual.
 	res := Result{Outcome: OutcomeManual, Tag: rel.TagName}
 
-	assetName := fmt.Sprintf("vibez_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	assetName, binaryName := releaseAsset(runtime.GOOS, runtime.GOARCH)
 	var downloadURL, checksumURL string
 	for _, a := range rel.Assets {
 		switch a.Name {
@@ -163,15 +175,11 @@ func update(api, current string, install bool, log func(string)) Result {
 	}
 
 	// Only attempt self-update for writable, self-managed installs.
-	exe, err := executable()
+	exe, err := selfPath()
 	if err != nil {
 		return res
 	}
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		return res
-	}
-	if !isWritable(exe) {
+	if !canReplace(exe) {
 		return res
 	}
 
@@ -182,14 +190,14 @@ func update(api, current string, install bool, log func(string)) Result {
 		return res
 	}
 
-	tarPath := filepath.Join(tmpDir, assetName)
-	if err := downloadFile(downloadURL, tarPath); err != nil {
+	archivePath := filepath.Join(tmpDir, assetName)
+	if err := downloadFile(downloadURL, archivePath); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return res
 	}
 
 	if checksumURL != "" {
-		if err := verifyChecksum(tarPath, assetName, checksumURL); err != nil {
+		if err := verifyChecksum(archivePath, assetName, checksumURL); err != nil {
 			log("Update aborted: checksum verification failed")
 			_ = os.RemoveAll(tmpDir)
 			return res
@@ -198,8 +206,8 @@ func update(api, current string, install bool, log func(string)) Result {
 
 	log("Installing update…")
 
-	newBin := filepath.Join(tmpDir, "vibez")
-	if err := extractBinary(tarPath, "vibez", newBin); err != nil {
+	newBin := filepath.Join(tmpDir, binaryName)
+	if err := extractBinary(archivePath, binaryName, newBin); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return res
 	}
@@ -208,19 +216,13 @@ func update(api, current string, install bool, log func(string)) Result {
 		return res
 	}
 
-	// Atomic replace: write to exe.new, rename over exe.
-	tmpBin := exe + ".new"
 	data, err := os.ReadFile(newBin) //nolint:gosec // path comes from our own tmpDir
 	if err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return res
 	}
-	if err := os.WriteFile(tmpBin, data, 0o755); err != nil { //nolint:gosec // executable permissions required
-		_ = os.RemoveAll(tmpDir)
-		return res
-	}
-	if err := os.Rename(tmpBin, exe); err != nil {
-		_ = os.Remove(tmpBin)
+	if err := installBinary(exe, data); err != nil {
+		log(fmt.Sprintf("Update failed: %v", err))
 		_ = os.RemoveAll(tmpDir)
 		return res
 	}
@@ -265,7 +267,7 @@ func downloadFile(url, dst string) error {
 	return err
 }
 
-func verifyChecksum(tarPath, assetName, checksumURL string) error {
+func verifyChecksum(archivePath, assetName, checksumURL string) error {
 	client := &http.Client{Timeout: apiTimeout}
 	resp, err := client.Get(checksumURL) //nolint:gosec // URL comes from the GitHub releases API response
 	if err != nil {
@@ -290,7 +292,7 @@ func verifyChecksum(tarPath, assetName, checksumURL string) error {
 		return fmt.Errorf("checksum for %s not found in checksums.txt", assetName)
 	}
 
-	f, err := os.Open(tarPath) //nolint:gosec // tarPath is a path inside our own tmpDir
+	f, err := os.Open(archivePath) //nolint:gosec // archivePath is a path inside our own tmpDir
 	if err != nil {
 		return err
 	}
@@ -305,7 +307,26 @@ func verifyChecksum(tarPath, assetName, checksumURL string) error {
 	return nil
 }
 
-func extractBinary(tarPath, binaryName, dst string) error {
+// releaseAsset names the archive a release publishes for goos/goarch and the
+// executable inside it: a zip holding vibez.exe for Windows, and a tar.gz
+// holding vibez everywhere else.
+func releaseAsset(goos, goarch string) (archive, binary string) {
+	if goos == "windows" {
+		return fmt.Sprintf("vibez_%s_%s.zip", goos, goarch), "vibez.exe"
+	}
+	return fmt.Sprintf("vibez_%s_%s.tar.gz", goos, goarch), "vibez"
+}
+
+// extractBinary copies binaryName out of the release archive at archivePath
+// into dst, reading the archive as a zip or a tar.gz by its extension.
+func extractBinary(archivePath, binaryName, dst string) error {
+	if strings.HasSuffix(archivePath, ".zip") {
+		return extractZipBinary(archivePath, binaryName, dst)
+	}
+	return extractTarGzBinary(archivePath, binaryName, dst)
+}
+
+func extractTarGzBinary(tarPath, binaryName, dst string) error {
 	f, err := os.Open(tarPath) //nolint:gosec // tarPath is a path inside our own tmpDir
 	if err != nil {
 		return err
@@ -326,18 +347,84 @@ func extractBinary(tarPath, binaryName, dst string) error {
 			return err
 		}
 		if filepath.Base(hdr.Name) == binaryName && hdr.Typeflag == tar.TypeReg {
-			out, err := os.Create(dst) //nolint:gosec // dst is a path inside our own tmpDir
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.Copy(out, io.LimitReader(tr, maxBinarySize))
-			if closeErr := out.Close(); closeErr != nil && copyErr == nil {
-				copyErr = closeErr
-			}
-			return copyErr
+			return writeBinary(dst, tr)
 		}
 	}
 	return fmt.Errorf("binary %q not found in archive", binaryName)
+}
+
+func extractZipBinary(zipPath, binaryName, dst string) error {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = zr.Close() }()
+	for _, zf := range zr.File {
+		if filepath.Base(zf.Name) != binaryName || !zf.Mode().IsRegular() {
+			continue
+		}
+		// The declared size is known up front, so an oversized entry is refused
+		// outright rather than cut short into a binary that cannot run.
+		if zf.UncompressedSize64 > maxBinarySize {
+			return fmt.Errorf("%s is %d bytes in the archive, over the %d byte limit", zf.Name, zf.UncompressedSize64, maxBinarySize)
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			return err
+		}
+		err = writeBinary(dst, rc)
+		if closeErr := rc.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		return err
+	}
+	return fmt.Errorf("binary %q not found in archive", binaryName)
+}
+
+// writeBinary copies r to dst, stopping at maxBinarySize so that no archive
+// can decompress into an unbounded file.
+func writeBinary(dst string, r io.Reader) error {
+	out, err := os.Create(dst) //nolint:gosec // dst is a path inside our own tmpDir
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, io.LimitReader(r, maxBinarySize))
+	if closeErr := out.Close(); closeErr != nil && copyErr == nil {
+		copyErr = closeErr
+	}
+	return copyErr
+}
+
+// selfPath is the running binary with symlinks resolved: the file an update
+// replaces.
+func selfPath() (string, error) {
+	exe, err := executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// canReplace reports whether this process may install a new binary at exe.
+// Elsewhere that means exe can be written. Windows never opens a running
+// executable for writing, so there it means what replaceRunningExe needs: exe
+// is not read-only, and its directory accepts new files.
+func canReplace(exe string) bool {
+	if runtime.GOOS != "windows" {
+		return isWritable(exe)
+	}
+	info, err := os.Stat(exe)
+	if err != nil || info.Mode().Perm()&0o200 == 0 {
+		return false
+	}
+	probe, err := os.CreateTemp(filepath.Dir(exe), filepath.Base(exe)+".probe-*")
+	if err != nil {
+		return false
+	}
+	name := probe.Name()
+	_ = probe.Close()
+	_ = os.Remove(name)
+	return true
 }
 
 func isWritable(path string) bool {
@@ -347,6 +434,87 @@ func isWritable(path string) bool {
 	}
 	_ = f.Close()
 	return true
+}
+
+// installBinary puts data in place of exe. It is written out beside exe first,
+// so exe is never left half-written and the swap is a rename within one
+// directory: a plain rename over exe, or on Windows, which will not replace a
+// running executable, replaceRunningExe.
+func installBinary(exe string, data []byte) error {
+	staged := exe + ".new"
+	if err := os.WriteFile(staged, data, 0o755); err != nil { //nolint:gosec // executable permissions required
+		_ = os.Remove(staged)
+		return err
+	}
+	var err error
+	if runtime.GOOS == "windows" {
+		err = replaceRunningExe(staged, exe)
+	} else {
+		err = rename(staged, exe)
+	}
+	if err != nil {
+		_ = os.Remove(staged)
+	}
+	return err
+}
+
+// replaceRunningExe moves staged to exe while exe may be running. Windows
+// refuses to write, delete or rename over a running executable, but does let it
+// be renamed, so exe first moves aside to a name only this updater uses, and
+// moves back if staged cannot take its place. The aside copy is deleted here
+// when nothing runs it, and otherwise by removeAside on a later start.
+func replaceRunningExe(staged, exe string) error {
+	aside := asideName(exe)
+	if err := rename(exe, aside); err != nil {
+		return fmt.Errorf("moving the running binary aside: %w", err)
+	}
+	if err := rename(staged, exe); err != nil {
+		if restoreErr := rename(aside, exe); restoreErr != nil {
+			return fmt.Errorf("installing %s: %w; restoring the previous binary also failed, it is at %s: %v", exe, err, aside, restoreErr)
+		}
+		return fmt.Errorf("installing %s: %w", exe, err)
+	}
+	_ = os.Remove(aside)
+	return nil
+}
+
+// A binary moved aside is named after itself plus asideInfix and asideIDBytes
+// random bytes in hex, which removeAside can match without ever mistaking
+// someone else's file for one.
+const (
+	asideInfix   = ".old-"
+	asideIDBytes = 16
+)
+
+func asideName(exe string) string {
+	var id [asideIDBytes]byte
+	_, _ = rand.Read(id[:]) // crypto/rand.Read never fails
+	return exe + asideInfix + hex.EncodeToString(id[:])
+}
+
+func isAsideName(base, name string) bool {
+	id, ok := strings.CutPrefix(name, base+asideInfix)
+	if !ok || len(id) != hex.EncodedLen(asideIDBytes) {
+		return false
+	}
+	_, err := hex.DecodeString(id)
+	return err == nil
+}
+
+// removeAside deletes the binaries replaceRunningExe moved aside from exe. One
+// that is still running, such as the process that just restarted into this
+// one, stays locked and is left for a later start.
+func removeAside(exe string) {
+	dir, base := filepath.Split(exe)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.Type().IsRegular() && isAsideName(base, e.Name()) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // isNewer reports whether latestTag represents a higher version than currentTag.

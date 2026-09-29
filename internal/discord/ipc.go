@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 )
@@ -24,69 +22,32 @@ const (
 
 const (
 	defaultTimeout = 3 * time.Second
+
+	// ipcEndpointCount is the number of discord-ipc-N endpoints (N = 0..9) Discord may listen on.
+	ipcEndpointCount = 10
 )
 
 var (
 	ErrClosed = errors.New("discord ipc connection closed")
 )
 
-// IPCClient handles communication with the local Discord client over IPC socket.
+// IPCClient handles communication with the local Discord client over its IPC endpoint
+// (a Unix domain socket, or a named pipe on Windows).
 type IPCClient struct {
 	conn    net.Conn
 	mu      sync.Mutex
 	onFrame func(op uint32, payload []byte)
 }
 
-// DialIPC locates and connects to an active Discord IPC socket.
+// DialIPC locates and connects to an active Discord IPC endpoint.
 func DialIPC() (*IPCClient, error) {
-	paths := candidateSocketPaths()
-	for _, p := range paths {
-		conn, err := net.DialTimeout("unix", p, defaultTimeout)
+	for _, p := range candidateIPCPaths() {
+		conn, err := dialIPCPath(p)
 		if err == nil {
 			return &IPCClient{conn: conn}, nil
 		}
 	}
-	return nil, errors.New("no active discord ipc socket found")
-}
-
-// candidateSocketPaths returns a list of prospective Discord IPC socket paths.
-func candidateSocketPaths() []string {
-	var candidates []string
-	dirs := socketDirs()
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		for i := range 10 {
-			candidates = append(candidates, filepath.Join(dir, fmt.Sprintf("discord-ipc-%d", i)))
-		}
-	}
-	return candidates
-}
-
-func socketDirs() []string {
-	dirs := []string{
-		os.Getenv("XDG_RUNTIME_DIR"),
-		filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "app", "com.discordapp.Discord"),
-		filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "app", "com.discordapp.DiscordCanary"),
-		filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "app", "com.discordapp.DiscordPTB"),
-		filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "snap.discord"),
-		os.Getenv("TMPDIR"),
-		os.Getenv("TMP"),
-		os.Getenv("TEMP"),
-		os.TempDir(),
-		"/tmp",
-	}
-
-	seen := make(map[string]bool)
-	var unique []string
-	for _, d := range dirs {
-		if d != "" && !seen[d] {
-			seen[d] = true
-			unique = append(unique, d)
-		}
-	}
-	return unique
+	return nil, errors.New("no active discord ipc endpoint found")
 }
 
 // Handshake sends the handshake frame, reads the ready response, and starts background reader.
@@ -185,7 +146,7 @@ func (c *IPCClient) WriteFrame(op uint32, payload []byte) error {
 	return nil
 }
 
-// ReadFrame reads an 8-byte little-endian header and payload from the socket.
+// ReadFrame reads an 8-byte little-endian header and payload from the IPC connection.
 func (c *IPCClient) ReadFrame() (uint32, []byte, error) {
 	c.mu.Lock()
 	conn := c.conn

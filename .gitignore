@@ -1,11 +1,13 @@
 # Binaries
 vibez
+/vibez.exe
 dist/
 
 # Test artifacts
 coverage.out
 coverage.html
 *.test
+*.test.exe
 
 # Release
 release_notes.md

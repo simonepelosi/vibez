@@ -29,9 +29,9 @@
 
 ---
 
-vibez is an open-source TUI Apple Music player for Linux and macOS. Search, queue, and control playback entirely from the keyboard.
+vibez is an open-source TUI Apple Music player for Linux, macOS, and Windows. Search, queue, and control playback entirely from the keyboard.
 
-Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on Linux arm64, vibez uses a system-installed Chromium plus a system Widevine CDM (Google publishes no arm64 Chrome for Linux). Where neither is available, WebKit + GStreamer remains available as a 30-second preview backend. On macOS, install Google Chrome before using Apple Music playback.
+Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on Linux arm64, vibez uses a system-installed Chromium plus a system Widevine CDM (Google publishes no arm64 Chrome for Linux). Where neither is available, WebKit + GStreamer remains available as a 30-second preview backend. On macOS and Windows, install Google Chrome before using Apple Music playback.
 
 ---
 
@@ -142,6 +142,27 @@ Install Google Chrome before using Apple Music playback on macOS:
 brew install --cask google-chrome
 ```
 
+### Windows (x64)
+
+Install Google Chrome, then build from PowerShell with Go 1.26+:
+
+```powershell
+go build -o vibez.exe .
+.\vibez.exe --demo
+.\vibez.exe --local --music-dir "$env:USERPROFILE\Music"
+```
+
+No WSL, C compiler, or Apple credentials are needed for demo or local mode. Local playback uses a private headless Chrome session for MP3, FLAC, M4A/AAC, and OGG, with seek, queue controls, and equalization. Codec support follows Chrome; not every codec inside an M4A container is supported.
+
+Chrome is discovered in per-user/system installation folders, App Paths registry entries, or `PATH`. Override it with `$env:VIBEZ_CHROME_PATH = 'C:\path\to\chrome.exe'` (`CHROME_PATH` is also supported). An invalid explicit override is reported rather than silently selecting a different browser.
+
+Configuration lives at `%APPDATA%\vibez\config.json`; the Playwright driver and cached icon live under `%LOCALAPPDATA%\vibez`. `--config` overrides the configuration file. The driver is downloaded on the first audio launch; Chrome itself is not downloaded.
+
+The Windows release target produces `vibez_windows_amd64.zip` containing `vibez.exe`. Extract a published build into a writable folder; self-update verifies its available checksum, replaces the executable, and restarts without releasing the console to the shell. Discord Rich Presence uses Windows named pipes. Linux MPRIS desktop integration is not available on Windows.
+
+**Verification status:** native CLI/TUI, local playback, Chrome Widevine capability, and the MusicKit invalid-token error path have been exercised on Windows. Apple sign-in and full-track Apple Music playback still need verification with an authorized developer token. A maintainer-built Dev Build can embed that token without sharing the MusicKit private key. An Apple Music subscription is still required, and this Chrome/MusicKit backend does not add lossless Apple Music streaming.
+
+
 ### From source
 
 ```bash
@@ -156,7 +177,7 @@ make install            # same, plus copies the binary to ~/.local/bin
 Embedded tokens expire after 30 days — re-run it when the catalog starts
 returning 401s. Override the location with `make install PREFIX=/usr/local`.
 
-**Requirements:** Linux x86-64 or arm64, or macOS · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS · on Linux arm64, a system Chromium + Widevine CDM for full-track playback (e.g. `pacman -S chromium widevine`) · Apple Developer Account with a MusicKit key
+**Requirements:** Linux x86-64 or arm64, macOS, or Windows x64 · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS/Windows · on Linux arm64, a system Chromium + Widevine CDM for full-track playback (e.g. `pacman -S chromium widevine`) · a MusicKit developer token for Apple Music (embedded in maintainer builds, or generated with your own Apple Developer account)
 
 ---
 
@@ -201,7 +222,7 @@ vibez version               # print version
   </tr>
 </table>
 
-Set the `theme` key in `~/.config/vibez/config.json`:
+Set the `theme` key in `~/.config/vibez/config.json` (`%APPDATA%\vibez\config.json` on Windows):
 
 ```json
 {
@@ -213,7 +234,7 @@ Set the `theme` key in `~/.config/vibez/config.json`:
 
 ### Custom themes
 
-Create `~/.config/vibez/themes/<name>.json` with any subset of fields — missing or invalid values fall back to `default`:
+Create `~/.config/vibez/themes/<name>.json` (`%APPDATA%\vibez\themes\<name>.json` on Windows) with any subset of fields — missing or invalid values fall back to `default`:
 
 ```json
 {
@@ -349,8 +370,9 @@ Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `ta
 |--------|--------|--------------|
 | **Chrome + Widevine** | Full tracks | Chrome (amd64) or system Chromium (arm64) via Playwright; MusicKit JS + Widevine DRM |
 | **WebKit + GStreamer** *(Linux fallback)* | 30 s previews | Embedded webkit2gtk-4.1; GStreamer decodes preview URLs |
+| **Chrome local audio** *(Windows)* | Local files | HTML audio decoding and Web Audio EQ; registered library files served only over loopback |
 
-On Linux amd64, Chrome is downloaded once to `~/.cache/vibez/chrome`. On Linux arm64, vibez uses the system Chromium with a persistent profile in `~/.cache/vibez/chromium-arm64` and a system-registered Widevine CDM (registered on a one-time warm-up launch). Setting `VIBEZ_CHROME_PATH` (or `CHROME_PATH`) to a browser binary selects that system browser on amd64 as well, with the same persistent profile (`~/.cache/vibez/chromium-amd64`) and Widevine lookup, and nothing is downloaded. The Playwright driver is stored in `~/.cache/vibez/driver`. On macOS, vibez uses an installed Google Chrome app.
+On Linux amd64, Chrome is downloaded once to `~/.cache/vibez/chrome`. On Linux arm64, vibez uses the system Chromium with a persistent profile in `~/.cache/vibez/chromium-arm64` and a system-registered Widevine CDM (registered on a one-time warm-up launch). Setting `VIBEZ_CHROME_PATH` (or `CHROME_PATH`) to a browser binary selects that system browser on amd64 as well, with the same persistent profile (`~/.cache/vibez/chromium-amd64`) and Widevine lookup, and nothing is downloaded. The Playwright driver is stored in `~/.cache/vibez/driver`. On macOS and Windows, vibez uses installed Google Chrome; Windows stores the driver in `%LOCALAPPDATA%\vibez\driver`.
 
 ---
 

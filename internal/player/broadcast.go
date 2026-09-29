@@ -26,16 +26,20 @@ const (
 // overflows.
 //
 // Each subscriber owns a goroutine that blocks on delivery so that no producer
-// ever does. Subscriptions last for the life of the process, as the channels
-// they hand out are never closed.
+// ever does. Subscriptions last until Close, which closes every channel handed
+// out. Values already buffered in a channel stay readable after that, but
+// entries still pending behind them are dropped: shutdown does not wait on a
+// subscriber that may never read again.
 type Broadcast struct {
-	mu   sync.Mutex
-	subs []*subscriber
+	mu     sync.Mutex
+	subs   []*subscriber
+	closed bool
 }
 
 type subscriber struct {
 	ch   chan State
 	wake chan struct{} // capacity 1; a buffered signal is a pending pass
+	done chan struct{} // closed by Broadcast.Close
 
 	mu      sync.Mutex
 	queue   []State
@@ -43,25 +47,49 @@ type subscriber struct {
 }
 
 // Subscribe returns a channel receiving state updates and debug log entries.
+// After Close it returns a channel that is already closed.
 func (b *Broadcast) Subscribe() <-chan State {
 	sub := &subscriber{
 		ch:   make(chan State, subChanSize),
 		wake: make(chan struct{}, 1),
+		done: make(chan struct{}),
 	}
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		close(sub.ch)
+		return sub.ch
+	}
 	b.subs = append(b.subs, sub)
 	b.mu.Unlock()
 	go sub.deliver()
 	return sub.ch
 }
 
-// Send delivers s to every subscriber.
+// Send delivers s to every subscriber. It does nothing after Close.
 func (b *Broadcast) Send(s State) {
 	b.mu.Lock()
 	subs := b.subs
 	b.mu.Unlock()
 	for _, sub := range subs {
 		sub.push(s)
+	}
+}
+
+// Close closes every subscriber channel and makes later sends no-ops. It is
+// safe to call more than once and concurrently with Send.
+func (b *Broadcast) Close() {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.closed = true
+	subs := b.subs
+	b.subs = nil
+	b.mu.Unlock()
+	for _, sub := range subs {
+		close(sub.done)
 	}
 }
 
@@ -75,6 +103,11 @@ func (b *Broadcast) SendLog(s State, msg string) {
 // push queues s for delivery. It never blocks: a subscriber that has stopped
 // reading must not stall the JS binding that produced the update.
 func (sub *subscriber) push(s State) {
+	select {
+	case <-sub.done:
+		return // a Send that raced Close
+	default:
+	}
 	sub.mu.Lock()
 	// Replace the newest queued entry when both it and s are state-only. A
 	// subscriber that is behind wants the current position, not every tick it
@@ -107,9 +140,21 @@ func (sub *subscriber) trim() {
 }
 
 // deliver drains the queue onto the subscriber's channel, blocking on the send
-// so the producer does not have to.
+// so the producer does not have to. Close ends it even mid-send, and it is the
+// only sender, so closing the channel here cannot race a delivery.
 func (sub *subscriber) deliver() {
-	for range sub.wake {
+	defer func() {
+		sub.mu.Lock()
+		sub.queue = nil
+		sub.mu.Unlock()
+		close(sub.ch)
+	}()
+	for {
+		select {
+		case <-sub.wake:
+		case <-sub.done:
+			return
+		}
 		for {
 			sub.mu.Lock()
 			if len(sub.queue) == 0 {
@@ -126,7 +171,18 @@ func (sub *subscriber) deliver() {
 			}
 			sub.mu.Unlock()
 
-			sub.ch <- s
+			// Checked first so a closed broadcast stops at once rather than
+			// whenever select happens to pick done over free buffer space.
+			select {
+			case <-sub.done:
+				return
+			default:
+			}
+			select {
+			case sub.ch <- s:
+			case <-sub.done:
+				return
+			}
 		}
 	}
 }

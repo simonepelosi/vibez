@@ -104,6 +104,18 @@ jobs:
             -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
             .
 
+      - name: Build (windows/amd64)
+        env:
+          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -o vibez-windows-amd64.exe \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            .
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +137,13 @@ jobs:
           path: vibez-darwin-arm64
           retention-days: 14
 
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-windows-amd64
+          path: vibez-windows-amd64.exe
+          retention-days: 14
+
       - name: Comment on PR
         if: steps.pr.outputs.is_pr == 'true'
         env:
@@ -137,5 +156,6 @@ jobs:
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64\`
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64\`
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64\` (for Apple Silicon Macs)
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-windows-amd64\` (native Windows)
 
           <sub>Built from ${{ steps.pr.outputs.sha }} • expires in 14 days</sub>"
