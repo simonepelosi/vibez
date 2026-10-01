@@ -1,6 +1,6 @@
 # Contributing to vibez
 
-Thanks for your interest in contributing! vibez is a TUI Apple Music player for Linux and macOS.
+Thanks for your interest in contributing! vibez is a TUI Apple Music player for Linux, macOS, and Windows.
 This guide will help you set up a productive development environment.
 
 ---
@@ -53,22 +53,38 @@ brew install --cask google-chrome
 
 Demo mode does not require Chrome, Apple credentials, or network access.
 
+## Windows setup
+
+Use Go 1.26+ and installed Google Chrome. No CGo toolchain or WSL is required:
+
+```powershell
+go build -o vibez.exe .
+.\vibez.exe --demo
+.\vibez.exe --local --music-dir "$env:USERPROFILE\Music"
+go test ./...
+```
+
+Install Node.js 22+ to run the local-audio JavaScript tests; they are also invoked by `go test`. Chrome is needed for real playback, not the unit tests. Use Windows Terminal for the interactive TUI. Repository text files use LF line endings on every platform.
+
+The Windows config path is `%APPDATA%\vibez\config.json`; the browser driver cache is `%LOCALAPPDATA%\vibez\driver`. `VIBEZ_CHROME_PATH` or `CHROME_PATH` can select a custom Chrome executable. Local startup reports browser setup progress before opening the TUI. Installed Chrome sessions retain Chromium's sandbox on Windows and macOS.
+
+For Apple Music testing without your own MusicKit key, coordinate with a maintainer on a test build after review of the exact PR head and the workflow's security. The current **Dev Build** executes PR code with Apple signing secrets available, so manual dispatch is not a safe shortcut for unreviewed code. Its `windows-amd64` artifact embeds a developer token; the private signing key must not be shared with contributors. Windows sign-in and full-track playback remain an end-to-end verification requirement even after build, demo, local-audio, and Widevine-capability checks pass.
+
+
 ## Full development setup (Apple credentials required)
 
-Full-track streaming requires:
+Full-track streaming requires a valid MusicKit developer token and an Apple Music subscription for the Apple ID you use. Maintainer-built releases embed the developer token; contributors can use a maintainer-built Dev Build or an authorized short-lived token in their config.
 
-1. **Apple Developer Program membership** (~$99/year, [developer.apple.com](https://developer.apple.com))
-2. A **MusicKit** identifier + private key in your developer account
-3. An **Apple Music subscription** for the Apple ID you'll use
+Generating your own developer token instead requires Apple Developer Program membership and a MusicKit identifier/private key in your developer account.
 
 ### Generate a developer token
 
 ```sh
-go run ./scripts/gen-devtoken
+go run ./scripts/gen-devtoken -write
 ```
 
-Follow the prompts to paste your MusicKit private key and Key ID.  
-The token is written to `~/.config/vibez/config.json`.
+Set `APPLE_KEY_ID`, `APPLE_TEAM_ID`, and `APPLE_PRIVATE_KEY` in the environment first.
+With `-write`, the token is saved to the platform config path (`~/.config/vibez/config.json`, or `%APPDATA%\vibez\config.json` on Windows). Without `-write`, it is printed to stdout; do not paste signing keys into issue comments or logs.
 
 ### First run
 
@@ -77,7 +93,7 @@ go run .
 ```
 
 On Linux, Chrome (~150 MB, Widevine-enabled) is downloaded on first launch to `~/.cache/vibez/chrome`, and the Playwright driver is stored in `~/.cache/vibez/driver`.
-On macOS, vibez uses the installed Google Chrome app.
+On macOS and Windows, vibez uses installed Google Chrome; Windows stores the driver in `%LOCALAPPDATA%\vibez\driver`.
 Your Apple ID is authorised in a popup browser window; the user token is cached in the config file.
 
 ---

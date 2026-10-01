@@ -25,10 +25,11 @@ type Player struct {
 	allTracks []provider.Track
 	idx       int
 	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // New creates a local Player backed by a GStreamer pipeline.
-func New() (*Player, error) {
+func New(_ func(string)) (*Player, error) {
 	gstPlayer, err := gst.New()
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
@@ -302,8 +303,10 @@ func (p *Player) Subscribe() <-chan player.State {
 }
 
 func (p *Player) Close() error {
-	close(p.done)
-	p.gst.Destroy()
+	p.closeOnce.Do(func() {
+		close(p.done)
+		p.gst.Destroy()
+	})
 	return nil
 }
 

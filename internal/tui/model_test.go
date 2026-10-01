@@ -2604,6 +2604,7 @@ func TestNowPlayingArtMode_LayoutIsMinimal(t *testing.T) {
 
 func TestExecuteCommand_ArtTogglesAndPersists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 	m := newModel(nil)
 	m.supportsArtColor = func() bool { return true }
 
@@ -2642,6 +2643,7 @@ func TestExecuteCommand_ArtRejectedWithoutColorSupport(t *testing.T) {
 
 func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -3687,6 +3689,7 @@ func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
 	p := newMockPlayer()
 	m := newModel(p)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 
 	cmd := m.executeCommand("quality 64")
 	if cmd == nil {
@@ -3708,6 +3711,7 @@ func TestExecuteCommandQualityPersistsWhenBackendCannotSwitchLive(t *testing.T) 
 	p.err = player.ErrAudioBitrateSavedPreferenceOnly
 	m := newModel(p)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 
 	cmd := m.executeCommand("quality 64")
 	if cmd == nil {

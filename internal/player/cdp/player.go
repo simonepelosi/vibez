@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cdp
 
@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +20,8 @@ import (
 )
 
 // Player drives Apple Music playback through a Playwright-managed Chrome
-// browser. Linux uses vibez's cached Chrome binary; macOS uses the installed
-// Google Chrome app. Chrome's built-in Widevine CDM enables full-track DRM
+// browser. Linux uses vibez's cached Chrome binary; macOS and Windows use
+// installed Google Chrome. Chrome's Widevine CDM enables full-track DRM
 // playback, and GStreamer is not used in this path.
 //
 // The absence of the goStreamURL binding tells musickit.html to use Chrome's
@@ -32,7 +31,6 @@ type Player struct {
 	OnStorefront     func(sf string)
 	OnSessionExpired func()
 
-	pw           *playwright.Playwright
 	closeBrowser func()
 	page         playwright.Page
 	srv          *http.Server
@@ -75,24 +73,12 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 		doneCh:  make(chan struct{}),
 	}
 
-	pw, err := runPlaywright()
-	if err != nil {
-		_ = srv.Close()
-		return nil, err
-	}
-	p.pw = pw
-
-	chromePath := HelperPath()
-	if _, err := os.Stat(chromePath); err != nil {
-		chromePath = ChromePath() // fall back if link not yet created
-	}
 	// Use headless when we have a saved token (no auth UI needed); show a real
 	// window for first-run interactive login.
 	headless := userToken != ""
 
-	pg, closeBrowser, err := launchBrowser(pw, chromePath, headless, wsl)
+	pg, closeBrowser, err := OpenBrowser(headless, wsl)
 	if err != nil {
-		_ = pw.Stop()
 		_ = srv.Close()
 		return nil, fmt.Errorf("cdp: launch browser: %w", err)
 	}
@@ -203,7 +189,6 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	for name, fn := range bindings {
 		if err := pg.ExposeFunction(name, fn); err != nil {
 			closeBrowser()
-			_ = pw.Stop()
 			_ = srv.Close()
 			return nil, fmt.Errorf("cdp: expose %s: %w", name, err)
 		}
@@ -323,8 +308,8 @@ func (p *Player) Run() {
 	if p.closeBrowser != nil {
 		p.closeBrowser()
 	}
-	_ = p.pw.Stop()
 	_ = p.srv.Close()
+	p.bcast.Close()
 }
 
 func (p *Player) Terminate() {

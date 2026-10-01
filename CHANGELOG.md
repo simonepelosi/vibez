@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Native Windows amd64 builds with installed-Chrome discovery, MusicKit/CDP startup, browser URL opening, per-user configuration/cache paths, Discord named-pipe IPC, and Windows CI, Dev Build, and ZIP release targets.
+- Windows local-file playback through Chrome for MP3, FLAC, M4A/AAC, and OGG, including queue editing, repeat/shuffle, seeking, volume, and Web Audio equalization. Library files are served only through opaque per-session loopback URLs.
+- Windows self-update replaces a running executable with rollback on installation failure and retains console ownership while the replacement runs. Old executable backups are removed once unlocked on a later update check.
+
+### Fixed
+- Saved volume and equalizer settings are restored for players supplied at TUI startup, including local mode, not only engines initialized asynchronously.
+- Windows local and CDP player shutdown releases broadcast subscribers; the TUI stops consuming a closed state stream instead of spinning.
+- Local-player shutdown on Linux and macOS is idempotent, preventing a panic when TUI quit is followed by deferred cleanup.
+- Installed Chrome sessions on Windows and macOS enable Chromium's sandbox.
+- Windows local startup reports browser setup progress without repeating the local-player error prefix.
+- Native Go test runs execute the local JavaScript engine suite; Windows-specific Go sources are linted in CI.
+
+### Verification
+- Windows CLI/TUI, local codec playback, equalization, Widevine capability, MusicKit invalid-token handling, and running-executable replacement have been exercised. Apple sign-in and full-track Apple Music streaming still require verification with an authorized developer token; no lossless Apple Music support is claimed.
+
 ## [1.0.0] — 2026-09-29
 
 ### Added

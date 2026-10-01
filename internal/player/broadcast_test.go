@@ -146,3 +146,107 @@ func TestBroadcastNeverBlocksOnAnUnreadSubscriber(t *testing.T) {
 		t.Fatal("Send blocked on a subscriber that is not reading")
 	}
 }
+
+// drainUntilClosed reads ch until it is closed, failing if that takes longer
+// than a stalled delivery goroutine could explain, and returns what it read.
+func drainUntilClosed(t *testing.T, ch <-chan State) []State {
+	t.Helper()
+	var got []State
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case s, ok := <-ch:
+			if !ok {
+				return got
+			}
+			got = append(got, s)
+		case <-deadline:
+			t.Fatalf("channel still open after Close; read %d values", len(got))
+		}
+	}
+}
+
+// A range loop over a subscription, such as the Discord presence loop, has to
+// end when the player shuts down, and it must still see what was already
+// handed to it.
+func TestBroadcastCloseEndsSubscriptionsKeepingBufferedValues(t *testing.T) {
+	var b Broadcast
+	ch := b.Subscribe()
+	b.SendLog(State{}, "before close")
+	// Wait for the entry to reach the channel buffer; Close only promises to
+	// keep values that were already there.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(ch) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	b.Close()
+	got := drainUntilClosed(t, ch)
+	if len(got) != 1 || len(got[0].Logs) != 1 || got[0].Logs[0] != "before close" {
+		t.Fatalf("got %+v, want the one entry buffered before Close", got)
+	}
+}
+
+// A subscriber that stopped reading, like the TUI after it exits, leaves its
+// delivery goroutine blocked on a full channel with a backlog behind it. Close
+// must free that goroutine without first pushing the whole backlog through.
+func TestBroadcastCloseDropsBacklogOfUnreadSubscriber(t *testing.T) {
+	var b Broadcast
+	ch := b.Subscribe()
+	for i := range maxPendingQueue {
+		b.SendLog(State{}, fmt.Sprintf("line %d", i))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(ch) < subChanSize && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	b.Close()
+	got := drainUntilClosed(t, ch)
+	// The buffer, plus at most the one entry deliver held when Close landed.
+	if len(got) > subChanSize+1 {
+		t.Fatalf("read %d entries after Close, want at most %d: the backlog was delivered instead of dropped", len(got), subChanSize+1)
+	}
+}
+
+func TestBroadcastAfterClose(t *testing.T) {
+	var b Broadcast
+	b.Close()
+	b.Close()
+	b.Send(State{Bitrate: 1})
+	b.SendLog(State{}, "ignored")
+	select {
+	case _, ok := <-b.Subscribe():
+		if ok {
+			t.Fatal("Subscribe after Close delivered a value")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Subscribe after Close returned an open channel")
+	}
+}
+
+// Close racing live sends must neither panic nor leave a subscriber open.
+func TestBroadcastCloseRacingSends(t *testing.T) {
+	var b Broadcast
+	chans := []<-chan State{b.Subscribe(), b.Subscribe()}
+	stop := make(chan struct{})
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b.SendLog(State{}, fmt.Sprintf("line %d", i))
+			b.Send(State{Bitrate: i})
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	b.Close()
+	for _, ch := range chans {
+		drainUntilClosed(t, ch)
+	}
+	close(stop)
+	<-sent
+}

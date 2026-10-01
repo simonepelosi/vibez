@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/simone-vibes/vibez/internal/audioquality"
 )
@@ -102,6 +103,13 @@ func (c *Config) SetAudioBitrate(kbps int) error {
 func ConfigPath(override string) (string, error) {
 	if override != "" {
 		return override, nil
+	}
+	if runtime.GOOS == "windows" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("could not determine config directory: %w", err)
+		}
+		return filepath.Join(dir, "vibez", "config.json"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

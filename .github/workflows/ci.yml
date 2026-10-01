@@ -46,6 +46,10 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
@@ -73,6 +77,10 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Build
         run: CGO_ENABLED=0 go build ./...
 
@@ -84,3 +92,35 @@ jobs:
 
       - name: Test release build mode
         run: CGO_ENABLED=0 go test ./...
+
+  test-windows:
+    name: build-vet-test-windows
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+
+      - name: Lint
+        run: golangci-lint run --config=.golangci.yml --fix=false
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...

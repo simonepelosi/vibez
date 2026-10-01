@@ -46,7 +46,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json; Windows: %APPDATA%\\vibez\\config.json)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
 	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
 	rootCmd.PersistentFlags().BoolVar(&demo, "demo", false, "run with built-in fake data — no Apple account or internet required")
@@ -111,10 +111,13 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("local provider: %w", err)
 		}
-		plyr, err := localPlayer.New()
+		plyr, err := localPlayer.New(func(msg string) {
+			fmt.Fprintln(os.Stderr, msg)
+		})
 		if err != nil {
-			return fmt.Errorf("local player: %w", err)
+			return err
 		}
+		defer func() { _ = plyr.Close() }()
 		tracks, err := prov.GetLibraryTracks(context.Background())
 		if err != nil {
 			return fmt.Errorf("loading local tracks: %w", err)
@@ -147,7 +150,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	lastfm.ApplyEmbedded(cfg)
 
 	if cfg.AppleDeveloperToken == "" {
-		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
+		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in %s\nor run: go run ./scripts/gen-devtoken", cfgPath)
 	}
 
 	// Make sure the desktop can resolve the MPRIS DesktopEntry property to an
