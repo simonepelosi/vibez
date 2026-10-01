@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package browserless
 
@@ -15,20 +15,32 @@ import (
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
-	"github.com/simone-vibes/vibez/internal/player/gst"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 )
 
+type audioSink interface {
+	PlayURI(uri string)
+	Play()
+	Pause()
+	Stop()
+	Seek(d time.Duration)
+	SetVolume(v float64)
+	Position() time.Duration
+	OnEOS(fn func())
+	OnError(fn func(error))
+	Destroy()
+}
+
 // Player implements player.Player without a web browser, using an in-process
-// Widevine CDM and GStreamer loopback streaming pipeline.
+// Widevine CDM and audio streaming pipeline.
 type Player struct {
 	cfg       *config.Config
 	provider  *apple.AppleProvider
 	cdmEngine *cdm.CDM
 	licClient *license.Client
 	streamer  *StreamServer
-	gst       *gst.Player
+	sink      audioSink
 
 	mu        sync.RWMutex
 	state     player.State
@@ -59,11 +71,11 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 		return nil, fmt.Errorf("browserless stream server: %w", err)
 	}
 
-	gstPlayer, err := gst.New()
+	sink, err := newAudioSink()
 	if err != nil {
 		_ = streamer.Close()
 		_ = cdmEngine.Close()
-		return nil, fmt.Errorf("browserless gstreamer: %w", err)
+		return nil, fmt.Errorf("browserless audio sink: %w", err)
 	}
 
 	p := &Player{
@@ -72,7 +84,7 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 		cdmEngine: cdmEngine,
 		licClient: licClient,
 		streamer:  streamer,
-		gst:       gstPlayer,
+		sink:      sink,
 		doneCh:    make(chan struct{}),
 		state: player.State{
 			Volume:  1.0,
@@ -80,10 +92,10 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 		},
 	}
 
-	p.gst.OnEOS(func() {
+	p.sink.OnEOS(func() {
 		p.mu.RLock()
 		playing := p.state.Playing
-		pos := p.gst.Position()
+		pos := p.sink.Position()
 		var dur time.Duration
 		if p.state.Track != nil {
 			dur = p.state.Track.Duration
@@ -100,7 +112,7 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 		_ = p.Next()
 	})
 
-	p.gst.OnError(func(e error) {
+	p.sink.OnError(func(e error) {
 		p.mu.Lock()
 		p.state.Error = e.Error()
 		p.state.Playing = false
@@ -130,7 +142,7 @@ func (p *Player) pollPosition() {
 			p.mu.RUnlock()
 
 			if playing && !loading {
-				pos := p.gst.Position()
+				pos := p.sink.Position()
 				p.mu.Lock()
 				p.state.Position = pos
 				s := p.state
@@ -194,7 +206,7 @@ func (p *Player) playTrack(t provider.Track) {
 		default:
 		}
 
-		p.gst.PlayURI(streamURL)
+		p.sink.PlayURI(streamURL)
 
 		p.mu.Lock()
 		p.state.Loading = false
@@ -211,7 +223,7 @@ func (p *Player) playTrack(t provider.Track) {
 // ── player.Player Implementation ───────────────────────────────────────────
 
 func (p *Player) Play() error {
-	p.gst.Play()
+	p.sink.Play()
 	p.mu.Lock()
 	p.state.Playing = true
 	s := p.state
@@ -221,7 +233,7 @@ func (p *Player) Play() error {
 }
 
 func (p *Player) Pause() error {
-	p.gst.Pause()
+	p.sink.Pause()
 	p.mu.Lock()
 	p.state.Playing = false
 	s := p.state
@@ -231,7 +243,7 @@ func (p *Player) Pause() error {
 }
 
 func (p *Player) Stop() error {
-	p.gst.Stop()
+	p.sink.Stop()
 	p.mu.Lock()
 	if p.playCtx != nil {
 		p.playCtx()
@@ -284,9 +296,9 @@ func (p *Player) Previous() error {
 		return nil
 	}
 
-	if p.gst.Position() > 3*time.Second {
+	if p.sink.Position() > 3*time.Second {
 		p.mu.Unlock()
-		p.gst.Seek(0)
+		p.sink.Seek(0)
 		return nil
 	}
 
@@ -303,12 +315,12 @@ func (p *Player) Previous() error {
 }
 
 func (p *Player) Seek(position time.Duration) error {
-	p.gst.Seek(position)
+	p.sink.Seek(position)
 	return nil
 }
 
 func (p *Player) SetVolume(v float64) error {
-	p.gst.SetVolume(v)
+	p.sink.SetVolume(v)
 	p.mu.Lock()
 	p.state.Volume = v
 	s := p.state
@@ -457,8 +469,8 @@ func (p *Player) RemoveFromQueue(idx int) error {
 		case idx == p.idx:
 			p.state.Track = nil
 			p.state.Playing = false
-			if p.gst != nil {
-				p.gst.Stop()
+			if p.sink != nil {
+				p.sink.Stop()
 			}
 			if p.idx >= len(p.queue) && len(p.queue) > 0 {
 				p.idx = len(p.queue) - 1
@@ -495,7 +507,36 @@ func (p *Player) MoveInQueue(from, to int) error {
 			p.idx++
 		}
 	}
+	s := p.state
 	p.mu.Unlock()
+	p.bcast.Send(s)
+	return nil
+}
+
+func (p *Player) Queue() []provider.Track {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	res := make([]provider.Track, len(p.queue))
+	copy(res, p.queue)
+	return res
+}
+
+func (p *Player) QueueIndex() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.idx
+}
+
+func (p *Player) PlayQueueIndex(idx int) error {
+	p.mu.Lock()
+	if idx < 0 || idx >= len(p.queue) {
+		p.mu.Unlock()
+		return fmt.Errorf("queue index out of bounds: %d", idx)
+	}
+	p.idx = idx
+	t := p.queue[p.idx]
+	p.mu.Unlock()
+	p.playTrack(t)
 	return nil
 }
 
@@ -505,8 +546,8 @@ func (p *Player) ClearQueue() error {
 	p.idx = 0
 	p.state.Track = nil
 	p.state.Playing = false
-	if p.gst != nil {
-		p.gst.Stop()
+	if p.sink != nil {
+		p.sink.Stop()
 	}
 	s := p.state
 	p.mu.Unlock()
@@ -528,8 +569,8 @@ func (p *Player) Subscribe() <-chan player.State {
 func (p *Player) Close() error {
 	p.closeOnce.Do(func() {
 		close(p.doneCh)
-		if p.gst != nil {
-			p.gst.Destroy()
+		if p.sink != nil {
+			p.sink.Destroy()
 		}
 		if p.streamer != nil {
 			_ = p.streamer.Close()
