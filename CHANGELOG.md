@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Dithered album art** — the `:art` view now draws the cover as dithered pixel art: it is reduced to a 16-colour palette, Atkinson-dithered and drawn with Unicode sextants (2×3 solid sub-pixels per cell), which Alacritty, kitty, Ghostty, WezTerm and foot draw themselves, so it tiles without gaps. Terminal.app, which cannot draw sextants, keeps the half-block renderer.
+
 ## [1.0.0] — 2026-09-29
 
 ### Added

@@ -17,6 +17,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -151,7 +152,11 @@ func testCfg() *config.Config {
 }
 
 func newModel(plyr player.Player) *Model {
-	return New(testCfg(), &mockProvider{}, plyr, Options{})
+	m := New(testCfg(), &mockProvider{}, plyr, Options{})
+	// Pin the half-block renderer so art assertions don't depend on the
+	// TERM_PROGRAM of the machine running the tests.
+	m.renderArt = art.RenderHalfBlocks
+	return m
 }
 
 // --- clamp ---
@@ -2671,6 +2676,57 @@ func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(m.nowPlayingLines(100, 16), "\n"), "▀") {
 		t.Fatal("cover not rendered after toggling art mode on")
+	}
+}
+
+func TestArtRenderer_FallsBackToHalfBlocksOnAppleTerminal(t *testing.T) {
+	img, err := art.Decode(bytes.NewReader(testArtworkPNG(t)))
+	if err != nil {
+		t.Fatalf("decoding test artwork: %v", err)
+	}
+	size := art.Size{Width: 8, Height: 4}
+
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	if got := strings.Join(artRenderer()(img, size), ""); !strings.Contains(got, "▀") {
+		t.Fatal("Terminal.app did not get the half-block renderer")
+	}
+
+	t.Setenv("TERM_PROGRAM", "ghostty")
+	got, want := artRenderer()(img, size), art.RenderDithered(img, size)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatal("sextant-capable terminal did not get the dithered renderer")
+	}
+}
+
+func TestNowPlayingArtLines_UsesDitheredRenderer(t *testing.T) {
+	img, err := art.Decode(bytes.NewReader(testArtworkPNG(t)))
+	if err != nil {
+		t.Fatalf("decoding test artwork: %v", err)
+	}
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsArtColor = func() bool { return true }
+	m.renderArt = art.RenderDithered
+	m.artMode = true
+	m.playerState.Track = &provider.Track{Title: "Song", Artist: "Artist", Album: "Album", ArtworkURL: "https://example.com/cover.png", Duration: time.Minute}
+	m.artwork.url = m.playerState.Track.ArtworkURL
+	m.artwork.img = img
+
+	lines := m.nowPlayingLines(100, 16)
+	if len(lines) != 16 {
+		t.Fatalf("nowPlayingLines returned %d lines, want 16", len(lines))
+	}
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "▀") {
+		t.Fatal("art view used half-blocks with the dithered renderer selected")
+	}
+	if !strings.Contains(joined, "Song") {
+		t.Fatal("art view lost the track line")
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w > 100 {
+			t.Fatalf("line %d is %d cells wide, want <= 100", i, w)
+		}
 	}
 }
 

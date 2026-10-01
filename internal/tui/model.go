@@ -291,9 +291,10 @@ type Model struct {
 	stateCh     <-chan player.State
 
 	// Album art view (:art). artMode mirrors cfg.AlbumArt; the cover is
-	// fetched per track and the rendered half-block lines are cached per size
-	// so they only re-render on a track change or a resize.
+	// fetched per track and the rendered lines are cached per size so they
+	// only re-render on a track change or a resize.
 	artMode          bool
+	renderArt        func(image.Image, art.Size) []string // cover renderer, see artRenderer
 	artwork          artworkCache
 	artworkGen       int
 	artHTTP          *http.Client
@@ -393,6 +394,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		supportsArtColor: art.SupportsColor,
+		renderArt:        artRenderer(),
 		// Measured cell height/width ratio, so album art renders as a true square.
 		artCellAsp: cellAspect(),
 	}
@@ -3216,7 +3218,7 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
 			m.artwork.rendered = map[art.Size][]string{}
 		}
-		artLines = art.RenderHalfBlocks(m.artwork.img, size)
+		artLines = m.renderArt(m.artwork.img, size)
 		m.artwork.rendered[size] = artLines
 	}
 
@@ -3251,6 +3253,15 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 	)
 	lines = append(lines, "", trackLine, albumLine, m.statusLine(contentW))
 	return lines
+}
+
+// artRenderer picks the album-art renderer: dithered sextants where the
+// terminal can draw them, the plain half-block renderer otherwise.
+func artRenderer() func(image.Image, art.Size) []string {
+	if art.SupportsSextants() {
+		return art.RenderDithered
+	}
+	return art.RenderHalfBlocks
 }
 
 // statusLine renders the centred error/status line, or "" when there is no
