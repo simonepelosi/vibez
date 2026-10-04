@@ -303,6 +303,10 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `R` | Toggle radio mode (seeded by the highlighted track) |
 | `esc` | Close |
 
+Album art uses the existing Kitty graphics encoder on Ghostty and Kitty outside
+tmux. Covers retain their image resolution and resize with the panel. Other
+terminals keep the coloured half-block renderer. Enable it with `:art`.
+
 ### Command mode (`:`)
 
 Vim-style command mode — press `:` from anywhere to open the command prompt.
@@ -314,7 +318,7 @@ Vim-style command mode — press `:` from anywhere to open the command prompt.
 | `:vol <0-100>` | Set volume to an absolute level (e.g. `:vol 80`) |
 | `:vol +n` / `:vol -n` | Raise or lower volume by *n* percent (e.g. `:vol +10`) |
 | `:vol` | Show current volume in the status bar |
-| `:art` | Toggle the album-art view: the cover (rendered as coloured half-blocks) with track, album, and elapsed time in place of the progress bar |
+| `:art` | Toggle the album-art view: the cover (full-resolution images in Ghostty/Kitty; coloured half-blocks elsewhere) with track, album, and elapsed time in place of the progress bar |
 | `:mute` | Toggle mute (run again to restore the previous volume) |
 | `:quality <high|standard|256|64>` | Set Apple Music AAC bitrate |
 | `:seek <seconds>` | Jump to an absolute position in the current song |

@@ -127,7 +127,7 @@
             title:      item.attributes.name,
             artist:     item.attributes.artistName,
             album:      item.attributes.albumName,
-            artworkURL: artwork ? MusicKit.formatArtworkURL(artwork, 300, 300) : '',
+            artworkURL: artwork ? MusicKit.formatArtworkURL(artwork, 1200, 1200) : '',
             durationMs: item.attributes.durationInMillis || 0,
           },
         };
@@ -194,7 +194,7 @@
               artist:     item.attributes.artistName,
               album:      item.attributes.albumName,
               artworkURL: item.attributes.artwork
-                ? MusicKit.formatArtworkURL(item.attributes.artwork, 300, 300) : '',
+                ? MusicKit.formatArtworkURL(item.attributes.artwork, 1200, 1200) : '',
               durationMs: item.attributes.durationInMillis,
             } : null,
           };

@@ -151,7 +151,9 @@ func testCfg() *config.Config {
 }
 
 func newModel(plyr player.Player) *Model {
-	return New(testCfg(), &mockProvider{}, plyr, Options{})
+	m := New(testCfg(), &mockProvider{}, plyr, Options{})
+	m.supportsArtGraphics = func() bool { return false }
+	return m
 }
 
 // --- clamp ---

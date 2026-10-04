@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"math"
 	"math/rand"
 	"net/http"
 	"slices"
@@ -293,15 +292,18 @@ type Model struct {
 	// Album art view (:art). artMode mirrors cfg.AlbumArt; the cover is
 	// fetched per track and the rendered half-block lines are cached per size
 	// so they only re-render on a track change or a resize.
-	artMode          bool
-	artwork          artworkCache
-	artworkGen       int
-	artHTTP          *http.Client
-	supportsArtColor func() bool
-	artCellAsp       float64          // terminal cell height/width ratio, for square art
-	queueIDs         []string         // current playback queue (for "add to queue")
-	queueTracks      []provider.Track // full track objects parallel to queueIDs
-	queueMiniOffset  int              // scroll offset for the mini-queue in the split view
+	artMode             bool
+	artGraphics         artworkGraphics
+	artworkViewport     art.Size
+	artwork             artworkCache
+	artworkGen          int
+	artHTTP             *http.Client
+	supportsArtColor    func() bool
+	supportsArtGraphics func() bool
+	artCellAsp          float64          // terminal cell height/width ratio, for square art
+	queueIDs            []string         // current playback queue (for "add to queue")
+	queueTracks         []provider.Track // full track objects parallel to queueIDs
+	queueMiniOffset     int              // scroll offset for the mini-queue in the split view
 
 	// Discovery mode
 	discovery discoveryMode
@@ -392,7 +394,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		artHTTP:      &http.Client{Timeout: 5 * time.Second},
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
-		supportsArtColor: art.SupportsColor,
+		supportsArtColor:    art.SupportsColor,
+		supportsArtGraphics: art.SupportsKitty,
 		// Measured cell height/width ratio, so album art renders as a true square.
 		artCellAsp: cellAspect(),
 	}
@@ -1157,6 +1160,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, libCmd)
 	}
 
+	cmds = append(cmds, m.syncArtworkGraphics())
 	return m, tea.Batch(cmds...)
 }
 
@@ -3185,28 +3189,18 @@ func (m *Model) nowPlayingLines(contentW, h int) []string {
 // centred, sized square via the measured cell aspect ratio. While the cover
 // is still downloading its rows stay blank and it pops in when loaded.
 func (m *Model) nowPlayingArtLines(contentW, h int) []string {
+	m.artworkViewport = art.Size{Width: contentW, Height: h}
 	t := m.playerState.Track
 	if t == nil {
 		return m.nowPlayingTextLines(contentW, h)
 	}
 
-	aspect := m.artCellAsp
-	if aspect <= 0 {
-		aspect = 2.0
-	}
-	artColsFor := func(rows int) int { return int(math.Round(float64(rows) * aspect)) }
+	size := m.artworkSize(contentW, h)
+	artRows, artCols := size.Height, size.Width
 	artRegion := h - 4
-	artRows := artRegion
-	artCols := artColsFor(artRows)
-	for artRows > 2 && artCols > contentW {
-		artRows--
-		artCols = artColsFor(artRows)
-	}
 	if artRows < 2 || artCols < 4 {
 		return m.nowPlayingTextLines(contentW, h)
 	}
-
-	size := art.Size{Width: artCols, Height: artRows}
 	if m.artwork.rendered == nil {
 		m.artwork.rendered = map[art.Size][]string{}
 	}
@@ -3216,7 +3210,11 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
 			m.artwork.rendered = map[art.Size][]string{}
 		}
-		artLines = art.RenderHalfBlocks(m.artwork.img, size)
+		if m.supportsArtGraphics != nil && m.supportsArtGraphics() && !m.artGraphics.failed {
+			artLines = art.KittyLines(m.artworkImageID(), size)
+		} else {
+			artLines = art.RenderHalfBlocks(m.artwork.img, size)
+		}
 		m.artwork.rendered[size] = artLines
 	}
 
