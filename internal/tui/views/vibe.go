@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -75,6 +76,7 @@ func closestOptionIdx(similarity float64) int {
 
 // VibeModel drives the interactive vibe panel (right split of the bottom area).
 type VibeModel struct {
+	Locale    locale.Locale
 	state     vibeState
 	input     textinput.Model
 	lastQ     string // last submitted query
@@ -257,6 +259,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ•̀ᴥ•́ʔ"}
 	bear := styles.BearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
 
+	v.input.Placeholder = v.Locale.Text("late night coding, gym, rainy day…")
 	v.input.SetWidth(max(w-4, 10))
 
 	clip := func(s string, maxLen int) string {
@@ -273,13 +276,13 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	if v.state == vibeDiscovery || v.state == vibeDiscoveryPicker {
 		labelTitle = "Discovery"
 	}
-	label := styles.TabActive.Render(labelTitle)
+	label := styles.TabActive.Render(v.Locale.Text(labelTitle))
 	sep := muted.Render(strings.Repeat("─", 5))
 
 	var lines []string
 	switch v.state {
 	case vibeDiscoveryPicker:
-		lines = []string{label, sep, accent.Render("select metric:"), ""}
+		lines = []string{label, sep, accent.Render(v.Locale.Text("select metric:")), ""}
 		for i, opt := range discoveryOptions {
 			prefix := "  "
 			nameStyle := muted
@@ -287,13 +290,13 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 				prefix = accent.Render("▶ ")
 				nameStyle = primary
 			}
-			lines = append(lines, prefix+nameStyle.Render(opt.label))
+			lines = append(lines, prefix+nameStyle.Render(v.Locale.Text(opt.label)))
 		}
 		lines = append(lines,
 			"",
-			accent.Render("↑↓")+muted.Render(" navigate")+
-				"  "+accent.Render("Enter")+muted.Render(" select")+
-				"  "+accent.Render("esc")+muted.Render(" cancel"),
+			accent.Render("↑↓")+muted.Render(v.Locale.Text(" navigate"))+
+				"  "+accent.Render("Enter")+muted.Render(v.Locale.Text(" select"))+
+				"  "+accent.Render("esc")+muted.Render(v.Locale.Text(" cancel")),
 		)
 
 	case vibeDiscovery:
@@ -308,16 +311,16 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 
 		bearStatus := bear + " "
 		if d.Refilling {
-			bearStatus += primary.Render("queuing next…")
+			bearStatus += primary.Render(v.Locale.Text("queuing next…"))
 		} else {
-			bearStatus += muted.Render("listening…")
+			bearStatus += muted.Render(v.Locale.Text("listening…"))
 		}
 
 		var modeStr string
 		if d.AutoMode {
-			modeStr = muted.Render("Mode  ") + accent.Render("auto")
+			modeStr = muted.Render(v.Locale.Text("Mode  ")) + accent.Render(v.Locale.Text("auto"))
 		} else {
-			modeStr = muted.Render("Mode  ") + accent.Render(fmt.Sprintf("%d song", d.Count))
+			modeStr = muted.Render(v.Locale.Text("Mode  ")) + accent.Render(fmt.Sprintf("%d song", d.Count))
 			if d.Count != 1 {
 				modeStr += accent.Render("s")
 			}
@@ -328,38 +331,38 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			accent.Render(clip(d.SeedArtist, w-4)),
 			muted.Render(clip(d.SeedTitle, w-4)),
 			"",
-			muted.Render("Metric") + "  " + bar + "  " + labelStyle.Render(pct),
-			muted.Render("       ") + labelStyle.Render(simLabel),
+			muted.Render(v.Locale.Text("Metric")) + "  " + bar + "  " + labelStyle.Render(pct),
+			muted.Render("       ") + labelStyle.Render(v.Locale.Text(simLabel)),
 			modeStr,
 			"",
 			bearStatus,
 			"",
-			accent.Render("+") + muted.Render(" similar") +
-				"  " + accent.Render("-") + muted.Render(" different") +
-				"  " + accent.Render("d") + muted.Render(" stop"),
+			accent.Render("+") + muted.Render(v.Locale.Text(" similar")) +
+				"  " + accent.Render("-") + muted.Render(v.Locale.Text(" different")) +
+				"  " + accent.Render("d") + muted.Render(v.Locale.Text(" stop")),
 		}
 
 	case vibeIdle:
 		lines = []string{
 			label, sep,
-			muted.Render("describe your vibe:"),
+			muted.Render(v.Locale.Text("describe your vibe:")),
 			"> " + accent.Render(v.input.Placeholder),
 			"",
-			bear + " " + muted.Render("press v to start"),
+			bear + " " + muted.Render(v.Locale.Text("press v to start")),
 			"",
-			accent.Render("d") + muted.Render(" set metric  ") + accent.Render(":discover") + muted.Render(" start"),
+			accent.Render("d") + muted.Render(v.Locale.Text(" set metric  ")) + accent.Render(":discover") + muted.Render(v.Locale.Text(" start")),
 		}
 
 	case vibeInputting:
 		lines = []string{
 			label, sep,
-			accent.Render("describe your vibe:"),
+			accent.Render(v.Locale.Text("describe your vibe:")),
 			"> " + v.input.View(),
 			"",
-			bear + " " + muted.Render("listening…"),
+			bear + " " + muted.Render(v.Locale.Text("listening…")),
 			"",
-			accent.Render("Enter") + muted.Render(" search") +
-				"  " + accent.Render("esc") + muted.Render(" cancel"),
+			accent.Render("Enter") + muted.Render(v.Locale.Text(" search")) +
+				"  " + accent.Render("esc") + muted.Render(v.Locale.Text(" cancel")),
 		}
 
 	case vibeSearching:
@@ -367,9 +370,9 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
-			bear + " " + primary.Render("searching…"),
+			bear + " " + primary.Render(v.Locale.Text("searching…")),
 			"",
-			muted.Render("adding tracks to your queue…"),
+			muted.Render(v.Locale.Text("adding tracks to your queue…")),
 		}
 
 	case vibeDone:
@@ -381,10 +384,15 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
-			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
+			bear + " " + primary.Render(func() string {
+				if strings.HasPrefix(v.Locale.Language, "zh") {
+					return fmt.Sprintf("✓ 已添加 %d 首歌曲", v.added)
+				}
+				return fmt.Sprintf("✓ added %d track%s", v.added, suffix)
+			}()),
 			"",
-			accent.Render("v") + muted.Render(" new vibe") +
-				"  " + accent.Render("d") + muted.Render(" set metric"),
+			accent.Render("v") + muted.Render(v.Locale.Text(" new vibe")) +
+				"  " + accent.Render("d") + muted.Render(v.Locale.Text(" set metric")),
 		}
 
 	case vibeError:
@@ -392,10 +400,10 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
-			styles.BearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
+			styles.BearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render(v.Locale.Text("no results")),
 			"",
-			accent.Render("v") + muted.Render(" try again") +
-				"  " + accent.Render("d") + muted.Render(" set metric"),
+			accent.Render("v") + muted.Render(v.Locale.Text(" try again")) +
+				"  " + accent.Render("d") + muted.Render(v.Locale.Text(" set metric")),
 		}
 	}
 

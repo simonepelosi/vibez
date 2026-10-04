@@ -43,13 +43,14 @@ type jsState struct {
 }
 
 type jsTrack struct {
-	ID         string `json:"id"`
-	CatalogID  string `json:"catalogId"`
-	Title      string `json:"title"`
-	Artist     string `json:"artist"`
-	Album      string `json:"album"`
-	ArtworkURL string `json:"artworkURL"`
-	DurationMs int64  `json:"durationMs"`
+	Genres     []string `json:"genres"`
+	ID         string   `json:"id"`
+	CatalogID  string   `json:"catalogId"`
+	Title      string   `json:"title"`
+	Artist     string   `json:"artist"`
+	Album      string   `json:"album"`
+	ArtworkURL string   `json:"artworkURL"`
+	DurationMs int64    `json:"durationMs"`
 }
 
 // Player implements player.Player using a hidden WebKit2GTK window.
@@ -331,6 +332,7 @@ func (p *Player) applyState(js jsState) {
 			Artist:     js.NowPlaying.Artist,
 			Album:      js.NowPlaying.Album,
 			ArtworkURL: js.NowPlaying.ArtworkURL,
+			Genres:     js.NowPlaying.Genres,
 			Duration:   time.Duration(js.NowPlaying.DurationMs) * time.Millisecond,
 		}
 	}

@@ -79,6 +79,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "debug: theme: %v (falling back to default)\n", themeErr)
 	}
 	styles.Apply(theme)
+	opts.BaseTheme = &theme
 
 	if local {
 		// if --music-dir was passed, it will save to config.

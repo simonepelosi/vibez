@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -28,6 +29,7 @@ type feedRow struct {
 
 // FeedModel renders the personalised recommendations panel.
 type FeedModel struct {
+	Locale locale.Locale
 	state  feedState
 	errMsg string
 	rows   []feedRow
@@ -143,17 +145,17 @@ func (f *FeedModel) View() string {
 
 	switch f.state {
 	case feedStateLoading:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("loading recommendations…")
+		return hdr.Render(f.Locale.Text("Feed")) + "\n" + sep + "\n\n" + muted.Render(f.Locale.Text("loading recommendations…"))
 	case feedStateEmpty:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("no recommendations") + "\n\n" +
-			muted.Render("press ") + styles.KeyName.Render("r") + muted.Render(" to reload")
+		return hdr.Render(f.Locale.Text("Feed")) + "\n" + sep + "\n\n" + muted.Render(f.Locale.Text("no recommendations")) + "\n\n" +
+			muted.Render(f.Locale.Text("press ")) + styles.KeyName.Render("r") + muted.Render(f.Locale.Text(" to reload"))
 	case feedStateError:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("could not load feed") + "\n\n" +
-			muted.Render("press ") + styles.KeyName.Render("r") + muted.Render(" to try again")
+		return hdr.Render(f.Locale.Text("Feed")) + "\n" + sep + "\n\n" + muted.Render(f.Locale.Text("could not load feed")) + "\n\n" +
+			muted.Render(f.Locale.Text("press ")) + styles.KeyName.Render("r") + muted.Render(f.Locale.Text(" to try again"))
 	}
 
 	var sb strings.Builder
-	sb.WriteString(hdr.Render("Feed") + "\n")
+	sb.WriteString(hdr.Render(f.Locale.Text("Feed")) + "\n")
 	sb.WriteString(sep + "\n")
 
 	visible := max(f.height-2, 1)

@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"math"
 	"strings"
 
@@ -26,6 +27,7 @@ type EQChangeMsg struct {
 }
 
 type EQModel struct {
+	Locale locale.Locale
 	bands  []player.EQBand
 	cursor int
 	width  int

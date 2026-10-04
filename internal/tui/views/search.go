@@ -3,6 +3,7 @@ package views
 import (
 	"context"
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"image/color"
 	"strings"
 	"time"
@@ -83,6 +84,7 @@ func rowLines(r searchRow) int {
 // SearchModel holds search results rendered as a unified multi-section list
 // (Tracks, Albums, Playlists) with keyboard navigation.
 type SearchModel struct {
+	Locale   locale.Locale
 	provider provider.Provider
 	results  *provider.SearchResult
 	rows     []searchRow
@@ -299,7 +301,7 @@ func sectionColor(label string) color.Color {
 // View renders the multi-section result list within the allocated height.
 func (m *SearchModel) View() string {
 	if m.loading {
-		return styles.QueueItemMuted.Render("  searching…")
+		return styles.QueueItemMuted.Render(m.Locale.Text("  searching…"))
 	}
 	if m.err != nil {
 		return styles.ErrorStyle.Render("⚠  " + m.err.Error())
@@ -337,7 +339,7 @@ func (m *SearchModel) View() string {
 				Foreground(currentAccent).
 				Bold(true).
 				Italic(true)
-			sb.WriteString("  " + hs.Render(row.label) + "\n")
+			sb.WriteString("  " + hs.Render(m.Locale.Text(row.label)) + "\n")
 			linesLeft--
 			continue
 		}
@@ -371,7 +373,7 @@ func (m *SearchModel) View() string {
 			if a.TrackCount > 0 {
 				desc += fmt.Sprintf("  ·  %d tracks", a.TrackCount)
 			}
-			sb.WriteString(cur + tStyle.Render(a.Title) + tagStyle.Render(" [album]") + "\n")
+			sb.WriteString(cur + tStyle.Render(a.Title) + tagStyle.Render(m.Locale.Text(" [album]")) + "\n")
 			sb.WriteString("    " + dStyle.Render(desc) + "\n")
 
 		case row.playlist != nil:
@@ -380,7 +382,7 @@ func (m *SearchModel) View() string {
 			if p.TrackCount > 0 {
 				desc = fmt.Sprintf("%d tracks", p.TrackCount)
 			}
-			sb.WriteString(cur + tStyle.Render(p.Name) + tagStyle.Render(" [playlist]") + "\n")
+			sb.WriteString(cur + tStyle.Render(p.Name) + tagStyle.Render(m.Locale.Text(" [playlist]")) + "\n")
 			sb.WriteString("    " + dStyle.Render(desc) + "\n")
 		}
 		linesLeft -= 2

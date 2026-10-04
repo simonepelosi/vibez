@@ -181,7 +181,7 @@ var ProgressGradStops = []color.Color{
 }
 
 // Apply replaces every style and color variable with values derived from t.
-// It must be called once at program startup, before any TUI model is created.
+// Call at startup or on the TUI event loop; never concurrently with rendering.
 func Apply(t Theme) {
 	// Update color vars.
 	ColorPrimary = lipgloss.Color(t.Primary)

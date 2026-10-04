@@ -3,10 +3,13 @@ package tui
 import (
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
 // Options configures optional TUI features at startup.
 type Options struct {
+	// BaseTheme restores the selected startup theme when genre metadata is missing.
+	BaseTheme *styles.Theme
 	// MemProfiling enables live RSS display (vibez + helper) in the header.
 	// Activate with --mem-profiling on the command line.
 	MemProfiling bool

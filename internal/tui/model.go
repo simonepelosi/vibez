@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"image"
 	"math"
 	"math/rand"
@@ -138,10 +139,11 @@ func (p *aboutPanel) Back() bool   { return false }
 
 type playerStateMsg player.State
 type artworkLoadedMsg struct {
-	url string
-	gen int
-	img image.Image
-	err error
+	theme *styles.Theme
+	url   string
+	gen   int
+	img   image.Image
+	err   error
 }
 type searchResultMsg struct {
 	result *provider.SearchResult
@@ -281,6 +283,7 @@ const radioMaxRetries = 5 // give up re-arming after this many consecutive failu
 // ── Model ─────────────────────────────────────────────────────────────────
 
 type Model struct {
+	ui       locale.Locale
 	cfg      *config.Config
 	provider provider.Provider
 	player   player.Player
@@ -297,6 +300,11 @@ type Model struct {
 	artwork          artworkCache
 	artworkGen       int
 	artHTTP          *http.Client
+	hideHints        bool
+	baseTheme        styles.Theme
+	musicTheme       string
+	coverThemeURL    string
+	inlineLyrics     bool
 	supportsArtColor func() bool
 	artCellAsp       float64          // terminal cell height/width ratio, for square art
 	queueIDs         []string         // current playback queue (for "add to queue")
@@ -381,6 +389,7 @@ type Model struct {
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
 	m := &Model{
+		ui:           locale.Locale{Language: cfg.UILanguage},
 		cfg:          cfg,
 		provider:     prov,
 		player:       plyr,
@@ -388,6 +397,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		memProfiling: opts.MemProfiling,
 		preMuteVol:   -1,
 		artMode:      cfg.AlbumArt,
+		hideHints:    cfg.HideHints,
 		artwork:      artworkCache{rendered: map[art.Size][]string{}},
 		artHTTP:      &http.Client{Timeout: 5 * time.Second},
 		// Album art needs at least a 256-colour terminal to look reasonable;
@@ -396,6 +406,11 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		// Measured cell height/width ratio, so album art renders as a true square.
 		artCellAsp: cellAspect(),
 	}
+	m.baseTheme = styles.DefaultTheme()
+	if opts.BaseTheme != nil {
+		m.baseTheme = *opts.BaseTheme
+	}
+	m.musicTheme = "base"
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
 	}
@@ -411,6 +426,15 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.favorites = make(map[string]bool)
 	m.aboutP = &aboutPanel{m: views.NewAbout()}
 	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
+	m.inlineLyrics = cfg.InlineLyrics
+	m.library.m.SetLocale(m.ui)
+	m.queue.m.Locale = m.ui
+	m.lyricsP.m.Locale = m.ui
+	m.feedP.m.Locale = m.ui
+	m.eqP.m.Locale = m.ui
+	m.vibe.Locale = m.ui
+	m.search.Locale = m.ui
+	m.aboutP.m.Locale = m.ui
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}
@@ -514,6 +538,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tick())
 
 	case glowTickMsg:
+		m.lyricsP.m.AdvanceFrame()
 		m.glowStep++
 		cmds = append(cmds, glowTick())
 
@@ -534,6 +559,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playerStateMsg:
 		wasPlaying := m.playerState.Playing
 		s := player.State(msg)
+		m.syncMusicTheme(s.Track)
 		for _, line := range s.Logs {
 			m.appendLog(line)
 		}
@@ -605,11 +631,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
 			// Only download covers while the art view is active; toggling
 			// :art on fetches the current track's cover on demand.
-			if m.artMode {
+			if m.artMode || m.cfg.CoverTheme {
 				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
 			}
 		}
-		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
+		if s.Track != nil && (m.playerState.Track == nil || views.PlaybackID(*m.playerState.Track) != views.PlaybackID(*s.Track)) {
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
 			// Log playParams so we can confirm which ID path MusicKit will use.
 			trackType := "catalog"
@@ -623,19 +649,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(pp)
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
-			// Fetch lyrics for the new track: immediately if the panel is
-			// visible, otherwise mark stale so the fetch is deferred until
-			// the user opens the panel (lazy loading).
-			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
-				lyricsOpen := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
-				if lyricsOpen {
-					m.lastLyricsTrackID = id
-					m.lyricsP.m.SetLoading()
-					cmds = append(cmds, m.fetchLyricsCmd(s.Track))
-				} else {
-					m.lastLyricsTrackID = "" // stale; will fetch on panel open
-				}
-			}
 			// Auto-scroll mini-queue to keep the current track visible.
 			for i, t := range m.queueTracks {
 				if t.Title == s.Track.Title {
@@ -644,6 +657,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.queueMiniOffset = max(0, i-visibleRows/2)
 					}
 					break
+				}
+			}
+		}
+		if s.Track != nil {
+			// Fetch lyrics for the new track: immediately if the panel is
+			// visible, otherwise mark stale so the fetch is deferred until
+			// the user opens the panel (lazy loading).
+			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
+				lyricsOpen := m.inlineLyrics || (m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP)
+				if lyricsOpen {
+					m.lastLyricsTrackID = id
+					m.lyricsP.m.SetLoading()
+					cmds = append(cmds, m.fetchLyricsCmd(s.Track))
+				} else {
+					m.lastLyricsTrackID = "" // stale; will fetch on panel open
 				}
 			}
 		}
@@ -696,6 +724,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.artwork.img = msg.img
+		if m.cfg.CoverTheme && msg.theme != nil {
+			styles.Apply(*msg.theme)
+			m.coverThemeURL = msg.url
+			m.musicTheme = "cover"
+		}
 		m.artwork.failed = false
 		m.artwork.rendered = map[art.Size][]string{}
 
@@ -712,6 +745,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Discard stale results if the user skipped to a different track.
 		if msg.trackID == m.lastLyricsTrackID {
 			m.lyricsP.m.SetLyrics(msg.result, msg.err)
+			m.lyricsP.m.SetPosition(m.playerState.Position)
 			if msg.err != nil {
 				m.appendLog(fmt.Sprintf("[lyrics] not found: %v", msg.err))
 			} else {
@@ -1636,11 +1670,18 @@ func (m *Model) fetchArtworkCmd(url string, gen int) tea.Cmd {
 		return nil
 	}
 	client := m.artHTTP
+	coverTheme, baseTheme := m.cfg.CoverTheme, m.baseTheme
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		img, err := art.FetchAndDecode(ctx, client, url, 5<<20)
-		return artworkLoadedMsg{url: url, gen: gen, img: img, err: err}
+		var theme *styles.Theme
+		if err == nil && coverTheme {
+			if extracted, ok := themeFromCover(img, baseTheme); ok {
+				theme = &extracted
+			}
+		}
+		return artworkLoadedMsg{url: url, gen: gen, img: img, err: err, theme: theme}
 	}
 }
 
@@ -1925,6 +1966,20 @@ func (m *Model) forwardToActivePanel(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
+	if k == "y" && m.playerState.Track != nil && m.lyricsP.m.HasError() {
+		m.lyricsP.m.SetLoading()
+		m.lastLyricsTrackID = views.PlaybackID(*m.playerState.Track)
+		return m.fetchLyricsCmd(m.playerState.Track)
+	}
+	if k == "y" && m.cfg.InlineLyrics {
+		m.inlineLyrics = !m.inlineLyrics
+		if m.inlineLyrics && m.playerState.Track != nil && m.lastLyricsTrackID == "" {
+			m.lastLyricsTrackID = views.PlaybackID(*m.playerState.Track)
+			m.lyricsP.m.SetLoading()
+			return m.fetchLyricsCmd(m.playerState.Track)
+		}
+		return nil
+	}
 	// When debug log is open, j/k/G scroll it; esc back/closes it.
 	if m.debugView {
 		switch k {
@@ -2969,6 +3024,9 @@ func (m *Model) View() tea.View {
 //	│ ʕ•ᴥ•ʔ > / search  n next  :q quit  │
 //	└─────────────────────────────────────┘
 func (m *Model) renderBoxLayout() string {
+	if m.width < 12 || m.height < 8 {
+		return ansi.Truncate(m.ui.Text("Terminal too small"), max(0, m.width), "")
+	}
 	inner := m.width - 2 // visual width between the │ border chars
 	npH := m.nowPlayingHeight()
 	panelH := m.panelHeight()
@@ -3061,11 +3119,14 @@ func (m *Model) renderBoxLayout() string {
 		}
 	}
 
-	// ── Join or full divider ──
-	if fullWidth {
-		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
-	} else {
-		sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
+	if !m.hideHints {
+		// ── Join or full divider ──
+		if fullWidth {
+			sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+		} else {
+			sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
+		}
+
 	}
 
 	// ── Status bar (context/mode then playback, each wrapped as needed) ──
@@ -3115,6 +3176,9 @@ func (m *Model) renderIntro() string {
 // renderBoxHeader builds the header line including the border chars.
 func (m *Model) renderBoxHeader(inner int) string {
 	bear := views.BearExpr(m.glowStep, m.playerState.Playing)
+	if mascot := m.musicMascot(); mascot != "" {
+		bear = styles.BearStyle.Render(mascot)
+	}
 	title := views.RenderGlowTitle("vibez ♪", m.glowStep)
 
 	vol := int(m.playerState.Volume * 100)
@@ -3172,6 +3236,9 @@ func (m *Model) nowPlayingHeight() int {
 
 // nowPlayingLines returns exactly h lines for the Now Playing section.
 func (m *Model) nowPlayingLines(contentW, h int) []string {
+	if m.inlineLyrics {
+		return m.coverAndLyricsLines(contentW, h)
+	}
 	if m.artModeActive() && h >= 8 {
 		return m.nowPlayingArtLines(contentW, h)
 	}
@@ -3276,8 +3343,8 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 	if t == nil {
 		lines := make([]string, h)
 		mid := h / 2
-		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
-		lines[h-2] = centerStr(muted.Render("made with ❤️ by simonepelosi · press ? for about"), contentW)
+		lines[mid] = centerStr(muted.Render(m.ui.Text("silence is not a vibe")), contentW)
+		lines[h-2] = centerStr(muted.Render(m.ui.Text("made with ❤️ by simonepelosi · press ? for about")), contentW)
 		if m.errMsg != "" {
 			// statusLine renders this identically and truncates to the width,
 			// which a message long enough to explain itself needs.
@@ -3357,7 +3424,7 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 
 	lines := []string{
 		"",
-		centerStr(styles.NowPlayingLabel.Render("Now Playing"), contentW),
+		centerStr(styles.NowPlayingLabel.Render(m.ui.Text("Now Playing")), contentW),
 		centerStr(muted.Render(strings.Repeat("─", 11)), contentW),
 		trackLine,
 		albumLine,
@@ -3408,10 +3475,10 @@ func (m *Model) queuePanelLines(w, h int) []string {
 	// Header: "Queue  12 tracks"
 	var headerLabel string
 	if total > 0 {
-		countStr := styles.QueueItemMuted.Render(fmt.Sprintf("  %d tracks", total))
-		headerLabel = styles.Header.Render("Queue") + countStr
+		countStr := styles.QueueItemMuted.Render(fmt.Sprintf(m.ui.Text("  %d tracks"), total))
+		headerLabel = styles.Header.Render(m.ui.Text("Queue")) + countStr
 	} else {
-		headerLabel = styles.Header.Render("Queue")
+		headerLabel = styles.Header.Render(m.ui.Text("Queue"))
 	}
 	sep := styles.QueueItemMuted.Render(strings.Repeat("─", 5))
 
@@ -3434,7 +3501,7 @@ func (m *Model) queuePanelLines(w, h int) []string {
 		}
 	}
 	if len(trackLines) == 0 {
-		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
+		trackLines = []string{styles.QueueItemMuted.Render(m.ui.Text("  Queue is empty"))}
 	}
 
 	// header + sep occupy 2 lines; remaining rows hold track entries.
@@ -3472,11 +3539,15 @@ func (m *Model) searchLines(contentW, h int) []string {
 	sep := muted.Render(strings.Repeat("─", contentW))
 
 	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
-	listH := max(1, h-4)
+	reserved := 4
+	if m.hideHints {
+		reserved = 2
+	}
+	listH := max(1, h-reserved)
 	m.search.SetSize(contentW, listH)
 	listView := m.search.View()
 	if listView == "" && !m.search.Loading() && m.searchQuery != "" {
-		listView = "  " + muted.Render("no results")
+		listView = "  " + muted.Render(m.ui.Text("no results"))
 	}
 
 	listLines := toLines(listView, listH)
@@ -3496,7 +3567,9 @@ func (m *Model) searchLines(contentW, h int) []string {
 		"  ·  " + accent.Render("Esc") + muted.Render(" close")
 
 	result := append([]string{inputLine, sep}, listLines...)
-	result = append(result, footerSep, footer)
+	if !m.hideHints {
+		result = append(result, footerSep, footer)
+	}
 	for len(result) < h {
 		result = append(result, "")
 	}
@@ -3534,8 +3607,8 @@ func (m *Model) statusNavLines(w int) []string {
 		case m.vibe.IsFocused():
 			parts = []string{
 				styles.ModeNormal.Render("VIBE"),
-				accent.Render("Enter") + muted.Render(" search"),
-				accent.Render("esc") + muted.Render(" cancel"),
+				accent.Render("Enter") + muted.Render(m.ui.Text(" search")),
+				accent.Render("esc") + muted.Render(m.ui.Text(" cancel")),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.queue:
 			parts = []string{
@@ -3569,7 +3642,7 @@ func (m *Model) statusNavLines(w int) []string {
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("Tab") + muted.Render(" queue"),
 				accent.Render("Shift+Tab") + muted.Render(" next"),
-				accent.Render("j/k") + muted.Render(" navigate"),
+				accent.Render("j/k") + muted.Render(m.ui.Text(" navigate")),
 				accent.Render("r") + muted.Render(" refresh"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
@@ -3592,7 +3665,7 @@ func (m *Model) statusNavLines(w int) []string {
 			parts = []string{
 				styles.ModeNormal.Render("NORMAL"),
 				accent.Render(":") + muted.Render(" command"),
-				accent.Render("/") + muted.Render(" search"),
+				accent.Render("/") + muted.Render(m.ui.Text(" search")),
 				accent.Render("l") + muted.Render(" library"),
 				accent.Render("q") + muted.Render(" queue"),
 				accent.Render("y") + muted.Render(" lyrics"),
@@ -3643,7 +3716,7 @@ func (m *Model) statusPlayLines(w int) []string {
 func (m *Model) commandLines(_ int, h int) []string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
-	header := accent.Render("Commands")
+	header := accent.Render(m.ui.Text("Commands"))
 	sep := muted.Render(strings.Repeat("─", 8))
 
 	suggs := m.commandSuggestions()
@@ -3658,11 +3731,11 @@ func (m *Model) commandLines(_ int, h int) []string {
 			descStyle = styles.QueueItem
 		}
 		usage := nameStyle.Render(fmt.Sprintf("%-20s", c.usage))
-		desc := descStyle.Render(c.description)
+		desc := descStyle.Render(m.ui.Text(c.description))
 		rows = append(rows, cursor+usage+" "+desc)
 	}
 	if len(rows) == 0 {
-		rows = []string{"  " + muted.Render("no matching commands")}
+		rows = []string{"  " + muted.Render(m.ui.Text("no matching commands"))}
 	}
 
 	result := append([]string{"", header, sep, ""}, rows...)
@@ -3676,6 +3749,9 @@ func (m *Model) commandLines(_ int, h int) []string {
 // each already wrapped to fit width w. The count varies with terminal width,
 // so panelHeight consults it rather than assuming a fixed two rows.
 func (m *Model) statusLines(w int) []string {
+	if m.hideHints {
+		return nil
+	}
 	return append(m.statusNavLines(w), m.statusPlayLines(w)...)
 }
 
@@ -3685,7 +3761,11 @@ func (m *Model) statusLines(w int) []string {
 // which grow as hints wrap on a narrow terminal — so both are measured rather
 // than assumed.
 func (m *Model) panelHeight() int {
-	fixedOverhead := 6 + m.nowPlayingHeight() + len(m.statusLines(m.width-4))
+	borderRows := 6
+	if m.hideHints {
+		borderRows = 5
+	}
+	fixedOverhead := borderRows + m.nowPlayingHeight() + len(m.statusLines(m.width-4))
 	return max(3, m.height-fixedOverhead)
 }
 
@@ -3964,13 +4044,13 @@ func (m *Model) renderPlaylistPickerModal() string {
 
 	switch {
 	case m.playlistPickerLoading:
-		lines = append(lines, styles.QueueItemMuted.Render("  Loading playlists…"))
+		lines = append(lines, styles.QueueItemMuted.Render(m.ui.Text("  Loading playlists…")))
 	case len(m.playlistPickerItems) == 0:
-		lines = append(lines, styles.QueueItemMuted.Render("  No playlists found"))
+		lines = append(lines, styles.QueueItemMuted.Render(m.ui.Text("  No playlists found")))
 	default:
 		start, end := m.pickerWindow()
 		if start > 0 {
-			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf("  ↑ %d more", start)))
+			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf(m.ui.Text("  ↑ %d more"), start)))
 		}
 		for i := start; i < end; i++ {
 			name := truncateStr(m.playlistPickerItems[i].Name, innerW-3)
@@ -3982,12 +4062,12 @@ func (m *Model) renderPlaylistPickerModal() string {
 		}
 		remaining := len(m.playlistPickerItems) - end
 		if remaining > 0 {
-			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf("  ↓ %d more", remaining)))
+			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf(m.ui.Text("  ↓ %d more"), remaining)))
 		}
 	}
 
 	lines = append(lines, sep)
-	lines = append(lines, styles.QueueItemMuted.Render("  ↑↓/jk navigate · ⏎ add · esc cancel"))
+	lines = append(lines, styles.QueueItemMuted.Render(m.ui.Text("  ↑↓/jk navigate · ⏎ add · esc cancel")))
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

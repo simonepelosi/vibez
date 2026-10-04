@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"github.com/simone-vibes/vibez/internal/tui/locale"
 	"strings"
 
 	"charm.land/bubbles/v2/list"
@@ -25,6 +26,7 @@ func (q queueItem) Description() string {
 func (q queueItem) FilterValue() string { return q.track.Title }
 
 type QueueModel struct {
+	Locale locale.Locale
 	list   list.Model
 	tracks []provider.Track
 }
@@ -80,7 +82,7 @@ func (m *QueueModel) Update(msg tea.KeyPressMsg) {
 func (m *QueueModel) View() string {
 	if len(m.tracks) == 0 {
 		return "\n" + centerLine(
-			styles.QueueItemMuted.Render("Queue is empty. Browse library or search to add tracks."),
+			styles.QueueItemMuted.Render(m.Locale.Text("Queue is empty. Browse library or search to add tracks.")),
 			m.list.Width(),
 		)
 	}

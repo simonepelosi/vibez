@@ -211,6 +211,36 @@ Set the `theme` key in `~/.config/vibez/config.json`:
 
 **Built-in themes:** `default`, `dracula`, `gruvbox`, `nord`
 
+
+### Optional music interface
+
+Add these keys to your existing config to hide the shortcut footers and let
+the cover image set the text and accent colors:
+
+```json
+{
+  "hide_hints": true,
+  "cover_theme": true,
+  "genre_theme": false
+}
+```
+
+All options default to `false`. `cover_theme` derives text and accent colors from
+the current cover, with brighter text for dark covers. It takes precedence over
+`genre_theme` and restores the startup palette when artwork is unavailable.
+Color extraction runs with the artwork download, outside the UI event loop.
+
+`genre_theme` optionally selects genre palettes instead of cover colors.
+Shortcuts still work with hints hidden.
+Rock/electronic uses Dracula, hip-hop/R&B/jazz uses Gruvbox, classical/ambient
+uses Nord, and pop uses the default palette. Missing or unknown genres restore
+your selected startup theme. Queue metadata is used when playback items omit
+genres. This uses catalog tags, not audio analysis.
+
+Set `"ui_language": "zh-CN"` for Chinese interface labels and prompts.
+The default is English. This setting does not translate commands, track names
+or artist metadata.
+
 ### Custom themes
 
 Create `~/.config/vibez/themes/<name>.json` with any subset of fields — missing or invalid values fall back to `default`:
@@ -452,3 +482,23 @@ go run . --demo
 ## License
 
 MIT © Simone Pelosi
+
+
+### Cover and rolling lyrics
+
+Set `"inline_lyrics": true` in your existing config. On a wide terminal the
+cover and track information appear on the left, with synchronized lyrics on
+the right; Queue and Vibe remain below. Press `y` to hide/show inline lyrics.
+Narrow terminals stack the cover and lyrics. Phrases wrap into a narrow column
+with spacing, a bold current phrase and fading context. Timed phrases scroll
+using the existing animation clock; untimed lyrics support manual scrolling.
+
+Explicit singer labels such as `甲：`, `乙：`, `[男]`, `[女]`, or `【合唱】`
+are preserved. The first two singers align left/right inside the lyric area;
+chorus lines are centered. Lines at the same timestamp highlight together.
+Lyrics without speaker labels keep the normal single-voice display; the app
+does not guess singers from audio. Lyrics come from LRCLIB, independently of
+Apple Music's own lyric catalogue. Exact lookup misses retry with less specific
+metadata; bilingual/featured titles are matched with duration checks and
+ambiguous recordings are rejected. Network/service errors are shown separately
+from missing results. Press `y` to retry a failed request.
