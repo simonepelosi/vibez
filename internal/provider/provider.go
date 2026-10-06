@@ -15,6 +15,10 @@ type Track struct {
 	ArtworkURL string
 	PreviewURL string
 	Genres     []string
+	// DiscNumber and TrackNumber give the track's position on its album.
+	// Zero means unknown.
+	DiscNumber  int
+	TrackNumber int
 }
 
 // RecommendationItem is a single album or playlist entry inside a recommendation group.

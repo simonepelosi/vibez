@@ -512,6 +512,29 @@ func TestGetLibraryTracks_SinglePage(t *testing.T) {
 	}
 }
 
+func TestGetLibraryTracks_AlbumPosition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		song := songJSON("i.1", "Evil", "Interpol", "Antics", 216000, "")
+		attrs := song["attributes"].(map[string]any)
+		attrs["discNumber"] = 1
+		attrs["trackNumber"] = 2
+		writeJSON(t, w, map[string]any{"data": []any{song}, "next": ""})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(tracks))
+	}
+	if tracks[0].DiscNumber != 1 || tracks[0].TrackNumber != 2 {
+		t.Errorf("disc/track = %d/%d, want 1/2", tracks[0].DiscNumber, tracks[0].TrackNumber)
+	}
+}
+
 func TestGetLibraryTracks_Pagination(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

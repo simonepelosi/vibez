@@ -1,12 +1,11 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -167,7 +166,9 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 
 	select {
 	case exe := <-restartExe:
-		_ = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec
+		if restartErr := restartProcess(exe); restartErr != nil {
+			return errors.Join(err, fmt.Errorf("restarting into the update at %s: %w", exe, restartErr))
+		}
 	default:
 	}
 

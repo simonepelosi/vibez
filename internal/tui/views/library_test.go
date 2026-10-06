@@ -35,6 +35,43 @@ func TestPlaylistItem_FilterValue(t *testing.T) {
 	}
 }
 
+// --- buildLibraryAlbums ---
+
+func TestBuildLibraryAlbums_TrackOrder(t *testing.T) {
+	// Library songs arrive sorted by title (#150).
+	tracks := []provider.Track{
+		{Title: "A Time to Be So Small", Artist: "Interpol", Album: "Antics", DiscNumber: 1, TrackNumber: 10},
+		{Title: "Bonus", Artist: "Interpol", Album: "Antics", DiscNumber: 2, TrackNumber: 1},
+		{Title: "Evil", Artist: "Interpol", Album: "Antics", DiscNumber: 1, TrackNumber: 2},
+		{Title: "Next Exit", Artist: "Interpol", Album: "Antics", DiscNumber: 1, TrackNumber: 1},
+		{Title: "Song A", Artist: "Other", Album: "Untagged"},
+		{Title: "Song B", Artist: "Other", Album: "Untagged"},
+	}
+	groups := buildLibraryAlbums(tracks)
+	if len(groups) != 2 {
+		t.Fatalf("got %d albums, want 2", len(groups))
+	}
+	cases := []struct {
+		album string
+		want  []string
+	}{
+		{"Antics", []string{"Next Exit", "Evil", "A Time to Be So Small", "Bonus"}},
+		{"Untagged", []string{"Song A", "Song B"}},
+	}
+	for i, c := range cases {
+		if groups[i].title != c.album {
+			t.Fatalf("groups[%d].title = %q, want %q", i, groups[i].title, c.album)
+		}
+		var got []string
+		for _, tr := range groups[i].tracks {
+			got = append(got, tr.Title)
+		}
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s order = %q, want %q", c.album, got, c.want)
+		}
+	}
+}
+
 // --- trackListItem ---
 
 func TestTrackListItem_Title(t *testing.T) {

@@ -250,10 +250,11 @@ type Player struct {
 	eosCh      chan struct{}
 	audioWg    sync.WaitGroup
 	allTracks  []provider.Track
+	closeOnce  sync.Once
 }
 
 // New creates a local Player backed by CoreAudio
-func New() (*Player, error) {
+func New(_ func(string)) (*Player, error) {
 	p := &Player{
 		done:  make(chan struct{}),
 		eosCh: make(chan struct{}, 1),
@@ -667,15 +668,17 @@ func (p *Player) Subscribe() <-chan player.State {
 }
 
 func (p *Player) Close() error {
-	close(p.done)
-	p.audioWg.Wait()
-	p.mu.Lock()
-	old := p.audio
-	p.audio = nil
-	p.mu.Unlock()
-	if old != nil {
-		old.release()
-	}
+	p.closeOnce.Do(func() {
+		close(p.done)
+		p.audioWg.Wait()
+		p.mu.Lock()
+		old := p.audio
+		p.audio = nil
+		p.mu.Unlock()
+		if old != nil {
+			old.release()
+		}
+	})
 	return nil
 }
 

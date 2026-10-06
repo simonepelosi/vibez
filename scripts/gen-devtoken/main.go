@@ -27,7 +27,7 @@ import (
 
 func main() {
 	write := flag.Bool("write", false, "write the token into apple_developer_token in the vibez config instead of printing it to stdout")
-	configPath := flag.String("config", "", "config file to update with -write (default: ~/.config/vibez/config.json)")
+	configPath := flag.String("config", "", "config file to update with -write (default: ~/.config/vibez/config.json; Windows: %APPDATA%\\vibez\\config.json)")
 	flag.Parse()
 
 	keyID := mustEnv("APPLE_KEY_ID")

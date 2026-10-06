@@ -51,7 +51,7 @@ func TestSwitchNearEndOfTrack(t *testing.T) {
 		ids = append(ids, id)
 	}
 
-	p, err := New()
+	p, err := New(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,6 +54,7 @@ jobs:
         env:
           APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
           VIBEZ_SKIP_LINUX: '1'
+          VIBEZ_SKIP_WINDOWS: '1'
           # Prevent Go from downloading a different toolchain into GOMODCACHE,
           # which garble cannot patch (overlay restrictions on GOMODCACHE).
           GOTOOLCHAIN: local

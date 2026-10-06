@@ -197,8 +197,10 @@ type songAttributes struct {
 	Previews   []struct {
 		URL string `json:"url"`
 	} `json:"previews"`
-	GenreNames []string    `json:"genreNames"`
-	PlayParams *playParams `json:"playParams"`
+	GenreNames  []string    `json:"genreNames"`
+	PlayParams  *playParams `json:"playParams"`
+	DiscNumber  int         `json:"discNumber"`
+	TrackNumber int         `json:"trackNumber"`
 }
 
 type songResource struct {
@@ -301,14 +303,16 @@ func toTrack(s songResource) provider.Track {
 	// Catalog IDs use { song: id } which triggers the preview limit if the
 	// user doesn't own the track — so we never map library IDs to catalog IDs.
 	t := provider.Track{
-		ID:         s.ID,
-		Title:      s.Attributes.Name,
-		Artist:     s.Attributes.ArtistName,
-		Album:      s.Attributes.AlbumName,
-		Duration:   time.Duration(s.Attributes.DurationMs) * time.Millisecond,
-		ArtworkURL: s.Attributes.Artwork.formatted(300),
-		PreviewURL: preview,
-		Genres:     s.Attributes.GenreNames,
+		ID:          s.ID,
+		Title:       s.Attributes.Name,
+		Artist:      s.Attributes.ArtistName,
+		Album:       s.Attributes.AlbumName,
+		Duration:    time.Duration(s.Attributes.DurationMs) * time.Millisecond,
+		ArtworkURL:  s.Attributes.Artwork.formatted(300),
+		PreviewURL:  preview,
+		Genres:      s.Attributes.GenreNames,
+		DiscNumber:  s.Attributes.DiscNumber,
+		TrackNumber: s.Attributes.TrackNumber,
 	}
 	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
 		t.CatalogID = s.Attributes.PlayParams.CatalogID
