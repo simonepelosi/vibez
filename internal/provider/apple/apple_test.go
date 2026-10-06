@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,9 +431,16 @@ func TestSearch_CatalogSongRejectionWarnsInsteadOfSilentlyEmptying(t *testing.T)
 }
 
 func TestSearch_QueryEncoded(t *testing.T) {
-	var gotURLs []string
+	// Search fans its catalog requests out across goroutines, so the handler
+	// runs concurrently and the request log needs a lock.
+	var (
+		mu      sync.Mutex
+		gotURLs []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotURLs = append(gotURLs, r.URL.RawQuery)
+		mu.Unlock()
 		writeJSON(t, w, map[string]any{"results": map[string]any{}})
 	}))
 	defer srv.Close()
@@ -440,6 +448,8 @@ func TestSearch_QueryEncoded(t *testing.T) {
 	p := newTestProvider(t, srv)
 	_, _ = p.Search(context.Background(), "lofi hip hop")
 
+	mu.Lock()
+	defer mu.Unlock()
 	found := false
 	for _, q := range gotURLs {
 		if containsStr(q, "lofi+hip+hop") || containsStr(q, "lofi%20hip%20hop") {
