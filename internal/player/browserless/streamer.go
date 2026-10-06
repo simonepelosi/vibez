@@ -51,6 +51,22 @@ type StreamServer struct {
 	mu         sync.RWMutex
 	streams    map[string]*trackStream
 	serverCert []byte
+
+	// onFail and onLog are set once, before the first stream is prepared.
+	// The local client cannot be told why a stream stopped once the 200 has
+	// gone out, so this is the only place a failure can be reported.
+	onFail func(streamID string, err error)
+	onLog  func(msg string)
+}
+
+// logWriter adapts onLog for http.Server.ErrorLog.
+type logWriter struct{ s *StreamServer }
+
+func (lw logWriter) Write(b []byte) (int, error) {
+	if lw.s.onLog != nil {
+		lw.s.onLog(strings.TrimSpace(string(b)))
+	}
+	return len(b), nil
 }
 
 // NewStreamServer creates and starts a local loopback HTTP server.
@@ -83,8 +99,8 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	s.server = &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		// Silence broken-pipe and connection-reset logs on skip so they don't corrupt the TUI.
-		ErrorLog: log.New(io.Discard, "", 0),
+		// Route net/http's own errors to the debug log: stderr would corrupt the TUI.
+		ErrorLog: log.New(logWriter{s}, "browserless stream: ", 0),
 	}
 
 	go func() {
@@ -275,6 +291,13 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	return streamURL, totalDur, nil
 }
 
+// streamIDFromURL returns the stream ID a PrepareTrack URL carries.
+func streamIDFromURL(streamURL string) string {
+	_, rest, _ := strings.Cut(streamURL, "/stream/")
+	id, _, _ := strings.Cut(rest, "/")
+	return id
+}
+
 func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Verify request is from loopback interface
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -348,6 +371,20 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	client := &http.Client{Timeout: 15 * time.Second}
 
+	// fail reports why the stream stopped early, then aborts the response so
+	// the client sees a truncated body rather than a clean end of stream. A
+	// cancelled request is the client going away on skip or stop, not a
+	// failure, and is not reported.
+	fail := func(seg int, stage string, err error) {
+		if ctx.Err() != nil {
+			return
+		}
+		if s.onFail != nil {
+			s.onFail(streamID, fmt.Errorf("stream %s: segment %d/%d: %s: %w", st.trackID, seg+1, len(st.segments), stage, err))
+		}
+		panic(http.ErrAbortHandler)
+	}
+
 	for i := startSeg; i < len(st.segments); i++ {
 		select {
 		case <-ctx.Done():
@@ -363,6 +400,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
 		if err != nil {
+			fail(i, "build request", err)
 			return
 		}
 		if seg.length > 0 {
@@ -371,17 +409,20 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 
 		resp, err := client.Do(req)
 		if err != nil {
+			fail(i, "fetch", err)
 			return
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			_ = resp.Body.Close()
+			fail(i, "fetch", fmt.Errorf("status %s", resp.Status))
 			return
 		}
 
 		segData, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
+			fail(i, "read", err)
 			return
 		}
 
@@ -397,11 +438,16 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
 		})
 		if err != nil {
+			fail(i, "decrypt", err)
 			return
 		}
 
-		// Write to HTTP client (GStreamer)
+		// Write to HTTP client (GStreamer). A failed write means the client
+		// has gone, so there is nobody left to abort for; log it only.
 		if _, err := w.Write(aacData); err != nil {
+			if ctx.Err() == nil && s.onLog != nil {
+				s.onLog(fmt.Sprintf("browserless stream: %s: segment %d/%d: write: %v", st.trackID, i+1, len(st.segments), err))
+			}
 			return
 		}
 		if flusher != nil {

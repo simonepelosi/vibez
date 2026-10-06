@@ -36,6 +36,7 @@ type Player struct {
 	queue     []provider.Track
 	idx       int
 	playCtx   context.CancelFunc
+	curStream string // stream ID of the track gst is playing
 	doneCh    chan struct{}
 	closeOnce sync.Once
 }
@@ -100,9 +101,33 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 		_ = p.Next()
 	})
 
+	p.streamer.onFail = func(streamID string, err error) {
+		p.mu.Lock()
+		if streamID != p.curStream {
+			p.mu.Unlock()
+			return
+		}
+		p.state.Error = err.Error()
+		p.state.Playing = false
+		p.state.Loading = false
+		s := p.state
+		p.mu.Unlock()
+		p.bcast.Send(s)
+	}
+	p.streamer.onLog = func(msg string) {
+		p.mu.RLock()
+		s := p.state
+		p.mu.RUnlock()
+		p.bcast.SendLog(s, msg)
+	}
+
 	p.gst.OnError(func(e error) {
 		p.mu.Lock()
-		p.state.Error = e.Error()
+		// A stream failure aborts the response, which gst then reports as a
+		// generic error of its own. Keep the specific cause already recorded.
+		if p.state.Error == "" {
+			p.state.Error = e.Error()
+		}
 		p.state.Playing = false
 		p.state.Loading = false
 		s := p.state
@@ -194,6 +219,9 @@ func (p *Player) playTrack(t provider.Track) {
 		default:
 		}
 
+		p.mu.Lock()
+		p.curStream = streamIDFromURL(streamURL)
+		p.mu.Unlock()
 		p.gst.PlayURI(streamURL)
 
 		p.mu.Lock()
