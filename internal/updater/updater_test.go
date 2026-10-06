@@ -508,6 +508,19 @@ func TestUpdate_UnwritableBinaryIsManual(t *testing.T) {
 	}
 }
 
+// The file an update replaces is always a running executable, and Linux will
+// not open one for writing (ETXTBSY), so canReplace must decide without
+// opening it. The test binary is the one executable known to be running here.
+func TestCanReplace_RunningBinary(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !canReplace(self) {
+		t.Fatalf("canReplace(%s) = false for the running test binary", self)
+	}
+}
+
 func TestUpdate_InstallsOverTheRunningBinary(t *testing.T) {
 	isolateCache(t)
 	exe := fakeExe(t, 0o755)

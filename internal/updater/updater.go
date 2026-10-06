@@ -405,14 +405,13 @@ func selfPath() (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
-// canReplace reports whether this process may install a new binary at exe.
-// Elsewhere that means exe can be written. Windows never opens a running
-// executable for writing, so there it means what replaceRunningExe needs: exe
-// is not read-only, and its directory accepts new files.
+// canReplace reports whether this process may install a new binary at exe:
+// exe is not read-only, and its directory accepts new files. That is what
+// installBinary needs, since it stages the download beside exe and renames it
+// into place. It must not open exe for writing to find out: exe is the running
+// executable, and Linux refuses to open one of those for writing (ETXTBSY),
+// as does Windows, while both let it be renamed.
 func canReplace(exe string) bool {
-	if runtime.GOOS != "windows" {
-		return isWritable(exe)
-	}
 	info, err := os.Stat(exe)
 	if err != nil || info.Mode().Perm()&0o200 == 0 {
 		return false
@@ -424,15 +423,6 @@ func canReplace(exe string) bool {
 	name := probe.Name()
 	_ = probe.Close()
 	_ = os.Remove(name)
-	return true
-}
-
-func isWritable(path string) bool {
-	f, err := os.OpenFile(path, os.O_WRONLY, 0) //nolint:gosec // intentional write-check
-	if err != nil {
-		return false
-	}
-	_ = f.Close()
 	return true
 }
 

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows self-update replaces a running executable with rollback on installation failure and retains console ownership while the replacement runs. Old executable backups are removed once unlocked on a later update check.
 
 ### Fixed
+- Auto-update on Linux never installed anything: the writability check opened the running binary, which Linux refuses for any executing file (`ETXTBSY`), so every release since v0.1.0 silently gave up before downloading. The check now probes the install directory, as it already did on Windows.
 - Saved volume and equalizer settings are restored for players supplied at TUI startup, including local mode, not only engines initialized asynchronously.
 - Windows local and CDP player shutdown releases broadcast subscribers; the TUI stops consuming a closed state stream instead of spinning.
 - Local-player shutdown on Linux and macOS is idempotent, preventing a panic when TUI quit is followed by deferred cleanup.
