@@ -819,3 +819,125 @@ func TestAdvice(t *testing.T) {
 		}
 	}
 }
+
+// ── asset URL and checksum policy ─────────────────────────────────────────────
+
+// The fixtures serve assets from loopback HTTP, which the real policy refuses,
+// so the tests that exercise the update flow run with it relaxed. The policy
+// itself is covered by TestCheckAssetURL, which calls it directly.
+func init() { assetURLCheck = func(string) error { return nil } }
+
+func TestCheckAssetURL(t *testing.T) {
+	good := []string{
+		"https://github.com/simonepelosi/vibez/releases/download/v1.2.0/vibez_linux_amd64.tar.gz",
+		"https://objects.githubusercontent.com/github-production-release-asset/abc",
+		"https://release-assets.githubusercontent.com/x",
+	}
+	bad := []string{
+		"http://github.com/simonepelosi/vibez/releases/download/v1/x.tar.gz",
+		"https://evil.example/vibez.tar.gz",
+		"https://github.com.evil.example/x",
+		"https://githubusercontent.com.evil.example/x",
+		"https://evilgithubusercontent.com/x",
+		"file:///etc/passwd",
+		"ftp://github.com/x",
+		"",
+	}
+	for _, u := range good {
+		if err := checkAssetURL(u); err != nil {
+			t.Errorf("checkAssetURL(%q) = %v, want ok", u, err)
+		}
+	}
+	for _, u := range bad {
+		if err := checkAssetURL(u); err == nil {
+			t.Errorf("checkAssetURL(%q) accepted, want refused", u)
+		}
+	}
+}
+
+// A release that publishes no checksums.txt used to be installed unverified.
+func TestUpdate_MissingChecksumsInstallsNothing(t *testing.T) {
+	isolateCache(t)
+	exe := fakeExe(t, 0o755)
+	assetName, archive := releaseArchive(t, []byte("new binary"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		if r.URL.Path == "/asset" {
+			_, _ = w.Write(archive)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(ghRelease{TagName: "v2.0.0", Assets: []ghAsset{
+			{Name: assetName, BrowserDownloadURL: base + "/asset"},
+		}})
+	}))
+	defer srv.Close()
+
+	if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+		t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+	}
+	if got := readFile(t, exe); got != "old binary" {
+		t.Errorf("binary was replaced with no checksum to verify it: %q", got)
+	}
+}
+
+// A 404 page must not be hashed, extracted or installed as if it were the
+// release.
+func TestUpdate_ErrorStatusDownloadInstallsNothing(t *testing.T) {
+	isolateCache(t)
+	exe := fakeExe(t, 0o755)
+	assetName, _ := releaseArchive(t, []byte("new binary"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/checksums.txt", "/asset":
+			http.Error(w, "gone", http.StatusNotFound)
+		default:
+			_ = json.NewEncoder(w).Encode(ghRelease{TagName: "v2.0.0", Assets: []ghAsset{
+				{Name: "checksums.txt", BrowserDownloadURL: base + "/checksums.txt"},
+				{Name: assetName, BrowserDownloadURL: base + "/asset"},
+			}})
+		}
+	}))
+	defer srv.Close()
+
+	if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+		t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+	}
+	if got := readFile(t, exe); got != "old binary" {
+		t.Errorf("binary was replaced after an error response: %q", got)
+	}
+}
+
+func TestUpdate_UntrustedAssetHostInstallsNothing(t *testing.T) {
+	isolateCache(t)
+	exe := fakeExe(t, 0o755)
+	assetName, archive := releaseArchive(t, []byte("new binary"))
+	sum := sha256.Sum256(archive)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := "http://" + r.Host
+		switch r.URL.Path {
+		case "/checksums.txt":
+			_, _ = w.Write([]byte(hex.EncodeToString(sum[:]) + "  " + assetName + "\n"))
+		case "/asset":
+			_, _ = w.Write(archive)
+		default:
+			_ = json.NewEncoder(w).Encode(ghRelease{TagName: "v2.0.0", Assets: []ghAsset{
+				{Name: "checksums.txt", BrowserDownloadURL: base + "/checksums.txt"},
+				{Name: assetName, BrowserDownloadURL: base + "/asset"},
+			}})
+		}
+	}))
+	defer srv.Close()
+
+	// Put the real policy back: these assets are plain-HTTP on loopback.
+	orig := assetURLCheck
+	assetURLCheck = checkAssetURL
+	t.Cleanup(func() { assetURLCheck = orig })
+
+	if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+		t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+	}
+	if got := readFile(t, exe); got != "old binary" {
+		t.Errorf("binary was installed from an untrusted host: %q", got)
+	}
+}

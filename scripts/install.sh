@@ -179,7 +179,7 @@ elif command -v shasum >/dev/null 2>&1; then
 fi
 
 if [ -z "${ACTUAL}" ]; then
-    warn "No sha256 tool found — skipping checksum verification."
+    die "No sha256 tool found (sha256sum or shasum) — refusing to install an unverified binary."
 elif [ -z "${EXPECTED}" ]; then
     die "No checksum published for ${ARCHIVE} — refusing to install."
 elif [ "${ACTUAL}" != "${EXPECTED}" ]; then
