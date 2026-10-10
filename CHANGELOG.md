@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-11
+
 ### Security
 - **Security hardening & access controls** — strengthened local service endpoints and internal playback communication with stricter loopback binding, host validation, and in-memory credential handling. Refs #169.
 - **Process isolation** — re-enabled process sandboxing for browser-backed playback on Linux where supported. Refs #169.
@@ -717,7 +719,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/simonepelosi/vibez/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/simonepelosi/vibez/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/simonepelosi/vibez/compare/v0.9.2...v1.0.0
 [0.9.2]: https://github.com/simonepelosi/vibez/compare/v0.9.1...v0.9.2
