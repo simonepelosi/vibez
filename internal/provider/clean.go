@@ -21,7 +21,7 @@ func clean(s string, keepNewlines bool) string {
 	isSpace := func(r rune) bool { return r == '\t' || (r == '\n' && !keepNewlines) }
 	dirty := false
 	for _, r := range s {
-		if isSpace(r) || (drop(r) && !(r == '\n' && keepNewlines)) {
+		if isSpace(r) || (drop(r) && (r != '\n' || !keepNewlines)) {
 			dirty = true
 			break
 		}
