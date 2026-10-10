@@ -474,3 +474,11 @@ go run . --demo
 ## License
 
 MIT © Simone Pelosi
+
+### Chinese search input
+
+Press `/`, then type or paste Unicode search text such as `周杰伦 范特西`.
+The search cursor follows terminal cell widths so Chinese IME candidates stay
+next to the input. Long queries scroll horizontally to keep the cursor visible.
+Press `Esc` to close search. While playing, `y` opens the lyrics panel; available
+lyrics are fetched from LRCLIB and synchronized lyrics follow playback.

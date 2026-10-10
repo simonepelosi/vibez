@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -1155,6 +1157,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RestartMsg:
 		return m, tea.Quit
 
+	case tea.PasteMsg:
+		if m.mode == modeSearch {
+			cmds = append(cmds, m.insertSearchText(msg.Content))
+		} else if m.mode == modeCommand {
+			m.insertCommandText(msg.Content)
+		}
+
 	case tea.KeyPressMsg:
 		cmd := m.handleKey(msg)
 		cmds = append(cmds, cmd)
@@ -1192,6 +1201,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case modeSearch:
 		return m.handleSearchKey(k, msg)
 	case modeCommand:
+		if msg.Text != "" && k != "space" {
+			m.insertCommandText(msg.Text)
+			return nil
+		}
 		return m.handleCommandKey(k)
 	case modePlaylistPicker:
 		return m.handlePlaylistPickerKey(k)
@@ -1344,15 +1357,31 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		m.searchCursor++
 		return m.scheduleSearch(m.searchQuery)
 	default:
-		if len(k) == 1 && k[0] >= 32 {
-			runes := []rune(m.searchQuery)
-			runes = append(runes[:m.searchCursor], append([]rune{rune(k[0])}, runes[m.searchCursor:]...)...)
-			m.searchQuery = string(runes)
-			m.searchCursor++
-			return m.scheduleSearch(m.searchQuery)
+		// Text carries committed IME input, including multiple Unicode characters.
+		if msg.Text != "" {
+			return m.insertSearchText(msg.Text)
 		}
 	}
 	return nil
+}
+
+// insertSearchText accepts Unicode text without interpreting pasted keys.
+func (m *Model) insertSearchText(text string) tea.Cmd {
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+	inserted := []rune(text)
+	if len(inserted) == 0 {
+		return nil
+	}
+	runes := []rune(m.searchQuery)
+	runes = slices.Insert(runes, m.searchCursor, inserted...)
+	m.searchQuery = string(runes)
+	m.searchCursor += len(inserted)
+	return m.scheduleSearch(m.searchQuery)
 }
 
 // ── Command palette ───────────────────────────────────────────────────────
@@ -1428,7 +1457,8 @@ func (m *Model) handleCommandKey(k string) tea.Cmd {
 		}
 	case "backspace":
 		if len(m.cmdBuf) > 0 {
-			m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-1]
+			_, size := utf8.DecodeLastRuneInString(m.cmdBuf)
+			m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-size]
 			m.cmdSuggIdx = 0
 		}
 	case "space":
@@ -2970,6 +3000,14 @@ func (m *Model) View() tea.View {
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
+	if m.introStep == introDone && (m.mode == modeSearch || m.mode == modeCommand) {
+		before := m.visibleCommandText(m.width - 4)
+		if m.mode == modeSearch {
+			before, _ = m.visibleSearchText(m.width - 4)
+		}
+		v.Cursor = tea.NewCursor(min(m.width-3, 5+lipgloss.Width(before)), m.nowPlayingHeight()+4)
+		v.Cursor.Shape = tea.CursorBar
+	}
 	return v
 }
 
@@ -3482,17 +3520,28 @@ func (m *Model) queuePanelLines(w, h int) []string {
 	return result
 }
 
+// visibleSearchText scrolls long queries while keeping the editing cursor visible.
+func (m *Model) visibleSearchText(contentW int) (string, string) {
+	runes := []rune(m.searchQuery)
+	cur := max(0, min(m.searchCursor, len(runes)))
+	before := runes[:cur]
+	available := max(0, contentW-4)
+	for len(before) > 0 && lipgloss.Width(string(before)) > available {
+		before = before[1:]
+	}
+	after := ansi.Truncate(string(runes[cur:]), max(0, available-lipgloss.Width(string(before))), "")
+	return string(before), after
+}
+
 // searchLines renders the search popup inline (full-width in the split area).
 func (m *Model) searchLines(contentW, h int) []string {
 	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
 	muted := lipgloss.NewStyle().Foreground(styles.ColorMuted)
 	textStyle := lipgloss.NewStyle().Foreground(styles.ColorFg)
-	cursor := accent.Render("█")
-
-	runes := []rune(m.searchQuery)
-	cur := min(m.searchCursor, len(runes))
-	before := textStyle.Render(string(runes[:cur]))
-	after := textStyle.Render(string(runes[cur:]))
+	cursor := " " // The real terminal cursor anchors the input method.
+	beforeText, afterText := m.visibleSearchText(contentW)
+	before := textStyle.Render(beforeText)
+	after := textStyle.Render(afterText)
 
 	inputLine := accent.Render("/") + "  " + before + cursor + after
 	sep := muted.Render(strings.Repeat("─", contentW))
@@ -3666,7 +3715,7 @@ func (m *Model) statusPlayLines(w int) []string {
 }
 
 // commandLines renders the command palette in the panel area when CMD mode is active.
-func (m *Model) commandLines(_ int, h int) []string {
+func (m *Model) commandLines(w int, h int) []string {
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
 	header := accent.Render("Commands")
@@ -3691,7 +3740,8 @@ func (m *Model) commandLines(_ int, h int) []string {
 		rows = []string{"  " + muted.Render("no matching commands")}
 	}
 
-	result := append([]string{"", header, sep, ""}, rows...)
+	input := accent.Render(":") + "  " + styles.QueueItem.Render(m.visibleCommandText(w)) + " "
+	result := append([]string{input, sep, header, ""}, rows...)
 	for len(result) < h {
 		result = append(result, "")
 	}
@@ -4040,4 +4090,22 @@ func playerEQBandsToConfig(bands []player.EQBand) []config.EQBand {
 		out[i] = config.EQBand{Frequency: b.Frequency, Q: b.Q, Gain: b.Gain}
 	}
 	return out
+}
+
+// Command input lives in the panel so hiding shortcut hints never hides typing.
+func (m *Model) insertCommandText(text string) {
+	m.cmdBuf += strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+	m.cmdSuggIdx = 0
+}
+func (m *Model) visibleCommandText(w int) string {
+	text := []rune(m.cmdBuf)
+	for len(text) > 0 && lipgloss.Width(string(text)) > max(0, w-4) {
+		text = text[1:]
+	}
+	return string(text)
 }
