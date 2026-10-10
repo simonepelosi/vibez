@@ -316,9 +316,12 @@ func warmUpWidevine(onProgress func(string)) error {
 		return fmt.Errorf("create chromium profile dir: %w", err)
 	}
 	onProgress("Registering Widevine CDM…")
-	cmd := exec.Command(browser, //nolint:gosec // path from trusted discovery
-		"--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-		"--user-data-dir="+chromiumProfileDir(), "about:blank")
+	args := []string{"--headless=new", "--disable-gpu", "--disable-dev-shm-usage"}
+	if !sandboxEnabled() {
+		args = append(args, "--no-sandbox")
+	}
+	args = append(args, "--user-data-dir="+chromiumProfileDir(), "about:blank")
+	cmd := exec.Command(browser, args...) //nolint:gosec // path from trusted discovery
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("warm-up launch: %w", err)
 	}
@@ -465,7 +468,15 @@ func runPlaywright() (*playwright.Playwright, error) {
 	return pw, nil
 }
 
+// chromeLaunchArgs returns the Chromium arguments, with the sandbox on unless
+// sandboxEnabled says it cannot be.
 func chromeLaunchArgs(headless bool, wsl bool) []string {
+	return chromeLaunchArgsSandbox(headless, wsl, sandboxEnabled())
+}
+
+// chromeLaunchArgsSandbox is chromeLaunchArgs with the sandbox choice made by
+// the caller, so a launch that fails sandboxed can be retried without it.
+func chromeLaunchArgsSandbox(headless bool, wsl bool, sandbox bool) []string {
 	var widevinePath string
 	if useSystemBrowser() {
 		// A system browser locates its registered CDM itself; pass the path
@@ -474,10 +485,10 @@ func chromeLaunchArgs(headless bool, wsl bool) []string {
 	} else {
 		widevinePath = filepath.Join(chromeInstallDir(), "opt", "google", "chrome", "WidevineCdm")
 	}
-	return launchArgs(widevinePath, headless, wsl)
+	return launchArgs(widevinePath, headless, wsl, sandbox)
 }
 
-func launchArgs(widevinePath string, headless bool, wsl bool) []string {
+func launchArgs(widevinePath string, headless bool, wsl bool, sandbox bool) []string {
 	disableFeatures := "HardwareMediaKeyHandling,MediaSessionService,CertificateTransparencyComponentUpdater"
 	if wsl {
 		// WSL2: disable out-of-process audio service to avoid distortion when
@@ -485,20 +496,21 @@ func launchArgs(widevinePath string, headless bool, wsl bool) []string {
 		disableFeatures += ",AudioServiceOutOfProcess"
 	}
 
-	args := []string{
-		// Sandbox requires suid/namespace support unavailable from a non-system path.
-		"--no-sandbox",
-		"--disable-setuid-sandbox",
-		// --no-zygote removes the Linux process-spawning shim; safe when sandbox
-		// is already disabled and cuts one helper process.
-		"--no-zygote",
+	var args []string
+	if !sandbox {
+		// Only where Chromium cannot create a sandbox (see sandboxEnabled).
+		// --no-zygote removes the Linux process-spawning shim and is only
+		// valid without the sandbox, which needs the zygote to set itself up.
+		args = append(args, "--no-sandbox", "--disable-setuid-sandbox", "--no-zygote")
+	}
+	args = append(args,
 		"--autoplay-policy=no-user-gesture-required",
 		"--enable-features=MediaCapabilities,WidevineCdm",
 		"--disable-blink-features=AutomationControlled",
 		// Suppress Chrome's built-in MPRIS D-Bus registration so our Go
 		// MPRIS server (org.mpris.MediaPlayer2.vibez) is the sole player
 		// visible to the desktop environment.
-		"--disable-features=" + disableFeatures,
+		"--disable-features="+disableFeatures,
 		"--disable-component-update",
 		// Memory footprint reduction:
 		// Removes the GPU compositor process (~100-200 MB) - not needed for
@@ -514,7 +526,7 @@ func launchArgs(widevinePath string, headless bool, wsl bool) []string {
 		// Disable background network activity (prefetch, DNS pre-resolve,
 		// speculative connections). Not needed for a single-page music player.
 		"--disable-background-networking",
-	}
+	)
 
 	// With the bundled Chrome this is its own CDM; with a system browser it is
 	// set only when a CDM directory was discovered (otherwise Chromium
