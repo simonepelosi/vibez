@@ -25,7 +25,35 @@ const (
 	favoritesPlaylistName  = "Favorites"
 	ratingBatchSize        = 100
 	ratingBatchConcurrency = 5
+	// maxResponseBody bounds how much of any API response is read.
+	maxResponseBody = 32 << 20
 )
+
+// resolveURL turns an endpoint into the URL to request. A relative endpoint
+// is joined to base. An absolute one, which is how Apple's "next" pagination
+// links may arrive, is accepted only on base's own scheme and host: every
+// request carries the developer and user tokens, so it must not be possible
+// for a response to steer them to another server.
+func resolveURL(base, endpoint string) (string, error) {
+	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+		if strings.HasPrefix(endpoint, "/v1/") {
+			endpoint = strings.TrimPrefix(endpoint, "/v1")
+		}
+		return base + endpoint, nil
+	}
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != b.Scheme || !strings.EqualFold(u.Host, b.Host) {
+		return "", fmt.Errorf("refusing to send credentials to %s://%s", u.Scheme, u.Host)
+	}
+	return endpoint, nil
+}
 
 type AppleProvider struct {
 	cfg            *config.Config
@@ -90,12 +118,9 @@ func (a *AppleProvider) IsAuthenticated() bool {
 }
 
 func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	u := endpoint
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		if strings.HasPrefix(u, "/v1/") {
-			u = strings.TrimPrefix(u, "/v1")
-		}
-		u = a.baseURL + u
+	u, err := resolveURL(a.baseURL, endpoint)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
@@ -116,12 +141,9 @@ func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string)
 // deleted because removing it is a judgement call about whether vibez is done
 // with amp-api, not a consequence of either change.
 func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
-	u := endpoint
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		if strings.HasPrefix(u, "/v1/") {
-			u = strings.TrimPrefix(u, "/v1")
-		}
-		u = a.catalogBaseURL + u
+	u, err := resolveURL(a.catalogBaseURL, endpoint)
+	if err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
@@ -144,7 +166,7 @@ func (a *AppleProvider) do(req *http.Request, dst any) error {
 	defer func() {
 		_ = resp.Body.Close()
 	}()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("%s", formatAPIError(resp.StatusCode, resp.Status, body))
 	}
@@ -1041,7 +1063,7 @@ func (a *AppleProvider) fetchSongRatingsBatch(ctx context.Context, ids []string)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	_ = resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
 		return map[string]bool{}, nil
@@ -1360,7 +1382,7 @@ func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bo
 	if resp.StatusCode >= 400 {
 		return false, nil // treat all errors as "not rated" — non-fatal
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	var rating ratingResponse
 	if err := json.Unmarshal(body, &rating); err != nil {
 		return false, nil

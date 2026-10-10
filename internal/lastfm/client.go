@@ -15,6 +15,9 @@ import (
 const (
 	apiBaseURL = "https://ws.audioscrobbler.com/2.0/"
 	authURL    = "https://www.last.fm/api/auth/"
+
+	// maxResponseBody bounds how much of any API response is read.
+	maxResponseBody = 4 << 20
 )
 
 // Client is a Last.fm API client. Create with NewClient.
@@ -82,7 +85,7 @@ func (c *Client) post(method string, params map[string]string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("reading last.fm response: %w", err)
 	}
@@ -115,7 +118,7 @@ func (c *Client) get(method string, params map[string]string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if err != nil {
 		return nil, fmt.Errorf("reading last.fm response: %w", err)
 	}
@@ -160,7 +163,8 @@ func (c *Client) GetToken() (string, error) {
 
 // AuthorizeURL returns the Last.fm URL the user must visit to grant access.
 func (c *Client) AuthorizeURL(token string) string {
-	return fmt.Sprintf("%s?api_key=%s&token=%s", authURL, c.apiKey, token)
+	q := url.Values{"api_key": {c.apiKey}, "token": {token}}
+	return authURL + "?" + q.Encode()
 }
 
 // GetSession exchanges an authorized token for a session key (auth.getSession).
