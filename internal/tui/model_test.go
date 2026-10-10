@@ -3092,6 +3092,83 @@ func TestDiscoveryQueries_NoGenres(t *testing.T) {
 	}
 }
 
+// TestDiscoveryQueries_SameArtistOnlySeedArtist guards #162: at "same artist"
+// a pool artist's query used to be added, and the shuffle often queued it.
+func TestDiscoveryQueries_SameArtistOnlySeedArtist(t *testing.T) {
+	seed := &provider.Track{Artist: "Daft Punk", Album: "Discovery", Genres: []string{"Electronic"}}
+	for range 50 {
+		for _, q := range discoveryQueries(seed, 0.95) {
+			if !strings.HasPrefix(q, "Daft Punk") {
+				t.Fatalf("discoveryQueries(0.95) = %v, includes another artist", q)
+			}
+		}
+	}
+}
+
+func TestSameArtist(t *testing.T) {
+	cases := []struct {
+		seed, artist string
+		want         bool
+	}{
+		{"Daft Punk", "Daft Punk", true},
+		{"Daft Punk", "daft punk", true},
+		{"Daft Punk", "Daft Punk feat. Julian Casablancas", true},
+		{"Daft Punk & Pharrell Williams", "Daft Punk", true},
+		{"Daft Punk", "Justice", false},
+		{"Yes", "Bad Eyes", false},
+		{"Muse", "Musetta", false},
+		{"Björk", "Björk & Thom Yorke", true},
+		{"Daft Punk", "", false},
+		{"", "Daft Punk", false},
+	}
+	for _, c := range cases {
+		if got := sameArtist(c.seed, c.artist); got != c.want {
+			t.Errorf("sameArtist(%q, %q) = %v, want %v", c.seed, c.artist, got, c.want)
+		}
+	}
+}
+
+type searchMockProvider struct {
+	mockProvider
+	tracks []provider.Track
+}
+
+func (p *searchMockProvider) Search(_ context.Context, _ string) (*provider.SearchResult, error) {
+	return &provider.SearchResult{Tracks: p.tracks}, nil
+}
+
+func TestRunDiscoverySearch_SameArtistFiltersOtherArtists(t *testing.T) {
+	prov := &searchMockProvider{tracks: []provider.Track{
+		{ID: "1", Title: "Around the World", Artist: "Daft Punk"},
+		{ID: "2", Title: "Daft Punk Is Playing at My House", Artist: "LCD Soundsystem"},
+		{ID: "3", Title: "One More Time", Artist: "Daft Punk"},
+	}}
+	m := New(testCfg(), prov, newMockPlayer(), Options{})
+	m.discovery.enabled = true
+	m.discovery.seed = &provider.Track{ID: "seed", Title: "Get Lucky", Artist: "Daft Punk"}
+	m.discovery.similarity = 0.95
+	m.discovery.refillCap = 10
+	msg, ok := m.runDiscoverySearch()().(vibeResultMsg)
+	if !ok {
+		t.Fatal("runDiscoverySearch did not return a vibeResultMsg")
+	}
+	if len(msg.tracks) != 2 {
+		t.Fatalf("got %d tracks, want the 2 by Daft Punk: %+v", len(msg.tracks), msg.tracks)
+	}
+	for _, tr := range msg.tracks {
+		if tr.Artist != "Daft Punk" {
+			t.Errorf("same-artist discovery queued %q by %q", tr.Title, tr.Artist)
+		}
+	}
+
+	// Below the threshold other artists are still allowed.
+	m.discovery.similarity = 0.75
+	msg = m.runDiscoverySearch()().(vibeResultMsg)
+	if len(msg.tracks) != 3 {
+		t.Errorf("similarity 0.75: got %d tracks, want 3", len(msg.tracks))
+	}
+}
+
 // ─── safeIdx ──────────────────────────────────────────────────────────────────
 
 func TestSafeIdx_ValidIndex(t *testing.T) {

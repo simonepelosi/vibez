@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -258,6 +260,9 @@ const discoveryMaxRetries = 5 // give up re-arming after this many consecutive f
 
 const (
 	discoverySimilarityStep = 0.1
+	// discoverySameArtist is where discovery stops exploring and only queues
+	// the seed artist. The picker's "same artist" option (0.95) is above it.
+	discoverySameArtist = 0.85
 )
 
 // ── Radio mode ──────────────────────────────────────────────────────────────
@@ -2606,6 +2611,11 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 				if exclude[id] || exclude[key] {
 					continue // already queued, skipped, or blacklisted
 				}
+				// A search for the artist's name also matches other artists'
+				// songs (covers, titles containing the name).
+				if similarity >= discoverySameArtist && !sameArtist(seed.Artist, t.Artist) {
+					continue
+				}
 				if !seen[key] {
 					seen[key] = true
 					merged = append(merged, t)
@@ -2632,6 +2642,40 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		}
 		return vibeResultMsg{discovery: true, tracks: merged, warnings: dedupeStrings(reasons)}
 	}
+}
+
+// sameArtist reports whether a result's artist credit matches the seed's.
+// Whole-word containment either way keeps collaborations: a "Daft Punk &
+// Pharrell Williams" seed keeps "Daft Punk" tracks, and a "Daft Punk" seed
+// keeps "Daft Punk feat. Julian Casablancas", but "Yes" does not match
+// "Bad Eyes".
+func sameArtist(seed, artist string) bool {
+	seed = strings.ToLower(strings.TrimSpace(seed))
+	artist = strings.ToLower(strings.TrimSpace(artist))
+	if seed == "" || artist == "" {
+		return false
+	}
+	return containsWords(seed, artist) || containsWords(artist, seed)
+}
+
+// containsWords reports whether sub occurs in s on word boundaries.
+func containsWords(s, sub string) bool {
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	for i := 0; i <= len(s)-len(sub); {
+		j := strings.Index(s[i:], sub)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(sub)
+		before, _ := utf8.DecodeLastRuneInString(s[:start])
+		after, _ := utf8.DecodeRuneInString(s[end:])
+		if (start == 0 || !isWord(before)) && (end == len(s) || !isWord(after)) {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(s[start:])
+		i = start + size
+	}
+	return false
 }
 
 // discoveryQueries returns search terms based on seed + similarity.
@@ -2686,15 +2730,14 @@ func discoveryQueries(seed *provider.Track, similarity float64) []string {
 	}
 
 	switch {
-	case similarity >= 0.85:
+	case similarity >= discoverySameArtist:
 		// Same-artist focus: search the artist directly, plus a specific album
-		// when available for breadth across their catalogue.
+		// when available for breadth across their catalogue. No pool artists:
+		// one would end up in the refill after the shuffle.
 		qs := []string{artist}
 		if album != "" {
 			qs = append(qs, artist+" "+album)
 		}
-		// Add one more artist from the same genre pool for slight variety.
-		qs = append(qs, pick(1, artist)...)
 		return qs
 
 	case similarity >= 0.65:
