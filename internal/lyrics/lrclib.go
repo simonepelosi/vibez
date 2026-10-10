@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 // Line is a single lyric line with an optional start timestamp.
@@ -88,16 +90,16 @@ func (c *Client) Fetch(ctx context.Context, artist, title, album string, duratio
 	if data.SyncedLyrics != "" {
 		lines, err := parseLRC(data.SyncedLyrics)
 		if err == nil && len(lines) > 0 {
-			return &Result{Lines: lines, Synced: true, Plain: data.PlainLyrics}, nil
+			return &Result{Lines: lines, Synced: true, Plain: provider.CleanLines(data.PlainLyrics)}, nil
 		}
 	}
 
 	if data.PlainLyrics != "" {
 		var lines []Line
 		for l := range strings.SplitSeq(data.PlainLyrics, "\n") {
-			lines = append(lines, Line{Text: strings.TrimSpace(l)})
+			lines = append(lines, Line{Text: strings.TrimSpace(provider.Clean(l))})
 		}
-		return &Result{Lines: lines, Plain: data.PlainLyrics}, nil
+		return &Result{Lines: lines, Plain: provider.CleanLines(data.PlainLyrics)}, nil
 	}
 
 	return nil, fmt.Errorf("no lyrics available")
@@ -119,7 +121,7 @@ func parseLRC(lrc string) ([]Line, error) {
 		if err != nil {
 			continue
 		}
-		lines = append(lines, Line{Start: d, Text: strings.TrimSpace(raw[idx+1:])})
+		lines = append(lines, Line{Start: d, Text: strings.TrimSpace(provider.Clean(raw[idx+1:]))})
 	}
 	return lines, nil
 }

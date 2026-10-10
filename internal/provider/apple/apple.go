@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,13 +327,13 @@ func toTrack(s songResource) provider.Track {
 	// user doesn't own the track — so we never map library IDs to catalog IDs.
 	t := provider.Track{
 		ID:          s.ID,
-		Title:       s.Attributes.Name,
-		Artist:      s.Attributes.ArtistName,
-		Album:       s.Attributes.AlbumName,
+		Title:       provider.Clean(s.Attributes.Name),
+		Artist:      provider.Clean(s.Attributes.ArtistName),
+		Album:       provider.Clean(s.Attributes.AlbumName),
 		Duration:    time.Duration(s.Attributes.DurationMs) * time.Millisecond,
 		ArtworkURL:  s.Attributes.Artwork.formatted(300),
 		PreviewURL:  preview,
-		Genres:      s.Attributes.GenreNames,
+		Genres:      provider.CleanAll(slices.Clone(s.Attributes.GenreNames)),
 		DiscNumber:  s.Attributes.DiscNumber,
 		TrackNumber: s.Attributes.TrackNumber,
 	}
@@ -345,8 +346,8 @@ func toTrack(s songResource) provider.Track {
 func toAlbum(r albumResource) provider.Album {
 	a := provider.Album{
 		ID:         r.ID,
-		Title:      r.Attributes.Name,
-		Artist:     r.Attributes.ArtistName,
+		Title:      provider.Clean(r.Attributes.Name),
+		Artist:     provider.Clean(r.Attributes.ArtistName),
 		ArtworkURL: r.Attributes.Artwork.formatted(300),
 		TrackCount: r.Attributes.TrackCount,
 	}
@@ -359,7 +360,7 @@ func toAlbum(r albumResource) provider.Album {
 func toPlaylist(r playlistResource) provider.Playlist {
 	return provider.Playlist{
 		ID:         r.ID,
-		Name:       r.Attributes.Name,
+		Name:       provider.Clean(r.Attributes.Name),
 		ArtworkURL: r.Attributes.Artwork.formatted(300),
 		TrackCount: r.Attributes.TrackCount,
 	}
@@ -1434,20 +1435,20 @@ func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.Reco
 
 	var groups []provider.RecommendationGroup
 	for _, r := range resp.Data {
-		title := r.Attributes.Title.StringForDisplay
+		title := provider.Clean(r.Attributes.Title.StringForDisplay)
 		if title == "" {
 			continue
 		}
 		var items []provider.RecommendationItem
 		for _, c := range r.Relationships.Contents.Data {
-			item := provider.RecommendationItem{ID: c.ID, Title: c.Attributes.Name}
+			item := provider.RecommendationItem{ID: c.ID, Title: provider.Clean(c.Attributes.Name)}
 			switch c.Type {
 			case "albums":
 				item.Kind = "album"
-				item.Subtitle = c.Attributes.ArtistName
+				item.Subtitle = provider.Clean(c.Attributes.ArtistName)
 			case "playlists":
 				item.Kind = "playlist"
-				item.Subtitle = c.Attributes.CuratorName
+				item.Subtitle = provider.Clean(c.Attributes.CuratorName)
 			default:
 				continue
 			}

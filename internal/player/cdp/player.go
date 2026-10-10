@@ -291,9 +291,9 @@ func (p *Player) applyState(js jsState) {
 		s.Track = &provider.Track{
 			ID:         js.NowPlaying.ID,
 			CatalogID:  js.NowPlaying.CatalogID,
-			Title:      js.NowPlaying.Title,
-			Artist:     js.NowPlaying.Artist,
-			Album:      js.NowPlaying.Album,
+			Title:      provider.Clean(js.NowPlaying.Title),
+			Artist:     provider.Clean(js.NowPlaying.Artist),
+			Album:      provider.Clean(js.NowPlaying.Album),
 			ArtworkURL: js.NowPlaying.ArtworkURL,
 			Duration:   time.Duration(js.NowPlaying.DurationMs) * time.Millisecond,
 		}
