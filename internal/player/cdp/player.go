@@ -6,8 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +31,10 @@ type Player struct {
 
 	closeBrowser func()
 	page         playwright.Page
-	srv          *http.Server
+	srv          *pageServer
 
 	mu                 sync.RWMutex
+	userToken          string // handed to the page by goGetUserToken; never put in the served HTML
 	state              player.State
 	bcast              player.Broadcast
 	sessionExpiredOnce sync.Once
@@ -47,30 +46,25 @@ type Player struct {
 
 // New creates a CDP Player. EnsureBrowser must be called once before New().
 func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int) (*Player, error) {
-	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps)
+	// The user token is deliberately not rendered into the page: anything that
+	// can fetch the page from the local server would otherwise get it. The page
+	// asks for it over the goGetUserToken binding instead.
+	html, err := web.RenderHTML(devToken, "", storefront, "1.0.0", audioBitrateKbps)
 	if err != nil {
 		return nil, fmt.Errorf("cdp: render html: %w", err)
 	}
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	srv, err := newPageServer(html)
 	if err != nil {
-		return nil, fmt.Errorf("cdp: listen: %w", err)
+		return nil, err
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(html))
-	})
-	srv := &http.Server{Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
-	go func() { _ = srv.Serve(ln) }()
 
 	p := &Player{
-		srv:     srv,
-		readyCh: make(chan struct{}),
-		errCh:   make(chan error, 1),
-		doneCh:  make(chan struct{}),
+		srv:       srv,
+		userToken: userToken,
+		readyCh:   make(chan struct{}),
+		errCh:     make(chan error, 1),
+		doneCh:    make(chan struct{}),
 	}
 
 	// Use headless when we have a saved token (no auth UI needed); show a real
@@ -79,7 +73,7 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 
 	pg, closeBrowser, err := OpenBrowser(headless, wsl)
 	if err != nil {
-		_ = srv.Close()
+		srv.close()
 		return nil, fmt.Errorf("cdp: launch browser: %w", err)
 	}
 	p.closeBrowser = closeBrowser
@@ -141,10 +135,20 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 			}
 			return nil
 		},
+		"goGetUserToken": func(_ ...any) any {
+			p.mu.RLock()
+			defer p.mu.RUnlock()
+			return p.userToken
+		},
 		"goUserTokenChanged": func(args ...any) any {
 			if len(args) > 0 {
-				if tok, ok := args[0].(string); ok && tok != "" && p.OnUserToken != nil {
-					p.OnUserToken(tok)
+				if tok, ok := args[0].(string); ok && tok != "" {
+					p.mu.Lock()
+					p.userToken = tok
+					p.mu.Unlock()
+					if p.OnUserToken != nil {
+						p.OnUserToken(tok)
+					}
 				}
 			}
 			return nil
@@ -189,12 +193,12 @@ func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int)
 	for name, fn := range bindings {
 		if err := pg.ExposeFunction(name, fn); err != nil {
 			closeBrowser()
-			_ = srv.Close()
+			srv.close()
 			return nil, fmt.Errorf("cdp: expose %s: %w", name, err)
 		}
 	}
 
-	srvURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	srvURL := srv.pageURL()
 	go func() {
 		if _, err := pg.Goto(srvURL); err != nil {
 			select {
@@ -231,6 +235,9 @@ func (p *Player) sendSkipped(id string) {
 // SetUserToken injects a fresh user token into the running MusicKit.js page
 // so playback can resume without restarting the browser.
 func (p *Player) SetUserToken(token string) error {
+	p.mu.Lock()
+	p.userToken = token
+	p.mu.Unlock()
 	_, err := p.page.Evaluate(fmt.Sprintf(`MusicKit.getInstance().musicUserToken = %q`, token))
 	return err
 }
@@ -284,9 +291,9 @@ func (p *Player) applyState(js jsState) {
 		s.Track = &provider.Track{
 			ID:         js.NowPlaying.ID,
 			CatalogID:  js.NowPlaying.CatalogID,
-			Title:      js.NowPlaying.Title,
-			Artist:     js.NowPlaying.Artist,
-			Album:      js.NowPlaying.Album,
+			Title:      provider.Clean(js.NowPlaying.Title),
+			Artist:     provider.Clean(js.NowPlaying.Artist),
+			Album:      provider.Clean(js.NowPlaying.Album),
 			ArtworkURL: js.NowPlaying.ArtworkURL,
 			Duration:   time.Duration(js.NowPlaying.DurationMs) * time.Millisecond,
 		}
@@ -308,7 +315,7 @@ func (p *Player) Run() {
 	if p.closeBrowser != nil {
 		p.closeBrowser()
 	}
-	_ = p.srv.Close()
+	p.srv.close()
 	p.bcast.Close()
 }
 

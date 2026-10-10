@@ -8,9 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -27,7 +29,47 @@ const (
 	dlTimeout     = 2 * time.Minute
 	// maxBinarySize caps extraction to guard against decompression bombs.
 	maxBinarySize = 256 << 20 // 256 MB
+	// maxDownloadSize caps the release archive itself; it is compressed, so it
+	// never legitimately exceeds the extracted binary's limit.
+	maxDownloadSize = maxBinarySize
+	// maxMetadataSize caps the release JSON and checksums.txt.
+	maxMetadataSize = 4 << 20
 )
+
+// checkAssetURL accepts only HTTPS URLs on GitHub's own hosts, so a tampered
+// API response cannot point the updater at an arbitrary server, or at plain
+// HTTP, to fetch the binary it is about to install.
+func checkAssetURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("refusing non-https URL %q", raw)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "github.com" && !strings.HasSuffix(host, ".githubusercontent.com") {
+		return fmt.Errorf("refusing URL on unexpected host %q", host)
+	}
+	return nil
+}
+
+// assetURLCheck is indirected so tests can serve assets from httptest servers.
+var assetURLCheck = checkAssetURL
+
+// newClient returns an HTTP client that applies assetURLCheck to every
+// redirect hop as well as to the first request.
+func newClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return assetURLCheck(req.URL.String())
+		},
+	}
+}
 
 type ghRelease struct {
 	TagName string    `json:"tag_name"`
@@ -173,6 +215,16 @@ func update(api, current string, install bool, log func(string)) Result {
 		res.Outcome = OutcomeDisabled
 		return res
 	}
+	// An update with nothing to verify it against is not installed, and the
+	// assets must come from GitHub over HTTPS.
+	if checksumURL == "" {
+		log("Update aborted: the release publishes no checksums.txt")
+		return res
+	}
+	if assetURLCheck(downloadURL) != nil || assetURLCheck(checksumURL) != nil {
+		log("Update aborted: release assets are not on a trusted host")
+		return res
+	}
 
 	// Only attempt self-update for writable, self-managed installs.
 	exe, err := selfPath()
@@ -196,12 +248,10 @@ func update(api, current string, install bool, log func(string)) Result {
 		return res
 	}
 
-	if checksumURL != "" {
-		if err := verifyChecksum(archivePath, assetName, checksumURL); err != nil {
-			log("Update aborted: checksum verification failed")
-			_ = os.RemoveAll(tmpDir)
-			return res
-		}
+	if err := verifyChecksum(archivePath, assetName, checksumURL); err != nil {
+		log("Update aborted: checksum verification failed")
+		_ = os.RemoveAll(tmpDir)
+		return res
 	}
 
 	log("Installing update…")
@@ -243,38 +293,47 @@ func fetchLatestRelease(api string) (*ghRelease, error) {
 		return nil, fmt.Errorf("GitHub API: unexpected status %d", resp.StatusCode)
 	}
 	var rel ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxMetadataSize)).Decode(&rel); err != nil {
 		return nil, err
 	}
 	return &rel, nil
 }
 
-func downloadFile(url, dst string) error {
-	client := &http.Client{Timeout: dlTimeout}
-	resp, err := client.Get(url) //nolint:gosec // URL comes from the GitHub releases API response
+func downloadFile(rawURL, dst string) error {
+	client := newClient(dlTimeout)
+	resp, err := client.Get(rawURL) //nolint:gosec // URL comes from the GitHub releases API response, checked by assetURLCheck
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download: unexpected status %d", resp.StatusCode)
+	}
 	f, err := os.Create(dst) //nolint:gosec // dst is a path inside our own tmpDir
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, resp.Body)
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadSize+1))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
+	}
+	if err == nil && n > maxDownloadSize {
+		err = fmt.Errorf("download exceeds the %d byte limit", maxDownloadSize)
 	}
 	return err
 }
 
 func verifyChecksum(archivePath, assetName, checksumURL string) error {
-	client := &http.Client{Timeout: apiTimeout}
-	resp, err := client.Get(checksumURL) //nolint:gosec // URL comes from the GitHub releases API response
+	client := newClient(apiTimeout)
+	resp, err := client.Get(checksumURL) //nolint:gosec // URL comes from the GitHub releases API response, checked by assetURLCheck
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("checksums: unexpected status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
 	if err != nil {
 		return err
 	}

@@ -197,10 +197,10 @@ func trackFromFile(path string) (provider.Track, error) {
 
 	return provider.Track{
 		ID:     fmt.Sprintf("local:%s", path),
-		Title:  title,
-		Artist: artist,
-		Album:  album,
-		Genres: genres,
+		Title:  provider.Clean(title),
+		Artist: provider.Clean(artist),
+		Album:  provider.Clean(album),
+		Genres: provider.CleanAll(genres),
 	}, nil
 }
 

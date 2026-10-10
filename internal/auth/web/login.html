@@ -101,6 +101,7 @@
           data-web-components crossorigin></script>
   <script>
     const developerToken = "{{.DeveloperToken}}";
+    const callbackState = "{{.State}}";
 
     async function connectAppleMusic() {
       const btn = document.getElementById("connectBtn");
@@ -124,7 +125,7 @@
         status.textContent = "Sending token to vibez…";
         const resp = await fetch("/callback", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Vibez-State": callbackState },
           body: JSON.stringify({ user_token: userToken }),
         });
 

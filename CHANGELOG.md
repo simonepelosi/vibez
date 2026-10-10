@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Security hardening & access controls** — strengthened local service endpoints and internal playback communication with stricter loopback binding, host validation, and in-memory credential handling. Refs #169.
+- **Process isolation** — re-enabled process sandboxing for browser-backed playback on Linux where supported. Refs #169.
+- **Update verification** — enforced strict checksum validation and integrity checks during auto-updates. Refs #169.
+- **Input sanitization & API safeguards** — sanitized external metadata and lyrics for terminal rendering, confined API navigation targets, and added bounded limits for network responses. Refs #169.
+- **CI pipeline hardening** — isolated build workflows and credential handling for continuous integration runs. Refs #169.
+
 ## [1.1.0] — 2026-10-10
 
 ### Added

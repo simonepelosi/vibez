@@ -60,3 +60,20 @@ func TestRenderHTMLClearsRestrictionBeforeApplyingToken(t *testing.T) {
 		t.Errorf("restrictedEnabled is cleared at %d, after the token is applied at %d", clear, token)
 	}
 }
+
+// The Chrome backend serves this HTML over local HTTP, so the user token must
+// come from the goGetUserToken binding and not from the rendered page.
+func TestRenderHTMLWithoutUserTokenHoldsNoSecret(t *testing.T) {
+	html, err := RenderHTML("dev", "", "us", "test", 256)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	get := strings.Index(html, "goGetUserToken()")
+	use := strings.Index(html, "music.musicUserToken = savedToken")
+	if get < 0 || use < 0 || get > use {
+		t.Errorf("goGetUserToken at %d, token applied at %d: page must fetch the token before using it", get, use)
+	}
+	if strings.Contains(html, "'user'") {
+		t.Error("user token leaked into rendered HTML")
+	}
+}

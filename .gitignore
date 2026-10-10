@@ -30,3 +30,6 @@ dist-darwin/
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent state
+.sisyphus/
