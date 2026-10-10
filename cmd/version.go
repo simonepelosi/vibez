@@ -13,7 +13,6 @@ var versionCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Printf("vibez %s\n", version.Version)
 		fmt.Println("made with ❤️ by simonepelosi")
-		fmt.Println("Donate: https://ko-fi.com/pelpsi")
 	},
 }
 

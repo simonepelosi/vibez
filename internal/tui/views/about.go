@@ -6,12 +6,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/version"
 )
 
-// AboutModel renders the About & support information.
+// AboutModel renders application and author information.
 type AboutModel struct {
 	width  int
 	height int
@@ -27,22 +26,13 @@ func (a *AboutModel) SetSize(w, h int) {
 	a.height = h
 }
 
-func (a *AboutModel) Update(msg tea.KeyPressMsg) tea.Cmd {
-	k := msg.String()
-	if k == "enter" || k == "d" {
-		a.status = "✓ Opening donation link..."
-		return func() tea.Msg {
-			_ = openurl.Open("https://ko-fi.com/pelpsi")
-			return nil
-		}
-	}
+func (a *AboutModel) Update(_ tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
 func (a *AboutModel) View() string {
 	muted := styles.QueueItemMuted
 	normal := lipgloss.NewStyle().Foreground(styles.ColorFg)
-	accent := styles.KeyName
 	header := styles.TabActive
 	primary := lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
 	secondary := lipgloss.NewStyle().Foreground(styles.ColorSecondary)
@@ -60,10 +50,6 @@ func (a *AboutModel) View() string {
 		"",
 		secondary.Render("made with ❤️ by simonepelosi"),
 		"",
-		muted.Render("If you enjoy vibez, consider supporting its development:"),
-		primary.Render("☕ Donate on Ko-fi: ") + lipgloss.NewStyle().Foreground(styles.ColorSubtle).Underline(true).Render("https://ko-fi.com/pelpsi"),
-		"",
-		muted.Render("Press ") + accent.Render("Enter") + muted.Render(" or ") + accent.Render("d") + muted.Render(" to open the donation link in your browser."),
 	}
 
 	if a.status != "" {

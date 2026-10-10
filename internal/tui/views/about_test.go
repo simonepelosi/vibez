@@ -22,37 +22,17 @@ func TestAboutModel(t *testing.T) {
 	if !strings.Contains(plain, "made with ❤️ by simonepelosi") {
 		t.Error("expected view to contain 'made with ❤️ by simonepelosi'")
 	}
-	if !strings.Contains(plain, "https://ko-fi.com/pelpsi") {
-		t.Error("expected view to contain 'https://ko-fi.com/pelpsi'")
+	for _, word := range []string{"ko-fi.com", "donat", "Opening"} {
+		if strings.Contains(plain, word) {
+			t.Fatalf("unwanted donation UI: %s", word)
+		}
+	}
+	for _, key := range []string{"x", "enter", "d"} {
+		if m.Update(tea.KeyPressMsg{Text: key}) != nil {
+			t.Fatalf("about key %s must not launch a browser", key)
+		}
 	}
 
-	// Test Update with random key
-	cmd := m.Update(tea.KeyPressMsg{Text: "x"})
-	if cmd != nil {
-		t.Error("expected nil command for unhandled key")
-	}
-
-	// Test Update with enter
-	cmd = m.Update(tea.KeyPressMsg{Text: "enter"})
-	if cmd == nil {
-		t.Fatal("expected non-nil command for enter key")
-	}
-	_ = cmd() // run it
-
-	// Test View after open link status change
-	viewAfter := m.View()
-	plainAfter := stripANSI(viewAfter)
-	if !strings.Contains(plainAfter, "Opening donation link") {
-		t.Error("expected view to indicate that the donation link is opening")
-	}
-
-	// Test Update with d
-	m = NewAbout()
-	cmd = m.Update(tea.KeyPressMsg{Text: "d"})
-	if cmd == nil {
-		t.Fatal("expected non-nil command for d key")
-	}
-	_ = cmd()
 }
 
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)

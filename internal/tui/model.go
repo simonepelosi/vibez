@@ -19,7 +19,6 @@ import (
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lyrics"
-	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/art"
@@ -1374,7 +1373,6 @@ var allCommands = []cmdEntry{
 	{"art", "art", "Toggle album-art view (cover + track info instead of the bar)"},
 	{"mute", "mute", "Toggle mute"},
 	{"about", "about", "Show information about vibez"},
-	{"donate", "donate", "Support vibez development by donating"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
@@ -1458,13 +1456,6 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			}
 		}
 		return nil
-	case cmd == "donate":
-		m.errMsg = "✓ Opening donation link..."
-		m.errExpiry = time.Now().Add(5 * time.Second)
-		return func() tea.Msg {
-			_ = openurl.Open("https://ko-fi.com/pelpsi")
-			return nil
-		}
 	case cmd == "debug-logs":
 		m.debugView = !m.debugView
 		m.debugScroll = 0
@@ -3611,7 +3602,6 @@ func (m *Model) statusNavLines(w int) []string {
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP:
 			parts = []string{
 				styles.ModeNormal.Render("ABOUT"),
-				accent.Render("Enter/d") + muted.Render(" donate"),
 				accent.Render("esc/?") + muted.Render(" close"),
 			}
 		default:
