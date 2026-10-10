@@ -23,8 +23,8 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.inputs.pr_number }}
         run: |
-          PR_NUM="${{ github.event.inputs.pr_number }}"
           if [ -z "$PR_NUM" ]; then
             echo "is_pr=false" >> "$GITHUB_OUTPUT"
             echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
@@ -41,10 +41,10 @@ jobs:
             echo "name_suffix=dev-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout PR head
+      - name: Checkout trusted scripts from default branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.sha }}
+          path: trusted-vibez
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -52,14 +52,9 @@ jobs:
           go-version: "1.26"
           cache: true
 
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-
-      - name: Install garble
-        run: go install mvdan.cc/garble@v0.15.0
-
       - name: Generate Apple Developer Token
         id: devtoken
+        working-directory: trusted-vibez
         env:
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -68,6 +63,20 @@ jobs:
           TOKEN=$(go run ./scripts/gen-devtoken)
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Clean up trusted checkout
+        run: rm -rf trusted-vibez
+
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install garble
+        run: go install mvdan.cc/garble@v0.15.0
 
       - name: Build (linux/amd64)
         env:
@@ -148,9 +157,10 @@ jobs:
         if: steps.pr.outputs.is_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.inputs.pr_number }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh pr comment ${{ github.event.inputs.pr_number }} --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
+          gh pr comment "$PR_NUM" --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
 
           **Download:** Go to the [workflow run]($RUN_URL) → Artifacts:
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64\`
