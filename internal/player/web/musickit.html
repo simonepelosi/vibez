@@ -16,6 +16,7 @@
       Go → JS : page.Evaluate for vibez*() commands
       JS → Go : goNeedsAuth, goAuthComplete, goPlayerStateChange,
                 goUserTokenChanged, goStorefrontChanged, goStreamURL*, goError,
+                goGetUserToken (Chrome mode only: user token is not in the HTML),
                 goSkipped (* GStreamer mode only for goStreamURL)
 
     IMPORTANT: the musickitloaded listener MUST be registered before the
@@ -84,7 +85,13 @@
                s.includes('expired token');
       };
 
-      const savedToken = '{{.UserToken}}';
+      // Chrome backend: the token is served over the goGetUserToken binding and
+      // is absent from the HTML, which is fetched over local HTTP. The template
+      // value is only populated for the WebKit backend, which loads the page
+      // in-process.
+      const savedToken = (typeof goGetUserToken === 'function'
+        ? await goGetUserToken().catch(() => '')
+        : '') || '{{.UserToken}}';
       if (savedToken !== '') {
         try {
           music.musicUserToken = savedToken;
