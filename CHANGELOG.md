@@ -10,13 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
-- **CDP player token isolation & host verification** — `Music-User-Token` is no longer rendered into the served `musickit.html` page, preventing local processes and DNS rebinding attacks from exfiltrating the token. The user token is transferred strictly in-memory into the browser session via Playwright bindings (`exposeBinding`). The local HTTP server now serves on a random path prefix and strictly validates `Host` headers (`localhost`, `127.0.0.1`, `[::1]`). Refs #169.
-- **Apple sign-in server hardening** — the local OAuth/sign-in HTTP server now binds strictly to loopback (`127.0.0.1` and `[::1]`) rather than `0.0.0.0`. Enforced cryptographically random per-session login state verification through an `X-Vibez-State` header from the sign-in page to the `/callback` endpoint to guard against cross-site request forgery, along with strict `Host` header checks and bounded body reads (`http.MaxBytesReader`). Refs #169.
-- **Chromium Linux sandbox** — re-enabled the Chromium sandbox by default on Linux (`--no-sandbox` is no longer passed unconditionally), maintaining safe fallbacks only when user namespaces or containers restrict sandboxing. Refs #169.
-- **Mandatory auto-update checksum verification** — self-updater now strictly requires SHA-256 verification against `checksums.txt` (failing closed if checksums cannot be verified), restricts download URLs and redirects to official HTTPS GitHub domains, and bounds downloaded archive sizes. `install.sh` fails closed if no sha256 utility is available. Refs #169.
-- **API credential confinement & bounded reads** — Apple Music pagination `next` URLs are strictly validated to ensure credentialed requests cannot be directed to external hosts (confined to `api.music.apple.com`). HTTP API responses are bounded with `io.LimitReader` to prevent denial-of-service, and Last.fm authorization URL parameters are properly URL-query-escaped. Refs #169.
-- **Terminal control character sanitization** — external track metadata, artist names, album titles, and community-sourced synced/plain lyrics (LRCLIB) are stripped of ANSI escape sequences, C0/C1 control codes, and directional formatting characters prior to rendering, preventing terminal escape injection and UI corruption. Refs #169.
-- **CI dev-build workflow secret isolation** — isolated Apple Developer Token generation in `.github/workflows/dev-build.yml` so that repository signing secrets are only handled by trusted scripts checked out from the default branch, preventing arbitrary pull request code from accessing secrets during dev builds. Refs #169.
+- **Security hardening & access controls** — strengthened local service endpoints and internal playback communication with stricter loopback binding, host validation, and in-memory credential handling. Refs #169.
+- **Process isolation** — re-enabled process sandboxing for browser-backed playback on Linux where supported. Refs #169.
+- **Update verification** — enforced strict checksum validation and integrity checks during auto-updates. Refs #169.
+- **Input sanitization & API safeguards** — sanitized external metadata and lyrics for terminal rendering, confined API navigation targets, and added bounded limits for network responses. Refs #169.
+- **CI pipeline hardening** — isolated build workflows and credential handling for continuous integration runs. Refs #169.
 
 ## [1.1.0] — 2026-10-10
 
