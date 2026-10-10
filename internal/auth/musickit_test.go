@@ -2,13 +2,13 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"fmt"
 	"html/template"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,36 +216,15 @@ func TestLogin_SuccessFlow(t *testing.T) {
 	// Override HOME so cfg.Save("") writes to a temp dir.
 	t.Setenv("HOME", t.TempDir())
 
-	ln, err := net.Listen("tcp", ":0") //nolint:gosec // G102: ":0" is standard for finding a free port in tests
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	cfg := &config.Config{ //nolint:gosec // G101: test credentials, not real secrets
 		AppleDeveloperToken: "test-dev-token",
-		AuthPort:            port,
+		AuthPort:            0,
 		StoreFront:          "us",
 		Provider:            "apple",
 		Theme:               "default",
 	}
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "test-user-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL constructed in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	if err := Login(cfg); err != nil {
+	if err := loginForTest(t, cfg, "test-user-token"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	if cfg.AppleUserToken != "test-user-token" {
@@ -261,26 +240,14 @@ func TestLogin_UsesInjectedDevToken(t *testing.T) {
 	devToken = "injected-dev-token" //nolint:gosec // G101: test value, not a real credential
 	t.Cleanup(func() { devToken = original })
 
-	port := 17782
 	cfg := &config.Config{
 		AppleDeveloperToken: "", // intentionally blank
-		AuthPort:            port,
+		AuthPort:            0,
 	}
 
 	// Simulate the browser posting a user token.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "injected-flow-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
 
-	if err := Login(cfg); err != nil {
+	if err := loginForTest(t, cfg, "injected-flow-token"); err != nil {
 		t.Fatalf("Login with injected token: %v", err)
 	}
 	if cfg.AppleUserToken != "injected-flow-token" {
@@ -296,29 +263,52 @@ func TestLogin_EmbeddedTokenOverridesExplicit(t *testing.T) {
 	devToken = "embedded-takes-priority" //nolint:gosec // G101: test value, not a real credential
 	t.Cleanup(func() { devToken = original })
 
-	port := 17783
 	cfg := &config.Config{ //nolint:gosec // G101: test value, not a real credential
 		AppleDeveloperToken: "stale-config-token",
-		AuthPort:            port,
+		AuthPort:            0,
 	}
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "explicit-flow-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	if err := Login(cfg); err != nil {
+	if err := loginForTest(t, cfg, "explicit-flow-token"); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	// The embedded token must override the stale config token.
 	if cfg.AppleDeveloperToken != "embedded-takes-priority" {
 		t.Errorf("AppleDeveloperToken = %q, want embedded token %q", cfg.AppleDeveloperToken, "embedded-takes-priority")
 	}
+}
+
+// Simulate only the browser boundary. Keep the real HTTP callback server and
+// config save, with a deadline so callback failures cannot hang tests for minutes.
+func loginForTest(t *testing.T, cfg *config.Config, token string) error {
+	t.Helper()
+	cfg.AuthPort = 0
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	opened := false
+	err := login(ctx, cfg, func(loginURL string) error {
+		opened = true
+		if !strings.HasPrefix(loginURL, "http://localhost:") || !strings.HasSuffix(loginURL, "/login") {
+			t.Errorf("unexpected login URL %q", loginURL)
+		}
+		body, _ := json.Marshal(map[string]string{"user_token": token})
+		req, e := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(loginURL, "/login")+"/callback", bytes.NewReader(body))
+		if e != nil {
+			return e
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			return e
+		}
+		defer resp.Body.Close()
+		_, e = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("callback status %d", resp.StatusCode)
+		}
+		return e
+	})
+	if !opened {
+		t.Error("browser boundary was not exercised")
+	}
+	return err
 }

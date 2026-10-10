@@ -26,6 +26,16 @@ type callbackPayload struct {
 // Login starts the MusicKit auth flow: serves a local web page, opens the browser,
 // waits for the user token, then saves it to config.
 func Login(cfg *config.Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	return login(ctx, cfg, openurl.Open)
+}
+
+// login injects the desktop boundary so tests exercise HTTP and persistence
+// without launching a real browser or depending on desktop configuration.
+func login(ctx context.Context, cfg *config.Config, openBrowser func(string) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	ApplyEmbedded(cfg)
 
 	if cfg.AppleDeveloperToken == "" {
@@ -65,21 +75,24 @@ To get one:
 		}
 	}()
 
-	loginURL := fmt.Sprintf("http://localhost:%d/login", cfg.AuthPort)
+	loginURL := fmt.Sprintf("http://localhost:%d/login", ln.Addr().(*net.TCPAddr).Port)
 	fmt.Println("Connecting to Apple Music...")
 	fmt.Println("Your browser will open to complete the login.")
 
-	_ = openurl.Open(loginURL) // intentional best-effort browser open
+	_ = openBrowser(loginURL) // intentional best-effort browser open
 
 	// Print the fallback URL after a short delay so users whose browser did
 	// not open automatically can still complete the flow.
 	go func() {
-		time.Sleep(4 * time.Second)
+		timer := time.NewTimer(4 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
 		fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", loginURL)
 	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 
 	shutdownSrv := func() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -101,7 +114,7 @@ To get one:
 		return fmt.Errorf("auth flow error: %w", err)
 	case <-ctx.Done():
 		shutdownSrv()
-		return errors.New("auth timed out after 5 minutes")
+		return fmt.Errorf("auth flow canceled or timed out: %w", ctx.Err())
 	}
 }
 
