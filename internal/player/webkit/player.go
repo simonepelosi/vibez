@@ -70,8 +70,8 @@ type Player struct {
 
 // New creates a Player and loads MusicKit JS into a fully hidden WebView.
 // Call Run() on the main OS goroutine to start the GTK event loop.
-func New(devToken, userToken, storefront string, audioBitrateKbps int) (*Player, error) {
-	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps)
+func New(devToken, userToken, storefront string, audioBitrateKbps int, languages ...string) (*Player, error) {
+	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps, languages...)
 	if err != nil {
 		return nil, err
 	}

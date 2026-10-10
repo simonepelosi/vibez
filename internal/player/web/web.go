@@ -3,6 +3,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"text/template"
@@ -16,7 +17,7 @@ import (
 var musickitHTML string
 
 // RenderHTML renders the MusicKit HTML template with the provided parameters.
-func RenderHTML(devToken, userToken, storefront, version string, audioBitrateKbps int) (string, error) {
+func RenderHTML(devToken, userToken, storefront, version string, audioBitrateKbps int, languages ...string) (string, error) {
 	if err := audioquality.Validate(audioBitrateKbps); err != nil {
 		return "", err
 	}
@@ -24,8 +25,17 @@ func RenderHTML(devToken, userToken, storefront, version string, audioBitrateKbp
 	if err != nil {
 		return "", fmt.Errorf("parsing musickit template: %w", err)
 	}
+	language := ""
+	if len(languages) > 0 {
+		language = languages[0]
+	}
+	languageJSON, err := json.Marshal(language)
+	if err != nil {
+		return "", err
+	}
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, map[string]any{
+		"LanguageJSON":     string(languageJSON),
 		"DeveloperToken":   devToken,
 		"UserToken":        userToken,
 		"Storefront":       storefront,

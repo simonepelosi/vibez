@@ -101,6 +101,11 @@ func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string)
 	if err != nil {
 		return nil, err
 	}
+	if method == http.MethodGet && a.cfg.AppleLanguage != "" {
+		q := req.URL.Query()
+		q.Set("l", a.cfg.AppleLanguage)
+		req.URL.RawQuery = q.Encode()
+	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
 	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
 	return req, nil
@@ -126,6 +131,11 @@ func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint 
 	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
 	if err != nil {
 		return nil, err
+	}
+	if method == http.MethodGet && a.cfg.AppleLanguage != "" {
+		q := req.URL.Query()
+		q.Set("l", a.cfg.AppleLanguage)
+		req.URL.RawQuery = q.Encode()
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
 	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)

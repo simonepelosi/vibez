@@ -83,7 +83,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 		}
 	}
 
-	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, audioBitrateKbps)
+	wkPlayer, err := webkit.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, audioBitrateKbps, cfg.AppleLanguage)
 	if err != nil {
 		return fmt.Errorf("creating audio engine: %w", err)
 	}

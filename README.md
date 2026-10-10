@@ -474,3 +474,12 @@ go run . --demo
 ## License
 
 MIT © Simone Pelosi
+
+
+### Apple Music metadata language
+
+Set `"apple_language": "zh-Hans-CN"` in your existing config to prefer simplified
+Chinese titles, artists, and albums. Use `zh-Hant-TW` for traditional Chinese.
+The account storefront and playback IDs stay unchanged. Catalog and MusicKit
+requests use Apple's `l` query parameter; availability of translated metadata
+depends on the storefront and the publisher. Leave it empty for Apple's default.

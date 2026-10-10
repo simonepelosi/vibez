@@ -34,6 +34,11 @@
       // auto-detection and causes CONTENT_EQUIVALENT for every non-US track.
       // MusicKit derives the correct storefront from the user token automatically.
       const music = await MusicKit.configure(configOpts);
+      const _metadataLanguage = {{.LanguageJSON}};
+      function _localizedMusicAPI(path, params = {}) {
+        const options = _metadataLanguage ? { ...params, l: _metadataLanguage } : params;
+        return music.api.music(path, options);
+      }
 
       // Lift MusicKit's client-side explicit-content filter.
       //
@@ -325,7 +330,7 @@
           const batchSize = 100;
           for (let i = 0; i < wanted.length; i += batchSize) {
             const batch = wanted.slice(i, i + batchSize);
-            _m().api.music('/v1/me/library/songs', { ids: batch })
+            _localizedMusicAPI('/v1/me/library/songs', { ids: batch })
               .then(r => {
                 for (const song of r?.data?.data ?? []) _libItems[song.id] = song;
                 _log(`[js:libwarm] cached ${batch.length} library copy(s)`);
@@ -483,7 +488,7 @@
             }
             const results = await Promise.all(batches.map(async (batch) => {
               try {
-                const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: batch, include: 'library' });
+                const r = await _localizedMusicAPI(`/v1/catalog/${sf}/songs`, { ids: batch, include: 'library' });
                 const songs = r?.data?.data ?? [];
                 for (const song of songs) {
                   const libId = song.relationships?.library?.data?.[0]?.id;
@@ -514,7 +519,7 @@
             }
             const results = await Promise.all(batches.map(async (batch) => {
               try {
-                const r = await _m().api.music('/v1/me/library/songs', { ids: batch });
+                const r = await _localizedMusicAPI('/v1/me/library/songs', { ids: batch });
                 return r && r.data && r.data.data ? r.data.data : [];
               } catch(e) {
                 if (isAuthError(e)) { goNeedsAuth('expired').catch(()=>{}); }
@@ -589,7 +594,7 @@
               return;
             }
             try {
-              const r = await _m().api.music('/v1/me/library/songs', { ids: [libId] });
+              const r = await _localizedMusicAPI('/v1/me/library/songs', { ids: [libId] });
               const lib = r?.data?.data ?? [];
               if (lib.length > 0) {
                 _log(`[js:doPlay] library swap OK → retry #${idx}`);
@@ -922,7 +927,7 @@
               : `/v1/catalog/${sf}/playlists/${playlistID}/tracks`;
             let items = [];
             try {
-              const resp = await m.api.music(url);
+              const resp = await _localizedMusicAPI(url);
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
@@ -1063,13 +1068,13 @@
             let items = [];
             if (catalogIds.length > 0) {
               try {
-                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                const resp = await _localizedMusicAPI(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
             }
             if (items.length === 0 && libraryIds.length > 0) {
               try {
-                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                const resp = await _localizedMusicAPI('/v1/me/library/songs', { ids: libraryIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] library API failed: ${errName(e)}`).catch(() => {}); }
             }
@@ -1086,7 +1091,7 @@
             const sf = m.storefrontId || 'us';
             let items = [];
             try {
-              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              const resp = await _localizedMusicAPI(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
@@ -1109,13 +1114,13 @@
             let items = [];
             if (catalogIds.length > 0) {
               try {
-                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                const resp = await _localizedMusicAPI(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
             }
             if (items.length === 0 && libraryIds.length > 0) {
               try {
-                const resp = await m.api.music('/v1/me/library/songs', { ids: libraryIds });
+                const resp = await _localizedMusicAPI('/v1/me/library/songs', { ids: libraryIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] library API failed: ${errName(e)}`).catch(() => {}); }
             }

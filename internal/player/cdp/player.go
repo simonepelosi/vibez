@@ -46,8 +46,8 @@ type Player struct {
 }
 
 // New creates a CDP Player. EnsureBrowser must be called once before New().
-func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int) (*Player, error) {
-	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps)
+func New(devToken, userToken, storefront string, wsl bool, audioBitrateKbps int, languages ...string) (*Player, error) {
+	html, err := web.RenderHTML(devToken, userToken, storefront, "1.0.0", audioBitrateKbps, languages...)
 	if err != nil {
 		return nil, fmt.Errorf("cdp: render html: %w", err)
 	}

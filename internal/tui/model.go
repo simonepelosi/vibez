@@ -564,6 +564,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playerStateMsg:
 		wasPlaying := m.playerState.Playing
 		s := player.State(msg)
+		m.localizePlaybackMetadata(&s)
 		for _, line := range s.Logs {
 			m.appendLog(line)
 		}

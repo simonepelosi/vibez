@@ -101,7 +101,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 		}
 
 		prog.Send(tui.InitStatusMsg("Starting audio engine..."))
-		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, cfg.WSL, audioBitrateKbps)
+		cdpPlayer, err := cdp.New(cfg.AppleDeveloperToken, cfg.AppleUserToken, cfg.StoreFront, cfg.WSL, audioBitrateKbps, cfg.AppleLanguage)
 		if err != nil {
 			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("audio engine: %w", err)})
 			return

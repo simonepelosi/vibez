@@ -60,3 +60,20 @@ func TestRenderHTMLClearsRestrictionBeforeApplyingToken(t *testing.T) {
 		t.Errorf("restrictedEnabled is cleared at %d, after the token is applied at %d", clear, token)
 	}
 }
+
+func TestRenderHTMLMetadataLanguageIsSafelyEncoded(t *testing.T) {
+	html, err := RenderHTML("dev", "user", "us", "test", 256, "zh-Hans-CN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(html, `const _metadataLanguage = "zh-Hans-CN";`) {
+		t.Fatal("locale not passed to playback API")
+	}
+	html, err = RenderHTML("dev", "user", "us", "test", 256, `</script><script>alert(1)</script>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(html, `const _metadataLanguage = "</script>`) {
+		t.Fatal("unsafe JavaScript string")
+	}
+}

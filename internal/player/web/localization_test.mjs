@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
+const html=readFileSync(new URL('./musickit.html',import.meta.url),'utf8');
+const start=html.indexOf('function _localizedMusicAPI(');
+const end=html.indexOf('\n      }',start)+'\n      }'.length;
+test('localized MusicKit requests retain IDs, include, and storefront',()=>{
+ const requests=[];
+ const env={_metadataLanguage:'zh-Hans-CN',music:{api:{music(path,options){requests.push({path,options});}}}};
+ runInNewContext(html.slice(start,end),env);
+ const opts={ids:['song'],include:'library'};
+ env._localizedMusicAPI('/v1/catalog/us/songs',opts);
+ assert.equal(requests[0].options.l,'zh-Hans-CN');
+ assert.deepEqual(requests[0].options.ids,['song']);
+ assert.equal(requests[0].path,'/v1/catalog/us/songs');
+ assert.equal(opts.l,undefined);
+ env._metadataLanguage='';
+ env._localizedMusicAPI('/v1/me/library/songs',opts);
+ assert.equal(requests[1].options,opts);
+});
