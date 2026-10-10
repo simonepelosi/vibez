@@ -427,6 +427,16 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	return nil
 }
 
+// PlayNext implements player.NextQueuer.
+func (p *Player) PlayNext(ids []string) error {
+	expr, err := buildPlayNextJS(ids)
+	if err != nil {
+		return err
+	}
+	p.dispatch(expr)
+	return nil
+}
+
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.dispatch(fmt.Sprintf(`window.vibezQueueRemove && window.vibezQueueRemove(%d)`, idx))
 	return nil

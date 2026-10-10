@@ -2924,6 +2924,9 @@ func (m *Model) playNextCmd(label string, tracks []provider.Track, ids []string)
 	m.appendLog(fmt.Sprintf("[queue] play next: %s (%d track(s))", label, len(tracks)))
 
 	return m.playerCmd(func(p player.Player) error {
+		if nq, ok := p.(player.NextQueuer); ok {
+			return nq.PlayNext(ids)
+		}
 		if err := p.AppendQueue(ids); err != nil {
 			return err
 		}

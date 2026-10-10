@@ -257,6 +257,18 @@ func (p *Player) AppendQueue(ids []string) error {
 	return nil
 }
 
+// PlayNext implements player.NextQueuer.
+func (p *Player) PlayNext(ids []string) error {
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("webkit: marshal play-next ids: %w", err)
+	}
+	js := fmt.Sprintf(`window.vibezQueuePlayNext && window.vibezQueuePlayNext(%s)`,
+		jsonStringLiteral(string(b)))
+	p.dispatch(js)
+	return nil
+}
+
 func (p *Player) SetRepeat(mode int) error {
 	p.dispatch(fmt.Sprintf(`window.vibezSetRepeat && window.vibezSetRepeat(%d)`, mode))
 	return nil

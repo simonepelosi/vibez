@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -3893,6 +3894,42 @@ func TestEqualizerKeyPriority(t *testing.T) {
 	}
 	if !plyr.playCalled && !plyr.pauseCalled {
 		t.Error("player play/pause was NOT called when pressing space in equalizer")
+	}
+}
+
+// nextQueuerPlayer is a mockPlayer that also implements player.NextQueuer,
+// like the MusicKit-backed players.
+type nextQueuerPlayer struct {
+	*mockPlayer
+	playNextIDs [][]string
+}
+
+func (p *nextQueuerPlayer) PlayNext(ids []string) error {
+	p.playNextIDs = append(p.playNextIDs, ids)
+	return nil
+}
+
+// TestPlayNextCmd_UsesNextQueuer guards #161: MusicKit cannot reorder a live
+// queue, so append-then-move left "play next" tracks at the end.
+func TestPlayNextCmd_UsesNextQueuer(t *testing.T) {
+	plyr := &nextQueuerPlayer{mockPlayer: newMockPlayer()}
+	m := New(testCfg(), &mockProvider{}, plyr, Options{})
+	m.queueTracks = []provider.Track{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}, {ID: "c", Title: "C"}}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.playerState.Track = &provider.Track{ID: "b", Title: "B"}
+
+	if cmd := m.playNextCmd("X", []provider.Track{{ID: "x", Title: "X"}}, []string{"x"}); cmd != nil {
+		cmd()
+	}
+	if want := []string{"a", "b", "x", "c"}; !slices.Equal(m.queueIDs, want) {
+		t.Errorf("queueIDs = %v, want %v", m.queueIDs, want)
+	}
+	if len(plyr.playNextIDs) != 1 || !slices.Equal(plyr.playNextIDs[0], []string{"x"}) {
+		t.Errorf("PlayNext calls = %v, want [[x]]", plyr.playNextIDs)
+	}
+	if len(plyr.appendQueueIDs) != 0 || len(plyr.moveInQueueCalls) != 0 {
+		t.Errorf("append/move should not run for a NextQueuer: append=%v move=%v",
+			plyr.appendQueueIDs, plyr.moveInQueueCalls)
 	}
 }
 

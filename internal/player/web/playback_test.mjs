@@ -61,3 +61,50 @@ test('native setQueue auto-play does not trigger a duplicate play and fallback',
  await env._doPlayNativeAt(0);
  assert.equal(env._nativeQueue,true); assert.equal(m.plays,0);
 });
+
+// ─── vibezQueuePlayNext (#161) ───────────────────────────────────────────────
+function setupPlayNext({ native, mirrors = true, qi = 1, playNextFails = false } = {}) {
+ const calls = [];
+ const m = {
+  async playNext(d) { calls.push(['playNext', d.items.map(i => i.id).join(',')]); if (playNextFails) throw new Error('nope'); },
+  async playLater(d) { calls.push(['playLater', d.items.map(i => i.id).join(',')]); },
+ };
+ const env = {
+  window: {}, _m: () => m, _log: () => {},
+  _q: [{id:'a'}, {id:'b'}, {id:'c'}], _qi: qi,
+  _nativeQueue: native, _nativeMirrors: mirrors, _removedIds: new Set(['x']),
+  _resolveItems: async ids => ids.map(id => ({id})),
+  _playAt: idx => calls.push(['playAt', idx]), _warmLibItems: () => {},
+  errName: e => e.message, goError: () => Promise.resolve(),
+ };
+ const start = html.indexOf('window.vibezQueuePlayNext = async function');
+ const end = html.indexOf('window.vibezQueueRemove = function', start);
+ runInNewContext(html.slice(start, end), env);
+ return { env, calls, ids: () => env._q.map(i => i.id).join(',') };
+}
+test('playNext in native mode inserts after the current item in both queues', async () => {
+ const { env, calls, ids } = setupPlayNext({ native: true });
+ await env.window.vibezQueuePlayNext('["x","y"]');
+ assert.equal(ids(), 'a,b,x,y,c');
+ assert.deepEqual(calls.map(c => c.join(':')), ['playNext:x,y']);
+ assert.equal(env._nativeMirrors, true, 'MusicKit inserted at the same place, so _q still mirrors it');
+ assert.equal(env._removedIds.has('x'), false, 're-added item must not be skipped on arrival');
+});
+test('playNext in one-item mode only touches _q', async () => {
+ const { env, calls, ids } = setupPlayNext({ native: false });
+ await env.window.vibezQueuePlayNext('["x"]');
+ assert.equal(ids(), 'a,b,x,c');
+ assert.equal(calls.length, 0);
+});
+test('playNext falls back to playLater and drops mirroring when playNext throws', async () => {
+ const { env, calls } = setupPlayNext({ native: true, playNextFails: true });
+ await env.window.vibezQueuePlayNext('["x"]');
+ assert.deepEqual(calls.map(c => c.join(':')), ['playNext:x', 'playLater:x']);
+ assert.equal(env._nativeMirrors, false);
+});
+test('playNext with nothing playing appends and starts', async () => {
+ const { env, calls, ids } = setupPlayNext({ native: false, qi: -1 });
+ await env.window.vibezQueuePlayNext('["x"]');
+ assert.equal(ids(), 'a,b,c,x');
+ assert.deepEqual(calls.map(c => c.join(':')), ['playAt:0']);
+});

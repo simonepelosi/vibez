@@ -962,6 +962,34 @@
           } catch(e) { goError('appendQueue failed: '+errName(e)).catch(()=>{}); }
         };
 
+        // Insert straight after the current item. Appending and then moving
+        // only reorders _q: in native mode MusicKit would still play the new
+        // items after everything else (#161). playNext inserts after the
+        // current item of MusicKit's own queue, so if _q mirrored it before,
+        // it still does.
+        window.vibezQueuePlayNext = async function(idsJSON) {
+          try {
+            const ids   = (JSON.parse(idsJSON) || []).filter(Boolean);
+            _log(`[js:playNext] resolving ${ids.length} id(s)`);
+            const items = await _resolveItems(ids);
+            if (items.length === 0) { _log('[js:playNext] no items resolved — skip'); return; }
+            for (const item of items) _removedIds.delete(item.id); // re-added: play it
+            if (_qi < 0) { _q = _q.concat(items); _playAt(0); return; } // nothing playing
+            _q.splice(_qi + 1, 0, ...items);
+            _log(`[js:playNext] +${items.length} at #${_qi + 1} → _q.length=${_q.length}`);
+            if (!_nativeQueue) return; // one-item mode advances through _q itself
+            try { await _m().playNext({ items: items.slice() }); _warmLibItems(); }
+            catch(e) {
+              // Same fallback as vibezAppendQueue: MusicKit gets them at the
+              // end, and _q no longer mirrors its order.
+              _log(`[js:playNext] native playNext failed: ${errName(e)} — appending`);
+              _nativeMirrors = false;
+              try { await _m().playLater({ items: items.slice() }); }
+              catch(e2) { _log(`[js:playNext] playLater failed too: ${errName(e2)}`); }
+            }
+          } catch(e) { goError('playNext failed: '+errName(e)).catch(()=>{}); }
+        };
+
         window.vibezQueueRemove = function(idxStr) {
           const idx = parseInt(idxStr);
           if (idx < 0 || idx >= _q.length) return;
@@ -1125,6 +1153,15 @@
             _queue = _queue.concat(items);
             if (wasEmpty) playIdx(0);
           } catch(e) { goError('appendQueue failed: ' + errName(e)).catch(() => {}); }
+        };
+
+        // vibez owns this queue outright, so append-then-move is exact here.
+        window.vibezQueuePlayNext = async function(idsJSON) {
+          const before = _queue.length;
+          const at     = _idx + 1;
+          await window.vibezAppendQueue(idsJSON);
+          if (before === 0) return; // the append started playback at item 0
+          for (let i = before; i < _queue.length; i++) window.vibezQueueMove(i, at + (i - before));
         };
 
         window.vibezQueueRemove = function(idxStr) {

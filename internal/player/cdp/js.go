@@ -45,6 +45,19 @@ func buildAppendQueueJS(ids []string) (string, error) {
 	return fmt.Sprintf(`window.vibezAppendQueue && window.vibezAppendQueue(%s)`, js), nil
 }
 
+// buildPlayNextJS returns the JS expression that calls vibezQueuePlayNext.
+func buildPlayNextJS(ids []string) (string, error) {
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return "", fmt.Errorf("cdp: marshal play-next ids: %w", err)
+	}
+	js, err := json.Marshal(string(b))
+	if err != nil {
+		return "", fmt.Errorf("cdp: marshal play-next json string: %w", err)
+	}
+	return fmt.Sprintf(`window.vibezQueuePlayNext && window.vibezQueuePlayNext(%s)`, js), nil
+}
+
 func buildSetAudioBitrateJS(kbps int) (string, error) {
 	if err := audioquality.Validate(kbps); err != nil {
 		return "", err
