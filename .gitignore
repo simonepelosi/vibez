@@ -33,3 +33,7 @@ Thumbs.db
 
 # Agent state
 .sisyphus/
+
+# Cloudflare Wrangler
+.wrangler/
+worker/.wrangler/

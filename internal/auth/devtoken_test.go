@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -192,4 +193,120 @@ func TestResolveDeveloperToken(t *testing.T) {
 			t.Errorf("config token clobbered: %q", cfg.AppleDeveloperToken)
 		}
 	})
+}
+
+func TestBrokerToken_RetriesOnTransientErrors(t *testing.T) {
+	origBackoff := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = origBackoff })
+
+	var hits atomic.Int32
+	now := time.Now()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count := hits.Add(1)
+		if count == 1 {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"` + fakeJWT + `","expires_at":` + itoa(now.Add(24*time.Hour).Unix()) + `}`))
+	}))
+	defer srv.Close()
+
+	cache := filepath.Join(t.TempDir(), "devtoken.json")
+	tok, err := brokerToken(srv.URL, "k", cache, now)
+	if err != nil {
+		t.Fatalf("brokerToken failed: %v", err)
+	}
+	if tok != fakeJWT {
+		t.Errorf("got token %q, want %q", tok, fakeJWT)
+	}
+	if hits.Load() != 2 {
+		t.Errorf("hits = %d, want 2", hits.Load())
+	}
+
+	logs := BrokerLogs()
+	foundAttempt1 := false
+	foundRetry := false
+	foundSuccess := false
+	for _, l := range logs {
+		if strings.Contains(l, "attempt 1/3 failed") {
+			foundAttempt1 = true
+		}
+		if strings.Contains(l, "retrying in") {
+			foundRetry = true
+		}
+		if strings.Contains(l, "fresh developer token received") {
+			foundSuccess = true
+		}
+	}
+	if !foundAttempt1 || !foundRetry || !foundSuccess {
+		t.Errorf("missing expected log messages in %v", logs)
+	}
+}
+
+func TestBrokerToken_DoesNotRetryPermanentErrors(t *testing.T) {
+	origBackoff := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = origBackoff })
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	cache := filepath.Join(t.TempDir(), "devtoken.json")
+	_, err := brokerToken(srv.URL, "bad-key", cache, time.Now())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (should not retry 401)", hits.Load())
+	}
+}
+
+func TestBrokerToken_ExhaustsRetriesAndFallsBackToCache(t *testing.T) {
+	origBackoff := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = origBackoff })
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	const fallbackJWT = "fallback.jwt.val" //nolint:gosec // G101: test value
+	now := time.Now()
+	cache := filepath.Join(t.TempDir(), "devtoken.json")
+	// Cache is expiring soon (within refreshBefore) but not yet expired
+	if err := writeCache(cache, cachedToken{Token: fallbackJWT, ExpiresAt: now.Add(30 * time.Minute).Unix()}); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := brokerToken(srv.URL, "k", cache, now)
+	if err != nil {
+		t.Fatalf("expected fallback to cache, got err: %v", err)
+	}
+	if tok != fallbackJWT {
+		t.Errorf("got %q, want cached token", tok)
+	}
+	if hits.Load() != maxFetchAttempts {
+		t.Errorf("hits = %d, want %d", hits.Load(), maxFetchAttempts)
+	}
+
+	logs := BrokerLogs()
+	foundFallback := false
+	for _, l := range logs {
+		if strings.Contains(l, "all fetch attempts failed, falling back to unexpired cached token") {
+			foundFallback = true
+			break
+		}
+	}
+	if !foundFallback {
+		t.Errorf("missing fallback log in %v", logs)
+	}
 }

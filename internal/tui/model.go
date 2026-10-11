@@ -413,6 +413,9 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.favorites = make(map[string]bool)
 	m.aboutP = &aboutPanel{m: views.NewAbout()}
 	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
+	for _, line := range opts.InitialLogs {
+		m.appendLog(line)
+	}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
 	}

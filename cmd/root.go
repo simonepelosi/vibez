@@ -149,6 +149,14 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	tokenErr := auth.ResolveDeveloperToken(cfg)
 	lastfm.ApplyEmbedded(cfg)
 
+	brokerLogs := auth.BrokerLogs()
+	if debug {
+		for _, msg := range brokerLogs {
+			fmt.Fprintf(os.Stderr, "debug: %s\n", msg)
+		}
+	}
+	opts.InitialLogs = brokerLogs
+
 	if tokenErr != nil && cfg.AppleDeveloperToken == "" {
 		return tokenErr
 	}
