@@ -41,7 +41,9 @@ type callbackPayload struct {
 // Login starts the MusicKit auth flow: serves a local web page, opens the browser,
 // waits for the user token, then saves it to config.
 func Login(cfg *config.Config) error {
-	ApplyEmbedded(cfg)
+	if err := ResolveDeveloperToken(cfg); err != nil && cfg.AppleDeveloperToken == "" {
+		return err
+	}
 
 	if cfg.AppleDeveloperToken == "" {
 		return errors.New(`apple developer token is not set.

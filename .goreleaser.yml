@@ -3,19 +3,18 @@ version: 2
 before:
   hooks:
     - go mod tidy
-    - go install mvdan.cc/garble@v0.16.0
 
 builds:
   - id: vibez-linux
     binary: vibez
-    tool: ./scripts/garble-go
     # Set to 1 by the darwin release job, which runs this same config on a
     # macOS runner and cannot build the webkit/gstreamer CGO target.
     skip: '{{ eq (index .Env "VIBEZ_SKIP_LINUX") "1" }}'
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
-      - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
     env:
       - CGO_ENABLED=1
       - PKG_CONFIG_PATH={{ .Env.PROJECT_DIR }}/pkg-config
@@ -32,7 +31,6 @@ builds:
 
   - id: vibez-darwin
     binary: vibez
-    tool: ./scripts/garble-go
     # Set to 1 by the linux release job. Darwin is built on a macOS runner so
     # that CGO_ENABLED=1 below has a working clang and the macOS SDK; the two
     # jobs each skip the other's target.
@@ -40,7 +38,8 @@ builds:
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
-      - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
     env:
       - CGO_ENABLED=1
       - GOTOOLCHAIN=local
@@ -62,13 +61,13 @@ builds:
 
   - id: vibez-windows
     binary: vibez
-    tool: ./scripts/garble-go
     # Cross-compiled by the Linux release job; no C toolchain is needed.
     skip: '{{ eq (index .Env "VIBEZ_SKIP_WINDOWS") "1" }}'
     ldflags:
       - -s -w
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
-      - -X 'github.com/simone-vibes/vibez/internal/auth.devToken={{ .Env.APPLE_DEV_TOKEN }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
+      - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
     env:
       - CGO_ENABLED=0
       - GOTOOLCHAIN=local
