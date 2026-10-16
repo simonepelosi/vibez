@@ -36,13 +36,48 @@ func RenderHTML(devToken, userToken, storefront, version string, audioBitrateKbp
 	}
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, map[string]any{
-		"DeveloperToken":   devToken,
-		"UserToken":        userToken,
-		"Storefront":       storefront,
-		"Version":          version,
+		"DeveloperToken":   escapeJSString(devToken),
+		"UserToken":        escapeJSString(userToken),
+		"Storefront":       escapeJSString(storefront),
+		"Version":          escapeJSString(version),
 		"AudioBitrateKbps": audioBitrateKbps,
 	}); err != nil {
 		return "", fmt.Errorf("rendering musickit template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// escapeJSString encodes s for interpolation in JavaScript string and template literals.
+func escapeJSString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\'':
+			b.WriteString(`\'`)
+		case '"':
+			b.WriteString(`\"`)
+		case '`':
+			b.WriteString("\\`")
+		case '$':
+			b.WriteString(`\$`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '<':
+			b.WriteString(`\u003c`)
+		case '>':
+			b.WriteString(`\u003e`)
+		case '\u2028':
+			b.WriteString(`\u2028`)
+		case '\u2029':
+			b.WriteString(`\u2029`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

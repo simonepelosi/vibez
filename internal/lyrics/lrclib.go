@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +15,9 @@ import (
 
 	"github.com/simone-vibes/vibez/internal/provider"
 )
+
+// maxLyricsResponseBytes bounds how much of an LRCLIB response body is read (1 MiB).
+const maxLyricsResponseBytes = 1 << 20
 
 // Line is a single lyric line with an optional start timestamp.
 // For plain (unsynced) lyrics, Start is always 0.
@@ -79,7 +83,7 @@ func (c *Client) Fetch(ctx context.Context, artist, title, album string, duratio
 		PlainLyrics  string `json:"plainLyrics"`
 		Instrumental bool   `json:"instrumental"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxLyricsResponseBytes)).Decode(&data); err != nil {
 		return nil, err
 	}
 

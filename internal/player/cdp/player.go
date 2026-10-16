@@ -244,7 +244,11 @@ func (p *Player) SetUserToken(token string) error {
 	p.mu.Lock()
 	p.userToken = token
 	p.mu.Unlock()
-	_, err := p.page.Evaluate(fmt.Sprintf(`MusicKit.getInstance().musicUserToken = %q`, token))
+	expr, err := buildSetUserTokenJS(token)
+	if err != nil {
+		return err
+	}
+	_, err = p.page.Evaluate(expr)
 	return err
 }
 

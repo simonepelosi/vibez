@@ -133,3 +133,36 @@ func TestRenderHTMLDropsMalformedStorefront(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderHTMLEscapesSpecialCharacters(t *testing.T) {
+	html, err := RenderHTML(
+		"dev'quote",
+		"user<tag>",
+		"us",
+		"1.0`${val}`\\\n\r\u2028\u2029'\"",
+		256,
+	)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	for _, raw := range []string{
+		"dev'quote",
+		"<tag>",
+		"`${val}`",
+		"\u2028",
+		"\u2029",
+	} {
+		if strings.Contains(html, raw) {
+			t.Errorf("rendered HTML contains unescaped sequence %q", raw)
+		}
+	}
+	if !strings.Contains(html, `dev\'quote`) {
+		t.Error("expected escaped single quote in DeveloperToken")
+	}
+	if !strings.Contains(html, `\u003ctag\u003e`) {
+		t.Error("expected escaped angle brackets in UserToken")
+	}
+	if !strings.Contains(html, `1.0\`+"`"+`\${val}\`+"`"+`\\`) {
+		t.Error("expected escaped backticks, dollar sign, and backslash in Version")
+	}
+}

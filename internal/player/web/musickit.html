@@ -606,7 +606,7 @@
             }
             const results = await Promise.all(batches.map(async (batch) => {
               try {
-                const r = await _m().api.music(`/v1/catalog/${sf}/songs`, { ids: batch, include: 'library' });
+                const r = await _m().api.music(`/v1/catalog/${encodeURIComponent(sf)}/songs`, { ids: batch, include: 'library' });
                 const songs = r?.data?.data ?? [];
                 for (const song of songs) {
                   const libId = song.relationships?.library?.data?.[0]?.id;
@@ -1089,8 +1089,8 @@
             const m   = _m();
             const sf  = m.storefrontId || 'us';
             const url = playlistID.startsWith('p.')
-              ? `/v1/me/library/playlists/${playlistID}/tracks`
-              : `/v1/catalog/${sf}/playlists/${playlistID}/tracks`;
+              ? `/v1/me/library/playlists/${encodeURIComponent(playlistID)}/tracks`
+              : `/v1/catalog/${encodeURIComponent(sf)}/playlists/${encodeURIComponent(playlistID)}/tracks`;
             let items = [];
             try {
               const resp = await m.api.music(url);
@@ -1299,7 +1299,7 @@
             let items = [];
             if (catalogIds.length > 0) {
               try {
-                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                const resp = await m.api.music(`/v1/catalog/${encodeURIComponent(sf)}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
             }
@@ -1322,7 +1322,7 @@
             const sf = m.storefrontId || 'us';
             let items = [];
             try {
-              const resp = await m.api.music(`/v1/catalog/${sf}/playlists/${playlistID}/tracks`);
+              const resp = await m.api.music(`/v1/catalog/${encodeURIComponent(sf)}/playlists/${encodeURIComponent(playlistID)}/tracks`);
               items = resp && resp.data && resp.data.data ? resp.data.data : [];
             } catch(e) { goError('[playlist] API failed: '+errName(e)).catch(()=>{}); return; }
             if (items.length === 0) { goError('setPlaylist: no items').catch(()=>{}); return; }
@@ -1345,7 +1345,7 @@
             let items = [];
             if (catalogIds.length > 0) {
               try {
-                const resp = await m.api.music(`/v1/catalog/${sf}/songs`, { ids: catalogIds });
+                const resp = await m.api.music(`/v1/catalog/${encodeURIComponent(sf)}/songs`, { ids: catalogIds });
                 items = resp && resp.data && resp.data.data ? resp.data.data : [];
               } catch(e) { goError(`[queue] catalog API failed: ${errName(e)}`).catch(() => {}); }
             }

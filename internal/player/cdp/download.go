@@ -5,10 +5,28 @@ package cdp
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// maxDownloadBytes caps how much data downloadFile will write to disk (512 MiB).
+var maxDownloadBytes int64 = 512 << 20
+
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 // progressReader wraps an io.Reader and calls onProgress with a formatted
 // "Downloading Chrome… XX%" message each time the percentage advances.
@@ -39,7 +57,7 @@ func downloadFile(onProgress func(string), dst, url string) error {
 		return fmt.Errorf("create dir: %w", err)
 	}
 
-	resp, err := http.Get(url) //nolint:noctx,gosec // URL is a compile-time constant
+	resp, err := downloadClient.Get(url) //nolint:noctx,gosec // URL is a compile-time constant
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", url, err)
 	}
@@ -53,14 +71,35 @@ func downloadFile(onProgress func(string), dst, url string) error {
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dst, err)
 	}
-	defer f.Close() //nolint:errcheck
+	cleanup := true
+	defer func() {
+		_ = f.Close()
+		if cleanup {
+			_ = os.Remove(dst)
+		}
+	}()
 
 	total := resp.ContentLength
+	if total > maxDownloadBytes {
+		return fmt.Errorf("GET %s: content length %d exceeds limit %d", url, total, maxDownloadBytes)
+	}
 	onProgress(fmt.Sprintf("Downloading Chromium drivers… 0%% (%.0f MB)", float64(total)/1e6))
 
-	pr := &progressReader{r: resp.Body, total: total, onProgress: onProgress}
-	if _, err := io.Copy(f, pr); err != nil {
+	pr := &progressReader{
+		r:          io.LimitReader(resp.Body, maxDownloadBytes+1),
+		total:      total,
+		onProgress: onProgress,
+	}
+	written, err := io.Copy(f, pr)
+	if err != nil {
 		return fmt.Errorf("write %s: %w", dst, err)
 	}
+	if written > maxDownloadBytes {
+		return fmt.Errorf("GET %s: response exceeded %d bytes limit", url, maxDownloadBytes)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	cleanup = false
 	return nil
 }
