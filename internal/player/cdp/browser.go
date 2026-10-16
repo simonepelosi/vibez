@@ -383,6 +383,9 @@ func ensureBrowserAMD64(onProgress func(string)) error {
 	return nil
 }
 
+// maxDebMemberBytes caps the size of any single member in a .deb ar archive (1 GiB).
+const maxDebMemberBytes int64 = 1 << 30
+
 // extractDeb unpacks the payload of a Debian .deb archive into destDir without
 // requiring dpkg-deb (which is absent in sandboxed environments like Flatpak).
 //
@@ -416,7 +419,10 @@ func extractDeb(debPath, destDir string) error {
 			break // EOF — data.tar.* was not found
 		}
 		name := strings.TrimRight(string(hdr[:16]), " ")
-		size, _ := strconv.ParseInt(strings.TrimRight(string(hdr[48:58]), " "), 10, 64)
+		size, err := strconv.ParseInt(strings.TrimRight(string(hdr[48:58]), " "), 10, 64)
+		if err != nil || size < 0 || size > maxDebMemberBytes {
+			return fmt.Errorf("invalid ar member size in %s", filepath.Base(debPath))
+		}
 
 		if strings.HasPrefix(name, "data.tar") {
 			// Write the embedded data.tar.* into a sibling temp file so that

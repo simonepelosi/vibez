@@ -271,3 +271,19 @@ func TestBuildSetAudioBitrateJS_Unsupported(t *testing.T) {
 		t.Fatalf("buildSetAudioBitrateJS(320) error = %v", err)
 	}
 }
+
+func TestBuildSetUserTokenJS_EscapesQuotesAndLineSeparators(t *testing.T) {
+	expr, err := buildSetUserTokenJS("tok\"\u2028\u2029")
+	if err != nil {
+		t.Fatalf("buildSetUserTokenJS: %v", err)
+	}
+	if strings.ContainsAny(expr, "\u2028\u2029") {
+		t.Errorf("expression contains unescaped JS line/paragraph separators: %q", expr)
+	}
+	if !strings.Contains(expr, `\u2028\u2029`) {
+		t.Errorf("expected JSON-escaped separators in %s", expr)
+	}
+	if !strings.Contains(expr, "window.vibezSetUserToken") {
+		t.Errorf("expected window.vibezSetUserToken in %s", expr)
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -254,5 +256,39 @@ func TestChromeLaunchArgs_HasHeadlessNew(t *testing.T) {
 	args = chromeLaunchArgs(false, false)
 	if slices.Contains(args, "--headless=new") {
 		t.Error("chromeLaunchArgs should not contain --headless=new when headless=false on Linux")
+	}
+}
+
+func TestExtractDeb_RejectsInvalidMemberSize(t *testing.T) {
+	for _, badSize := range []string{"-60       ", "notanumber", "9999999999"} {
+		hdr := fmt.Sprintf("%-16s%-12d%-6d%-6d%-8o%s`\n", "debian-binary", 0, 0, 0, 0o644, badSize)
+		path := filepath.Join(t.TempDir(), "badsize.deb")
+		if err := os.WriteFile(path, []byte("!<arch>\n"+hdr), 0o600); err != nil { //nolint:gosec // test fixture
+			t.Fatal(err)
+		}
+		err := extractDeb(path, t.TempDir())
+		if err == nil || !strings.Contains(err.Error(), "invalid ar member size") {
+			t.Errorf("badSize=%q: extractDeb error = %v, want invalid ar member size", badSize, err)
+		}
+	}
+}
+
+func TestDownloadFile_RejectsOversizedBody(t *testing.T) {
+	origMax := maxDownloadBytes
+	maxDownloadBytes = 16
+	t.Cleanup(func() { maxDownloadBytes = origMax })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", 64)))
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "oversized.deb")
+	err := downloadFile(func(string) {}, dst, srv.URL)
+	if err == nil {
+		t.Fatal("expected error for oversized download, got nil")
+	}
+	if _, statErr := os.Stat(dst); !os.IsNotExist(statErr) {
+		t.Errorf("expected partial file %q to be removed on error, statErr=%v", dst, statErr)
 	}
 }

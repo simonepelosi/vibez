@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/simone-vibes/vibez/internal/config"
@@ -378,4 +379,111 @@ func TestAudioQualityInvalidConfig(t *testing.T) {
 
 func testConfigWithDefaults() *config.Config {
 	return &config.Config{AuthPort: 7777, Provider: "apple", Theme: "default"}
+}
+
+func TestSave_TightensExistingPermissivePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses inherited profile ACLs, not Unix permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"storefront":"us"}`), 0o644); err != nil { //nolint:gosec // intentionally permissive to test tightening
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // intentionally permissive to test tightening
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.AppleUserToken = "secret-token"
+	if err := cfg.Save(""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("file permissions after Save = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestSave_ConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			c := &config.Config{
+				AppleUserToken: "tok",
+				StoreFront:     "us",
+				AuthPort:       7777 + idx,
+				Provider:       "apple",
+				Theme:          "default",
+			}
+			if err := c.Save(path); err != nil {
+				t.Errorf("Save(%d): %v", idx, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load after concurrent Save: %v", err)
+	}
+	if loaded.AppleUserToken != "tok" {
+		t.Errorf("AppleUserToken = %q, want tok", loaded.AppleUserToken)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.json" {
+		t.Errorf("unexpected leftover files in config dir: %v", entries)
+	}
+}
+
+func TestSave_PreservesSymlink(t *testing.T) {
+	targetDir := t.TempDir()
+	targetPath := filepath.Join(targetDir, "dotfiles-config.json")
+	if err := os.WriteFile(targetPath, []byte(`{"storefront":"us"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	linkDir := t.TempDir()
+	linkPath := filepath.Join(linkDir, "config.json")
+	if err := os.Symlink(targetPath, linkPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	cfg, err := config.Load(linkPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	cfg.StoreFront = "it"
+	if err := cfg.Save(""); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatalf("Lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("Save replaced the symlink with a regular file")
+	}
+	loaded, err := config.Load(targetPath)
+	if err != nil {
+		t.Fatalf("Load target: %v", err)
+	}
+	if loaded.StoreFront != "it" {
+		t.Errorf("target StoreFront = %q, want it", loaded.StoreFront)
+	}
 }
