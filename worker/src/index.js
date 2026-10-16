@@ -3,8 +3,8 @@
 // Signs short-lived Apple Music developer tokens (ES256 JWT) so the vibez
 // binary does not have to ship one. The MusicKit private key lives only in
 // this Worker's secrets; clients get a token that expires in TOKEN_TTL_SECONDS
-// and fetch a fresh one on demand, so rotating the key or cutting off abuse
-// never needs a vibez release.
+// and fetch a fresh one on demand, so rotating the Apple key never needs a
+// vibez release.
 //
 // The token is not secret from whoever runs vibez (MusicKit JS needs it in the
 // page), so the gate below limits abuse; it does not make the token private.
@@ -12,7 +12,7 @@
 // Secrets: APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KEY (PEM, PKCS#8 .p8
 // contents), CLIENT_KEY (shared header value baked into release builds).
 
-export const TOKEN_TTL_SECONDS = 24 * 60 * 60;
+export const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60;
 // A signed token is reused for this long, so a burst of clients costs one
 // signature instead of one each.
 const REUSE_SECONDS = 60 * 60;
@@ -88,16 +88,16 @@ export default {
     if (url.pathname !== "/v1/token") return json({ error: "not found" }, 404);
     if (request.method !== "GET") return json({ error: "method not allowed" }, 405, { allow: "GET" });
 
+    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+    const { success } = await env.RATE_LIMITER.limit({ key: ip });
+    if (!success) return json({ error: "rate limited" }, 429, { "retry-after": "60" });
+
     // Shared header: keeps drive-by scanners out. It is baked into release
     // builds, so it is not proof of identity.
     const given = request.headers.get("x-vibez-client") ?? "";
     if (!env.CLIENT_KEY || !timingSafeEqual(given, env.CLIENT_KEY)) {
       return json({ error: "unauthorized" }, 401);
     }
-
-    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
-    const { success } = await env.RATE_LIMITER.limit({ key: ip });
-    if (!success) return json({ error: "rate limited" }, 429, { "retry-after": "60" });
 
     const nowSec = Math.floor(Date.now() / 1000);
     if (!cached || cached.exp - nowSec < TOKEN_TTL_SECONDS - REUSE_SECONDS) {

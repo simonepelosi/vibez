@@ -37,7 +37,7 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 func TestBrokerToken_FetchesAndCaches(t *testing.T) {
 	now := time.Now()
 	var hits atomic.Int32
-	srv := brokerServer(t, "k", fakeJWT, now.Add(24*time.Hour), &hits)
+	srv := brokerServer(t, "k", fakeJWT, now.Add(7*24*time.Hour), &hits)
 	cache := filepath.Join(t.TempDir(), "sub", "devtoken.json")
 
 	got, err := brokerToken(srv.URL, "k", cache, now)
@@ -71,7 +71,7 @@ func TestBrokerToken_FetchesAndCaches(t *testing.T) {
 func TestBrokerToken_RefetchesNearExpiry(t *testing.T) {
 	now := time.Now()
 	var hits atomic.Int32
-	srv := brokerServer(t, "k", fakeJWT, now.Add(24*time.Hour), &hits)
+	srv := brokerServer(t, "k", fakeJWT, now.Add(7*24*time.Hour), &hits)
 	cache := filepath.Join(t.TempDir(), "devtoken.json")
 	if err := writeCache(cache, cachedToken{Token: "old.old.old", ExpiresAt: now.Add(refreshBefore / 2).Unix()}); err != nil {
 		t.Fatal(err)
@@ -119,6 +119,8 @@ func TestFetchToken_RejectsBadResponses(t *testing.T) {
 	now := time.Now()
 	cases := map[string]string{
 		"malformed token": `{"token":"not-a-jwt","expires_at":` + itoa(now.Add(time.Hour).Unix()) + `}`,
+		"empty segment":   `{"token":"a..c","expires_at":` + itoa(now.Add(time.Hour).Unix()) + `}`,
+		"js injection":    `{"token":"a.b.';alert(1)//","expires_at":` + itoa(now.Add(time.Hour).Unix()) + `}`,
 		"expired token":   `{"token":"` + fakeJWT + `","expires_at":` + itoa(now.Add(-time.Hour).Unix()) + `}`,
 		"not json":        `<html>`,
 	}
@@ -209,7 +211,7 @@ func TestBrokerToken_RetriesOnTransientErrors(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"token":"` + fakeJWT + `","expires_at":` + itoa(now.Add(24*time.Hour).Unix()) + `}`))
+		_, _ = w.Write([]byte(`{"token":"` + fakeJWT + `","expires_at":` + itoa(now.Add(7*24*time.Hour).Unix()) + `}`))
 	}))
 	defer srv.Close()
 
@@ -267,7 +269,7 @@ func TestBrokerToken_DoesNotRetryPermanentErrors(t *testing.T) {
 	}
 }
 
-func TestBrokerToken_ExhaustsRetriesAndFallsBackToCache(t *testing.T) {
+func TestBrokerToken_SingleAttemptWhenFallingBackToValidCache(t *testing.T) {
 	origBackoff := retryBackoff
 	retryBackoff = time.Millisecond
 	t.Cleanup(func() { retryBackoff = origBackoff })
@@ -294,14 +296,14 @@ func TestBrokerToken_ExhaustsRetriesAndFallsBackToCache(t *testing.T) {
 	if tok != fallbackJWT {
 		t.Errorf("got %q, want cached token", tok)
 	}
-	if hits.Load() != maxFetchAttempts {
-		t.Errorf("hits = %d, want %d", hits.Load(), maxFetchAttempts)
+	if hits.Load() != 1 {
+		t.Errorf("hits = %d, want 1 (should not multi-retry when a valid cache exists)", hits.Load())
 	}
 
 	logs := BrokerLogs()
 	foundFallback := false
 	for _, l := range logs {
-		if strings.Contains(l, "all fetch attempts failed, falling back to unexpired cached token") {
+		if strings.Contains(l, "fetch failed, falling back to unexpired cached token") {
 			foundFallback = true
 			break
 		}

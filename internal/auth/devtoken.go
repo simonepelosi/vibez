@@ -22,8 +22,8 @@ import (
 //
 //	-X 'github.com/simone-vibes/vibez/internal/auth.devToken=<jwt>'
 //
-// When empty the user must set apple_developer_token in their config file.
-// garble -literals obfuscates this string so it does not appear in plaintext.
+// When empty the user must set apple_developer_token in their config file or
+// use a build configured with tokenURL.
 var devToken string //nolint:gochecknoglobals // intentionally set via ldflags
 
 // tokenURL and clientKey are injected at build time via -ldflags by release
@@ -35,20 +35,25 @@ var devToken string //nolint:gochecknoglobals // intentionally set via ldflags
 //
 // The token is not secret from whoever runs vibez (MusicKit JS needs it in the
 // page); fetching it keeps the signing key off the binary, lets a leaked token
-// expire within a day and lets the key rotate without a release.
+// expire within days and lets the Apple key rotate without a release.
 var (
 	tokenURL  string //nolint:gochecknoglobals // intentionally set via ldflags
 	clientKey string //nolint:gochecknoglobals // intentionally set via ldflags
 )
 
 const (
-	// refreshBefore is how close to expiry a cached token stops being reused.
-	refreshBefore = 2 * time.Hour
-	// fetchTimeout bounds the startup round trip.
+	// refreshBefore is how close to expiry a cached token stops being reused
+	// without trying the broker first. With a 7-day Worker TTL, refreshing at
+	// 3 days guarantees every session starts with at least 3 days of token life.
+	refreshBefore = 72 * time.Hour
+	// fetchTimeout bounds a cold-start round trip when no valid cached token exists.
 	fetchTimeout = 5 * time.Second
+	// refreshTimeout bounds an opportunistic refresh when a valid cached token
+	// is available to fall back on, keeping offline/slow-broker startup fast.
+	refreshTimeout = 2 * time.Second
 	// maxTokenResponse bounds the broker response body.
 	maxTokenResponse = 8 << 10
-	// maxFetchAttempts is the maximum number of attempts for broker requests.
+	// maxFetchAttempts is the maximum number of attempts for cold-start broker requests.
 	maxFetchAttempts = 3
 )
 
@@ -124,7 +129,29 @@ type cachedToken struct {
 }
 
 func (c cachedToken) validFor(now time.Time, d time.Duration) bool {
-	return c.Token != "" && time.Unix(c.ExpiresAt, 0).After(now.Add(d))
+	return isValidJWT(c.Token) && time.Unix(c.ExpiresAt, 0).After(now.Add(d))
+}
+
+// isValidJWT checks that tok has three non-empty base64url segments.
+// Because the developer token is rendered into musickit.html via text/template,
+// restricting it to the base64url alphabet prevents template/JS injection.
+func isValidJWT(tok string) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for i := 0; i < len(p); i++ {
+			c := p[i]
+			if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 type nonRetryableError struct{ error }
@@ -142,29 +169,43 @@ func isPermanentError(err error) bool {
 func brokerToken(endpoint, key, cache string, now time.Time) (string, error) {
 	cached, _ := readCache(cache)
 	if cached.validFor(now, refreshBefore) {
-		remaining := time.Until(time.Unix(cached.ExpiresAt, 0)).Round(time.Minute)
+		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] using cached developer token (valid for %v)", remaining))
 		return cached.Token, nil
 	}
 
-	if cached.validFor(now, 0) {
-		remaining := time.Until(time.Unix(cached.ExpiresAt, 0)).Round(time.Minute)
+	hasFallback := cached.validFor(now, 0)
+	if hasFallback {
+		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] cached token expiring soon (%v remaining), fetching fresh token from %s", remaining, endpoint))
 	} else {
 		logBroker(fmt.Sprintf("[broker] fetching fresh developer token from %s", endpoint))
 	}
 
-	fetched, err := fetchTokenWithRetry(endpoint, key, now)
+	var (
+		fetched cachedToken
+		err     error
+	)
+	if hasFallback {
+		// When a working cached token is available, make a single fast attempt
+		// rather than blocking startup across multiple retries and backoffs.
+		fetched, err = fetchTokenWithTimeout(endpoint, key, now, refreshTimeout)
+		if err != nil {
+			logBroker(fmt.Sprintf("[broker] refresh attempt failed: %v", err))
+		}
+	} else {
+		fetched, err = fetchTokenWithRetry(endpoint, key, now)
+	}
 	if err == nil {
-		validity := time.Until(time.Unix(fetched.ExpiresAt, 0)).Round(time.Minute)
+		validity := time.Unix(fetched.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] fresh developer token received (valid for %v)", validity))
 		_ = writeCache(cache, fetched)
 		return fetched.Token, nil
 	}
 
-	if cached.validFor(now, 0) {
-		remaining := time.Until(time.Unix(cached.ExpiresAt, 0)).Round(time.Minute)
-		logBroker(fmt.Sprintf("[broker] all fetch attempts failed, falling back to unexpired cached token (valid for %v)", remaining))
+	if hasFallback {
+		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
+		logBroker(fmt.Sprintf("[broker] fetch failed, falling back to unexpired cached token (valid for %v)", remaining))
 		return cached.Token, nil
 	}
 
@@ -195,10 +236,15 @@ func fetchTokenWithRetry(endpoint, key string, now time.Time) (cachedToken, erro
 	return cachedToken{}, lastErr
 }
 
-// fetchToken asks the broker for a token. The endpoint must be HTTPS, or HTTP
-// on a loopback host so tests can use httptest. Redirects are refused: the
-// client key must not follow a redirect to another host.
+// fetchToken asks the broker for a token using the default cold-start timeout.
 func fetchToken(endpoint, key string, now time.Time) (cachedToken, error) {
+	return fetchTokenWithTimeout(endpoint, key, now, fetchTimeout)
+}
+
+// fetchTokenWithTimeout asks the broker for a token. The endpoint must be HTTPS,
+// or HTTP on a loopback host so tests can use httptest. Redirects are refused:
+// the client key must not follow a redirect to another host.
+func fetchTokenWithTimeout(endpoint, key string, now time.Time, timeout time.Duration) (cachedToken, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return cachedToken{}, nonRetryableError{fmt.Errorf("token url: %w", err)}
@@ -207,7 +253,7 @@ func fetchToken(endpoint, key string, now time.Time) (cachedToken, error) {
 		return cachedToken{}, nonRetryableError{errors.New("token url must be https")}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
@@ -217,7 +263,7 @@ func fetchToken(endpoint, key string, now time.Time) (cachedToken, error) {
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{
-		Timeout:       fetchTimeout,
+		Timeout:       timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
@@ -240,7 +286,7 @@ func fetchToken(endpoint, key string, now time.Time) (cachedToken, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTokenResponse)).Decode(&out); err != nil {
 		return cachedToken{}, fmt.Errorf("token broker response: %w", err)
 	}
-	if strings.Count(out.Token, ".") != 2 {
+	if !isValidJWT(out.Token) {
 		return cachedToken{}, nonRetryableError{errors.New("token broker returned a malformed token")}
 	}
 	if !time.Unix(out.ExpiresAt, 0).After(now) {
@@ -283,15 +329,30 @@ func writeCache(path string, c cachedToken) error {
 	if path == "" {
 		return errors.New("no cache dir")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	f, err := os.CreateTemp(dir, "devtoken-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

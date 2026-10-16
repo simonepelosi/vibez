@@ -4,13 +4,14 @@ A small Cloudflare Worker that signs short-lived Apple Music developer tokens,
 so release binaries do not embed one.
 
 - `GET /v1/token` with the header `X-Vibez-Client: <CLIENT_KEY>` returns
-  `{"token": "<jwt>", "expires_at": <unix>}`. Tokens last 24 hours.
+  `{"token": "<jwt>", "expires_at": <unix>}`. Tokens last 7 days and are refreshed
+  by clients once under 3 days remain.
 - The MusicKit private key (`.p8`) lives only in this Worker's secrets. It is not
   in GitHub, in the repo, or in any binary.
 - Requests are rate limited per IP. The client key keeps drive-by scanners out; it
   ships in release builds, so it is not proof of identity.
 - The token is not secret from whoever runs vibez (MusicKit JS needs it in the
-  page). Short lifetimes and the ability to rotate are what limit a leak.
+  page). Short lifetimes and the ability to rotate the Apple key are what limit a leak.
 
 The client side is `internal/auth/devtoken.go`: it fetches a token at startup,
 caches it in the user cache dir, and falls back to a cached token that has not yet
@@ -61,7 +62,7 @@ gh variable set VIBEZ_TOKEN_URL --body "https://vibez-token.<subdomain>.workers.
 1. Create a new MusicKit key in the Apple Developer portal.
 2. `wrangler secret put APPLE_KEY_ID` and `APPLE_PRIVATE_KEY` with the new values.
 3. Revoke the old key. No vibez release is needed: clients fetch a fresh token
-   once their cached one is within two hours of expiring, so within a day.
+   once their cached one has under three days left.
 
 ## Test
 
