@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Enhanced lyrics lookup, word-level highlighting, and line seeking** — the LRCLIB client now falls back to `/api/search` with normalized track/artist titles (stripping `(feat. …)`, `[Remastered …]`, and edition suffixes) when exact `/api/get` returns 404, parses inline `<mm:ss.xx>` word timestamps for progressive karaoke highlighting on the active line, and supports pressing `Enter` on a scrolled lyric line to seek playback directly to its timestamp.
+
 ### Changed
 - **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make release`) and a configured `apple_developer_token` work as before. Refs #167.
 

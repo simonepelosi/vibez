@@ -15,11 +15,18 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+// Word is a single timed word or syllable span within an enhanced LRC line.
+type Word struct {
+	Start time.Duration
+	Text  string
+}
+
 // Line is a single lyric line with an optional start timestamp.
 // For plain (unsynced) lyrics, Start is always 0.
 type Line struct {
 	Start time.Duration
 	Text  string
+	Words []Word // populated when enhanced LRC (<mm:ss.xx>) word timestamps are present
 }
 
 // Result holds the parsed lyrics returned by the client.
@@ -29,21 +36,61 @@ type Result struct {
 	Plain  string // original plain-text fallback (may be empty)
 }
 
+const defaultBaseURL = "https://lrclib.net"
+
 // Client is a thin HTTP wrapper around the LRCLIB API.
 type Client struct {
-	http *http.Client
+	http    *http.Client
+	baseURL string
 }
 
 // NewClient returns a Client ready for use.
 func NewClient() *Client {
-	return &Client{http: &http.Client{Timeout: 10 * time.Second}}
+	return &Client{
+		http:    &http.Client{Timeout: 10 * time.Second},
+		baseURL: defaultBaseURL,
+	}
+}
+
+type lrclibTrack struct {
+	TrackName    string  `json:"trackName"`
+	ArtistName   string  `json:"artistName"`
+	AlbumName    string  `json:"albumName"`
+	Duration     float64 `json:"duration"`
+	SyncedLyrics string  `json:"syncedLyrics"`
+	PlainLyrics  string  `json:"plainLyrics"`
+	Instrumental bool    `json:"instrumental"`
 }
 
 // Fetch retrieves lyrics for a track. It prefers synced (LRC) lyrics and
-// falls back to plain lyrics when timing data is unavailable.
+// falls back to plain lyrics when timing data is unavailable. When an exact
+// lookup against /api/get fails (e.g. due to Apple Music "(Deluxe Edition)" or
+// "(feat. ...)" suffixes), it falls back to /api/search with normalized names.
 // duration is used as a search hint; pass 0 if unknown.
 func (c *Client) Fetch(ctx context.Context, artist, title, album string, duration time.Duration) (*Result, error) {
-	u, _ := url.Parse("https://lrclib.net/api/get")
+	res, err := c.fetchExact(ctx, artist, title, album, duration)
+	if err == nil {
+		return res, nil
+	}
+	// Fall back to /api/search when exact match is not found.
+	if searchRes, searchErr := c.fetchSearch(ctx, artist, title, duration); searchErr == nil {
+		return searchRes, nil
+	}
+	return nil, err
+}
+
+func (c *Client) base() string {
+	if c.baseURL != "" {
+		return strings.TrimRight(c.baseURL, "/")
+	}
+	return defaultBaseURL
+}
+
+func (c *Client) fetchExact(ctx context.Context, artist, title, album string, duration time.Duration) (*Result, error) {
+	u, err := url.Parse(c.base() + "/api/get")
+	if err != nil {
+		return nil, err
+	}
 	q := u.Query()
 	q.Set("artist_name", artist)
 	q.Set("track_name", title)
@@ -74,15 +121,110 @@ func (c *Client) Fetch(ctx context.Context, artist, title, album string, duratio
 		return nil, fmt.Errorf("lrclib: status %d", resp.StatusCode)
 	}
 
-	var data struct {
-		SyncedLyrics string `json:"syncedLyrics"`
-		PlainLyrics  string `json:"plainLyrics"`
-		Instrumental bool   `json:"instrumental"`
-	}
+	var data lrclibTrack
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, err
 	}
+	return buildResult(data)
+}
 
+func (c *Client) fetchSearch(ctx context.Context, artist, title string, duration time.Duration) (*Result, error) {
+	cleanedTitle := cleanSearchTerm(title)
+	cleanedArtist := cleanSearchTerm(artist)
+	if cleanedTitle == "" && cleanedArtist == "" {
+		return nil, fmt.Errorf("lyrics not found")
+	}
+
+	u, err := url.Parse(c.base() + "/api/search")
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	if cleanedTrack := cleanedTitle; cleanedTrack != "" {
+		q.Set("track_name", cleanedTrack)
+	}
+	if cleanedArtist != "" {
+		q.Set("artist_name", cleanedArtist)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil) //nolint:gosec // G107: URL is constructed from a parsed constant base with safe query params
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "vibez")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("lrclib search: status %d", resp.StatusCode)
+	}
+
+	var candidates []lrclibTrack
+	if err := json.NewDecoder(resp.Body).Decode(&candidates); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("lyrics not found")
+	}
+
+	best := pickBestCandidate(candidates, duration)
+	if best == nil {
+		return nil, fmt.Errorf("lyrics not found")
+	}
+	return buildResult(*best)
+}
+
+// pickBestCandidate selects the best matching track from a list of LRCLIB
+// search results, preferring tracks whose duration is close to targetDur and
+// that have time-synced lyrics.
+func pickBestCandidate(candidates []lrclibTrack, targetDur time.Duration) *lrclibTrack {
+	targetSec := targetDur.Seconds()
+	var best *lrclibTrack
+	bestScore := -1
+
+	for i := range candidates {
+		cand := &candidates[i]
+		if !cand.Instrumental && cand.SyncedLyrics == "" && cand.PlainLyrics == "" {
+			continue
+		}
+		score := 0
+		if targetSec > 0 && cand.Duration > 0 {
+			diff := cand.Duration - targetSec
+			if diff < 0 {
+				diff = -diff
+			}
+			switch {
+			case diff <= 2:
+				score += 40
+			case diff <= 5:
+				score += 25
+			case diff <= 15:
+				score += 10
+			default:
+				continue // reject candidates whose duration differs by >15s
+			}
+		} else {
+			score += 10
+		}
+		if cand.SyncedLyrics != "" {
+			score += 20
+		} else if cand.PlainLyrics != "" || cand.Instrumental {
+			score += 5
+		}
+		if score > bestScore {
+			bestScore = score
+			best = cand
+		}
+	}
+	return best
+}
+
+func buildResult(data lrclibTrack) (*Result, error) {
 	if data.Instrumental {
 		return &Result{Lines: []Line{{Text: "♪  Instrumental  ♪"}}, Plain: "♪ Instrumental ♪"}, nil
 	}
@@ -105,7 +247,34 @@ func (c *Client) Fetch(ctx context.Context, artist, title, album string, duratio
 	return nil, fmt.Errorf("no lyrics available")
 }
 
-// parseLRC parses lines in LRC format: [mm:ss.xx] text
+// cleanSearchTerm strips parenthetical/bracketed metadata suffixes commonly
+// added by Apple Music (e.g. "(feat. ...)", "[Remastered 2021]", "- Single")
+// so LRCLIB's /api/search can match the canonical song title.
+func cleanSearchTerm(s string) string {
+	s = strings.TrimSpace(s)
+	for _, pair := range [][2]string{{"(", ")"}, {"[", "]"}} {
+		for {
+			start := strings.Index(s, pair[0])
+			if start < 0 {
+				break
+			}
+			end := strings.Index(s[start:], pair[1])
+			if end < 0 {
+				break
+			}
+			s = strings.TrimSpace(s[:start] + " " + s[start+end+len(pair[1]):])
+		}
+	}
+	for _, suffix := range []string{" - Single", " - EP"} {
+		if idx := strings.Index(strings.ToLower(s), strings.ToLower(suffix)); idx > 0 {
+			s = strings.TrimSpace(s[:idx])
+		}
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// parseLRC parses lines in standard LRC format ("[mm:ss.xx] text") as well as
+// enhanced LRC format with inline word timestamps ("[mm:ss.xx] <mm:ss.xx>word ...").
 func parseLRC(lrc string) ([]Line, error) {
 	var lines []Line
 	for raw := range strings.SplitSeq(lrc, "\n") {
@@ -121,9 +290,72 @@ func parseLRC(lrc string) ([]Line, error) {
 		if err != nil {
 			continue
 		}
-		lines = append(lines, Line{Start: d, Text: strings.TrimSpace(provider.Clean(raw[idx+1:]))})
+		cleaned := strings.TrimSpace(provider.Clean(raw[idx+1:]))
+		text, words := parseInlineWords(cleaned, d)
+		lines = append(lines, Line{Start: d, Text: text, Words: words})
 	}
 	return lines, nil
+}
+
+// parseInlineWords extracts enhanced LRC word timestamps ("<mm:ss.xx>") from a
+// cleaned lyric line. When no valid inline timestamps are present, it returns
+// the original text and a nil Words slice.
+func parseInlineWords(s string, lineStart time.Duration) (string, []Word) {
+	if !strings.Contains(s, "<") || !strings.Contains(s, ">") {
+		return s, nil
+	}
+
+	var words []Word
+	var plainParts []string
+	curStart := lineStart
+	hasTimedWord := false
+	rest := s
+
+	for len(rest) > 0 {
+		openIdx := strings.IndexByte(rest, '<')
+		if openIdx < 0 {
+			text := strings.TrimSpace(rest)
+			if text != "" {
+				words = append(words, Word{Start: curStart, Text: text})
+				plainParts = append(plainParts, text)
+			}
+			break
+		}
+		if openIdx > 0 {
+			prefix := strings.TrimSpace(rest[:openIdx])
+			if prefix != "" {
+				words = append(words, Word{Start: curStart, Text: prefix})
+				plainParts = append(plainParts, prefix)
+			}
+		}
+		closeIdx := strings.IndexByte(rest[openIdx:], '>')
+		if closeIdx < 0 {
+			// Unclosed '<': treat remainder as literal text.
+			text := strings.TrimSpace(rest[openIdx:])
+			if text != "" {
+				words = append(words, Word{Start: curStart, Text: text})
+				plainParts = append(plainParts, text)
+			}
+			break
+		}
+		tagContent := rest[openIdx+1 : openIdx+closeIdx]
+		if ts, err := parseLRCTimestamp(tagContent); err == nil {
+			curStart = ts
+			hasTimedWord = true
+			rest = rest[openIdx+closeIdx+1:]
+		} else {
+			// Not a valid timestamp tag — keep it as literal text up to '>'.
+			literal := rest[:openIdx+closeIdx+1]
+			words = append(words, Word{Start: curStart, Text: strings.TrimSpace(literal)})
+			plainParts = append(plainParts, strings.TrimSpace(literal))
+			rest = rest[openIdx+closeIdx+1:]
+		}
+	}
+
+	if !hasTimedWord {
+		return s, nil
+	}
+	return strings.Join(plainParts, " "), words
 }
 
 // parseLRCTimestamp parses "mm:ss.xx" or "mm:ss" into a Duration.
