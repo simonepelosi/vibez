@@ -244,7 +244,7 @@ func (p *Player) SetUserToken(token string) error {
 	p.mu.Lock()
 	p.userToken = token
 	p.mu.Unlock()
-	_, err := p.page.Evaluate(fmt.Sprintf(`MusicKit.getInstance().musicUserToken = %q`, token))
+	_, err := p.page.Evaluate(fmt.Sprintf(`window.vibezSetUserToken ? window.vibezSetUserToken(%q) : (MusicKit.getInstance().musicUserToken = %q)`, token, token))
 	return err
 }
 

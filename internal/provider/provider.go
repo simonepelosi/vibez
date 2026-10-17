@@ -5,6 +5,21 @@ import (
 	"time"
 )
 
+// ArtworkPalette holds the dominant background and text colors extracted by
+// Apple Music for a track's artwork, formatted as "#rrggbb" hex strings.
+type ArtworkPalette struct {
+	BgColor    string
+	TextColor1 string
+	TextColor2 string
+	TextColor3 string
+	TextColor4 string
+}
+
+// HasColors reports whether the palette contains at least one usable accent color.
+func (p ArtworkPalette) HasColors() bool {
+	return p.TextColor1 != "" || p.TextColor2 != "" || p.TextColor3 != "" || p.TextColor4 != ""
+}
+
 type Track struct {
 	ID         string
 	CatalogID  string // catalog ID for playback; set for library tracks where ID is "i.XXXXX"
@@ -19,6 +34,25 @@ type Track struct {
 	// Zero means unknown.
 	DiscNumber  int
 	TrackNumber int
+	// Extended catalog metadata populated when available from Apple Music.
+	ContentRating        string         // "explicit", "clean", or ""
+	IsAppleDigitalMaster bool           // true when mastered as an Apple Digital Master
+	ReleaseDate          string         // ISO release date ("YYYY-MM-DD" or "YYYY")
+	ArtworkPalette       ArtworkPalette // per-artwork color palette from Apple Music
+}
+
+// ReleaseYear returns the 4-digit release year from ReleaseDate, or "" if unavailable.
+func (t Track) ReleaseYear() string {
+	if len(t.ReleaseDate) < 4 {
+		return ""
+	}
+	year := t.ReleaseDate[:4]
+	for i := range 4 {
+		if year[i] < '0' || year[i] > '9' {
+			return ""
+		}
+	}
+	return year
 }
 
 // RecommendationItem is a single album or playlist entry inside a recommendation group.
