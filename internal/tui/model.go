@@ -753,9 +753,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.appendLog(fmt.Sprintf("[lyrics] not found: %v", msg.err))
 			} else {
+				m.lyricsP.m.SetPosition(m.playerState.Position)
 				m.appendLog("[lyrics] loaded")
 			}
 		}
+
+	case views.LyricsSeekMsg:
+		m.playerState.Position = msg.Position
+		m.lyricsP.m.SetPosition(msg.Position)
+		m.appendLog(fmt.Sprintf("[lyrics] seek → %s", views.FormatDuration(msg.Position)))
+		pos := msg.Position
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error { return p.Seek(pos) }))
 
 	case feedResultMsg:
 		if msg.err != nil {
@@ -3634,6 +3642,7 @@ func (m *Model) statusNavLines(w int) []string {
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
 			parts = []string{
 				styles.ModeNormal.Render("LYRICS"),
+				accent.Render("Enter") + muted.Render(" seek"),
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("g/G") + muted.Render(" top/bottom"),
 				accent.Render("esc") + muted.Render(" close"),
