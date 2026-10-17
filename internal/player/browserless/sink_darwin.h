@@ -8,7 +8,7 @@ extern "C" {
 typedef void* vibez_avplayer_t;
 
 typedef void (*vibez_eos_cb_t)(void* user_data);
-typedef void (*vibez_err_cb_t)(void* user_data, const char* err_msg);
+typedef void (*vibez_err_cb_t)(void* user_data, char* err_msg);
 
 vibez_avplayer_t vibez_avplayer_create(void* user_data, vibez_eos_cb_t on_eos, vibez_err_cb_t on_err);
 void vibez_avplayer_play_uri(vibez_avplayer_t handle, const char* uri);

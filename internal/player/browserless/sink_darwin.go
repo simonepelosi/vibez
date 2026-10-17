@@ -9,7 +9,7 @@ package browserless
 #include <stdlib.h>
 
 extern void vibezDarwinOnEOS(void* userData);
-extern void vibezDarwinOnError(void* userData, const char* errMsg);
+extern void vibezDarwinOnError(void* userData, char* errMsg);
 
 static inline vibez_avplayer_t vibez_create_darwin_sink(void* userData) {
     return vibez_avplayer_create(userData, vibezDarwinOnEOS, vibezDarwinOnError);

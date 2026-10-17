@@ -28,7 +28,7 @@
         if (self.player && self.player.currentItem && self.player.currentItem.error) {
             desc = [self.player.currentItem.error localizedDescription];
         }
-        self.errCb(self.userData, [desc UTF8String]);
+        self.errCb(self.userData, (char*)[desc UTF8String]);
     }
 }
 
