@@ -23,6 +23,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/art"
+	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/tui/views"
 )
 
@@ -4248,5 +4249,76 @@ func TestNew_ScanNoticeOnlyLoggedWhenTracksWereFound(t *testing.T) {
 	}
 	if !logContains(m, notice) {
 		t.Errorf("debugLog = %v, want an entry carrying the notice", m.debugLog)
+	}
+}
+
+func TestNowPlaying_RendersExtendedBadgesAndEnrichesFromQueue(t *testing.T) {
+	m := newModel(nil)
+	m.queueTracks = []provider.Track{
+		{
+			ID:                   "617154366",
+			Title:                "Get Lucky",
+			Artist:               "Daft Punk",
+			Album:                "Random Access Memories",
+			Duration:             4 * time.Minute,
+			ContentRating:        "explicit",
+			IsAppleDigitalMaster: true,
+			ReleaseDate:          "2013-04-19",
+			ArtworkPalette: provider.ArtworkPalette{
+				BgColor:    "#090d0e",
+				TextColor1: "#cde0f2",
+				TextColor2: "#acc1e1",
+			},
+		},
+	}
+	m.queueIDs = []string{"617154366"}
+
+	// Simulate playerStateMsg carrying only basic JS player fields.
+	updated, _ := m.Update(playerStateMsg{
+		Playing: true,
+		Track: &provider.Track{
+			ID:       "617154366",
+			Title:    "Get Lucky",
+			Artist:   "Daft Punk",
+			Album:    "Random Access Memories",
+			Duration: 4 * time.Minute,
+		},
+	})
+	m = updated.(*Model)
+	defer styles.ClearArtworkPalette()
+
+	joined := strings.Join(m.nowPlayingTextLines(100, 12), "\n")
+	for _, want := range []string{"🅴", "Random Access Memories (2013)", "✦ Master"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("nowPlayingTextLines missing %q:\n%s", want, joined)
+		}
+	}
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != "#cde0f2" {
+		t.Errorf("ProgressGradStops[0] = %q, want #cde0f2 from track ArtworkPalette", got)
+	}
+}
+
+func TestEnrichTrackFromQueue_DoesNotCrossMatchSameTitleDifferentAlbum(t *testing.T) {
+	m := newModel(nil)
+	m.queueTracks = []provider.Track{
+		{
+			ID:                   "111",
+			Title:                "One",
+			Artist:               "Metallica",
+			Album:                "...And Justice for All",
+			ContentRating:        "explicit",
+			IsAppleDigitalMaster: true,
+			ReleaseDate:          "1988-08-25",
+		},
+	}
+	playing := &provider.Track{
+		ID:     "222",
+		Title:  "One",
+		Artist: "U2",
+		Album:  "Achtung Baby",
+	}
+	m.enrichTrackFromQueue(playing)
+	if playing.ContentRating != "" || playing.IsAppleDigitalMaster || playing.ReleaseDate != "" {
+		t.Errorf("enrichTrackFromQueue cross-matched unrelated track with same title: %+v", playing)
 	}
 }

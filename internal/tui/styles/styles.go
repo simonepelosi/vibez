@@ -2,6 +2,7 @@ package styles
 
 import (
 	"image/color"
+	"math"
 
 	"charm.land/lipgloss/v2"
 )
@@ -69,6 +70,8 @@ var (
 	NowPlayingArtist = lipgloss.NewStyle().
 				Foreground(ColorPrimary)
 
+	NowPlayingTrackArtist = lipgloss.NewStyle().
+				Foreground(ColorPrimary)
 	NowPlayingAlbum = lipgloss.NewStyle().
 			Foreground(ColorMuted)
 
@@ -222,6 +225,7 @@ func Apply(t Theme) {
 	NowPlayingTitle = lipgloss.NewStyle().Italic(true).Foreground(ColorFg)
 	NowPlayingTitlePlaying = lipgloss.NewStyle().Italic(true).Bold(true).Foreground(ColorGlow7)
 	NowPlayingArtist = lipgloss.NewStyle().Foreground(ColorPrimary)
+	NowPlayingTrackArtist = lipgloss.NewStyle().Foreground(ColorPrimary)
 	NowPlayingAlbum = lipgloss.NewStyle().Foreground(ColorMuted)
 	ControlActive = lipgloss.NewStyle().Foreground(ColorActive)
 	Playing = lipgloss.NewStyle().Foreground(ColorGlow5)
@@ -253,6 +257,74 @@ func Apply(t Theme) {
 	BearStyle = lipgloss.NewStyle().Foreground(ColorBear)
 	NoteStyle = lipgloss.NewStyle().Foreground(ColorAccentWarm)
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)
+}
+
+// ApplyArtworkPalette dynamically tints the Now Playing accent styles and
+// progress bar gradient using Apple Music's per-track artwork color palette.
+// Only colors that have legible contrast (WCAG >= 3.0) against the active theme
+// background ColorBg are accepted; if none qualify (e.g. dark text colors from
+// a pale cover on a dark theme), the active theme defaults are restored.
+func ApplyArtworkPalette(_, text1, text2, text3, text4 string) {
+	var accents []color.Color
+	for _, hex := range []string{text1, text2, text3, text4} {
+		if validColor(hex) {
+			c := lipgloss.Color(hex)
+			if contrastRatio(c, ColorBg) >= 3.0 {
+				accents = append(accents, c)
+			}
+		}
+	}
+	if len(accents) == 0 {
+		ClearArtworkPalette()
+		return
+	}
+	c1 := accents[0]
+	c2 := LerpColor(c1, ColorGlow6, 0.5)
+	if len(accents) >= 2 {
+		c2 = accents[1]
+	}
+	c3 := LerpColor(c2, ColorLove, 0.5)
+	if len(accents) >= 3 {
+		c3 = accents[2]
+	}
+
+	NowPlayingTrackArtist = lipgloss.NewStyle().Foreground(c1)
+	NowPlayingTitlePlaying = lipgloss.NewStyle().
+		Italic(true).
+		Bold(true).
+		Foreground(LerpColor(c1, lipgloss.Color("#ffffff"), 0.35))
+	NowPlayingTime = lipgloss.NewStyle().Foreground(c2)
+	ProgressGradStops = []color.Color{c1, c2, c3}
+}
+
+// ClearArtworkPalette restores the Now Playing styles and progress gradient
+// stops to the active theme's base colors.
+func ClearArtworkPalette() {
+	NowPlayingTrackArtist = lipgloss.NewStyle().Foreground(ColorPrimary)
+	NowPlayingTitlePlaying = lipgloss.NewStyle().Italic(true).Bold(true).Foreground(ColorGlow7)
+	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
+	ProgressGradStops = []color.Color{ColorProgress, ColorGlow6, ColorLove}
+}
+
+func relativeLuminance(c color.Color) float64 {
+	r, g, b, _ := c.RGBA()
+	chanLum := func(v uint32) float64 {
+		s := float64(v>>8) / 255.0
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*chanLum(r) + 0.7152*chanLum(g) + 0.0722*chanLum(b)
+}
+
+func contrastRatio(a, b color.Color) float64 {
+	la := relativeLuminance(a)
+	lb := relativeLuminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
 }
 
 // LerpColor linearly interpolates between two colours by factor t ∈ [0,1].

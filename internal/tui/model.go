@@ -640,6 +640,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLog("[radio] max retries reached — giving up")
 			}
 		}
+		if s.Track != nil {
+			m.enrichTrackFromQueue(s.Track)
+		}
+		if s.Track == nil {
+			styles.ClearArtworkPalette()
+		}
 		if s.Track == nil || s.Track.ArtworkURL == "" {
 			if m.artwork.url != "" || m.artwork.img != nil || m.artwork.failed {
 				m.artworkGen++
@@ -655,6 +661,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
+			m.applyTrackPalette(s.Track)
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
 			// Log playParams so we can confirm which ID path MusicKit will use.
 			trackType := "catalog"
@@ -1049,6 +1056,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.PlayTracksMsg:
 		if msg.Track != nil {
 			m.playerState.Track = msg.Track
+			m.applyTrackPalette(msg.Track)
 		}
 		m.playerState.Loading = true
 		m.playerState.Playing = false
@@ -3332,6 +3340,88 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		}
 	}
 
+	trackLine := m.renderTrackTitleLine(t, contentW, true)
+	albumLine := m.renderAlbumMetaLine(t, contentW, true)
+	lines = append(lines, "", trackLine, albumLine, m.statusLine(contentW))
+	return lines
+}
+
+// enrichTrackFromQueue merges catalog metadata (content rating, digital master,
+// release date, artwork palette, genres) from the queued provider.Track into
+// the player-reported Track, since the JS player bridge only reports playback
+// fields (id, title, artist, album, artworkURL, duration).
+func (m *Model) enrichTrackFromQueue(t *provider.Track) {
+	if t == nil {
+		return
+	}
+	idx := enrichQueueIdx(m.queueTracks, t)
+	if idx < 0 || idx >= len(m.queueTracks) {
+		return
+	}
+	qt := m.queueTracks[idx]
+	if t.CatalogID == "" {
+		t.CatalogID = qt.CatalogID
+	}
+	if len(t.Genres) == 0 && len(qt.Genres) > 0 {
+		t.Genres = qt.Genres
+	}
+	if t.DiscNumber == 0 {
+		t.DiscNumber = qt.DiscNumber
+	}
+	if t.TrackNumber == 0 {
+		t.TrackNumber = qt.TrackNumber
+	}
+	if t.ContentRating == "" {
+		t.ContentRating = qt.ContentRating
+	}
+	if !t.IsAppleDigitalMaster && qt.IsAppleDigitalMaster {
+		t.IsAppleDigitalMaster = true
+	}
+	if t.ReleaseDate == "" {
+		t.ReleaseDate = qt.ReleaseDate
+	}
+	if !t.ArtworkPalette.HasColors() && qt.ArtworkPalette.HasColors() {
+		t.ArtworkPalette = qt.ArtworkPalette
+	}
+}
+
+// enrichQueueIdx locates the queued track matching playing for metadata
+// enrichment. Unlike playingQueueIdx (which falls back to Title alone),
+// enrichment requires either an exact PlaybackID/ID/CatalogID match or a full
+// Title+Artist+Album match so a different track with the same title cannot
+// lend its badges or artwork palette to the one that is playing.
+func enrichQueueIdx(tracks []provider.Track, playing *provider.Track) int {
+	if playing == nil {
+		return -1
+	}
+	playingID := views.PlaybackID(*playing)
+	for i, t := range tracks {
+		if views.PlaybackID(t) == playingID ||
+			(playing.ID != "" && (t.ID == playing.ID || t.CatalogID == playing.ID)) ||
+			(playing.CatalogID != "" && (t.ID == playing.CatalogID || t.CatalogID == playing.CatalogID)) {
+			return i
+		}
+	}
+	for i, t := range tracks {
+		if t.Title == playing.Title &&
+			(playing.Artist == "" || strings.EqualFold(t.Artist, playing.Artist)) &&
+			(playing.Album == "" || strings.EqualFold(t.Album, playing.Album)) {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) applyTrackPalette(t *provider.Track) {
+	if t == nil || !t.ArtworkPalette.HasColors() {
+		styles.ClearArtworkPalette()
+		return
+	}
+	p := t.ArtworkPalette
+	styles.ApplyArtworkPalette(p.BgColor, p.TextColor1, p.TextColor2, p.TextColor3, p.TextColor4)
+}
+
+func (m *Model) renderTrackTitleLine(t *provider.Track, contentW int, truncate bool) string {
 	muted := styles.QueueItemMuted
 	var titleStr string
 	if m.playerState.Playing || m.playerState.Loading {
@@ -3339,20 +3429,38 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 	} else {
 		titleStr = styles.NowPlayingTitle.Render(t.Title)
 	}
-	// Long metadata is truncated (ANSI-aware) so no row can overflow the
-	// panel and break the box border.
-	trackLine := centerStr(
-		ansi.Truncate(styles.NowPlayingArtist.Render(t.Artist)+muted.Render(" — ")+titleStr, contentW, "…"),
-		contentW,
-	)
+	if strings.EqualFold(t.ContentRating, "explicit") {
+		titleStr += " " + muted.Render("🅴")
+	}
+	line := styles.NowPlayingTrackArtist.Render(t.Artist) + muted.Render(" — ") + titleStr
+	if truncate {
+		line = ansi.Truncate(line, contentW, "…")
+	}
+	return centerStr(line, contentW)
+}
+
+func (m *Model) renderAlbumMetaLine(t *provider.Track, contentW int, truncate bool) string {
+	albumText := t.Album
+	if year := t.ReleaseYear(); year != "" && albumText != "" {
+		albumText += " (" + year + ")"
+	}
 	elapsed := views.FormatDuration(m.playerState.Position)
 	total := views.FormatDuration(t.Duration)
-	albumLine := centerStr(
-		ansi.Truncate(styles.NowPlayingAlbum.Render(t.Album+" • ")+styles.TimeStyle.Render(elapsed+" / "+total), contentW, "…"),
-		contentW,
-	)
-	lines = append(lines, "", trackLine, albumLine, m.statusLine(contentW))
-	return lines
+
+	var line string
+	if t.IsAppleDigitalMaster {
+		line = styles.NowPlayingAlbum.Render(albumText+" • ") +
+			styles.NowPlayingLabel.Render("✦ Master") +
+			styles.NowPlayingAlbum.Render(" • ") +
+			styles.NowPlayingTime.Render(elapsed+" / "+total)
+	} else {
+		line = styles.NowPlayingAlbum.Render(albumText+" • ") +
+			styles.NowPlayingTime.Render(elapsed+" / "+total)
+	}
+	if truncate {
+		line = ansi.Truncate(line, contentW, "…")
+	}
+	return centerStr(line, contentW)
 }
 
 // artRenderer picks the album-art renderer: dithered sextants where the
@@ -3397,27 +3505,8 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 		return lines
 	}
 
-	// Title: bright lavender while playing, softer gray while paused.
-	var titleStr string
-	if m.playerState.Playing || m.playerState.Loading {
-		titleStr = styles.NowPlayingTitlePlaying.Render(t.Title)
-	} else {
-		titleStr = styles.NowPlayingTitle.Render(t.Title)
-	}
-
-	// "Artist — Title" — centred
-	trackLine := centerStr(
-		styles.NowPlayingArtist.Render(t.Artist)+muted.Render(" — ")+titleStr,
-		contentW,
-	)
-
-	// "Album • elapsed / total" — centred
-	elapsed := views.FormatDuration(m.playerState.Position)
-	total := views.FormatDuration(t.Duration)
-	albumLine := centerStr(
-		styles.NowPlayingAlbum.Render(t.Album+" • ")+styles.TimeStyle.Render(elapsed+" / "+total),
-		contentW,
-	)
+	trackLine := m.renderTrackTitleLine(t, contentW, false)
+	albumLine := m.renderAlbumMetaLine(t, contentW, false)
 
 	// Progress bar — centred, slightly narrower than full width
 	barW := max(10, contentW-8)

@@ -175,3 +175,46 @@ func TestApply_UpdatesGlowPalette(t *testing.T) {
 	}
 	styles.Apply(styles.DefaultTheme())
 }
+
+func TestApplyArtworkPalette_AndClear(t *testing.T) {
+	styles.Apply(styles.DefaultTheme())
+	defStop0 := styles.ColorHex(styles.ProgressGradStops[0])
+
+	styles.ApplyArtworkPalette("#090d0e", "#cde0f2", "#acc1e1", "#a5b5c4", "#8b9db7")
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != "#cde0f2" {
+		t.Errorf("ProgressGradStops[0] after ApplyArtworkPalette = %q, want #cde0f2", got)
+	}
+	if got := styles.ColorHex(styles.ProgressGradStops[1]); got != "#acc1e1" {
+		t.Errorf("ProgressGradStops[1] after ApplyArtworkPalette = %q, want #acc1e1", got)
+	}
+
+	styles.ClearArtworkPalette()
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != defStop0 {
+		t.Errorf("ProgressGradStops[0] after ClearArtworkPalette = %q, want %q", got, defStop0)
+	}
+}
+
+func TestApplyArtworkPalette_SkipsLowContrastAndLeavesSharedArtistUntouched(t *testing.T) {
+	styles.Apply(styles.DefaultTheme())
+	defPrimary := styles.ColorHex(styles.NowPlayingArtist.GetForeground())
+	defStop0 := styles.ColorHex(styles.ProgressGradStops[0])
+
+	// Pale cover palette: near-black text colors have poor contrast on dark ColorBg.
+	styles.ApplyArtworkPalette("#f5f5f5", "#111214", "#18191c", "#202225", "#25272a")
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != defStop0 {
+		t.Errorf("ProgressGradStops[0] with low-contrast palette = %q, want theme default %q", got, defStop0)
+	}
+
+	// High-contrast palette tints NowPlayingTrackArtist & NowPlayingTime without mutating NowPlayingArtist.
+	styles.ApplyArtworkPalette("#090d0e", "#cde0f2", "#acc1e1", "", "")
+	if got := styles.ColorHex(styles.NowPlayingArtist.GetForeground()); got != defPrimary {
+		t.Errorf("NowPlayingArtist foreground = %q, want unchanged %q", got, defPrimary)
+	}
+	if got := styles.ColorHex(styles.NowPlayingTrackArtist.GetForeground()); got != "#cde0f2" {
+		t.Errorf("NowPlayingTrackArtist foreground = %q, want #cde0f2", got)
+	}
+	if got := styles.ColorHex(styles.NowPlayingTime.GetForeground()); got != "#acc1e1" {
+		t.Errorf("NowPlayingTime foreground = %q, want #acc1e1", got)
+	}
+	styles.ClearArtworkPalette()
+}

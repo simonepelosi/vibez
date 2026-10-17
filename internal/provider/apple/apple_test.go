@@ -1613,3 +1613,62 @@ func songJSONWithCatalog(id, catalogID, name, artist, album string, durationMs i
 	s["attributes"].(map[string]any)["playParams"] = map[string]any{"id": id, "kind": "song", "catalogId": catalogID}
 	return s
 }
+
+func TestToTrack_ExtendedMetadataAndPalette(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/me/library/songs"):
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"id": "i.1",
+						"attributes": map[string]any{
+							"name":                 "Get Lucky",
+							"artistName":           "Daft Punk",
+							"albumName":            "Random Access Memories",
+							"durationInMillis":     248000,
+							"contentRating":        "explicit",
+							"isAppleDigitalMaster": true,
+							"releaseDate":          "2013-04-19",
+							"artwork": map[string]any{
+								"url":        "https://example.com/{w}x{h}.jpg",
+								"width":      1500,
+								"height":     1500,
+								"bgColor":    "090D0E",
+								"textColor1": "CDE0F2",
+								"textColor2": "acc1e1",
+								"textColor3": "invalid",
+								"textColor4": "8b9db7",
+							},
+						},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(tracks))
+	}
+	tr := tracks[0]
+	if tr.ContentRating != "explicit" {
+		t.Errorf("ContentRating = %q, want %q", tr.ContentRating, "explicit")
+	}
+	if !tr.IsAppleDigitalMaster {
+		t.Errorf("IsAppleDigitalMaster = false, want true")
+	}
+	if tr.ReleaseYear() != "2013" {
+		t.Errorf("ReleaseYear() = %q, want 2013", tr.ReleaseYear())
+	}
+	if tr.ArtworkPalette.BgColor != "#090d0e" || tr.ArtworkPalette.TextColor1 != "#cde0f2" || tr.ArtworkPalette.TextColor2 != "#acc1e1" || tr.ArtworkPalette.TextColor3 != "" || tr.ArtworkPalette.TextColor4 != "#8b9db7" {
+		t.Errorf("unexpected ArtworkPalette: %+v", tr.ArtworkPalette)
+	}
+}
