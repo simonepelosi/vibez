@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Windows release quarantined by Microsoft Defender** — release binaries are no longer built with `garble`, whose output Defender flags as `Trojan:Win32/Gracing.I`. With no embedded token to obfuscate, release builds are plain Go builds on every platform. Closes #167.
+- **MusicKit `CONTENT_EQUIVALENT` playback failure on non-US accounts** — when launching with a saved session token and a configured non-US storefront (`configOpts.storefrontId`), skipping `music.authorize()` left MusicKit's internal `storekit.storefrontCountryCode` at its default `"us"`, causing `assertUserStorefront()` inside `setQueue()` to reject every catalog and library track with `CONTENT_EQUIVALENT`. The player page now awaits `music.me()` (`/v1/me/account`) before signalling ready so `storefrontCountryCode` and `storefrontId` stay synchronized.
 
 ## [1.1.1] — 2026-10-11
 
