@@ -901,3 +901,92 @@ func TestPlaybackID_LibraryID(t *testing.T) {
 		t.Errorf("PlaybackID(no catalogID) = %q, want %q", got, "i.library-id")
 	}
 }
+
+// --- artists (#164) ---
+
+func artistSearch() *SearchModel {
+	s := NewSearch(nil)
+	s.SetSize(80, 40)
+	s.SetResults(&provider.SearchResult{
+		Tracks:  []provider.Track{{Title: "Song"}},
+		Artists: []provider.Artist{{ID: "ar1", Name: "Some Artist"}},
+	}, false, nil)
+	return s
+}
+
+func TestSearch_ArtistsSectionAfterAlbums(t *testing.T) {
+	s := NewSearch(nil)
+	s.SetSize(80, 40)
+	s.SetResults(&provider.SearchResult{
+		Albums:    []provider.Album{{Title: "Alb"}},
+		Artists:   []provider.Artist{{ID: "ar1", Name: "Some Artist"}},
+		Playlists: []provider.Playlist{{Name: "Pl"}},
+	}, false, nil)
+	v := s.View()
+	ia, iar, ip := strings.Index(v, "Albums"), strings.Index(v, "Artists"), strings.Index(v, "Playlists")
+	if ia < 0 || iar < ia || ip < iar {
+		t.Errorf("sections out of order (Albums %d, Artists %d, Playlists %d):\n%s", ia, iar, ip, v)
+	}
+	if !strings.Contains(v, "Some Artist") {
+		t.Errorf("artist row missing:\n%s", v)
+	}
+}
+
+func TestSearch_OpenArtistShowsAlbumsThenCloseRestoresCursor(t *testing.T) {
+	s := artistSearch()
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	a := s.SelectedArtist()
+	if a == nil {
+		t.Fatal("cursor should be on the artist after one down")
+	}
+	cursor := s.cursor
+
+	s.OpenArtist(*a)
+	if !s.InArtist() || !strings.Contains(s.View(), "loading albums") {
+		t.Fatalf("open artist should show loading, got:\n%s", s.View())
+	}
+	s.SetArtistAlbums("ar1", []provider.Album{
+		{ID: "n", Title: "Newest", ReleaseDate: "2024-01-01", TrackCount: 9},
+		{ID: "o", Title: "Oldest"},
+	}, nil)
+	if al := s.SelectedAlbum(); al == nil || al.ID != "n" {
+		t.Fatalf("SelectedAlbum = %+v, want the first album", al)
+	}
+	v := s.View()
+	if !strings.Contains(v, "2024  ·  9 tracks") || strings.Contains(v, "Song") {
+		t.Errorf("artist view should list the albums with year and nothing else:\n%s", v)
+	}
+
+	s.CloseArtist()
+	if s.InArtist() || s.cursor != cursor || s.SelectedArtist() == nil {
+		t.Errorf("close should restore the results with the cursor on the artist (cursor %d, want %d)", s.cursor, cursor)
+	}
+}
+
+func TestSearch_StaleArtistAlbumsDropped(t *testing.T) {
+	s := artistSearch()
+	s.OpenArtist(provider.Artist{ID: "ar1", Name: "Some Artist"})
+	s.CloseArtist()
+	s.SetArtistAlbums("ar1", []provider.Album{{ID: "x"}}, nil)
+	if s.InArtist() || s.SelectedAlbum() != nil {
+		t.Error("albums for a closed artist must not reopen it")
+	}
+}
+
+func TestSearch_NewResultsLeaveArtist(t *testing.T) {
+	s := artistSearch()
+	s.OpenArtist(provider.Artist{ID: "ar1", Name: "Some Artist"})
+	s.SetResults(nil, true, nil)
+	if s.InArtist() {
+		t.Error("a new query should leave the artist view")
+	}
+}
+
+func TestSearch_ArtistAlbumsErrorShown(t *testing.T) {
+	s := artistSearch()
+	s.OpenArtist(provider.Artist{ID: "ar1", Name: "Some Artist"})
+	s.SetArtistAlbums("ar1", nil, errors.New("offline"))
+	if v := s.View(); !strings.Contains(v, "offline") {
+		t.Errorf("error should be shown, got:\n%s", v)
+	}
+}

@@ -15,11 +15,28 @@ static void vibez_gst_init(void) {
         gst_init(NULL, NULL);
 }
 
-// vibez_gst_new creates a playbin3 pipeline, falling back to playbin.
-static GstElement* vibez_gst_new(void) {
+// vibez_gst_new creates a playbin3 pipeline, falling back to playbin, and
+// attaches a 10-band equalizer audio-filter when gstreamer1.0-plugins-good is installed.
+static GstElement* vibez_gst_new(GstElement** eqOut) {
     GstElement* p = gst_element_factory_make("playbin3", "vibez-audio");
     if (!p) p = gst_element_factory_make("playbin", "vibez-audio");
+    if (p && eqOut) {
+        GstElement* eq = gst_element_factory_make("equalizer-10bands", "vibez-eq");
+        if (eq) {
+            g_object_set(G_OBJECT(p), "audio-filter", eq, NULL);
+            *eqOut = eq;
+        }
+    }
     return p;
+}
+
+static void vibez_gst_set_eq_band(GstElement* eq, gint idx, gdouble gain) {
+    if (!eq || idx < 0 || idx > 9) return;
+    char prop[8];
+    g_snprintf(prop, sizeof(prop), "band%d", idx);
+    if (gain < -24.0) gain = -24.0;
+    if (gain > 12.0) gain = 12.0;
+    g_object_set(G_OBJECT(eq), prop, gain, NULL);
 }
 
 static void vibez_gst_set_uri(GstElement* p, const char* uri) {
@@ -98,6 +115,7 @@ var once sync.Once
 type Player struct {
 	mu       sync.Mutex
 	pipeline *C.GstElement
+	eq       *C.GstElement
 	onEOS    func()
 	onError  func(error)
 	stop     chan struct{}
@@ -107,11 +125,12 @@ type Player struct {
 // New initialises GStreamer once and returns a ready Player.
 func New() (*Player, error) {
 	once.Do(func() { C.vibez_gst_init() })
-	pl := C.vibez_gst_new()
+	var eq *C.GstElement
+	pl := C.vibez_gst_new(&eq) //nolint:gocritic // CGO wrapper triggers false-positive dupSubExpr
 	if pl == nil {
 		return nil, fmt.Errorf("gst: playbin3/playbin element unavailable — is gstreamer1.0-plugins-base installed?")
 	}
-	p := &Player{pipeline: pl, stop: make(chan struct{})}
+	p := &Player{pipeline: pl, eq: eq, stop: make(chan struct{})}
 	p.wg.Add(1)
 	go p.busLoop()
 	return p, nil
@@ -174,6 +193,23 @@ func (p *Player) SetVolume(v float64) {
 	p.mu.Lock()
 	C.vibez_gst_set_volume(p.pipeline, C.gdouble(v))
 	p.mu.Unlock()
+}
+
+// SetEqualizer sets the 10-band equalizer gains in dB (clamped to [-24, +12]).
+// Pass nil or an empty slice to reset all 10 bands to 0 dB.
+func (p *Player) SetEqualizer(gains []float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.eq == nil {
+		return
+	}
+	for i := range 10 {
+		gain := 0.0
+		if i < len(gains) {
+			gain = gains[i]
+		}
+		C.vibez_gst_set_eq_band(p.eq, C.gint(i), C.gdouble(gain))
+	}
 }
 
 // Position returns the current playback position (0 if unknown).

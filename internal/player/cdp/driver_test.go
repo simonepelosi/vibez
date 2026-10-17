@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cdp
 
@@ -11,12 +11,25 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	playwright "github.com/mxschmitt/playwright-go"
 )
 
 const outdatedPlaywrightVersion = "1.57.0"
+
+func TestMain(m *testing.M) {
+	if os.Getenv("VIBEZ_DRIVER_TEST_NODE") == "1" {
+		data, err := os.ReadFile(os.Args[1]) //nolint:gosec // helper reads the driver fixture passed by its parent test
+		if err != nil {
+			os.Exit(1)
+		}
+		fmt.Printf("Version %s\n", strings.TrimSpace(string(data)))
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func playwrightPackageArchive(t *testing.T, version string) []byte {
 	t.Helper()
@@ -51,20 +64,17 @@ func setTestCacheHome(t *testing.T) {
 	cacheHome := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cacheHome)
 	t.Setenv("HOME", cacheHome)
+	t.Setenv("LOCALAPPDATA", cacheHome)
 }
 
 func setVersionReportingNode(t *testing.T) {
 	t.Helper()
-	fakeNodePath := filepath.Join(t.TempDir(), "node")
-	fakeNode := `#!/bin/sh
-printf 'Version '
-cat "$1"
-printf '\n'
-`
-	if err := os.WriteFile(fakeNodePath, []byte(fakeNode), 0o700); err != nil { //nolint:gosec // test fixture must be executable
-		t.Fatalf("write fake Node.js: %v", err)
+	node, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test executable: %v", err)
 	}
-	t.Setenv("PLAYWRIGHT_NODEJS_PATH", fakeNodePath)
+	t.Setenv("VIBEZ_DRIVER_TEST_NODE", "1")
+	t.Setenv("PLAYWRIGHT_NODEJS_PATH", node)
 }
 
 func TestInstallPlaywrightDriverReplacesOutdatedCache(t *testing.T) {

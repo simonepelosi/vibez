@@ -10,20 +10,33 @@ import (
 	"time"
 )
 
-// FindCDM searches the host for an existing Widevine CDM library binary.
-// Returns the file path if found, or empty string.
+// FindCDM searches the host for an existing Widevine CDM library binary and
+// returns the newest valid candidate so revoked older copies are skipped.
 func FindCDM() string {
-	for _, p := range candidatePaths() {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 100000 {
-			return p
+	if envPath := os.Getenv("VIBEZ_CDM_PATH"); envPath != "" {
+		if fi, err := os.Stat(envPath); err == nil && !fi.IsDir() && fi.Size() > 100000 { //nolint:gosec // G703: explicit user override via VIBEZ_CDM_PATH
+			return envPath
 		}
 	}
-	return ""
+
+	var bestPath string
+	var bestMod time.Time
+	for _, p := range candidatePaths() {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Size() <= 100000 {
+			continue
+		}
+		if bestPath == "" || fi.ModTime().After(bestMod) {
+			bestPath = p
+			bestMod = fi.ModTime()
+		}
+	}
+	return bestPath
 }
 
 // EnsureCDM returns an existing CDM library path, or automatically downloads
-// and extracts the official Widevine CDM component into the user cache directory.
-func EnsureCDM() (string, error) {
+// and extracts the official standalone Widevine CDM component into the user cache directory.
+func EnsureCDM(progress ...func(string)) (string, error) {
 	if p := FindCDM(); p != "" {
 		return p, nil
 	}
@@ -33,12 +46,10 @@ func EnsureCDM() (string, error) {
 		return "", fmt.Errorf("failed to create cdm cache directory: %w", err)
 	}
 
-	// We can check if a user placed it in ~/.config/vibez/libwidevinecdm.<ext>
 	libName := filepath.Base(dest)
 	home, _ := os.UserHomeDir()
 	cfgPath := filepath.Join(home, ".config", "vibez", libName)
 	if fi, err := os.Stat(cfgPath); err == nil && !fi.IsDir() && fi.Size() > 100000 {
-		// Copy to cache
 		if data, err := os.ReadFile(cfgPath); err == nil { //nolint:gosec // G304: user config path in home dir
 			if err := os.WriteFile(dest, data, 0600); err == nil { //nolint:gosec // G306: destination path inside user cache
 				return dest, nil
@@ -46,11 +57,10 @@ func EnsureCDM() (string, error) {
 		}
 	}
 
-	// Automatically download official Google Widevine package (mirroring Firefox's mechanism)
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	downloaded, err := DownloadCDM(ctx, dest)
+	downloaded, err := DownloadCDM(ctx, dest, progress...)
 	if err != nil {
 		return "", fmt.Errorf("%s not found and auto-download failed: %w (place %s manually in %s)", libName, err, libName, dest)
 	}

@@ -79,6 +79,7 @@ public:
     void OnResolveNewSessionPromise(uint32_t promise_id, const char* session_id, uint32_t session_id_size) override {
         std::lock_guard<std::mutex> lk(cv_m);
         sessionId = std::string(session_id, session_id_size);
+        msg_cv.notify_all();
     }
 
     void OnResolvePromise(uint32_t promise_id) override {
@@ -239,24 +240,24 @@ int cdm_context_generate_challenge(
         ctx->host.hasMessage = false;
     }
 
-    // Widevine PSSH header box for key ID
-    std::vector<uint8_t> pssh;
-    uint32_t pssh_data_size = 32 + kid_size;
-    pssh.resize(pssh_data_size);
-
-    pssh[3] = pssh_data_size; // size
-    std::memcpy(&pssh[4], "pssh", 4);
-    pssh[8] = 0; // version 0
-
-    // System ID for Widevine: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
-    const uint8_t widevine_uuid[16] = {
+    // Widevine PSSH header box (52 bytes) matching MusicKit v3 generatePSSH:
+    //   [0..3]   size = 52 (32-byte box header + 4-byte protobuf prefix + 16-byte KID)
+    //   [4..7]   "pssh"
+    //   [8..11]  version = 0, flags = 0
+    //   [12..27] Widevine SystemID: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
+    //   [28..31] data_size = 20 (4 + 16)
+    //   [32..35] WidevinePsshData protobuf: 0x08 0x01 (algorithm=AESCTR) 0x12 0x10 (key_id, len=16)
+    //   [36..51] 16-byte Key ID
+    std::vector<uint8_t> pssh = {
+        0x00, 0x00, 0x00, 0x34,
+        'p',  's',  's',  'h',
+        0x00, 0x00, 0x00, 0x00,
         0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
-        0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed
+        0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+        0x00, 0x00, 0x00, 0x14,
+        0x08, 0x01, 0x12, 0x10
     };
-    std::memcpy(&pssh[12], widevine_uuid, 16);
-
-    pssh[31] = kid_size; // data size
-    std::memcpy(&pssh[32], kid, kid_size);
+    pssh.insert(pssh.end(), kid, kid + kid_size);
 
     ctx->cdm11->CreateSessionAndGenerateRequest(
         2,

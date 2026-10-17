@@ -58,18 +58,20 @@ type searchResultMsg struct {
 }
 
 // searchRow is one entry in the unified search result list.
-// Section headers are non-selectable; item rows (track/album/playlist) are selectable.
+// Section headers are non-selectable; item rows (track/album/artist/playlist)
+// are selectable.
 type searchRow struct {
 	header   bool
 	label    string // header text (only when header=true)
 	track    *provider.Track
 	album    *provider.Album
+	artist   *provider.Artist
 	playlist *provider.Playlist
 }
 
 // isItem reports whether this row is a selectable item (not a header).
 func (r searchRow) isItem() bool {
-	return r.track != nil || r.album != nil || r.playlist != nil
+	return r.track != nil || r.album != nil || r.artist != nil || r.playlist != nil
 }
 
 // rowLines returns the number of visual lines a row occupies.
@@ -78,6 +80,17 @@ func rowLines(r searchRow) int {
 		return 1
 	}
 	return 2
+}
+
+// artistView is an artist opened from the results: their albums replace the
+// result list until Esc puts the results back where they were.
+type artistView struct {
+	artist  provider.Artist
+	albums  []provider.Album
+	loading bool
+	err     error
+	// cursor and scroll of the result list, restored on close.
+	cursor, scroll int
 }
 
 // SearchModel holds search results rendered as a unified multi-section list
@@ -92,6 +105,7 @@ type SearchModel struct {
 	height   int
 	loading  bool
 	err      error
+	artist   *artistView // non-nil while an artist's albums are shown
 }
 
 func NewSearch(prov provider.Provider) *SearchModel {
@@ -107,6 +121,7 @@ func (m *SearchModel) SetSize(w, h int) {
 
 // SetResults updates the model with a full search result (tracks + albums + playlists).
 func (m *SearchModel) SetResults(result *provider.SearchResult, loading bool, err error) {
+	m.artist = nil // a new query leaves the artist behind
 	m.loading = loading
 	m.err = err
 	m.results = result
@@ -126,6 +141,13 @@ func (m *SearchModel) SetState(tracks []provider.Track, loading bool, err error)
 
 func (m *SearchModel) rebuildRows() {
 	m.rows = nil
+	if m.artist != nil {
+		m.rows = append(m.rows, searchRow{header: true, label: m.artist.artist.Name})
+		for i := range m.artist.albums {
+			m.rows = append(m.rows, searchRow{album: &m.artist.albums[i]})
+		}
+		return
+	}
 	if m.results == nil {
 		return
 	}
@@ -141,6 +163,12 @@ func (m *SearchModel) rebuildRows() {
 		for i := range m.results.Albums {
 			a := &m.results.Albums[i]
 			m.rows = append(m.rows, searchRow{album: a})
+		}
+	}
+	if len(m.results.Artists) > 0 {
+		m.rows = append(m.rows, searchRow{header: true, label: "Artists"})
+		for i := range m.results.Artists {
+			m.rows = append(m.rows, searchRow{artist: &m.results.Artists[i]})
 		}
 	}
 	if len(m.results.Playlists) > 0 {
@@ -228,6 +256,51 @@ func (m *SearchModel) SelectedAlbum() *provider.Album {
 	return m.rows[m.cursor].album
 }
 
+// SelectedArtist returns the highlighted artist, or nil.
+func (m *SearchModel) SelectedArtist() *provider.Artist {
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
+		return nil
+	}
+	return m.rows[m.cursor].artist
+}
+
+// OpenArtist replaces the results with the artist's albums, shown as loading
+// until SetArtistAlbums delivers them.
+func (m *SearchModel) OpenArtist(a provider.Artist) {
+	m.artist = &artistView{artist: a, loading: true, cursor: m.cursor, scroll: m.scroll}
+	m.rebuildRows()
+	m.cursor = m.advance(-1, 1)
+	m.scroll = 0
+}
+
+// SetArtistAlbums delivers the albums for the open artist. A reply for an
+// artist that is no longer open is dropped.
+func (m *SearchModel) SetArtistAlbums(artistID string, albums []provider.Album, err error) {
+	if m.artist == nil || m.artist.artist.ID != artistID {
+		return
+	}
+	m.artist.albums = albums
+	m.artist.loading = false
+	m.artist.err = err
+	m.rebuildRows()
+	m.cursor = m.advance(-1, 1)
+	m.scroll = 0
+}
+
+// InArtist reports whether an artist's albums are shown.
+func (m *SearchModel) InArtist() bool { return m.artist != nil }
+
+// CloseArtist goes back to the search results, where they were left.
+func (m *SearchModel) CloseArtist() {
+	if m.artist == nil {
+		return
+	}
+	cursor, scroll := m.artist.cursor, m.artist.scroll
+	m.artist = nil
+	m.rebuildRows()
+	m.cursor, m.scroll = cursor, scroll
+}
+
 // SelectedPlaylist returns the highlighted playlist, or nil.
 func (m *SearchModel) SelectedPlaylist() *provider.Playlist {
 	if m.cursor < 0 || m.cursor >= len(m.rows) {
@@ -289,6 +362,8 @@ func sectionColor(label string) color.Color {
 	switch label {
 	case "Albums":
 		return styles.ColorPrimary // violet  #C678DD
+	case "Artists":
+		return styles.ColorSubtle // blue  #61AFEF
 	case "Playlists":
 		return styles.ColorSecondary // green  #98C379
 	default: // "Tracks"
@@ -303,6 +378,19 @@ func (m *SearchModel) View() string {
 	}
 	if m.err != nil {
 		return styles.ErrorStyle.Render("⚠  " + m.err.Error())
+	}
+	if m.artist != nil && len(m.artist.albums) == 0 {
+		hs := lipgloss.NewStyle().Foreground(sectionColor("Albums")).Bold(true).Italic(true)
+		var status string
+		switch {
+		case m.artist.loading:
+			status = styles.QueueItemMuted.Render("loading albums…")
+		case m.artist.err != nil:
+			status = styles.ErrorStyle.Render("⚠  " + m.artist.err.Error())
+		default:
+			status = styles.QueueItemMuted.Render("no albums")
+		}
+		return "  " + hs.Render(m.artist.artist.Name) + "\n  " + status
 	}
 	if len(m.rows) == 0 {
 		return ""
@@ -321,7 +409,10 @@ func (m *SearchModel) View() string {
 	// scrolled out of view would render with the wrong colour (the default
 	// "Tracks" amber) until the header scrolls back into the viewport.
 	currentAccent := sectionColor("Tracks")
-	for i := start - 1; i >= 0; i-- {
+	if m.artist != nil {
+		currentAccent = sectionColor("Albums") // the one header is the artist's name
+	}
+	for i := start - 1; i >= 0 && m.artist == nil; i-- {
 		if m.rows[i].header {
 			currentAccent = sectionColor(m.rows[i].label)
 			break
@@ -332,7 +423,9 @@ func (m *SearchModel) View() string {
 		row := m.rows[i]
 
 		if row.header {
-			currentAccent = sectionColor(row.label)
+			if m.artist == nil {
+				currentAccent = sectionColor(row.label)
+			}
 			hs := lipgloss.NewStyle().
 				Foreground(currentAccent).
 				Bold(true).
@@ -367,12 +460,24 @@ func (m *SearchModel) View() string {
 
 		case row.album != nil:
 			a := row.album
-			desc := a.Artist
-			if a.TrackCount > 0 {
-				desc += fmt.Sprintf("  ·  %d tracks", a.TrackCount)
+			parts := []string{a.Artist}
+			if m.artist != nil {
+				// Every album here is the artist's; the year orders them.
+				parts = nil
+				if len(a.ReleaseDate) >= 4 {
+					parts = append(parts, a.ReleaseDate[:4])
+				}
 			}
+			if a.TrackCount > 0 {
+				parts = append(parts, fmt.Sprintf("%d tracks", a.TrackCount))
+			}
+			desc := strings.Join(parts, "  ·  ")
 			sb.WriteString(cur + tStyle.Render(a.Title) + tagStyle.Render(" [album]") + "\n")
 			sb.WriteString("    " + dStyle.Render(desc) + "\n")
+
+		case row.artist != nil:
+			sb.WriteString(cur + tStyle.Render(row.artist.Name) + tagStyle.Render(" [artist]") + "\n")
+			sb.WriteString("    " + dStyle.Render("albums, singles and EPs") + "\n")
 
 		case row.playlist != nil:
 			p := row.playlist

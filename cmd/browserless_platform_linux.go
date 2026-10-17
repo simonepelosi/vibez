@@ -16,6 +16,7 @@ func browserlessBackendLabel(audioBitrateKbps int) string {
 func setupBrowserlessPlatform(p *browserless.Player) {
 	if srv, mprisErr := mpris.NewServer(p); mprisErr == nil {
 		go func() {
+			defer func() { _ = srv.Close() }()
 			for st := range p.Subscribe() {
 				srv.Update(st)
 			}

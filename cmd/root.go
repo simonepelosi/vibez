@@ -29,6 +29,7 @@ var demo bool
 var noUpdate bool
 var local bool
 var musicDir string
+var noDiscord bool
 var browserlessFlag bool
 
 var rootCmd = &cobra.Command{
@@ -46,13 +47,14 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json; Windows: %APPDATA%\\vibez\\config.json)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
 	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
 	rootCmd.PersistentFlags().BoolVar(&demo, "demo", false, "run with built-in fake data — no Apple account or internet required")
 	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 	rootCmd.PersistentFlags().BoolVar(&local, "local", false, "run with local music files (no Apple account required)")
 	rootCmd.PersistentFlags().StringVar(&musicDir, "music-dir", "", "path to your music directory (saved to config)")
+	rootCmd.PersistentFlags().BoolVar(&noDiscord, "no-discord", false, "disable Discord Rich Presence")
 	rootCmd.PersistentFlags().BoolVar(&browserlessFlag, "browserless", false, "use experimental in-process Widevine CDM player without Chrome")
 }
 
@@ -111,10 +113,13 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("local provider: %w", err)
 		}
-		plyr, err := localPlayer.New()
+		plyr, err := localPlayer.New(func(msg string) {
+			fmt.Fprintln(os.Stderr, msg)
+		})
 		if err != nil {
-			return fmt.Errorf("local player: %w", err)
+			return err
 		}
+		defer func() { _ = plyr.Close() }()
 		tracks, err := prov.GetLibraryTracks(context.Background())
 		if err != nil {
 			return fmt.Errorf("loading local tracks: %w", err)
@@ -123,7 +128,10 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		opts.IconPath = iconPath
 		opts.InitialTracks = tracks
 		opts.Backend = "Local mode · playing from " + cfg.MusicDir
+		opts.ScanNotice = prov.ScanNotice()
 		prog := tea.NewProgram(tui.New(cfg, prov, plyr, opts))
+		stopRPC := startDiscordRPC(cfg, plyr, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		defer stopRPC()
 		_, err = prog.Run()
 		return err
 	}
@@ -140,11 +148,23 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	auth.ApplyEmbedded(cfg)
+	tokenErr := auth.ResolveDeveloperToken(cfg)
 	lastfm.ApplyEmbedded(cfg)
 
+	brokerLogs := auth.BrokerLogs()
+	if debug {
+		for _, msg := range brokerLogs {
+			fmt.Fprintf(os.Stderr, "debug: %s\n", msg)
+		}
+	}
+	opts.InitialLogs = brokerLogs
+
+	if tokenErr != nil && cfg.AppleDeveloperToken == "" {
+		return tokenErr
+	}
+
 	if cfg.AppleDeveloperToken == "" {
-		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in ~/.config/vibez/config.json\nor run: go run ./scripts/gen-devtoken")
+		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in %s\nor run: go run ./scripts/gen-devtoken", cfgPath)
 	}
 
 	// Make sure the desktop can resolve the MPRIS DesktopEntry property to an

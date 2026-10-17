@@ -15,6 +15,10 @@ type Track struct {
 	ArtworkURL string
 	PreviewURL string
 	Genres     []string
+	// DiscNumber and TrackNumber give the track's position on its album.
+	// Zero means unknown.
+	DiscNumber  int
+	TrackNumber int
 }
 
 // RecommendationItem is a single album or playlist entry inside a recommendation group.
@@ -38,6 +42,14 @@ type Album struct {
 	Artist     string
 	ArtworkURL string
 	TrackCount int
+	// ReleaseDate is "YYYY-MM-DD", or "YYYY" when Apple knows only the year.
+	// Empty means unknown.
+	ReleaseDate string
+}
+
+type Artist struct {
+	ID   string
+	Name string
 }
 
 type Playlist struct {
@@ -52,6 +64,7 @@ type Playlist struct {
 type SearchResult struct {
 	Tracks    []Track
 	Albums    []Album
+	Artists   []Artist
 	Playlists []Playlist
 
 	// Warnings carries non-fatal failures from providers that query several
@@ -72,6 +85,9 @@ type Provider interface {
 	// Use this when the album ID starts with "l." (library album); catalog album
 	// IDs (numeric) should use GetAlbumTracks instead.
 	GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]Track, error)
+	// GetArtistAlbums returns every catalog album by the artist, singles and
+	// EPs included, newest first.
+	GetArtistAlbums(ctx context.Context, artistID string) ([]Album, error)
 	// GetCatalogPlaylistTracks fetches tracks for a catalog playlist (e.g. from
 	// the recommendations feed). Unlike GetPlaylistTracks, this targets the
 	// catalog endpoint and does not require a library playlist ID.

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,9 +431,16 @@ func TestSearch_CatalogSongRejectionWarnsInsteadOfSilentlyEmptying(t *testing.T)
 }
 
 func TestSearch_QueryEncoded(t *testing.T) {
-	var gotURLs []string
+	// Search fans its catalog requests out across goroutines, so the handler
+	// runs concurrently and the request log needs a lock.
+	var (
+		mu      sync.Mutex
+		gotURLs []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotURLs = append(gotURLs, r.URL.RawQuery)
+		mu.Unlock()
 		writeJSON(t, w, map[string]any{"results": map[string]any{}})
 	}))
 	defer srv.Close()
@@ -440,6 +448,8 @@ func TestSearch_QueryEncoded(t *testing.T) {
 	p := newTestProvider(t, srv)
 	_, _ = p.Search(context.Background(), "lofi hip hop")
 
+	mu.Lock()
+	defer mu.Unlock()
 	found := false
 	for _, q := range gotURLs {
 		if containsStr(q, "lofi+hip+hop") || containsStr(q, "lofi%20hip%20hop") {
@@ -509,6 +519,29 @@ func TestGetLibraryTracks_SinglePage(t *testing.T) {
 	}
 	if tracks[0].Title != "Song A" {
 		t.Errorf("tracks[0].Title = %q", tracks[0].Title)
+	}
+}
+
+func TestGetLibraryTracks_AlbumPosition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		song := songJSON("i.1", "Evil", "Interpol", "Antics", 216000, "")
+		attrs := song["attributes"].(map[string]any)
+		attrs["discNumber"] = 1
+		attrs["trackNumber"] = 2
+		writeJSON(t, w, map[string]any{"data": []any{song}, "next": ""})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(tracks))
+	}
+	if tracks[0].DiscNumber != 1 || tracks[0].TrackNumber != 2 {
+		t.Errorf("disc/track = %d/%d, want 1/2", tracks[0].DiscNumber, tracks[0].TrackNumber)
 	}
 }
 

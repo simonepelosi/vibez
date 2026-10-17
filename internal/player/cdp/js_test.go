@@ -149,6 +149,20 @@ func TestBuildSetPlaylistJS_SpecialChars(t *testing.T) {
 	}
 }
 
+// ─── buildPlayNextJS ────────────────────────────────────────────────────────
+
+func TestBuildPlayNextJS(t *testing.T) {
+	input := []string{"987654321", "i.AbC"}
+	expr, err := buildPlayNextJS(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ids := parseIDsFromJS(t, expr, "vibezQueuePlayNext")
+	if len(ids) != len(input) || ids[0] != input[0] || ids[1] != input[1] {
+		t.Errorf("decoded IDs = %v, want %v", ids, input)
+	}
+}
+
 // ─── buildAppendQueueJS ─────────────────────────────────────────────────────
 
 func TestBuildAppendQueueJS_SingleID(t *testing.T) {

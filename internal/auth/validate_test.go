@@ -25,7 +25,7 @@ func TestCheckTokens_BothValid(t *testing.T) {
 	user, _ := statusServer(t, http.StatusOK)
 	dev, _ := statusServer(t, http.StatusOK)
 
-	if got := checkTokens(user.URL, dev.URL, "dev", "user"); got != TokensValid {
+	if got, _ := checkTokens(user.URL, dev.URL, "dev", "user"); got != TokensValid {
 		t.Errorf("checkTokens = %v, want TokensValid", got)
 	}
 }
@@ -36,7 +36,7 @@ func TestCheckTokens_UserTokenExpired(t *testing.T) {
 	user, _ := statusServer(t, http.StatusUnauthorized)
 	dev, _ := statusServer(t, http.StatusOK)
 
-	if got := checkTokens(user.URL, dev.URL, "dev", "user"); got != UserTokenRejected {
+	if got, _ := checkTokens(user.URL, dev.URL, "dev", "user"); got != UserTokenRejected {
 		t.Errorf("checkTokens = %v, want UserTokenRejected", got)
 	}
 }
@@ -48,7 +48,7 @@ func TestCheckTokens_DeveloperTokenExpired(t *testing.T) {
 	user, _ := statusServer(t, http.StatusUnauthorized)
 	dev, _ := statusServer(t, http.StatusUnauthorized)
 
-	if got := checkTokens(user.URL, dev.URL, "dev", "user"); got != DeveloperTokenRejected {
+	if got, _ := checkTokens(user.URL, dev.URL, "dev", "user"); got != DeveloperTokenRejected {
 		t.Errorf("checkTokens = %v, want DeveloperTokenRejected", got)
 	}
 }
@@ -57,19 +57,19 @@ func TestCheckTokens_ForbiddenIsRejection(t *testing.T) {
 	user, _ := statusServer(t, http.StatusForbidden)
 	dev, _ := statusServer(t, http.StatusForbidden)
 
-	if got := checkTokens(user.URL, dev.URL, "dev", "user"); got != DeveloperTokenRejected {
+	if got, _ := checkTokens(user.URL, dev.URL, "dev", "user"); got != DeveloperTokenRejected {
 		t.Errorf("checkTokens = %v, want DeveloperTokenRejected", got)
 	}
 }
 
 func TestCheckTokens_MissingCredentials(t *testing.T) {
-	if got := CheckTokens("", "user"); got != DeveloperTokenRejected {
+	if got, _ := CheckTokens("", "user"); got != DeveloperTokenRejected {
 		t.Errorf("empty devToken = %v, want DeveloperTokenRejected", got)
 	}
-	if got := CheckTokens("dev", ""); got != UserTokenRejected {
+	if got, _ := CheckTokens("dev", ""); got != UserTokenRejected {
 		t.Errorf("empty userToken = %v, want UserTokenRejected", got)
 	}
-	if got := CheckTokens("", ""); got != DeveloperTokenRejected {
+	if got, _ := CheckTokens("", ""); got != DeveloperTokenRejected {
 		t.Errorf("both empty = %v, want DeveloperTokenRejected", got)
 	}
 }
@@ -77,7 +77,7 @@ func TestCheckTokens_MissingCredentials(t *testing.T) {
 func TestCheckTokens_NetworkErrorKeepsSession(t *testing.T) {
 	dev, _ := statusServer(t, http.StatusOK)
 
-	if got := checkTokens(deadURL, dev.URL, "dev", "user"); got != TokensValid {
+	if got, _ := checkTokens(deadURL, dev.URL, "dev", "user"); got != TokensValid {
 		t.Errorf("checkTokens = %v, want TokensValid on network error", got)
 	}
 }
@@ -86,7 +86,7 @@ func TestCheckTokens_NetworkErrorKeepsSession(t *testing.T) {
 func TestCheckTokens_InconclusiveTiebreakerKeepsSession(t *testing.T) {
 	user, _ := statusServer(t, http.StatusUnauthorized)
 
-	if got := checkTokens(user.URL, deadURL, "dev", "user"); got != TokensValid {
+	if got, _ := checkTokens(user.URL, deadURL, "dev", "user"); got != TokensValid {
 		t.Errorf("checkTokens = %v, want TokensValid on inconclusive tiebreaker", got)
 	}
 }
@@ -104,7 +104,7 @@ func TestCheckTokens_ServerErrorTiebreakerKeepsSession(t *testing.T) {
 		user, _ := statusServer(t, http.StatusUnauthorized)
 		dev, _ := statusServer(t, code)
 
-		if got := checkTokens(user.URL, dev.URL, "dev", "user"); got != TokensValid {
+		if got, _ := checkTokens(user.URL, dev.URL, "dev", "user"); got != TokensValid {
 			t.Errorf("tiebreaker %d: checkTokens = %v, want TokensValid", code, got)
 		}
 	}
@@ -136,5 +136,52 @@ func TestCheckTokens_TiebreakerOmitsUserToken(t *testing.T) {
 	}
 	if got := devHeaders.Get("Music-User-Token"); got != "" {
 		t.Errorf("Music-User-Token = %q, want it unset", got)
+	}
+}
+
+// bodyServer serves a fixed JSON body with a 200.
+func bodyServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestCheckTokens_ReportsStorefront is the regression test for #163: the
+// startup check already asks /v1/me/storefront, and its answer is the
+// account's storefront, which the player page cannot know on a saved token.
+func TestCheckTokens_ReportsStorefront(t *testing.T) {
+	user := bodyServer(t, `{"data":[{"id":"ar","type":"storefronts","href":"/v1/storefronts/ar"}]}`)
+	dev, _ := statusServer(t, http.StatusOK)
+
+	status, sf := checkTokens(user.URL, dev.URL, "dev", "user")
+	if status != TokensValid || sf != "ar" {
+		t.Errorf("checkTokens = %v, %q, want TokensValid, \"ar\"", status, sf)
+	}
+}
+
+func TestCheckTokens_NoStorefrontWithoutBody(t *testing.T) {
+	user, _ := statusServer(t, http.StatusOK)
+	dev, _ := statusServer(t, http.StatusOK)
+
+	if _, sf := checkTokens(user.URL, dev.URL, "dev", "user"); sf != "" {
+		t.Errorf("storefront = %q, want \"\"", sf)
+	}
+}
+
+// The tiebreaker lists every storefront there is; none of them is the
+// account's, and an inconclusive first request has no answer either.
+func TestCheckTokens_NoStorefrontFromTiebreakerOrNetworkError(t *testing.T) {
+	user, _ := statusServer(t, http.StatusUnauthorized)
+	dev := bodyServer(t, `{"data":[{"id":"us"},{"id":"ar"}]}`)
+
+	if status, sf := checkTokens(user.URL, dev.URL, "dev", "user"); status != UserTokenRejected || sf != "" {
+		t.Errorf("checkTokens = %v, %q, want UserTokenRejected, \"\"", status, sf)
+	}
+	if status, sf := checkTokens(deadURL, dev.URL, "dev", "user"); status != TokensValid || sf != "" {
+		t.Errorf("checkTokens = %v, %q, want TokensValid, \"\"", status, sf)
 	}
 }

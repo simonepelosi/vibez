@@ -1,0 +1,17 @@
+name = "vibez-token"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+# Per-IP limit, enforced per Cloudflare location. Real clients fetch about once
+# a day, so this is generous for people and tight for scrapers.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "4217"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# Secrets (set with `wrangler secret put <NAME>`, never committed):
+#   APPLE_KEY_ID, APPLE_TEAM_ID, APPLE_PRIVATE_KEY, CLIENT_KEY

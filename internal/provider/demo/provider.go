@@ -4,6 +4,7 @@ package demo
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,11 +47,28 @@ var playlistTracks = map[string][]provider.Track{
 	"dp3": {Tracks[1], Tracks[2], Tracks[4]},
 }
 
+var releaseDates = map[string]string{
+	"Blonde":           "2016-08-20",
+	"channel ORANGE":   "2012-07-10",
+	"nostalgia, ULTRA": "2011-02-16",
+	"Awaken, My Love!": "2016-12-02",
+	"Flower Boy":       "2017-07-21",
+	"SOS":              "2022-12-09",
+	"Good Days":        "2020-12-25",
+	"Isolation":        "2018-04-06",
+}
+
+func demoAlbum(t provider.Track) provider.Album {
+	return provider.Album{ID: "da-" + t.ID, Title: t.Album, Artist: t.Artist, ReleaseDate: releaseDates[t.Album]}
+}
+
 func (Provider) Search(_ context.Context, query string) (*provider.SearchResult, error) {
 	q := strings.ToLower(query)
 	var tracks []provider.Track
 	var albums []provider.Album
+	var artists []provider.Artist
 	seen := map[string]bool{}
+	seenArtist := map[string]bool{}
 
 	for _, t := range Tracks {
 		if strings.Contains(strings.ToLower(t.Title), q) ||
@@ -59,15 +77,29 @@ func (Provider) Search(_ context.Context, query string) (*provider.SearchResult,
 			tracks = append(tracks, t)
 			if !seen[t.Album] {
 				seen[t.Album] = true
-				albums = append(albums, provider.Album{
-					ID:     "da-" + t.ID,
-					Title:  t.Album,
-					Artist: t.Artist,
-				})
+				albums = append(albums, demoAlbum(t))
 			}
 		}
+		if strings.Contains(strings.ToLower(t.Artist), q) && !seenArtist[t.Artist] {
+			seenArtist[t.Artist] = true
+			artists = append(artists, provider.Artist{ID: "dar-" + t.Artist, Name: t.Artist})
+		}
 	}
-	return &provider.SearchResult{Tracks: tracks, Albums: albums}, nil
+	return &provider.SearchResult{Tracks: tracks, Albums: albums, Artists: artists}, nil
+}
+
+func (Provider) GetArtistAlbums(_ context.Context, artistID string) ([]provider.Album, error) {
+	name := strings.TrimPrefix(artistID, "dar-")
+	var albums []provider.Album
+	seen := map[string]bool{}
+	for _, t := range Tracks {
+		if t.Artist == name && !seen[t.Album] {
+			seen[t.Album] = true
+			albums = append(albums, demoAlbum(t))
+		}
+	}
+	slices.SortStableFunc(albums, func(x, y provider.Album) int { return strings.Compare(y.ReleaseDate, x.ReleaseDate) })
+	return albums, nil
 }
 
 func (Provider) GetLibraryTracks(_ context.Context) ([]provider.Track, error) {

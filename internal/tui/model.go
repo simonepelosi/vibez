@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -212,6 +214,13 @@ type feedTracksMsg struct {
 	playNext bool
 	err      error
 }
+
+type artistAlbumsMsg struct {
+	artist provider.Artist
+	albums []provider.Album
+	err    error
+}
+
 type searchCollectionTracksMsg struct {
 	label    string // album/playlist name for log messages
 	tracks   []provider.Track
@@ -258,6 +267,9 @@ const discoveryMaxRetries = 5 // give up re-arming after this many consecutive f
 
 const (
 	discoverySimilarityStep = 0.1
+	// discoverySameArtist is where discovery stops exploring and only queues
+	// the seed artist. The picker's "same artist" option (0.95) is above it.
+	discoverySameArtist = 0.85
 )
 
 // ── Radio mode ──────────────────────────────────────────────────────────────
@@ -291,9 +303,10 @@ type Model struct {
 	stateCh     <-chan player.State
 
 	// Album art view (:art). artMode mirrors cfg.AlbumArt; the cover is
-	// fetched per track and the rendered half-block lines are cached per size
-	// so they only re-render on a track change or a resize.
+	// fetched per track and the rendered lines are cached per size so they
+	// only re-render on a track change or a resize.
 	artMode          bool
+	renderArt        func(image.Image, art.Size) []string // cover renderer, see artRenderer
 	artwork          artworkCache
 	artworkGen       int
 	artHTTP          *http.Client
@@ -393,6 +406,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		supportsArtColor: art.SupportsColor,
+		renderArt:        artRenderer(),
 		// Measured cell height/width ratio, so album art renders as a true square.
 		artCellAsp: cellAspect(),
 	}
@@ -411,8 +425,18 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.favorites = make(map[string]bool)
 	m.aboutP = &aboutPanel{m: views.NewAbout()}
 	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
+	for _, line := range opts.InitialLogs {
+		m.appendLog(line)
+	}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
+	}
+	if opts.ScanNotice != "" {
+		m.appendLog("[local] " + opts.ScanNotice)
+		if len(opts.InitialTracks) == 0 {
+			m.errMsg = opts.ScanNotice
+			m.errExpiry = time.Now().Add(30 * time.Second)
+		}
 	}
 	if len(opts.InitialTracks) > 0 {
 		ids := make([]string, len(opts.InitialTracks))
@@ -438,7 +462,29 @@ func (m *Model) Init() tea.Cmd {
 	if m.stateCh != nil {
 		cmds = append(cmds, waitForState(m.stateCh))
 	}
+	if m.player != nil {
+		cmds = append(cmds, m.restoreAudioSettings()...)
+	}
 	return tea.Batch(cmds...)
+}
+
+func (m *Model) restoreAudioSettings() []tea.Cmd {
+	var cmds []tea.Cmd
+	if m.cfg.Volume != nil {
+		v := m.cfg.VolumeOrDefault()
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+			return p.SetVolume(v)
+		}))
+		m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
+	}
+	if len(m.cfg.EQBands) > 0 {
+		bands := configEQBandsToPlayer(m.cfg.EQBands)
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
+			return p.SetEqualizer(bands)
+		}))
+		m.appendLog("[eq] restored from config")
+	}
+	return cmds
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────
@@ -463,7 +509,10 @@ func memTick(helperPaths []string) tea.Cmd {
 
 func waitForState(ch <-chan player.State) tea.Cmd {
 	return func() tea.Msg {
-		s := <-ch
+		s, ok := <-ch
+		if !ok {
+			return nil
+		}
 		// Drain any additional buffered states, keeping only the most recent.
 		// During a track transition the player fires a rapid burst of events
 		// (paused → buffering → playing). Processing each one floods the event
@@ -471,7 +520,10 @@ func waitForState(ch <-chan player.State) tea.Cmd {
 		// the burst into a single Update cycle keeps the UI responsive.
 		for {
 			select {
-			case newer := <-ch:
+			case newer, ok := <-ch:
+				if !ok {
+					return playerStateMsg(s)
+				}
 				s = newer
 			default:
 				return playerStateMsg(s)
@@ -936,6 +988,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.search.SetResults(msg.result, false, nil)
 		}
 
+	case artistAlbumsMsg:
+		if msg.err != nil {
+			m.appendLog(fmt.Sprintf("[search] artist %q albums error: %v", msg.artist.Name, msg.err))
+		} else {
+			m.appendLog(fmt.Sprintf("[search] artist %q: %d album(s)", msg.artist.Name, len(msg.albums)))
+		}
+		m.search.SetArtistAlbums(msg.artist.ID, msg.albums, msg.err)
+
 	case searchCollectionTracksMsg:
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("search: %v", msg.err)
@@ -1027,20 +1087,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.helperPaths = msg.HelperPaths
 		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
-		if m.cfg.Volume != nil {
-			v := m.cfg.VolumeOrDefault()
-			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
-				return p.SetVolume(v)
-			}))
-			m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
-		}
-		if len(m.cfg.EQBands) > 0 {
-			bands := configEQBandsToPlayer(m.cfg.EQBands)
-			cmds = append(cmds, m.playerCmd(func(p player.Player) error {
-				return p.SetEqualizer(bands)
-			}))
-			m.appendLog("[eq] restored from config")
-		}
+		cmds = append(cmds, m.restoreAudioSettings()...)
 		if m.memProfiling {
 			cmds = append(cmds, memTick(m.helperPaths))
 		}
@@ -1179,11 +1226,19 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 	switch k {
 	case "esc":
+		if m.search.InArtist() {
+			m.search.CloseArtist()
+			return nil
+		}
 		m.mode = modeNormal
 		m.searchQuery = ""
 		m.searchCursor = 0
 		return nil
 	case "enter":
+		// Artist: open their albums in place of the results.
+		if a := m.search.SelectedArtist(); a != nil {
+			return m.openArtistCmd(*a)
+		}
 		// Track: play now — replaces queue and starts immediately.
 		if t := m.search.SelectedTrack(); t != nil {
 			tc := *t
@@ -1658,6 +1713,19 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 		defer cancel()
 		groups, err := prov.GetRecommendations(ctx)
 		return feedResultMsg{groups: groups, err: err}
+	}
+}
+
+// openArtistCmd shows the artist in the search view and fetches their albums.
+func (m *Model) openArtistCmd(artist provider.Artist) tea.Cmd {
+	m.search.OpenArtist(artist)
+	m.appendLog(fmt.Sprintf("[search] loading artist %q (id=%s)…", artist.Name, artist.ID))
+	prov := m.provider
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		albums, err := prov.GetArtistAlbums(ctx, artist.ID)
+		return artistAlbumsMsg{artist: artist, albums: albums, err: err}
 	}
 }
 
@@ -2582,6 +2650,11 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 				if exclude[id] || exclude[key] {
 					continue // already queued, skipped, or blacklisted
 				}
+				// A search for the artist's name also matches other artists'
+				// songs (covers, titles containing the name).
+				if similarity >= discoverySameArtist && !sameArtist(seed.Artist, t.Artist) {
+					continue
+				}
 				if !seen[key] {
 					seen[key] = true
 					merged = append(merged, t)
@@ -2608,6 +2681,40 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		}
 		return vibeResultMsg{discovery: true, tracks: merged, warnings: dedupeStrings(reasons)}
 	}
+}
+
+// sameArtist reports whether a result's artist credit matches the seed's.
+// Whole-word containment either way keeps collaborations: a "Daft Punk &
+// Pharrell Williams" seed keeps "Daft Punk" tracks, and a "Daft Punk" seed
+// keeps "Daft Punk feat. Julian Casablancas", but "Yes" does not match
+// "Bad Eyes".
+func sameArtist(seed, artist string) bool {
+	seed = strings.ToLower(strings.TrimSpace(seed))
+	artist = strings.ToLower(strings.TrimSpace(artist))
+	if seed == "" || artist == "" {
+		return false
+	}
+	return containsWords(seed, artist) || containsWords(artist, seed)
+}
+
+// containsWords reports whether sub occurs in s on word boundaries.
+func containsWords(s, sub string) bool {
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	for i := 0; i <= len(s)-len(sub); {
+		j := strings.Index(s[i:], sub)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(sub)
+		before, _ := utf8.DecodeLastRuneInString(s[:start])
+		after, _ := utf8.DecodeRuneInString(s[end:])
+		if (start == 0 || !isWord(before)) && (end == len(s) || !isWord(after)) {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(s[start:])
+		i = start + size
+	}
+	return false
 }
 
 // discoveryQueries returns search terms based on seed + similarity.
@@ -2662,15 +2769,14 @@ func discoveryQueries(seed *provider.Track, similarity float64) []string {
 	}
 
 	switch {
-	case similarity >= 0.85:
+	case similarity >= discoverySameArtist:
 		// Same-artist focus: search the artist directly, plus a specific album
-		// when available for breadth across their catalogue.
+		// when available for breadth across their catalogue. No pool artists:
+		// one would end up in the refill after the shuffle.
 		qs := []string{artist}
 		if album != "" {
 			qs = append(qs, artist+" "+album)
 		}
-		// Add one more artist from the same genre pool for slight variety.
-		qs = append(qs, pick(1, artist)...)
 		return qs
 
 	case similarity >= 0.65:
@@ -2900,6 +3006,9 @@ func (m *Model) playNextCmd(label string, tracks []provider.Track, ids []string)
 	m.appendLog(fmt.Sprintf("[queue] play next: %s (%d track(s))", label, len(tracks)))
 
 	return m.playerCmd(func(p player.Player) error {
+		if nq, ok := p.(player.NextQueuer); ok {
+			return nq.PlayNext(ids)
+		}
 		if err := p.AppendQueue(ids); err != nil {
 			return err
 		}
@@ -3209,7 +3318,7 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
 			m.artwork.rendered = map[art.Size][]string{}
 		}
-		artLines = art.RenderHalfBlocks(m.artwork.img, size)
+		artLines = m.renderArt(m.artwork.img, size)
 		m.artwork.rendered[size] = artLines
 	}
 
@@ -3246,6 +3355,15 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 	return lines
 }
 
+// artRenderer picks the album-art renderer: dithered sextants where the
+// terminal can draw them, the plain half-block renderer otherwise.
+func artRenderer() func(image.Image, art.Size) []string {
+	if art.SupportsSextants() {
+		return art.RenderDithered
+	}
+	return art.RenderHalfBlocks
+}
+
 // statusLine renders the centred error/status line, or "" when there is no
 // message. Messages prefixed with '✓' are rendered as success (green); all
 // others are treated as warnings/errors (red with ⚠ prefix).
@@ -3272,13 +3390,9 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
 		lines[h-2] = centerStr(muted.Render("made with ❤️ by simonepelosi · press ? for about"), contentW)
 		if m.errMsg != "" {
-			var errRendered string
-			if strings.HasPrefix(m.errMsg, "✓") {
-				errRendered = centerStr(styles.ControlActive.Render(m.errMsg), contentW)
-			} else {
-				errRendered = centerStr(styles.ErrorStyle.Render("⚠  "+m.errMsg), contentW)
-			}
-			lines[max(0, mid-2)] = errRendered
+			// statusLine renders this identically and truncates to the width,
+			// which a message long enough to explain itself needs.
+			lines[max(0, mid-2)] = m.statusLine(contentW)
 		}
 		return lines
 	}
@@ -3486,11 +3600,19 @@ func (m *Model) searchLines(contentW, h int) []string {
 	} else if m.search.SelectedPlaylist() != nil {
 		kind = "playlist"
 	}
+	esc := " close"
+	if m.search.InArtist() {
+		esc = " back"
+	}
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
 		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
 		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
-		"  ·  " + accent.Render("Esc") + muted.Render(" close")
+		"  ·  " + accent.Render("Esc") + muted.Render(esc)
+	if m.search.SelectedArtist() != nil {
+		footer = "  " + accent.Render("Enter") + muted.Render(" open artist") +
+			"  ·  " + accent.Render("Esc") + muted.Render(esc)
+	}
 
 	result := append([]string{inputLine, sep}, listLines...)
 	result = append(result, footerSep, footer)

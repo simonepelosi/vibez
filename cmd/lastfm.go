@@ -22,7 +22,7 @@ var lastfmLoginCmd = &cobra.Command{
 	Long: `Authenticate with Last.fm using the application credentials embedded in
 vibez. Your play history will be scrobbled automatically during playback.
 
-The session key is stored in ~/.config/vibez/config.json.
+The session key is stored in the vibez config file selected by --config.
 If you built vibez from source without embedded keys, set lastfm_api_key and
 lastfm_api_secret in that file first (obtain them from https://www.last.fm/api/account/create).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,7 +37,7 @@ lastfm_api_secret in that file first (obtain them from https://www.last.fm/api/a
 
 If you built vibez from source, register an application at
   https://www.last.fm/api/account/create
-and add to ~/.config/vibez/config.json:
+and add to your vibez config file:
   "lastfm_api_key":    "<your API key>",
   "lastfm_api_secret": "<your shared secret>"`)
 		}

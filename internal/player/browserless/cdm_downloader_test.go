@@ -68,14 +68,14 @@ func TestCanDownloadCDM(t *testing.T) {
 }
 
 func TestDownloadCDMReal(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping network test in short mode")
+	if testing.Short() || os.Getenv("VIBEZ_TEST_NETWORK") != "1" {
+		t.Skip("skipping live 21 MB CDN download test (set VIBEZ_TEST_NETWORK=1 to run)")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	tmpDir := t.TempDir()
-	targetName := "libwidevinecdm.so"
+	targetName := filepath.Base(DefaultCDMPath())
 	destPath := filepath.Join(tmpDir, targetName)
 	path, err := DownloadCDM(ctx, destPath)
 	if err != nil {

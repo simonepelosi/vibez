@@ -12,7 +12,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
-	"github.com/simone-vibes/vibez/internal/player/browserless"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
 	"github.com/simone-vibes/vibez/internal/player/mpris"
 	"github.com/simone-vibes/vibez/internal/player/webkit"
@@ -24,7 +23,7 @@ import (
 
 func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	wantBrowserless := browserlessFlag || os.Getenv("VIBEZ_BROWSERLESS") == "1"
-	if wantBrowserless && browserless.FindCDM() != "" {
+	if wantBrowserless {
 		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
 	}
 	if cdp.Available() {
@@ -47,9 +46,6 @@ func runPlatform(cfg *config.Config, iconPath string, opts tui.Options, onUserTo
 			},
 		})
 	}
-	if browserless.FindCDM() != "" {
-		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
-	}
 	return runWebKitFlow(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
 }
 
@@ -60,7 +56,7 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 
 	if cfg.AppleUserToken != "" {
 		fmt.Fprintln(os.Stderr, "Checking Apple Music session...")
-		switch auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken) {
+		switch status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); status {
 		case auth.UserTokenRejected:
 			fmt.Fprintln(os.Stderr, "Session expired - re-authenticating...")
 			cfg.AppleUserToken = ""
@@ -83,11 +79,20 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 				fmt.Fprintln(os.Stderr, advice)
 			}
 		case auth.TokensValid:
+			// The same request reported the account's storefront. Save it before
+			// the player page renders: on a saved token the page's own value is
+			// MusicKit's default, not the account's (#163).
+			onStorefront(sf)
 		}
 	}
 	if cfg.AppleUserToken == "" {
 		if err := auth.Login(cfg); err != nil {
 			return fmt.Errorf("authentication: %w", err)
+		}
+		// A fresh session has no storefront in config yet. The check that
+		// validates returning sessions reports it.
+		if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" {
+			onStorefront(sf)
 		}
 	}
 
@@ -126,6 +131,8 @@ func runWebKitFlow(cfg *config.Config, iconPath string, opts tui.Options, onUser
 		p := tea.NewProgram(m)
 
 		startLastfmScrobbler(cfg, wkPlayer, func(msg string) { p.Send(tui.DebugLogMsg(msg)) })
+		stopRPC := startDiscordRPC(cfg, wkPlayer, func(msg string) { p.Send(tui.DebugLogMsg(msg)) })
+		defer stopRPC()
 
 		_, runErr := p.Run()
 		tuiErr <- runErr

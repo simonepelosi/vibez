@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -44,6 +45,13 @@ func TestConfigPath_Default(t *testing.T) {
 	}
 	home, _ := os.UserHomeDir()
 	want := filepath.Join(home, ".config", "vibez", "config.json")
+	if runtime.GOOS == "windows" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = filepath.Join(dir, "vibez", "config.json")
+	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -191,6 +199,9 @@ func TestSave_CreatesDirectories(t *testing.T) {
 }
 
 func TestSave_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows uses inherited profile ACLs, not Unix permission bits")
+	}
 	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := &config.Config{StoreFront: "us", AuthPort: 7777, Provider: "apple", Theme: "default"}
 
@@ -215,42 +226,28 @@ func TestLoad_FileIsDirectory(t *testing.T) {
 	}
 }
 
-func TestConfigPath_UsesHomeEnv(t *testing.T) {
+func TestConfigPath_UsesPlatformDirectory(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("APPDATA", tmpHome)
 	got, err := config.ConfigPath("")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.HasPrefix(got, tmpHome) {
-		t.Errorf("ConfigPath should use HOME env, got %q (HOME=%q)", got, tmpHome)
+		t.Errorf("ConfigPath should use the platform config directory, got %q", got)
 	}
 }
 
 func TestSave_WriteError(t *testing.T) {
-	// Make the directory unwritable so WriteFile fails.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := &config.Config{StoreFront: "us", AuthPort: 7777, Provider: "apple", Theme: "default"}
-
-	// First save succeeds.
 	if err := cfg.Save(path); err != nil {
 		t.Fatalf("initial Save: %v", err)
 	}
-
-	// Make dir read-only so the file can't be overwritten.
-	if err := os.Chmod(dir, 0o400); err != nil {
-		t.Skip("cannot change dir permissions:", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // G302: restoring temp dir permissions for cleanup
-			t.Logf("cleanup chmod: %v", err)
-		}
-	})
-
-	err := cfg.Save(path)
-	if err == nil {
-		t.Error("expected error when directory is read-only, got nil")
+	// A regular file cannot be used as the containing directory on any OS.
+	if err := cfg.Save(filepath.Join(path, "config.json")); err == nil {
+		t.Fatal("expected an error when the parent is a regular file")
 	}
 }
 
@@ -303,6 +300,7 @@ func TestSave_WithOverridePath(t *testing.T) {
 
 func TestSave_UsesLoadedOverrideWhenPathOmitted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 	override := writeCfg(t, map[string]any{
 		"storefront": "us",
 		"auth_port":  7777,

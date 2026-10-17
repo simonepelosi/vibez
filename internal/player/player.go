@@ -83,3 +83,12 @@ type Player interface {
 	Subscribe() <-chan State
 	Close() error
 }
+
+// NextQueuer is implemented by players that need a dedicated "play next"
+// call. MusicKit's live queue cannot be reordered, so AppendQueue followed by
+// MoveInQueue would only reorder the view there (#161). Players that own their
+// queue do not need it.
+type NextQueuer interface {
+	// PlayNext inserts the given track IDs straight after the current track.
+	PlayNext(ids []string) error
+}

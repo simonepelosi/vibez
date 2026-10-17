@@ -25,10 +25,11 @@ type Player struct {
 	allTracks []provider.Track
 	idx       int
 	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // New creates a local Player backed by a GStreamer pipeline.
-func New() (*Player, error) {
+func New(_ func(string)) (*Player, error) {
 	gstPlayer, err := gst.New()
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
@@ -231,7 +232,16 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
-func (p *Player) SetEqualizer(_ []player.EQBand) error { return nil }
+func (p *Player) SetEqualizer(bands []player.EQBand) error {
+	if p.gst != nil {
+		gains := make([]float64, len(bands))
+		for i, b := range bands {
+			gains[i] = b.Gain
+		}
+		p.gst.SetEqualizer(gains)
+	}
+	return nil
+}
 
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
@@ -302,8 +312,10 @@ func (p *Player) Subscribe() <-chan player.State {
 }
 
 func (p *Player) Close() error {
-	close(p.done)
-	p.gst.Destroy()
+	p.closeOnce.Do(func() {
+		close(p.done)
+		p.gst.Destroy()
+	})
 	return nil
 }
 

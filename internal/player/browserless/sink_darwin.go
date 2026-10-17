@@ -124,6 +124,10 @@ func (s *darwinAudioSink) SetVolume(v float64) {
 	}
 }
 
+func (s *darwinAudioSink) SetEqualizer(_ []float64) {
+	// Equalizer bands on Darwin AVPlayer can be wired via MTAudioProcessingTap in a future enhancement.
+}
+
 func (s *darwinAudioSink) Position() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()

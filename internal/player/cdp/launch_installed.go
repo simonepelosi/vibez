@@ -1,12 +1,12 @@
-//go:build darwin
+//go:build darwin || windows
 
 package cdp
 
 import playwright "github.com/mxschmitt/playwright-go"
 
 // launchBrowser starts Chromium with an ephemeral profile and returns the page
-// to drive plus a close function. macOS uses the installed Google Chrome, which
-// bundles Widevine directly, so no persistent profile or warm-up is needed.
+// to drive plus a close function. macOS and Windows use installed Google Chrome,
+// which manages the Widevine CDM component.
 //
 // Playwright injects --mute-audio into every headless Chromium launch; we strip
 // it so audio routes normally. Playwright also injects --disable-component-update;
@@ -15,6 +15,7 @@ func launchBrowser(pw *playwright.Playwright, chromePath string, headless, wsl b
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
+		ChromiumSandbox:   new(true),
 		IgnoreDefaultArgs: []string{"--mute-audio", "--disable-component-update"},
 		Args:              chromeLaunchArgs(headless, wsl),
 	})

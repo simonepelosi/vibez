@@ -18,8 +18,9 @@ import (
 )
 
 type CDM struct {
-	mu  sync.Mutex
-	ctx *C.cdm_context_t
+	mu      sync.Mutex
+	ctx     *C.cdm_context_t
+	certSet bool
 }
 
 // New loads the Widevine CDM shared library from the given path.
@@ -43,6 +44,9 @@ func (c *CDM) SetServerCertificate(cert []byte) error {
 	if c.ctx == nil {
 		return errors.New("cdm context is closed")
 	}
+	if c.certSet {
+		return nil
+	}
 
 	ret := C.cdm_context_set_server_certificate(
 		c.ctx,
@@ -52,6 +56,7 @@ func (c *CDM) SetServerCertificate(cert []byte) error {
 	if ret != 0 {
 		return fmt.Errorf("failed to set server certificate: %d", ret)
 	}
+	c.certSet = true
 	return nil
 }
 
