@@ -175,3 +175,21 @@ func TestApply_UpdatesGlowPalette(t *testing.T) {
 	}
 	styles.Apply(styles.DefaultTheme())
 }
+
+func TestApplyArtworkPalette_AndClear(t *testing.T) {
+	styles.Apply(styles.DefaultTheme())
+	defStop0 := styles.ColorHex(styles.ProgressGradStops[0])
+
+	styles.ApplyArtworkPalette("#090d0e", "#cde0f2", "#acc1e1", "#a5b5c4", "#8b9db7")
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != "#cde0f2" {
+		t.Errorf("ProgressGradStops[0] after ApplyArtworkPalette = %q, want #cde0f2", got)
+	}
+	if got := styles.ColorHex(styles.ProgressGradStops[1]); got != "#acc1e1" {
+		t.Errorf("ProgressGradStops[1] after ApplyArtworkPalette = %q, want #acc1e1", got)
+	}
+
+	styles.ClearArtworkPalette()
+	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != defStop0 {
+		t.Errorf("ProgressGradStops[0] after ClearArtworkPalette = %q, want %q", got, defStop0)
+	}
+}

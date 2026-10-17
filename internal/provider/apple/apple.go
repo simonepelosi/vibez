@@ -192,9 +192,14 @@ func formatAPIError(statusCode int, status string, body []byte) string {
 // --- Apple Music API response types ---
 
 type artworkAttrs struct {
-	URL    string `json:"url"`
-	Width  int    `json:"width"`
-	Height int    `json:"height"`
+	URL        string `json:"url"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	BgColor    string `json:"bgColor"`
+	TextColor1 string `json:"textColor1"`
+	TextColor2 string `json:"textColor2"`
+	TextColor3 string `json:"textColor3"`
+	TextColor4 string `json:"textColor4"`
 }
 
 func (a artworkAttrs) formatted(size int) string {
@@ -202,6 +207,30 @@ func (a artworkAttrs) formatted(size int) string {
 	u := strings.ReplaceAll(a.URL, "{w}", s)
 	u = strings.ReplaceAll(u, "{h}", s)
 	return u
+}
+
+func (a artworkAttrs) palette() provider.ArtworkPalette {
+	return provider.ArtworkPalette{
+		BgColor:    normalizeHexColor(a.BgColor),
+		TextColor1: normalizeHexColor(a.TextColor1),
+		TextColor2: normalizeHexColor(a.TextColor2),
+		TextColor3: normalizeHexColor(a.TextColor3),
+		TextColor4: normalizeHexColor(a.TextColor4),
+	}
+}
+
+func normalizeHexColor(s string) string {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
+	if len(s) != 3 && len(s) != 6 {
+		return ""
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return ""
+		}
+	}
+	return "#" + strings.ToLower(s)
 }
 
 type playParams struct {
@@ -220,10 +249,13 @@ type songAttributes struct {
 	Previews   []struct {
 		URL string `json:"url"`
 	} `json:"previews"`
-	GenreNames  []string    `json:"genreNames"`
-	PlayParams  *playParams `json:"playParams"`
-	DiscNumber  int         `json:"discNumber"`
-	TrackNumber int         `json:"trackNumber"`
+	GenreNames           []string    `json:"genreNames"`
+	PlayParams           *playParams `json:"playParams"`
+	DiscNumber           int         `json:"discNumber"`
+	TrackNumber          int         `json:"trackNumber"`
+	ContentRating        string      `json:"contentRating"`
+	IsAppleDigitalMaster bool        `json:"isAppleDigitalMaster"`
+	ReleaseDate          string      `json:"releaseDate"`
 }
 
 type songResource struct {
@@ -326,16 +358,20 @@ func toTrack(s songResource) provider.Track {
 	// Catalog IDs use { song: id } which triggers the preview limit if the
 	// user doesn't own the track — so we never map library IDs to catalog IDs.
 	t := provider.Track{
-		ID:          s.ID,
-		Title:       provider.Clean(s.Attributes.Name),
-		Artist:      provider.Clean(s.Attributes.ArtistName),
-		Album:       provider.Clean(s.Attributes.AlbumName),
-		Duration:    time.Duration(s.Attributes.DurationMs) * time.Millisecond,
-		ArtworkURL:  s.Attributes.Artwork.formatted(300),
-		PreviewURL:  preview,
-		Genres:      provider.CleanAll(slices.Clone(s.Attributes.GenreNames)),
-		DiscNumber:  s.Attributes.DiscNumber,
-		TrackNumber: s.Attributes.TrackNumber,
+		ID:                   s.ID,
+		Title:                provider.Clean(s.Attributes.Name),
+		Artist:               provider.Clean(s.Attributes.ArtistName),
+		Album:                provider.Clean(s.Attributes.AlbumName),
+		Duration:             time.Duration(s.Attributes.DurationMs) * time.Millisecond,
+		ArtworkURL:           s.Attributes.Artwork.formatted(300),
+		PreviewURL:           preview,
+		Genres:               provider.CleanAll(slices.Clone(s.Attributes.GenreNames)),
+		DiscNumber:           s.Attributes.DiscNumber,
+		TrackNumber:          s.Attributes.TrackNumber,
+		ContentRating:        strings.ToLower(strings.TrimSpace(provider.Clean(s.Attributes.ContentRating))),
+		IsAppleDigitalMaster: s.Attributes.IsAppleDigitalMaster,
+		ReleaseDate:          strings.TrimSpace(provider.Clean(s.Attributes.ReleaseDate)),
+		ArtworkPalette:       s.Attributes.Artwork.palette(),
 	}
 	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
 		t.CatalogID = s.Attributes.PlayParams.CatalogID

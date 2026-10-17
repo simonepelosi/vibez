@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Extended catalog metadata badges and dynamic artwork color palette** — tracks from Apple Music now parse `contentRating`, `isAppleDigitalMaster`, `releaseDate`, and per-artwork color palettes (`bgColor`, `textColor1..4`). Now Playing displays explicit (`🅴`), release year (`(YYYY)`), and Apple Digital Master (`✦ Master`) badges, and dynamically tints the Now Playing accent colors and progress bar gradient to match the playing track's artwork palette.
+
 ### Changed
 - **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make release`) and a configured `apple_developer_token` work as before. Refs #167.
 

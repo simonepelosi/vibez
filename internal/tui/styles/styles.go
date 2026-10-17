@@ -255,6 +255,48 @@ func Apply(t Theme) {
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)
 }
 
+// ApplyArtworkPalette dynamically tints the Now Playing accent styles and
+// progress bar gradient using Apple Music's per-track artwork color palette.
+// If no valid accent colors are supplied, it restores the active theme defaults.
+func ApplyArtworkPalette(_, text1, text2, text3, text4 string) {
+	var accents []color.Color
+	for _, hex := range []string{text1, text2, text3, text4} {
+		if validColor(hex) {
+			accents = append(accents, lipgloss.Color(hex))
+		}
+	}
+	if len(accents) == 0 {
+		ClearArtworkPalette()
+		return
+	}
+	c1 := accents[0]
+	c2 := LerpColor(c1, ColorGlow6, 0.5)
+	if len(accents) >= 2 {
+		c2 = accents[1]
+	}
+	c3 := LerpColor(c2, ColorLove, 0.5)
+	if len(accents) >= 3 {
+		c3 = accents[2]
+	}
+
+	NowPlayingArtist = lipgloss.NewStyle().Foreground(c1)
+	NowPlayingTitlePlaying = lipgloss.NewStyle().
+		Italic(true).
+		Bold(true).
+		Foreground(LerpColor(c1, lipgloss.Color("#ffffff"), 0.35))
+	NowPlayingTime = lipgloss.NewStyle().Foreground(c2)
+	ProgressGradStops = []color.Color{c1, c2, c3}
+}
+
+// ClearArtworkPalette restores the Now Playing styles and progress gradient
+// stops to the active theme's base colors.
+func ClearArtworkPalette() {
+	NowPlayingArtist = lipgloss.NewStyle().Foreground(ColorPrimary)
+	NowPlayingTitlePlaying = lipgloss.NewStyle().Italic(true).Bold(true).Foreground(ColorGlow7)
+	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
+	ProgressGradStops = []color.Color{ColorProgress, ColorGlow6, ColorLove}
+}
+
 // LerpColor linearly interpolates between two colours by factor t ∈ [0,1].
 // Used to compute gradient colours for dynamic indicators like the similarity bar.
 func LerpColor(a, b color.Color, t float64) color.Color {
