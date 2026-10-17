@@ -6,32 +6,62 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Standard locations where libwidevinecdm.so may exist on Linux.
+// System browser locations come before the standalone cache so a stale copy in
+// ~/.cache/vibez/cdm never shadows a browser-updated CDM.
 func candidatePaths() []string {
 	home, _ := os.UserHomeDir()
-	return []string{
-		filepath.Join(home, ".cache", "vibez", "cdm", "libwidevinecdm.so"),
-		filepath.Join(home, ".cache", "vibez", "chrome", "opt", "google", "chrome", "WidevineCdm", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
-		"/usr/lib/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/usr/lib/chromium-browser/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/opt/google/chrome/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/opt/google/chrome-unstable/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-		"/usr/lib/firefox/gmp-widevinecdm/system-installed/libwidevinecdm.so",
-		"/var/lib/flatpak/app/org.chromium.Chromium/current/active/files/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
-	}
-}
+	var paths []string
 
-// FindCDM searches the host for an existing libwidevinecdm.so binary.
-// Returns the file path if found, or empty string.
-func FindCDM() string {
-	for _, p := range candidatePaths() {
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 100000 {
-			return p
+	// Component-updated Widevine inside user browser profiles (e.g. ~/.config/google-chrome/WidevineCdm/*/_platform_specific/linux_x64/libwidevinecdm.so)
+	for _, pattern := range []string{
+		filepath.Join(home, ".config", "google-chrome", "WidevineCdm", "*", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
+		filepath.Join(home, ".config", "chromium", "WidevineCdm", "*", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
+		"/usr/lib/firefox/gmp-widevinecdm/*/libwidevinecdm.so",
+	} {
+		if matches, err := filepath.Glob(pattern); err == nil {
+			paths = append(paths, matches...)
 		}
 	}
-	return ""
+
+	paths = append(paths,
+		"/opt/google/chrome/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+		"/opt/google/chrome-unstable/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+		"/usr/lib/chromium/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+		"/usr/lib/chromium-browser/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+		filepath.Join(home, ".cache", "vibez", "chrome", "opt", "google", "chrome", "WidevineCdm", "_platform_specific", "linux_x64", "libwidevinecdm.so"),
+		"/usr/lib/firefox/gmp-widevinecdm/system-installed/libwidevinecdm.so",
+		"/var/lib/flatpak/app/org.chromium.Chromium/current/active/files/WidevineCdm/_platform_specific/linux_x64/libwidevinecdm.so",
+		filepath.Join(home, ".cache", "vibez", "cdm", "libwidevinecdm.so"),
+	)
+	return paths
+}
+
+// FindCDM searches the host for an existing libwidevinecdm.so binary and
+// returns the newest valid candidate so revoked older copies are skipped.
+func FindCDM() string {
+	if envPath := os.Getenv("VIBEZ_CDM_PATH"); envPath != "" {
+		if fi, err := os.Stat(envPath); err == nil && !fi.IsDir() && fi.Size() > 100000 { //nolint:gosec // G703: explicit user override via VIBEZ_CDM_PATH
+			return envPath
+		}
+	}
+
+	var bestPath string
+	var bestMod time.Time
+	for _, p := range candidatePaths() {
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() || fi.Size() <= 100000 {
+			continue
+		}
+		if bestPath == "" || fi.ModTime().After(bestMod) {
+			bestPath = p
+			bestMod = fi.ModTime()
+		}
+	}
+	return bestPath
 }
 
 // Destination path for the cached standalone CDM library.
