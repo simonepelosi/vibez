@@ -461,13 +461,41 @@
       }
 
       // ── Auth (both modes) ────────────────────────────────────────────────
+      // Sync storekit.storefrontCountryCode (/v1/me/account) before playback
+      // so assertUserStorefront() inside setQueue() matches storefrontId.
+      async function syncAccountStorefront() {
+        try {
+          await music.me();
+          return true;
+        } catch(e) {
+          if (isAuthError(e)) {
+            await goNeedsAuth('expired').catch(() => {});
+            return false;
+          }
+          const fallbackSf = music.storefrontCountryCode || '';
+          if (fallbackSf && music.storefrontId !== fallbackSf) {
+            if (typeof goLog === 'function') {
+              await goLog(`[auth] music.me() failed (${errName(e)}); aligning storefrontId=${music.storefrontId} -> ${fallbackSf}`).catch(() => {});
+            }
+            music.storefrontId = fallbackSf;
+          } else if (typeof goLog === 'function') {
+            await goLog(`[auth] music.me() failed (${errName(e)})`).catch(() => {});
+          }
+          return true;
+        }
+      }
+
+      window.vibezSetUserToken = async function(token) {
+        music.musicUserToken = token;
+        await syncAccountStorefront();
+      };
+
       // savedToken is already declared above and musicUserToken pre-set.
       // If a token exists, skip music.authorize() — in headless Chrome it
       // opens an invisible OAuth popup that hangs forever. Use the token
       // directly; if it's expired, API calls will fail and we handle it then.
       if (savedToken !== '') {
-        // The storefront is not reported here: with a saved token it is the
-        // configured value or MusicKit's default, not the account's (#163).
+        if (!(await syncAccountStorefront())) return;
         await goAuthComplete('done').catch(() => {});
       } else {
         // No saved token: need interactive auth (Chrome window is visible).

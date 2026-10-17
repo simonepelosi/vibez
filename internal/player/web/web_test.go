@@ -133,3 +133,26 @@ func TestRenderHTMLDropsMalformedStorefront(t *testing.T) {
 		}
 	}
 }
+
+// MusicKit's setQueue() calls assertUserStorefront(), which throws
+// CONTENT_EQUIVALENT whenever storekit.storefrontCountryCode !== storefrontId.
+// On a saved token authorize() is skipped, leaving storefrontCountryCode at
+// its default "us" until music.me() fetches /v1/me/account.
+func TestRenderHTMLSyncsAccountStorefrontBeforeReady(t *testing.T) {
+	html, err := RenderHTML("dev", "user", "it", "test", 256)
+	if err != nil {
+		t.Fatalf("RenderHTML: %v", err)
+	}
+	meIdx := strings.Index(html, "await music.me()")
+	syncIdx := strings.Index(html, "await syncAccountStorefront()")
+	readyIdx := strings.Index(html, "await goAuthComplete('done')")
+	if meIdx < 0 || syncIdx < 0 || readyIdx < 0 || meIdx > readyIdx || syncIdx > readyIdx {
+		t.Errorf("music.me() at %d, syncAccountStorefront() at %d, goAuthComplete at %d: page must sync account storefront before signalling ready", meIdx, syncIdx, readyIdx)
+	}
+	if !strings.Contains(html, "window.vibezSetUserToken = async function(token)") {
+		t.Error("rendered HTML does not expose window.vibezSetUserToken for mid-session re-auth")
+	}
+	if !strings.Contains(html, "aligning storefrontId=") {
+		t.Error("rendered HTML does not log storefrontId fallback via goLog when music.me() fails")
+	}
+}
