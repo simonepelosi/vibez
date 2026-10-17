@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 @interface VibezPlayerObserver : NSObject
-@property (nonatomic, assign) void* userData;
+@property (nonatomic, assign) uintptr_t userData;
 @property (nonatomic, assign) vibez_eos_cb_t eosCb;
 @property (nonatomic, assign) vibez_err_cb_t errCb;
 @property (nonatomic, weak) AVPlayer* player;
@@ -54,7 +54,7 @@ struct VibezPlayerHandle {
     VibezPlayerObserver* observer;
 };
 
-vibez_avplayer_t vibez_avplayer_create(void* user_data, vibez_eos_cb_t on_eos, vibez_err_cb_t on_err) {
+vibez_avplayer_t vibez_avplayer_create(uintptr_t user_data, vibez_eos_cb_t on_eos, vibez_err_cb_t on_err) {
     @autoreleasepool {
         struct VibezPlayerHandle* h = (struct VibezPlayerHandle*)calloc(1, sizeof(struct VibezPlayerHandle));
         if (!h) return NULL;

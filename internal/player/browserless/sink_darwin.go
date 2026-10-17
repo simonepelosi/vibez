@@ -8,10 +8,10 @@ package browserless
 #include "sink_darwin.h"
 #include <stdlib.h>
 
-extern void vibezDarwinOnEOS(void* userData);
-extern void vibezDarwinOnError(void* userData, char* errMsg);
+extern void vibezDarwinOnEOS(uintptr_t userData);
+extern void vibezDarwinOnError(uintptr_t userData, char* errMsg);
 
-static inline vibez_avplayer_t vibez_create_darwin_sink(void* userData) {
+static inline vibez_avplayer_t vibez_create_darwin_sink(uintptr_t userData) {
     return vibez_avplayer_create(userData, vibezDarwinOnEOS, vibezDarwinOnError);
 }
 */
@@ -38,7 +38,7 @@ func newAudioSink() (audioSink, error) {
 	h := cgo.NewHandle(s)
 	s.cgoH = h
 
-	playerHandle := C.vibez_create_darwin_sink(unsafe.Pointer(uintptr(h)))
+	playerHandle := C.vibez_create_darwin_sink(C.uintptr_t(h))
 	if playerHandle == nil {
 		h.Delete()
 		return nil, errors.New("failed to create AVPlayer audio sink")
@@ -48,8 +48,8 @@ func newAudioSink() (audioSink, error) {
 }
 
 //export vibezDarwinOnEOS
-func vibezDarwinOnEOS(userData unsafe.Pointer) {
-	h := cgo.Handle(uintptr(userData))
+func vibezDarwinOnEOS(userData C.uintptr_t) {
+	h := cgo.Handle(userData)
 	if s, ok := h.Value().(*darwinAudioSink); ok {
 		s.mu.Lock()
 		cb := s.onEOS
@@ -61,9 +61,9 @@ func vibezDarwinOnEOS(userData unsafe.Pointer) {
 }
 
 //export vibezDarwinOnError
-func vibezDarwinOnError(userData unsafe.Pointer, cErrMsg *C.char) {
+func vibezDarwinOnError(userData C.uintptr_t, cErrMsg *C.char) {
 	msg := C.GoString(cErrMsg)
-	h := cgo.Handle(uintptr(userData))
+	h := cgo.Handle(userData)
 	if s, ok := h.Value().(*darwinAudioSink); ok {
 		s.mu.Lock()
 		cb := s.onError
