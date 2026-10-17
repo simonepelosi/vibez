@@ -21,13 +21,26 @@ import (
 // --disable-component-update; we strip it so Chrome can load the Widevine CDM
 // component. DRM in headless mode is enabled via --headless=new (chromeLaunchArgs).
 func launchBrowser(pw *playwright.Playwright, chromePath string, headless, wsl bool) (playwright.Page, func(), error) {
+	sandbox := sandboxEnabled()
+	pg, closeFn, err := launchOnce(pw, chromePath, headless, wsl, sandbox)
+	if err != nil && sandbox {
+		// sandboxEnabled is a heuristic over /proc and the environment. When
+		// Chromium still cannot create its sandbox, run without it rather
+		// than leave the user with no playback.
+		return launchOnce(pw, chromePath, headless, wsl, false)
+	}
+	return pg, closeFn, err
+}
+
+func launchOnce(pw *playwright.Playwright, chromePath string, headless, wsl, sandbox bool) (playwright.Page, func(), error) {
 	ignore := []string{"--mute-audio", "--disable-component-update"}
-	args := chromeLaunchArgs(headless, wsl)
+	args := chromeLaunchArgsSandbox(headless, wsl, sandbox)
 
 	if useSystemBrowser() {
 		ctx, err := pw.Chromium.LaunchPersistentContext(chromiumProfileDir(), playwright.BrowserTypeLaunchPersistentContextOptions{
 			ExecutablePath:    &chromePath,
 			Headless:          &headless,
+			ChromiumSandbox:   &sandbox,
 			IgnoreDefaultArgs: ignore,
 			Args:              args,
 		})
@@ -45,6 +58,7 @@ func launchBrowser(pw *playwright.Playwright, chromePath string, headless, wsl b
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 		ExecutablePath:    &chromePath,
 		Headless:          &headless,
+		ChromiumSandbox:   &sandbox,
 		IgnoreDefaultArgs: ignore,
 		Args:              args,
 	})

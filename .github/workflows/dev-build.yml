@@ -23,8 +23,8 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.inputs.pr_number }}
         run: |
-          PR_NUM="${{ github.event.inputs.pr_number }}"
           if [ -z "$PR_NUM" ]; then
             echo "is_pr=false" >> "$GITHUB_OUTPUT"
             echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
@@ -52,56 +52,66 @@ jobs:
           go-version: "1.26"
           cache: true
 
+      - name: Check token broker configuration
+        env:
+          VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
+          VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
+        run: |
+          [ -n "$VIBEZ_TOKEN_URL" ] || { echo "VIBEZ_TOKEN_URL repository variable is not set"; exit 1; }
+          [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
+
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
-      - name: Install garble
-        run: go install mvdan.cc/garble@v0.15.0
-
-      - name: Generate Apple Developer Token
-        id: devtoken
-        env:
-          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
-        run: |
-          TOKEN=$(go run ./scripts/gen-devtoken)
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-
       - name: Build (linux/amd64)
         env:
-          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
+          VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "1"
           PKG_CONFIG_PATH: ${{ github.workspace }}/pkg-config
           GOTOOLCHAIN: local
         run: |
           go build -o vibez-linux-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
             .
 
       - name: Build (darwin/amd64)
         env:
-          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
+          VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "0"
           GOTOOLCHAIN: local
           GOOS: darwin
           GOARCH: amd64
         run: |
           go build -o vibez-darwin-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
             .
 
       - name: Build (darwin/arm64)
         env:
-          APPLE_DEV_TOKEN: ${{ steps.devtoken.outputs.token }}
+          VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
+          VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "0"
           GOTOOLCHAIN: local
           GOOS: darwin
           GOARCH: arm64
         run: |
           go build -o vibez-darwin-arm64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.devToken=${{ env.APPLE_DEV_TOKEN }}'" \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
+            .
+
+      - name: Build (windows/amd64)
+        env:
+          VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
+          VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
+          CGO_ENABLED: "0"
+          GOTOOLCHAIN: local
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          go build -o vibez-windows-amd64.exe \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ steps.pr.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
             .
 
       - name: Upload Linux artifact
@@ -125,17 +135,26 @@ jobs:
           path: vibez-darwin-arm64
           retention-days: 14
 
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibez-${{ steps.pr.outputs.name_suffix }}-windows-amd64
+          path: vibez-windows-amd64.exe
+          retention-days: 14
+
       - name: Comment on PR
         if: steps.pr.outputs.is_pr == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ github.event.inputs.pr_number }}
         run: |
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh pr comment ${{ github.event.inputs.pr_number }} --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
+          gh pr comment "$PR_NUM" --body "🎵 **Dev builds ready** — [\`${{ steps.pr.outputs.version }}\`]($RUN_URL)
 
           **Download:** Go to the [workflow run]($RUN_URL) → Artifacts:
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-linux-amd64\`
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-amd64\`
           - \`vibez-${{ steps.pr.outputs.name_suffix }}-darwin-arm64\` (for Apple Silicon Macs)
+          - \`vibez-${{ steps.pr.outputs.name_suffix }}-windows-amd64\` (native Windows)
 
           <sub>Built from ${{ steps.pr.outputs.sha }} • expires in 14 days</sub>"

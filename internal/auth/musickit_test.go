@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 // minimalTemplate is a no-op login page template used in handler tests.
 const minimalTemplate = `<html><body>{{.DeveloperToken}}</body></html>`
 
+const testState = "test-state"
+
 func newTestMux(t *testing.T) (*http.ServeMux, chan string, chan error) {
 	t.Helper()
 	tmpl, err := template.New("login").Parse(minimalTemplate)
@@ -26,8 +29,54 @@ func newTestMux(t *testing.T) (*http.ServeMux, chan string, chan error) {
 	}
 	tokenCh := make(chan string, 1)
 	errCh := make(chan error, 1)
-	mux := buildMux("TEST_DEV_TOKEN", tmpl, tokenCh, errCh)
+	mux := buildMux("TEST_DEV_TOKEN", testState, tmpl, tokenCh, errCh)
 	return mux, tokenCh, errCh
+}
+
+// callbackRequest builds an authorised POST to /callback.
+func callbackRequest(body io.Reader) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/callback", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(stateHeader, testState)
+	return req
+}
+
+// captureLoginState replaces the browser opener for the test and returns a
+// channel that yields the state from the login URL Login opens.
+func captureLoginState(t *testing.T) <-chan string {
+	t.Helper()
+	ch := make(chan string, 1)
+	original := openBrowser
+	openBrowser = func(raw string) error {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Errorf("login URL %q: %v", raw, err)
+			return err
+		}
+		ch <- u.Query().Get("state")
+		return nil
+	}
+	t.Cleanup(func() { openBrowser = original })
+	return ch
+}
+
+// postToken waits for Login to open the browser, then posts token to /callback
+// the way the login page does.
+func postToken(port int, states <-chan string, token string) {
+	state := <-states
+	body, _ := json.Marshal(map[string]string{"user_token": token})
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d/callback", port), bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(stateHeader, state)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // G704: localhost URL constructed in test
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 // --- Login error cases ---
@@ -47,7 +96,7 @@ func TestLogin_MissingDeveloperToken(t *testing.T) {
 
 func TestLoginHandler_ServesHTML(t *testing.T) {
 	mux, _, _ := newTestMux(t)
-	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req := httptest.NewRequest(http.MethodGet, "/login?state="+testState, nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -74,8 +123,7 @@ func TestCallbackHandler_AcceptsValidToken(t *testing.T) {
 	mux, tokenCh, _ := newTestMux(t)
 
 	body, _ := json.Marshal(callbackPayload{UserToken: "valid-user-token"})
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req := callbackRequest(bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -106,7 +154,7 @@ func TestCallbackHandler_RejectsGET(t *testing.T) {
 
 func TestCallbackHandler_RejectsBadJSON(t *testing.T) {
 	mux, _, errCh := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewBufferString("{not-json"))
+	req := callbackRequest(bytes.NewBufferString("{not-json"))
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -126,7 +174,7 @@ func TestCallbackHandler_RejectsBadJSON(t *testing.T) {
 func TestCallbackHandler_RejectsEmptyToken(t *testing.T) {
 	mux, _, errCh := newTestMux(t)
 	body, _ := json.Marshal(callbackPayload{UserToken: ""})
-	req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
+	req := callbackRequest(bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -140,6 +188,116 @@ func TestCallbackHandler_RejectsEmptyToken(t *testing.T) {
 		}
 	default:
 		t.Error("no error sent to errCh")
+	}
+}
+
+// --- state and Host checks ---
+
+func TestLoginHandler_RejectsMissingOrWrongState(t *testing.T) {
+	mux, _, _ := newTestMux(t)
+	for _, target := range []string{"/login", "/login?state=", "/login?state=wrong"} {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("GET %s: status = %d, want %d", target, w.Code, http.StatusForbidden)
+		}
+		if containsSubstr(w.Body.String(), "TEST_DEV_TOKEN") {
+			t.Errorf("GET %s leaked the developer token", target)
+		}
+	}
+}
+
+func TestCallbackHandler_RejectsMissingOrWrongState(t *testing.T) {
+	for _, state := range []string{"", "wrong"} {
+		mux, tokenCh, errCh := newTestMux(t)
+		body, _ := json.Marshal(callbackPayload{UserToken: "attacker-token"})
+		req := httptest.NewRequest(http.MethodPost, "/callback", bytes.NewReader(body))
+		if state != "" {
+			req.Header.Set(stateHeader, state)
+		}
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("state %q: status = %d, want %d", state, w.Code, http.StatusForbidden)
+		}
+		select {
+		case tok := <-tokenCh:
+			t.Errorf("state %q: token %q was accepted", state, tok)
+		default:
+		}
+		select {
+		case err := <-errCh:
+			t.Errorf("state %q: unauthenticated request aborted login: %v", state, err)
+		default:
+		}
+	}
+}
+
+func TestHostGuard(t *testing.T) {
+	h := hostGuard(7777, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	cases := map[string]int{
+		"localhost:7777":           http.StatusOK,
+		"127.0.0.1:7777":           http.StatusOK,
+		"[::1]:7777":               http.StatusOK,
+		"rebind-test.example:7777": http.StatusNotFound,
+		"localhost:1234":           http.StatusNotFound,
+		"192.168.1.20:7777":        http.StatusNotFound,
+		"":                         http.StatusNotFound,
+	}
+	for host, want := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/login", nil)
+		req.Host = host
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Errorf("Host %q: status = %d, want %d", host, w.Code, want)
+		}
+	}
+}
+
+// The sign-in server must not be reachable through a non-loopback address.
+func TestLogin_ListensOnLoopbackOnly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var lanIP string
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok && ipn.IP.To4() != nil && !ipn.IP.IsLoopback() {
+			lanIP = ipn.IP.String()
+			break
+		}
+	}
+	if lanIP == "" {
+		t.Skip("no non-loopback IPv4 address on this machine")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	states := captureLoginState(t)
+	cfg := &config.Config{AppleDeveloperToken: "test-dev-token", AuthPort: port} //nolint:gosec // G101: test value
+	done := make(chan error, 1)
+	go func() { done <- Login(cfg) }()
+
+	state := <-states // the server is listening once the browser is opened
+	if conn, err := net.DialTimeout("tcp", net.JoinHostPort(lanIP, fmt.Sprint(port)), time.Second); err == nil {
+		_ = conn.Close()
+		t.Errorf("auth server accepted a connection on %s", lanIP)
+	}
+
+	// Finish the login so Login returns.
+	stateCh := make(chan string, 1)
+	stateCh <- state
+	postToken(port, stateCh, "done")
+	if err := <-done; err != nil {
+		t.Fatalf("Login: %v", err)
 	}
 }
 
@@ -233,17 +391,8 @@ func TestLogin_SuccessFlow(t *testing.T) {
 		Theme:               "default",
 	}
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "test-user-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL constructed in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	states := captureLoginState(t)
+	go postToken(port, states, "test-user-token")
 
 	if err := Login(cfg); err != nil {
 		t.Fatalf("Login: %v", err)
@@ -268,17 +417,8 @@ func TestLogin_UsesInjectedDevToken(t *testing.T) {
 	}
 
 	// Simulate the browser posting a user token.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "injected-flow-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	states := captureLoginState(t)
+	go postToken(port, states, "injected-flow-token")
 
 	if err := Login(cfg); err != nil {
 		t.Fatalf("Login with injected token: %v", err)
@@ -302,17 +442,8 @@ func TestLogin_EmbeddedTokenOverridesExplicit(t *testing.T) {
 		AuthPort:            port,
 	}
 
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		body, _ := json.Marshal(map[string]string{"user_token": "explicit-flow-token"})
-		callbackURL := fmt.Sprintf("http://localhost:%d/callback", port)
-		resp, err := http.Post(callbackURL, "application/json", bytes.NewReader(body)) //nolint:gosec // G107: localhost URL in test
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	states := captureLoginState(t)
+	go postToken(port, states, "explicit-flow-token")
 
 	if err := Login(cfg); err != nil {
 		t.Fatalf("Login: %v", err)

@@ -298,6 +298,29 @@ func streamIDFromURL(streamURL string) string {
 	return id
 }
 
+// SeekTarget resolves a target playback timestamp into the starting HLS segment
+// index and that segment's exact starting time offset within the track.
+func (s *StreamServer) SeekTarget(streamID string, target time.Duration) (int, time.Duration, bool) {
+	s.mu.RLock()
+	st, ok := s.streams[streamID]
+	s.mu.RUnlock()
+	if !ok || len(st.segments) == 0 {
+		return 0, 0, false
+	}
+	if target <= 0 {
+		return 0, 0, true
+	}
+	targetSec := target.Seconds()
+	var acc float64
+	for i, seg := range st.segments {
+		if acc+seg.duration > targetSec || i == len(st.segments)-1 {
+			return i, time.Duration(acc * float64(time.Second)), true
+		}
+		acc += seg.duration
+	}
+	return 0, 0, true
+}
+
 func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Verify request is from loopback interface
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

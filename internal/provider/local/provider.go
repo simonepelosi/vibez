@@ -1,15 +1,18 @@
 // Package local provides a Provider that serves tracks from a local music
-// directory. It scans recursively for MP3, FLAC, M4A (plus OGG files for Linux) and reads
+// directory. It scans recursively for MP3, FLAC, M4A (plus OGG on Linux and Windows) and reads
 // their metadata using the dhowden/tag library. No network or credentials
 // are required.
 
 package local
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dhowden/tag"
@@ -20,6 +23,12 @@ import (
 type Provider struct {
 	dir    string
 	tracks []provider.Track
+
+	// skipped counts the files the last scan ignored for an unsupported
+	// extension, keyed by that extension ("" for a file that has none).
+	// unreadable counts files with a supported extension that would not open.
+	skipped    map[string]int
+	unreadable int
 }
 
 // New creates a Provider and performs the initial directory scan.
@@ -37,6 +46,8 @@ func (p *Provider) IsAuthenticated() bool { return true }
 // scan walks dir recursively and indexes all supported audio files.
 func (p *Provider) scan() error {
 	p.tracks = nil
+	p.skipped = map[string]int{}
+	p.unreadable = 0
 	return filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsPermission(err) {
@@ -49,15 +60,109 @@ func (p *Provider) scan() error {
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if !supportedExts[ext] {
+			p.skipped[ext]++
 			return nil
 		}
 		t, err := trackFromFile(path)
 		if err != nil {
+			p.unreadable++
 			return nil // skipping files that have unreadable metadata
 		}
 		p.tracks = append(p.tracks, t)
 		return nil
 	})
+}
+
+// ScanNotice reports what the last scan left out, or "" when every file in the
+// directory was indexed. An empty library reaches the TUI looking the same
+// whether the directory holds nothing, holds only formats this platform cannot
+// play, or holds files that would not open, and only the format case has a
+// remedy the user can act on. The supported set is not documented anywhere
+// else a user would look, so the message names it.
+func (p *Provider) ScanNotice() string {
+	skipped := 0
+	for _, n := range p.skipped {
+		skipped += n
+	}
+	if skipped == 0 && p.unreadable == 0 && len(p.tracks) > 0 {
+		return ""
+	}
+
+	dir := shortPath(p.dir)
+	head := "no playable tracks in " + dir
+	if len(p.tracks) > 0 {
+		head = fmt.Sprintf("indexed %d of %d files in %s",
+			len(p.tracks), len(p.tracks)+skipped+p.unreadable, dir)
+	}
+
+	var parts []string
+	if skipped > 0 {
+		// The playable set comes before the detail: a status bar truncates
+		// from the right, and it is the half the user can act on.
+		parts = append(parts,
+			platformName+" plays "+supportedExtList(),
+			fmt.Sprintf("skipped %s (%s)", fileCount(skipped), skippedExtList(p.skipped)))
+	}
+	if p.unreadable > 0 {
+		parts = append(parts, fileCount(p.unreadable)+" could not be read")
+	}
+	if len(parts) == 0 {
+		return head + ": the directory is empty"
+	}
+	return head + ": " + strings.Join(parts, "; ")
+}
+
+// fileCount renders a count of files with its plural.
+func fileCount(n int) string {
+	if n == 1 {
+		return "1 file"
+	}
+	return fmt.Sprintf("%d files", n)
+}
+
+// skippedExtList names the skipped extensions, commonest first, capped so the
+// line stays inside a status bar. A music directory routinely holds artwork,
+// cue sheets and logs beside the audio, so the list can be long and the tail
+// of it is never the answer.
+func skippedExtList(counts map[string]int) string {
+	exts := slices.Sorted(maps.Keys(counts))
+	slices.SortStableFunc(exts, func(a, b string) int { return cmp.Compare(counts[b], counts[a]) })
+
+	const named = 3
+	parts := make([]string, 0, named+1)
+	for i, ext := range exts {
+		if i == named {
+			parts = append(parts, fmt.Sprintf("+%d more", len(exts)-named))
+			break
+		}
+		name := ext
+		if name == "" {
+			name = "no extension"
+		}
+		parts = append(parts, fmt.Sprintf("%d %s", counts[ext], name))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// shortPath swaps the home directory for ~. A music directory is usually
+// under it, and the path is the one part of the line the user already knows.
+func shortPath(dir string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return dir
+	}
+	if dir == home {
+		return "~"
+	}
+	if strings.HasPrefix(dir, home+string(filepath.Separator)) {
+		return "~" + dir[len(home):]
+	}
+	return dir
+}
+
+// supportedExtList names this platform's playable extensions.
+func supportedExtList() string {
+	return strings.Join(slices.Sorted(maps.Keys(supportedExts)), ", ")
 }
 
 // trackFromFile reads metadata from an audio file and returns a Track.
@@ -92,10 +197,10 @@ func trackFromFile(path string) (provider.Track, error) {
 
 	return provider.Track{
 		ID:     fmt.Sprintf("local:%s", path),
-		Title:  title,
-		Artist: artist,
-		Album:  album,
-		Genres: genres,
+		Title:  provider.Clean(title),
+		Artist: provider.Clean(artist),
+		Album:  provider.Clean(album),
+		Genres: provider.CleanAll(genres),
 	}, nil
 }
 
@@ -153,6 +258,11 @@ func (p *Provider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([
 }
 
 func (p *Provider) GetCatalogPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	return nil, nil
+}
+
+// GetArtistAlbums returns nothing: local search returns no artists to open.
+func (p *Provider) GetArtistAlbums(_ context.Context, _ string) ([]provider.Album, error) {
 	return nil, nil
 }
 

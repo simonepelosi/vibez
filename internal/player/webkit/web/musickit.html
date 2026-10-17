@@ -29,6 +29,8 @@
         developerToken: '{{.DeveloperToken}}',
         app: { name: 'vibez', build: '{{.Version}}' },
       };
+      // Go supplies the storefront only alongside a saved session, once the
+      // startup check has confirmed it against /v1/me/storefront (#163).
       const configuredStorefront = '{{.Storefront}}';
       if (configuredStorefront) {
         configOpts.storefrontId = configuredStorefront;
@@ -98,8 +100,12 @@
       music.addEventListener('userTokenDidChange', function() {
         goUserTokenChanged(MusicKit.getInstance().musicUserToken || '').catch(console.error);
       });
-      music.addEventListener('storefrontIdentifierDidChange', function() {
-        goStorefrontChanged(MusicKit.getInstance().storefrontId || '').catch(console.error);
+      // storefrontCountryCode is the account's storefront, set by MusicKit's
+      // /v1/me/storefront and /v1/me/account calls. storefrontId would return
+      // the configured value instead, and storefrontIdentifierDidChange is a
+      // different property that never fires on this page.
+      music.addEventListener('storefrontCountryCodeDidChange', function() {
+        goStorefrontChanged(MusicKit.getInstance().storefrontCountryCode || '').catch(console.error);
       });
 
       // ════════════════════════════════════════════════════════════════════
@@ -460,7 +466,8 @@
       // opens an invisible OAuth popup that hangs forever. Use the token
       // directly; if it's expired, API calls will fail and we handle it then.
       if (savedToken !== '') {
-        await goStorefrontChanged(music.storefrontId || 'us').catch(() => {});
+        // The storefront is not reported here: with a saved token it is the
+        // configured value or MusicKit's default, not the account's (#163).
         await goAuthComplete('done').catch(() => {});
       } else {
         // No saved token: need interactive auth (Chrome window is visible).
@@ -468,7 +475,9 @@
           await goNeedsAuth('pending').catch(() => {});
           const token = await music.authorize();
           await goUserTokenChanged(token || '').catch(() => {});
-          await goStorefrontChanged(music.storefrontId || '').catch(() => {});
+          // authorize() has just fetched /v1/me/storefront, so this is the
+          // account's storefront.
+          await goStorefrontChanged(music.storefrontCountryCode || '').catch(() => {});
           await goAuthComplete('done').catch(() => {});
         } catch(e) {
           goError('auth failed: ' + (e.message || String(e))).catch(() => {});

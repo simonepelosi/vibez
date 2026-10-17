@@ -10,7 +10,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Browserless Apple Music playback on Linux via in-process Widevine CDM and GStreamer** — completely eliminates the dependency on Google Chrome, Chromium, Playwright, and Node.js for Apple Music streaming on Linux. Apple's MZPlay web playback and DRM license APIs are queried directly via pure Go HTTP, while Widevine `cenc` decryption is executed in-process through a lightweight CGo bridge wrapping Chromium's `Host_11` CDM interface against `libwidevinecdm.so`. Decrypted audio frames are packaged into standard ADTS AAC format and progressively streamed to a local GStreamer pipeline. Reduces runtime RAM usage from ~250 MB to ~15 MB (a 94% reduction), cuts DRM startup latency from ~2.5s to < 500 ms, and leaves zero external browser helper processes running. Automatically discovers existing system CDM installations (Chrome, Chromium, Brave, Firefox, Flatpak, or `~/.cache/vibez/cdm/`) with seamless fallback to Chrome/CDP if unavailable. Refs #138.
+- **Browserless Apple Music playback on Linux via in-process Widevine CDM and GStreamer** — completely eliminates the dependency on Google Chrome, Chromium, Playwright, and Node.js for Apple Music streaming on Linux. Apple's MZPlay web playback and DRM license APIs are queried directly via pure Go HTTP, while Widevine `cenc` decryption is executed in-process through a lightweight CGo bridge wrapping Chromium's `Host_11` CDM interface against `libwidevinecdm.so`. Decrypted audio frames are packaged into standard ADTS AAC format and progressively streamed to a local GStreamer pipeline. Reduces runtime RAM usage from ~250 MB to ~15 MB (a 94% reduction), cuts DRM startup latency from ~2.5s to < 500 ms, and leaves zero external browser helper processes running. Enabled via `--browserless` or `VIBEZ_BROWSERLESS=1`, automatically discovering existing system CDM installations (Chrome, Chromium, Brave, Firefox, Flatpak, or `~/.cache/vibez/cdm/`). Refs #138.
+
+### Changed
+- **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make release`) and a configured `apple_developer_token` work as before. Refs #167.
+
+### Fixed
+- **Windows release quarantined by Microsoft Defender** — release binaries are no longer built with `garble`, whose output Defender flags as `Trojan:Win32/Gracing.I`. With no embedded token to obfuscate, release builds are plain Go builds on every platform. Closes #167.
+
+## [1.1.1] — 2026-10-11
+
+### Security
+- **Security hardening & access controls** — strengthened local service endpoints and internal playback communication with stricter loopback binding, host validation, and in-memory credential handling. Refs #169.
+- **Process isolation** — re-enabled process sandboxing for browser-backed playback on Linux where supported. Refs #169.
+- **Update verification** — enforced strict checksum validation and integrity checks during auto-updates. Refs #169.
+- **Input sanitization & API safeguards** — sanitized external metadata and lyrics for terminal rendering, confined API navigation targets, and added bounded limits for network responses. Refs #169.
+- **CI pipeline hardening** — isolated build workflows and credential handling for continuous integration runs. Refs #169.
+
+## [1.1.0] — 2026-10-10
+
+### Added
+- **Native Windows support** — full native Windows amd64 support without cgo. Includes installed Google Chrome discovery, headless MusicKit/CDP playback, Windows URL association opening, per-user configuration and cache paths (`%APPDATA%` / `%LOCALAPPDATA%`), Discord Rich Presence over Windows named pipes (`\\.\pipe\discord-ipc-*`), and atomic self-updating with rollback. Closes #147, refs #148.
+- **Windows local file playback** — local music directory playback on Windows through a secured loopback HTTP server and Chrome audio engine, supporting MP3, FLAC, M4A/AAC, and OGG formats, full equalizer controls, seeking, volume, and repeat/shuffle modes. Refs #148.
+
+### Changed
+- **Dithered album art** — the `:art` view now renders album covers as crisp dithered pixel art using Unicode sextants (`U+1FB00`) and Atkinson error diffusion with a 16-color palette on terminals that support sextants (kitty, Ghostty, WezTerm, Alacritty, foot), gracefully falling back to half-blocks on Apple Terminal. Closes #146.
+
+### Fixed
+- **Linux auto-update** — auto-updating on Linux was previously failing silently because the writability check opened the running executable with `O_WRONLY`, which the Linux kernel rejects with `ETXTBSY` ("Text file busy"). The updater now validates write permissions and probes the install directory, enabling reliable in-place self-updates across all platforms. Refs #160.
+- **MusicKit concurrent play requests** — avoided duplicate `m.play()` calls and race conditions during rapid queue changes and resumes by debouncing playback requests via `_ensurePlaying` and ignoring extraneous resume calls while queue builds are in-flight. Refs #153.
+- **Apple search test data race** — resolved a data race in `TestSearch_QueryEncoded` by synchronizing concurrent request logging across goroutines with a mutex. Refs #159.
+- Saved volume and equalizer settings are restored for players supplied at TUI startup, including local mode, not only engines initialized asynchronously.
+- Windows local and CDP player shutdown releases broadcast subscribers; the TUI stops consuming a closed state stream instead of spinning.
+- Local-player shutdown on Linux and macOS is idempotent, preventing a panic when TUI quit is followed by deferred cleanup.
+- Installed Chrome sessions on Windows and macOS enable Chromium's sandbox.
+- Windows local startup reports browser setup progress without repeating the local-player error prefix.
+- Native Go test runs execute the local JavaScript engine suite; Windows-specific Go sources are linted in CI.
+
+### Verification
+- Windows CLI/TUI, local codec playback, equalization, Widevine capability, MusicKit invalid-token handling, and running-executable replacement have been exercised. Apple sign-in and full-track Apple Music streaming still require verification with an authorized developer token; no lossless Apple Music support is claimed.
+
+### Thanks
+- Thanks to @hiKareeem for implementing native Windows support (#148).
+- Thanks to @chriopter for creating the dithered sextant album art renderer (#146).
+- Thanks to @ianswope for uncovering and fixing the Linux auto-update ETXTBSY bug (#160), fixing the Apple search test race (#159), and rigorous cross-platform reviews.
+- Thanks to @Wang-Yang-source for fixing concurrent MusicKit play race conditions during queue changes (#153).
+
+## [1.0.0] — 2026-09-29
+
+### Added
+- **Discord Rich Presence (RPC)** — vibez now displays your currently playing track, artist, album, album art, and listening time on Discord. Connects seamlessly to the local Discord desktop client on Linux and macOS; enabled by default and can be disabled via `--no-discord` or `"discord_rpc": false` in config. Custom client ID can be specified in config via `"discord_client_id"`. Closes #60, refs #145.
+
+### Thanks
+- Thanks to @ianswope for reviewing and testing Discord RPC across platforms, verifying IPC timeouts, and adding fuzz tests for the browserless MP4 parser.
+
+## [0.9.2] — 2026-09-25
+
+### Fixed
+- **Switching local tracks on macOS could panic if the outgoing track reached its end** — `playTrack` deleted the player's cgo handle while the previous track's `AudioQueue` was still running on a CoreAudio thread and could invoke `vibezOnEOS` with it, crashing the process with a panic on deleted handle access. Each C audio state (`audioRef`) now owns its own cgo handle, deleted in `release()` only after `vibez_destroy` has fully stopped and disposed of the queue. `vibezOnEOS` also ignores stale EOS events from swapped-out queues so they cannot prematurely advance a new track. Closes #143, refs #144.
+- **Local mode gave no sign when a file's format was unsupported on that platform** — `scan()` dropped every file whose extension was missing from the platform's `supportedExts` map and counted nothing, so a macOS user whose library is OGG got a TUI headed `Local mode · playing from ~/Music` with nothing in it. That is what a mistyped path, an empty directory and an unreadable file all look like too, and only the format case has a remedy the user can act on. The scan now counts what it left out and why, and the provider renders it as one line: `no playable tracks in /home/user/Music: macOS plays .flac, .m4a, .mp3; skipped 412 files (410 .ogg, 2 .jpg)`. It reaches the debug log on every local launch and the status bar when the library came back empty, with the playable set ahead of the detail because a status bar truncates from the right. The now-playing box renders that line through `statusLine` rather than its own copy of it, so a message long enough to explain itself is truncated to the width instead of overflowing the box. Closes #134, refs #141.
+
+### Thanks
+- Thanks to @OvOhao for reporting the CoreAudio callback handle lifecycle issue (#143).
+- Thanks to @ianswope for fixing the Darwin audio state handle lifecycle (#144), implementing empty library format diagnostics (#141), and enabling CI on non-main pull requests (#142).
 
 ## [0.9.1] — 2026-09-15
 
@@ -666,7 +728,11 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/simonepelosi/vibez/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/simonepelosi/vibez/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/simonepelosi/vibez/compare/v0.9.2...v1.0.0
+[0.9.2]: https://github.com/simonepelosi/vibez/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/simonepelosi/vibez/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/simonepelosi/vibez/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/simonepelosi/vibez/compare/v0.7.0...v0.8.0

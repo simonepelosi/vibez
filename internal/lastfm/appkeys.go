@@ -9,8 +9,7 @@ import "github.com/simone-vibes/vibez/internal/config"
 //	-X 'github.com/simone-vibes/vibez/internal/lastfm.apiSecret=<secret>'
 //
 // When empty the user must set lastfm_api_key and lastfm_api_secret in their
-// config file (useful for self-built binaries). garble -literals obfuscates
-// these strings in release builds so they do not appear in plaintext.
+// config file (useful for self-built binaries).
 var (
 	apiKey    string //nolint:gochecknoglobals // intentionally set via ldflags
 	apiSecret string //nolint:gochecknoglobals // intentionally set via ldflags

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -115,6 +117,9 @@ func (m *mockProvider) GetLibraryAlbumTracks(_ context.Context, _ string) ([]pro
 func (m *mockProvider) GetCatalogPlaylistTracks(_ context.Context, _ string) ([]provider.Track, error) {
 	return nil, nil
 }
+func (m *mockProvider) GetArtistAlbums(_ context.Context, _ string) ([]provider.Album, error) {
+	return nil, nil
+}
 func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{}, nil
 }
@@ -151,7 +156,11 @@ func testCfg() *config.Config {
 }
 
 func newModel(plyr player.Player) *Model {
-	return New(testCfg(), &mockProvider{}, plyr, Options{})
+	m := New(testCfg(), &mockProvider{}, plyr, Options{})
+	// Pin the half-block renderer so art assertions don't depend on the
+	// TERM_PROGRAM of the machine running the tests.
+	m.renderArt = art.RenderHalfBlocks
+	return m
 }
 
 // --- clamp ---
@@ -683,6 +692,33 @@ func TestWaitForState_ReadsFromChannel(t *testing.T) {
 	}
 	if ps.Volume != 0.9 {
 		t.Errorf("playerStateMsg.Volume = %v, want 0.9", ps.Volume)
+	}
+}
+
+// --- Search: Enter opens an artist, Esc steps back out (#164) ---
+
+func TestModel_SearchArtistEnterOpensEscReturns(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.search.SetResults(&provider.SearchResult{Artists: []provider.Artist{{ID: "ar1", Name: "Some Artist"}}}, false, nil)
+
+	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil || !m.search.InArtist() {
+		t.Fatal("Enter on an artist should open it and fetch its albums")
+	}
+	msg, ok := cmd().(artistAlbumsMsg)
+	if !ok || msg.artist.ID != "ar1" {
+		t.Fatalf("fetch returned %#v, want artistAlbumsMsg for ar1", msg)
+	}
+	m.Update(msg)
+
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.search.InArtist() || m.mode != modeSearch {
+		t.Fatalf("first Esc should go back to the results and stay in search (mode %d)", m.mode)
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.mode != modeNormal {
+		t.Errorf("second Esc should close search (mode %d)", m.mode)
 	}
 }
 
@@ -2604,6 +2640,7 @@ func TestNowPlayingArtMode_LayoutIsMinimal(t *testing.T) {
 
 func TestExecuteCommand_ArtTogglesAndPersists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 	m := newModel(nil)
 	m.supportsArtColor = func() bool { return true }
 
@@ -2642,6 +2679,7 @@ func TestExecuteCommand_ArtRejectedWithoutColorSupport(t *testing.T) {
 
 func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -2671,6 +2709,57 @@ func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(m.nowPlayingLines(100, 16), "\n"), "▀") {
 		t.Fatal("cover not rendered after toggling art mode on")
+	}
+}
+
+func TestArtRenderer_FallsBackToHalfBlocksOnAppleTerminal(t *testing.T) {
+	img, err := art.Decode(bytes.NewReader(testArtworkPNG(t)))
+	if err != nil {
+		t.Fatalf("decoding test artwork: %v", err)
+	}
+	size := art.Size{Width: 8, Height: 4}
+
+	t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+	if got := strings.Join(artRenderer()(img, size), ""); !strings.Contains(got, "▀") {
+		t.Fatal("Terminal.app did not get the half-block renderer")
+	}
+
+	t.Setenv("TERM_PROGRAM", "ghostty")
+	got, want := artRenderer()(img, size), art.RenderDithered(img, size)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatal("sextant-capable terminal did not get the dithered renderer")
+	}
+}
+
+func TestNowPlayingArtLines_UsesDitheredRenderer(t *testing.T) {
+	img, err := art.Decode(bytes.NewReader(testArtworkPNG(t)))
+	if err != nil {
+		t.Fatalf("decoding test artwork: %v", err)
+	}
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.supportsArtColor = func() bool { return true }
+	m.renderArt = art.RenderDithered
+	m.artMode = true
+	m.playerState.Track = &provider.Track{Title: "Song", Artist: "Artist", Album: "Album", ArtworkURL: "https://example.com/cover.png", Duration: time.Minute}
+	m.artwork.url = m.playerState.Track.ArtworkURL
+	m.artwork.img = img
+
+	lines := m.nowPlayingLines(100, 16)
+	if len(lines) != 16 {
+		t.Fatalf("nowPlayingLines returned %d lines, want 16", len(lines))
+	}
+	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "▀") {
+		t.Fatal("art view used half-blocks with the dithered renderer selected")
+	}
+	if !strings.Contains(joined, "Song") {
+		t.Fatal("art view lost the track line")
+	}
+	for i, l := range lines {
+		if w := ansi.StringWidth(l); w > 100 {
+			t.Fatalf("line %d is %d cells wide, want <= 100", i, w)
+		}
 	}
 }
 
@@ -3031,6 +3120,83 @@ func TestDiscoveryQueries_NoGenres(t *testing.T) {
 	queries := discoveryQueries(seed, 0.8)
 	if len(queries) == 0 {
 		t.Fatal("discoveryQueries(no genres) returned empty slice")
+	}
+}
+
+// TestDiscoveryQueries_SameArtistOnlySeedArtist guards #162: at "same artist"
+// a pool artist's query used to be added, and the shuffle often queued it.
+func TestDiscoveryQueries_SameArtistOnlySeedArtist(t *testing.T) {
+	seed := &provider.Track{Artist: "Daft Punk", Album: "Discovery", Genres: []string{"Electronic"}}
+	for range 50 {
+		for _, q := range discoveryQueries(seed, 0.95) {
+			if !strings.HasPrefix(q, "Daft Punk") {
+				t.Fatalf("discoveryQueries(0.95) = %v, includes another artist", q)
+			}
+		}
+	}
+}
+
+func TestSameArtist(t *testing.T) {
+	cases := []struct {
+		seed, artist string
+		want         bool
+	}{
+		{"Daft Punk", "Daft Punk", true},
+		{"Daft Punk", "daft punk", true},
+		{"Daft Punk", "Daft Punk feat. Julian Casablancas", true},
+		{"Daft Punk & Pharrell Williams", "Daft Punk", true},
+		{"Daft Punk", "Justice", false},
+		{"Yes", "Bad Eyes", false},
+		{"Muse", "Musetta", false},
+		{"Björk", "Björk & Thom Yorke", true},
+		{"Daft Punk", "", false},
+		{"", "Daft Punk", false},
+	}
+	for _, c := range cases {
+		if got := sameArtist(c.seed, c.artist); got != c.want {
+			t.Errorf("sameArtist(%q, %q) = %v, want %v", c.seed, c.artist, got, c.want)
+		}
+	}
+}
+
+type searchMockProvider struct {
+	mockProvider
+	tracks []provider.Track
+}
+
+func (p *searchMockProvider) Search(_ context.Context, _ string) (*provider.SearchResult, error) {
+	return &provider.SearchResult{Tracks: p.tracks}, nil
+}
+
+func TestRunDiscoverySearch_SameArtistFiltersOtherArtists(t *testing.T) {
+	prov := &searchMockProvider{tracks: []provider.Track{
+		{ID: "1", Title: "Around the World", Artist: "Daft Punk"},
+		{ID: "2", Title: "Daft Punk Is Playing at My House", Artist: "LCD Soundsystem"},
+		{ID: "3", Title: "One More Time", Artist: "Daft Punk"},
+	}}
+	m := New(testCfg(), prov, newMockPlayer(), Options{})
+	m.discovery.enabled = true
+	m.discovery.seed = &provider.Track{ID: "seed", Title: "Get Lucky", Artist: "Daft Punk"}
+	m.discovery.similarity = 0.95
+	m.discovery.refillCap = 10
+	msg, ok := m.runDiscoverySearch()().(vibeResultMsg)
+	if !ok {
+		t.Fatal("runDiscoverySearch did not return a vibeResultMsg")
+	}
+	if len(msg.tracks) != 2 {
+		t.Fatalf("got %d tracks, want the 2 by Daft Punk: %+v", len(msg.tracks), msg.tracks)
+	}
+	for _, tr := range msg.tracks {
+		if tr.Artist != "Daft Punk" {
+			t.Errorf("same-artist discovery queued %q by %q", tr.Title, tr.Artist)
+		}
+	}
+
+	// Below the threshold other artists are still allowed.
+	m.discovery.similarity = 0.75
+	msg = m.runDiscoverySearch()().(vibeResultMsg)
+	if len(msg.tracks) != 3 {
+		t.Errorf("similarity 0.75: got %d tracks, want 3", len(msg.tracks))
 	}
 }
 
@@ -3687,6 +3853,7 @@ func TestExecuteCommandQualitySetsPlayerAndPersists(t *testing.T) {
 	p := newMockPlayer()
 	m := newModel(p)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 
 	cmd := m.executeCommand("quality 64")
 	if cmd == nil {
@@ -3708,6 +3875,7 @@ func TestExecuteCommandQualityPersistsWhenBackendCannotSwitchLive(t *testing.T) 
 	p.err = player.ErrAudioBitrateSavedPreferenceOnly
 	m := newModel(p)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
 
 	cmd := m.executeCommand("quality 64")
 	if cmd == nil {
@@ -3833,6 +4001,42 @@ func TestEqualizerKeyPriority(t *testing.T) {
 	}
 	if !plyr.playCalled && !plyr.pauseCalled {
 		t.Error("player play/pause was NOT called when pressing space in equalizer")
+	}
+}
+
+// nextQueuerPlayer is a mockPlayer that also implements player.NextQueuer,
+// like the MusicKit-backed players.
+type nextQueuerPlayer struct {
+	*mockPlayer
+	playNextIDs [][]string
+}
+
+func (p *nextQueuerPlayer) PlayNext(ids []string) error {
+	p.playNextIDs = append(p.playNextIDs, ids)
+	return nil
+}
+
+// TestPlayNextCmd_UsesNextQueuer guards #161: MusicKit cannot reorder a live
+// queue, so append-then-move left "play next" tracks at the end.
+func TestPlayNextCmd_UsesNextQueuer(t *testing.T) {
+	plyr := &nextQueuerPlayer{mockPlayer: newMockPlayer()}
+	m := New(testCfg(), &mockProvider{}, plyr, Options{})
+	m.queueTracks = []provider.Track{{ID: "a", Title: "A"}, {ID: "b", Title: "B"}, {ID: "c", Title: "C"}}
+	m.queueIDs = []string{"a", "b", "c"}
+	m.playerState.Track = &provider.Track{ID: "b", Title: "B"}
+
+	if cmd := m.playNextCmd("X", []provider.Track{{ID: "x", Title: "X"}}, []string{"x"}); cmd != nil {
+		cmd()
+	}
+	if want := []string{"a", "b", "x", "c"}; !slices.Equal(m.queueIDs, want) {
+		t.Errorf("queueIDs = %v, want %v", m.queueIDs, want)
+	}
+	if len(plyr.playNextIDs) != 1 || !slices.Equal(plyr.playNextIDs[0], []string{"x"}) {
+		t.Errorf("PlayNext calls = %v, want [[x]]", plyr.playNextIDs)
+	}
+	if len(plyr.appendQueueIDs) != 0 || len(plyr.moveInQueueCalls) != 0 {
+		t.Errorf("append/move should not run for a NextQueuer: append=%v move=%v",
+			plyr.appendQueueIDs, plyr.moveInQueueCalls)
 	}
 }
 
@@ -4002,5 +4206,47 @@ func TestNoResultsError(t *testing.T) {
 	}
 	if strings.Count(got, "catalog song search") != 1 {
 		t.Errorf("noResultsError = %q, want the repeated reason collapsed to one", got)
+	}
+}
+
+// --- local-mode scan notice ---
+
+// logContains reports whether any debug log entry carries want.
+func logContains(m *Model, want string) bool {
+	for _, entry := range m.debugLog {
+		if strings.Contains(entry, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestNew_ScanNoticeShownWhenTheLibraryIsEmpty(t *testing.T) {
+	notice := "no playable tracks in /music: skipped 4 files (4 .ogg); macOS plays .flac, .m4a, .mp3"
+	m := New(testCfg(), &mockProvider{}, newMockPlayer(), Options{ScanNotice: notice})
+
+	if m.errMsg != notice {
+		t.Errorf("errMsg = %q, want the notice", m.errMsg)
+	}
+	if !m.errExpiry.After(time.Now().Add(20 * time.Second)) {
+		t.Errorf("errExpiry = %v, want long enough to read past the intro", m.errExpiry)
+	}
+	if !logContains(m, notice) {
+		t.Errorf("debugLog = %v, want an entry carrying the notice", m.debugLog)
+	}
+}
+
+func TestNew_ScanNoticeOnlyLoggedWhenTracksWereFound(t *testing.T) {
+	notice := "indexed 1 of 5 files in /music: skipped 4 files (4 .ogg); macOS plays .flac, .m4a, .mp3"
+	m := New(testCfg(), &mockProvider{}, newMockPlayer(), Options{
+		ScanNotice:    notice,
+		InitialTracks: []provider.Track{{ID: "local:/music/a.mp3", Title: "A"}},
+	})
+
+	if m.errMsg != "" {
+		t.Errorf("errMsg = %q, want empty when the scan found tracks", m.errMsg)
+	}
+	if !logContains(m, notice) {
+		t.Errorf("debugLog = %v, want an entry carrying the notice", m.debugLog)
 	}
 }

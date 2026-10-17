@@ -462,12 +462,12 @@ test('multi-item library only → native', () =>
 test('empty → one-item mode', () => eq(wantsNative([]), false));
 
 console.log('\ncompleted handler: who advances');
-// Mirrors musickit.html playbackStateDidChange: native short-circuit, diverged
+// Mirrors musickit.html playbackStateDidChange: native short-circuit, shuffled
 // stop, then the pre-existing one-item logic.
 const onCompleted = (s) => {
   const out = { playAt: null, clearedNative: false, advanced: false };
   if (s.nativeQueue && _nativeHasNext(s.m)) return out;      // MusicKit advances
-  if (s.nativeQueue && !s.nativeMirrors) { out.clearedNative = true; return out; }
+  if (s.nativeQueue && !s.nativeMirrors && s.m.shuffleMode) { out.clearedNative = true; return out; }
   if (s.busy || s.qi < 0 || s.q.length === 0) return out;
   if (s.m.repeatMode === 1) { out.playAt = s.qi; out.advanced = true; return out; }
   const next = s.qi + 1;
@@ -493,11 +493,16 @@ test('native exhausted while mirroring: vibez resumes at _qi+1', () => {
                           m: { repeatMode: 0, queue: { position: 2, length: 2 } } });
   eq(r.playAt, 2, 'should pick up the appended tail');
 });
-test('native exhausted with order diverged: stops instead of playing an arbitrary index', () => {
+test('native exhausted while shuffled: stops instead of playing an arbitrary index', () => {
   const r = onCompleted({ ...base, nativeQueue: true, nativeMirrors: false, qi: 1,
-                          m: { repeatMode: 0, queue: { position: 2, length: 2 } } });
+                          m: { repeatMode: 0, shuffleMode: 1, queue: { position: 2, length: 2 } } });
   eq(r.advanced, false, 'must not resume at _qi+1 after a shuffle');
   eq(r.clearedNative, true, 'safe to drop authority: MusicKit has nowhere to go');
+});
+test('native exhausted while following a reordered _q: vibez resumes at _qi+1', () => {
+  const r = onCompleted({ ...base, nativeQueue: true, nativeMirrors: false, qi: 1,
+                          m: { repeatMode: 0, shuffleMode: 0, queue: { position: 2, length: 2 } } });
+  eq(r.playAt, 2, '_qi tracks _q while following, so _qi+1 is the right track');
 });
 test('one-item mode is unchanged: advance, repeat-one, repeat-all', () => {
   eq(onCompleted({ ...base, m: { repeatMode: 0 } }).playAt, 1);

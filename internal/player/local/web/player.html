@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>vibez local player</title>
+<link rel="icon" href="data:,">
+</head>
+<body>
+<script src="engine.js"></script>
+<script>
+  'use strict';
+  // goLocalEvent is exposed by Go before this page loads.
+  window.vibezLocal = vibezLocalEngine({
+    audioContext: new AudioContext({ latencyHint: 'playback' }),
+    createAudio: () => new Audio(),
+    emit: (ev) => { window.goLocalEvent(JSON.stringify(ev)).catch(() => {}); },
+    now: () => performance.now(),
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (id) => window.clearTimeout(id),
+  });
+</script>
+</body>
+</html>

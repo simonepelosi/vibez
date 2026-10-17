@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 )
@@ -51,35 +53,40 @@ apple_developer_token in the config.`
 //
 // It is deliberately conservative: anything it cannot establish comes back as
 // TokensValid, so a flaky network never costs the user a working session.
-func CheckTokens(devToken, userToken string) TokenStatus {
+//
+// The string is the account's storefront, which the request that accepted
+// both credentials reports. It is "" whenever that request did not complete
+// with a 2xx, so the caller keeps whatever it already had.
+func CheckTokens(devToken, userToken string) (TokenStatus, string) {
 	return checkTokens(storefrontURL, catalogURL, devToken, userToken)
 }
 
 // checkTokens is the testable core of CheckTokens. It takes both URLs
 // explicitly so tests can point them at an httptest server.
-func checkTokens(userURL, devURL, devToken, userToken string) TokenStatus {
+func checkTokens(userURL, devURL, devToken, userToken string) (TokenStatus, string) {
 	if devToken == "" {
-		return DeveloperTokenRejected
+		return DeveloperTokenRejected, ""
 	}
 	if userToken == "" {
-		return UserTokenRejected
+		return UserTokenRejected, ""
 	}
 
-	if probe(userURL, devToken, userToken) != probeRejected {
-		return TokensValid
+	if res, sf := probe(userURL, devToken, userToken); res != probeRejected {
+		return TokensValid, sf
 	}
 
 	// Both credentials travelled together on that request, so the rejection is
-	// still unattributed. A developer-token-only endpoint settles it.
-	switch probe(devURL, devToken, "") {
+	// still unattributed. A developer-token-only endpoint settles it. Its body
+	// lists every storefront there is, so it says nothing about the account's.
+	switch res, _ := probe(devURL, devToken, ""); res {
 	case probeRejected:
-		return DeveloperTokenRejected
+		return DeveloperTokenRejected, ""
 	case probeAccepted:
-		return UserTokenRejected
+		return UserTokenRejected, ""
 	default:
 		// The tiebreaker did not complete, so the cause stays unknown. Keep
 		// the user token rather than discarding it on a guess.
-		return TokensValid
+		return TokensValid, ""
 	}
 }
 
@@ -96,14 +103,16 @@ const (
 )
 
 // probe makes one lightweight Apple Music request. An empty userToken sends
-// the developer token alone.
-func probe(url, devToken, userToken string) probeResult {
+// the developer token alone. On acceptance it also returns the id of the first
+// resource in the response, which for storefrontURL is the account's
+// storefront, or "" when the body carries none.
+func probe(url, devToken, userToken string) (probeResult, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // URL is a hardcoded constant or test server
 	if err != nil {
-		return probeInconclusive
+		return probeInconclusive, ""
 	}
 	req.Header.Set("Authorization", "Bearer "+devToken)
 	if userToken != "" {
@@ -112,18 +121,33 @@ func probe(url, devToken, userToken string) probeResult {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return probeInconclusive
+		return probeInconclusive, ""
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return probeRejected
+		return probeRejected, ""
 	}
 	// Only a 2xx proves the credentials were accepted. A 429 or a 5xx says
 	// nothing about them, and treating it as acceptance would let a transient
 	// Apple outage attribute the rejection to the user token and wipe it.
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return probeAccepted
+		return probeAccepted, firstResourceID(resp.Body)
 	}
-	return probeInconclusive
+	return probeInconclusive, ""
+}
+
+// firstResourceID reads the id of the first resource in an Apple Music
+// response, or "" when there is none. The body is capped: the storefront
+// object this is for is a few hundred bytes.
+func firstResourceID(r io.Reader) string {
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r, 64<<10)).Decode(&body); err != nil || len(body.Data) == 0 {
+		return ""
+	}
+	return body.Data[0].ID
 }

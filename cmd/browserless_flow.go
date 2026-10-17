@@ -3,9 +3,8 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/auth"
@@ -22,6 +21,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)
 	restartExe := make(chan string, 1)
+	var stopRPC func()
 
 	go func() {
 		if exe := updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
@@ -32,16 +32,33 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			return
 		}
 
+		devTokenRejected := false
 		if cfg.AppleUserToken != "" {
 			prog.Send(tui.InitStatusMsg("Checking Apple Music session..."))
-			switch auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken) {
+			switch status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); status {
 			case auth.UserTokenRejected:
 				prog.Send(tui.InitStatusMsg("Session expired - re-authenticating..."))
 				cfg.AppleUserToken = ""
 				_ = cfg.Save("")
 			case auth.DeveloperTokenRejected:
-				prog.Send(tui.InitStatusMsg(auth.DeveloperTokenStatus))
+				devTokenRejected = true
+				res := updater.UpdateNow(version.Version, noUpdate, func(msg string) {
+					prog.Send(tui.InitStatusMsg(msg))
+				})
+				if res.Outcome == updater.OutcomeInstalled {
+					restartExe <- res.Exe
+					prog.Send(tui.RestartMsg{})
+					return
+				}
+				statusMsg := auth.DeveloperTokenStatus
+				if advice := res.Advice(); advice != "" {
+					statusMsg = auth.DeveloperTokenPrefix + " - " + advice
+				}
+				prog.Send(tui.InitStatusMsg(statusMsg))
 			case auth.TokensValid:
+				if onStorefront != nil {
+					onStorefront(sf)
+				}
 			}
 		}
 
@@ -54,15 +71,21 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			if onUserToken != nil {
 				onUserToken(cfg.AppleUserToken)
 			}
+			if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" && onStorefront != nil {
+				onStorefront(sf)
+			}
 		}
 
-		prog.Send(tui.InitStatusMsg("Starting browserless audio engine..."))
+		if !devTokenRejected {
+			prog.Send(tui.InitStatusMsg("Starting browserless audio engine..."))
+		}
 		prov := apple.New(cfg)
 		blPlayer, err := browserless.New(cfg, prov)
 		if err != nil {
 			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("audio engine: %w", err)})
 			return
 		}
+		_ = blPlayer.SetAudioBitrate(audioBitrateKbps)
 
 		playerCh <- blPlayer
 
@@ -75,8 +98,9 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			}()
 		}
 
-		// Last.fm scrobbler integration
+		// Last.fm scrobbler & Discord RPC integration
 		startLastfmScrobbler(cfg, blPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		stopRPC = startDiscordRPC(cfg, blPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 
 		backendLabel := fmt.Sprintf("Browserless (In-Process Widevine + GStreamer) · %d kbps AAC", audioBitrateKbps)
 		prog.Send(tui.EngineReadyMsg{
@@ -87,6 +111,9 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	}()
 
 	_, err := prog.Run()
+	if stopRPC != nil {
+		stopRPC()
+	}
 
 	select {
 	case p := <-playerCh:
@@ -96,7 +123,9 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 	select {
 	case exe := <-restartExe:
-		_ = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec
+		if restartErr := restartProcess(exe); restartErr != nil {
+			return errors.Join(err, fmt.Errorf("restarting into the update at %s: %w", exe, restartErr))
+		}
 	default:
 	}
 

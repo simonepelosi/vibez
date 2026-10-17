@@ -1,8 +1,10 @@
 package views
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -650,6 +652,14 @@ func buildLibraryAlbums(tracks []provider.Track) []trackGroup {
 		}
 		index[key] = len(groups)
 		groups = append(groups, trackGroup{title: title, desc: track.Artist, tracks: []provider.Track{track}})
+	}
+	// Library songs arrive sorted by title, so put each album back in
+	// disc and track order. The sort is stable, so an album with no numbers
+	// keeps the order it arrived in.
+	for i := range groups {
+		slices.SortStableFunc(groups[i].tracks, func(a, b provider.Track) int {
+			return cmp.Or(cmp.Compare(a.DiscNumber, b.DiscNumber), cmp.Compare(a.TrackNumber, b.TrackNumber))
+		})
 	}
 	return groups
 }

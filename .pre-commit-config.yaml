@@ -51,6 +51,13 @@ repos:
         files: '^internal/player/(web|webkit/web)/musickit'
         pass_filenames: false
 
+      - id: worker-js-test
+        name: worker js test
+        language: system
+        entry: node --test worker/test/token.test.mjs
+        files: '^worker/'
+        pass_filenames: false
+
   # ── General file hygiene ───────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

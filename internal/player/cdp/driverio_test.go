@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cdp
 
@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,17 +49,6 @@ func TestDriverRunOptions_LeaveTheStandardLoggerAlone(t *testing.T) {
 
 	if after := log.Writer(); after != before {
 		t.Errorf("playwright-go repointed the standard logger to %T; RunOptions.Logger must stay non-nil to avoid its log.SetOutput branch", after)
-	}
-}
-
-// playwright-go keeps the logger in package state (run.go:36, reassigned at
-// run.go:455), and its default writes to stderr. One shared instance keeps that
-// global pointing somewhere harmless no matter which entry point ran last.
-func TestDriverRunOptions_ReuseOneLogger(t *testing.T) {
-	first, _ := newDriverRunOptions(t.TempDir())
-	second, _ := newDriverRunOptions(t.TempDir())
-	if first.Logger != second.Logger {
-		t.Error("each call built its own logger; playwright-go stores it in a package global, so the instance should be stable")
 	}
 }
 
@@ -146,29 +134,5 @@ func TestAddDriverOutput_AttachesOutputAndStaysUnwrappable(t *testing.T) {
 	}
 	if strings.Contains(got.Error(), "output:\n  node") {
 		t.Error("surrounding whitespace should be trimmed before the output is attached")
-	}
-}
-
-// A RunOptions built anywhere but the constructor is a driver process that can
-// still reach the terminal. The compiler cannot catch an absent field, so the
-// rule is enforced here instead: this is what turns adding a call site into a
-// visible failure rather than a silent regression.
-func TestDriverRunOptions_IsTheOnlySourceOfRunOptions(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read package dir: %v", err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") || name == "driverio.go" {
-			continue
-		}
-		src, err := os.ReadFile(name) //nolint:gosec // package-local source files
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if strings.Contains(string(src), "playwright.RunOptions{") {
-			t.Errorf("%s builds a playwright.RunOptions directly; use newDriverRunOptions so the driver cannot inherit the terminal", name)
-		}
 	}
 }

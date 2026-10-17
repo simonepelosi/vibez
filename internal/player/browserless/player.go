@@ -30,15 +30,17 @@ type Player struct {
 	streamer  *StreamServer
 	gst       *gst.Player
 
-	mu        sync.RWMutex
-	state     player.State
-	bcast     player.Broadcast
-	queue     []provider.Track
-	idx       int
-	playCtx   context.CancelFunc
-	curStream string // stream ID of the track gst is playing
-	doneCh    chan struct{}
-	closeOnce sync.Once
+	mu           sync.RWMutex
+	state        player.State
+	bcast        player.Broadcast
+	queue        []provider.Track
+	idx          int
+	playCtx      context.CancelFunc
+	curStream    string        // stream ID of the track gst is playing
+	curStreamURL string        // base loopback stream URL for current track
+	seekOffset   time.Duration // start offset of the current segment after Seek
+	doneCh       chan struct{}
+	closeOnce    sync.Once
 }
 
 // New creates a ready browserless Player.
@@ -84,7 +86,7 @@ func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
 	p.gst.OnEOS(func() {
 		p.mu.RLock()
 		playing := p.state.Playing
-		pos := p.gst.Position()
+		pos := p.seekOffset + p.gst.Position()
 		var dur time.Duration
 		if p.state.Track != nil {
 			dur = p.state.Track.Duration
@@ -157,7 +159,7 @@ func (p *Player) pollPosition() {
 			if playing && !loading {
 				pos := p.gst.Position()
 				p.mu.Lock()
-				p.state.Position = pos
+				p.state.Position = p.seekOffset + pos
 				s := p.state
 				p.mu.Unlock()
 				p.bcast.Send(s)
@@ -179,6 +181,8 @@ func (p *Player) playTrack(t provider.Track) {
 	p.state.Playing = false
 	p.state.Position = 0
 	p.state.Error = ""
+	p.seekOffset = 0
+	p.curStreamURL = ""
 	s := p.state
 	prefer256k := p.state.Bitrate >= 256
 	p.mu.Unlock()
@@ -221,6 +225,8 @@ func (p *Player) playTrack(t provider.Track) {
 
 		p.mu.Lock()
 		p.curStream = streamIDFromURL(streamURL)
+		p.curStreamURL = streamURL
+		p.seekOffset = 0
 		p.mu.Unlock()
 		p.gst.PlayURI(streamURL)
 
@@ -312,10 +318,13 @@ func (p *Player) Previous() error {
 		return nil
 	}
 
-	if p.gst.Position() > 3*time.Second {
+	var gstPos time.Duration
+	if p.gst != nil {
+		gstPos = p.gst.Position()
+	}
+	if p.seekOffset+gstPos > 3*time.Second {
 		p.mu.Unlock()
-		p.gst.Seek(0)
-		return nil
+		return p.Seek(0)
 	}
 
 	if p.idx <= 0 {
@@ -331,7 +340,44 @@ func (p *Player) Previous() error {
 }
 
 func (p *Player) Seek(position time.Duration) error {
-	p.gst.Seek(position)
+	p.mu.Lock()
+	streamID := p.curStream
+	streamURL := p.curStreamURL
+	wasPlaying := p.state.Playing
+	if p.state.Track != nil && p.state.Track.Duration > 0 && position > p.state.Track.Duration {
+		position = p.state.Track.Duration
+	}
+	if position < 0 {
+		position = 0
+	}
+	p.mu.Unlock()
+
+	if streamID == "" || streamURL == "" || p.streamer == nil {
+		if p.gst != nil {
+			p.gst.Seek(position)
+		}
+		return nil
+	}
+
+	startSeg, segOffset, ok := p.streamer.SeekTarget(streamID, position)
+	if !ok {
+		return nil
+	}
+
+	p.mu.Lock()
+	p.seekOffset = segOffset
+	p.state.Position = segOffset
+	s := p.state
+	p.mu.Unlock()
+
+	if p.gst != nil {
+		seekURI := fmt.Sprintf("%s?start_seg=%d", streamURL, startSeg)
+		p.gst.PlayURI(seekURI)
+		if !wasPlaying {
+			p.gst.Pause()
+		}
+	}
+	p.bcast.Send(s)
 	return nil
 }
 
@@ -473,7 +519,14 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
-func (p *Player) SetEqualizer(_ []player.EQBand) error {
+func (p *Player) SetEqualizer(bands []player.EQBand) error {
+	if p.gst != nil {
+		gains := make([]float64, len(bands))
+		for i, b := range bands {
+			gains[i] = b.Gain
+		}
+		p.gst.SetEqualizer(gains)
+	}
 	return nil
 }
 

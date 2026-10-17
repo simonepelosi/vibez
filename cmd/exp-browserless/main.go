@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player/browserless"
 	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
@@ -39,6 +40,7 @@ func findCDMPath() string {
 
 func main() {
 	songIDFlag := flag.String("song", "", "Apple Music song ID (optional; if empty, searches for a song)")
+	verifyFull := flag.Bool("verify-full", false, "download and decrypt 100% of the full track stream and count ADTS frames")
 	flag.Parse()
 
 	cfg, err := config.Load("")
@@ -46,6 +48,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	_ = auth.ResolveDeveloperToken(cfg)
 
 	if cfg.AppleDeveloperToken == "" || cfg.AppleUserToken == "" {
 		fmt.Fprintf(os.Stderr, "Apple Developer Token or User Token is missing in config\n")
@@ -188,6 +191,43 @@ func main() {
 	}
 	fmt.Printf("      Stream URL: %s\n", streamURL)
 	fmt.Printf("      Duration:   %v\n", duration)
+
+	if *verifyFull {
+		fmt.Println("\n[7b/8] Downloading and decrypting 100% of the full track stream...")
+		dlStart := time.Now()
+		resp, err := http.Get(streamURL) //nolint:gosec
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to GET stream URL: %v\n", err)
+			os.Exit(1)
+		}
+		fullAAC, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Stream read aborted with error: %v\n", err)
+			os.Exit(1)
+		}
+		// Walk ADTS frames to verify structural integrity of 100% of the track
+		frames := 0
+		offset := 0
+		for offset+7 <= len(fullAAC) {
+			if fullAAC[offset] != 0xFF || (fullAAC[offset+1]&0xF0) != 0xF0 {
+				fmt.Fprintf(os.Stderr, "Invalid ADTS syncword at byte %d/%d\n", offset, len(fullAAC))
+				os.Exit(1)
+			}
+			frameLen := (int(fullAAC[offset+3]&0x03) << 11) | (int(fullAAC[offset+4]) << 3) | (int(fullAAC[offset+5]&0xE0) >> 5)
+			if frameLen < 7 || offset+frameLen > len(fullAAC) {
+				fmt.Fprintf(os.Stderr, "Truncated/invalid ADTS frame length %d at byte %d/%d\n", frameLen, offset, len(fullAAC))
+				os.Exit(1)
+			}
+			frames++
+			offset += frameLen
+		}
+		audioSeconds := float64(frames) * 1024.0 / 44100.0
+		fmt.Printf("      ✅ 100%% of full track decrypted cleanly in %v!\n", time.Since(dlStart).Round(time.Millisecond))
+		fmt.Printf("      ✅ Total decrypted AAC size: %d bytes (%.2f MB)\n", len(fullAAC), float64(len(fullAAC))/(1024*1024))
+		fmt.Printf("      ✅ Valid ADTS AAC frames:    %d (%.1f seconds / %v of audio, zero leftover bytes: %v)\n",
+			frames, audioSeconds, time.Duration(audioSeconds*float64(time.Second)).Round(time.Second), offset == len(fullAAC))
+	}
 
 	fmt.Println("[8/8] Connecting to GStreamer and playing 5 seconds of live decrypted audio...")
 	gstPlayer, err := gst.New()

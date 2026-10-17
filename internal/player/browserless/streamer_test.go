@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 // streamResult is what onFail saw and what the handler panicked with.
@@ -77,5 +80,41 @@ func TestStreamIDFromURL(t *testing.T) {
 	got := streamIDFromURL("http://127.0.0.1:4321/stream/123-1700000000/abcdef.aac")
 	if got != "123-1700000000" {
 		t.Errorf("streamIDFromURL = %q, want 123-1700000000", got)
+	}
+}
+
+func TestSeekTargetAndPlayerSeek(t *testing.T) {
+	s := &StreamServer{
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID: "123",
+				segments: []segmentRef{
+					{uri: "seg0.mp4", duration: 6.0},
+					{uri: "seg1.mp4", duration: 6.0},
+					{uri: "seg2.mp4", duration: 6.0},
+					{uri: "seg3.mp4", duration: 6.0},
+				},
+			},
+		},
+	}
+
+	idx, offset, ok := s.SeekTarget("s1", 13*time.Second)
+	if !ok || idx != 2 || offset != 12*time.Second {
+		t.Fatalf("SeekTarget(13s) = (%d, %v, %v), want (2, 12s, true)", idx, offset, ok)
+	}
+
+	p := &Player{
+		streamer:     s,
+		curStream:    "s1",
+		curStreamURL: "http://127.0.0.1:4321/stream/s1/tok.aac",
+	}
+	p.state.Track = &provider.Track{ID: "123", Duration: 24 * time.Second}
+
+	if err := p.Seek(14 * time.Second); err != nil {
+		t.Fatalf("Seek(14s) returned error: %v", err)
+	}
+	st, _ := p.GetState()
+	if st.Position != 12*time.Second {
+		t.Errorf("Position after Seek(14s) = %v, want 12s (start of segment 2)", st.Position)
 	}
 }

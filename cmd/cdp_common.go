@@ -1,12 +1,11 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -33,6 +32,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 	playerCh := make(chan *cdp.Player, 1)
 	runDone := make(chan struct{})
 	restartExe := make(chan string, 1)
+	var stopRPC func()
 
 	go func() {
 		if exe := updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
@@ -46,7 +46,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 		devTokenRejected := false
 		if cfg.AppleUserToken != "" {
 			prog.Send(tui.InitStatusMsg("Checking Apple Music session..."))
-			switch auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken) {
+			switch status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); status {
 			case auth.UserTokenRejected:
 				prog.Send(tui.InitStatusMsg("Session expired - re-authenticating..."))
 				cfg.AppleUserToken = ""
@@ -73,6 +73,10 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 				}
 				prog.Send(tui.InitStatusMsg(status))
 			case auth.TokensValid:
+				// The same request reported the account's storefront. Save it before
+				// the player page renders: on a saved token the page's own value is
+				// MusicKit's default, not the account's (#163).
+				onStorefront(sf)
 			}
 		}
 
@@ -97,6 +101,11 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 			if err := auth.Login(cfg); err != nil {
 				prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
 				return
+			}
+			// A fresh session has no storefront in config yet. The check that
+			// validates returning sessions reports it.
+			if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" {
+				onStorefront(sf)
 			}
 		}
 
@@ -142,6 +151,7 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 			hooks.afterReady(cdpPlayer)
 		}
 		startLastfmScrobbler(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		stopRPC = startDiscordRPC(cfg, cdpPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
 
 		prog.Send(tui.EngineReadyMsg{
 			Player:      cdpPlayer,
@@ -152,6 +162,9 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 	}()
 
 	_, err := prog.Run()
+	if stopRPC != nil {
+		stopRPC()
+	}
 
 	select {
 	case p := <-playerCh:
@@ -162,7 +175,9 @@ func runCDPFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront 
 
 	select {
 	case exe := <-restartExe:
-		_ = syscall.Exec(exe, os.Args, os.Environ()) //nolint:gosec
+		if restartErr := restartProcess(exe); restartErr != nil {
+			return errors.Join(err, fmt.Errorf("restarting into the update at %s: %w", exe, restartErr))
+		}
 	default:
 	}
 

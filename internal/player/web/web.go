@@ -4,6 +4,7 @@ package web
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"text/template"
 
@@ -15,10 +16,19 @@ import (
 //go:embed musickit.html
 var musickitHTML string
 
+// storefrontID matches an Apple Music storefront ID such as "us" or "gb".
+var storefrontID = regexp.MustCompile(`^[a-zA-Z0-9-]+$`)
+
 // RenderHTML renders the MusicKit HTML template with the provided parameters.
 func RenderHTML(devToken, userToken, storefront, version string, audioBitrateKbps int) (string, error) {
 	if err := audioquality.Validate(audioBitrateKbps); err != nil {
 		return "", err
+	}
+	// The storefront lands inside JS string literals, and text/template does
+	// not escape it. Anything that isn't a storefront ID is dropped, leaving
+	// MusicKit to resolve the account's own.
+	if !storefrontID.MatchString(storefront) {
+		storefront = ""
 	}
 	tmpl, err := template.New("musickit").Parse(musickitHTML)
 	if err != nil {
