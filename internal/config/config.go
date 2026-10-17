@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"github.com/simone-vibes/vibez/internal/audioquality"
 )
+
+var saveMu sync.Mutex
 
 type Config struct {
 	// path remembers where this config was loaded from. It is deliberately not
@@ -162,6 +165,9 @@ func (c *Config) normalize() {
 }
 
 func (c *Config) Save(override string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	path := override
 	if path == "" {
 		path = c.path
@@ -181,12 +187,44 @@ func (c *Config) Save(override string) error {
 }
 
 func (c *Config) save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshalling config: %w", err)
 	}
-	return os.WriteFile(path, data, 0o600)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp config: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if runtime.GOOS != "windows" {
+		if err := tmp.Chmod(0o600); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("chmod temp config: %w", err)
+		}
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp config: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replacing config: %w", err)
+	}
+	cleanup = false
+	return nil
 }

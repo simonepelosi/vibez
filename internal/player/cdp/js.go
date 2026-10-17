@@ -76,3 +76,11 @@ func buildSetEqualizerJS(bands []player.EQBand) (string, error) {
 	}
 	return fmt.Sprintf(`window.vibezSetEqualizer && window.vibezSetEqualizer(%s)`, js), nil
 }
+
+func buildSetUserTokenJS(token string) (string, error) {
+	js, err := json.Marshal(token)
+	if err != nil {
+		return "", fmt.Errorf("cdp: marshal user token: %w", err)
+	}
+	return fmt.Sprintf(`MusicKit.getInstance().musicUserToken = %s`, js), nil
+}

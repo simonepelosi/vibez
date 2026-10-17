@@ -10,10 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make release`) and a configured `apple_developer_token` work as before. Refs #167.
+- **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make build-with-token`) and a configured `apple_developer_token` work as before. Refs #167, #170.
 
 ### Fixed
 - **Windows release quarantined by Microsoft Defender** — release binaries are no longer built with `garble`, whose output Defender flags as `Trojan:Win32/Gracing.I`. With no embedded token to obfuscate, release builds are plain Go builds on every platform. Closes #167.
+
+### Security
+- **Configuration persistence** — synchronized config saves and switched to atomic temporary-file replacement with strict file permissions.
+- **Template & bridge encoding** — added string encoding for MusicKit HTML template parameters and browser bridge token updates.
+- **Bounded network & archive I/O** — added timeouts and response size limits to driver downloads, archive extraction, and lyrics API responses.
 
 ## [1.1.1] — 2026-10-11
 
