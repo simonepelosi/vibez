@@ -92,6 +92,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		// MPRIS Linux media key & status bar integration
 		if srv, mprisErr := mpris.NewServer(blPlayer); mprisErr == nil {
 			go func() {
+				defer srv.Close()
 				for st := range blPlayer.Subscribe() {
 					srv.Update(st)
 				}

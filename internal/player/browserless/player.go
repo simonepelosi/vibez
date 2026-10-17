@@ -201,6 +201,21 @@ func (p *Player) playTrack(t provider.Track) {
 			}
 		}
 
+		// Backfill full metadata (Title, Artist, Album, ArtworkURL, Duration)
+		// for library-ID or placeholder tracks so MPRIS, Lyrics, Discord RPC,
+		// Last.fm, and the TUI Now Playing panel have complete track info.
+		if t.Title == "" && p.provider != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
+			if fetched, err := p.provider.GetCatalogTracks(ctx, []string{catalogID}); err == nil && len(fetched) > 0 {
+				meta := fetched[0]
+				meta.ID = t.ID
+				meta.CatalogID = catalogID
+				t = meta
+				p.mu.Lock()
+				p.state.Track = &t
+				p.mu.Unlock()
+			}
+		}
+
 		streamURL, duration, err := p.streamer.PrepareTrack(ctx, catalogID, prefer256k)
 		if err != nil {
 			select {
@@ -403,6 +418,48 @@ func (p *Player) SetAudioBitrate(kbps int) error {
 	return nil
 }
 
+func (p *Player) resolveTracksForIDs(ctx context.Context, ids []string) []provider.Track {
+	tracks := make([]provider.Track, len(ids))
+	for i, id := range ids {
+		tracks[i] = provider.Track{ID: id, CatalogID: id}
+	}
+	if p.provider == nil {
+		return tracks
+	}
+
+	var catalogIDs []string
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" && !strings.HasPrefix(id, "i.") && !seen[id] {
+			seen[id] = true
+			catalogIDs = append(catalogIDs, id)
+		}
+	}
+	if len(catalogIDs) == 0 {
+		return tracks
+	}
+
+	byID := make(map[string]provider.Track, len(catalogIDs))
+	const batchSize = 100
+	for start := 0; start < len(catalogIDs); start += batchSize {
+		end := min(start+batchSize, len(catalogIDs))
+		fetched, err := p.provider.GetCatalogTracks(ctx, catalogIDs[start:end])
+		if err != nil {
+			continue
+		}
+		for _, t := range fetched {
+			byID[t.ID] = t
+		}
+	}
+
+	for i, id := range ids {
+		if t, ok := byID[id]; ok {
+			tracks[i] = t
+		}
+	}
+	return tracks
+}
+
 func (p *Player) SetQueue(ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -411,21 +468,7 @@ func (p *Player) SetQueue(ids []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var tracks []provider.Track
-	if p.provider != nil {
-		fetched, err := p.provider.GetCatalogTracks(ctx, ids)
-		if err == nil && len(fetched) > 0 {
-			tracks = fetched
-		}
-	}
-
-	if len(tracks) == 0 {
-		// Fallback placeholder track objects with just IDs
-		tracks = make([]provider.Track, len(ids))
-		for i, id := range ids {
-			tracks[i] = provider.Track{ID: id, CatalogID: id}
-		}
-	}
+	tracks := p.resolveTracksForIDs(ctx, ids)
 
 	p.mu.Lock()
 	p.queue = tracks
@@ -476,19 +519,7 @@ func (p *Player) AppendQueue(ids []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var tracks []provider.Track
-	if p.provider != nil {
-		fetched, err := p.provider.GetCatalogTracks(ctx, ids)
-		if err == nil {
-			tracks = fetched
-		}
-	}
-	if len(tracks) == 0 {
-		tracks = make([]provider.Track, len(ids))
-		for i, id := range ids {
-			tracks[i] = provider.Track{ID: id, CatalogID: id}
-		}
-	}
+	tracks := p.resolveTracksForIDs(ctx, ids)
 
 	p.mu.Lock()
 	wasEmpty := len(p.queue) == 0
@@ -609,6 +640,7 @@ func (p *Player) Subscribe() <-chan player.State {
 func (p *Player) Close() error {
 	p.closeOnce.Do(func() {
 		close(p.doneCh)
+		p.bcast.Close()
 		if p.gst != nil {
 			p.gst.Destroy()
 		}
