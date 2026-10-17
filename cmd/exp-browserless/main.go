@@ -198,13 +198,13 @@ func main() {
 		resp, err := http.Get(streamURL) //nolint:gosec
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to GET stream URL: %v\n", err)
-			os.Exit(1)
+			return
 		}
 		fullAAC, err := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Stream read aborted with error: %v\n", err)
-			os.Exit(1)
+			return
 		}
 		// Walk ADTS frames to verify structural integrity of 100% of the track
 		frames := 0
@@ -212,12 +212,12 @@ func main() {
 		for offset+7 <= len(fullAAC) {
 			if fullAAC[offset] != 0xFF || (fullAAC[offset+1]&0xF0) != 0xF0 {
 				fmt.Fprintf(os.Stderr, "Invalid ADTS syncword at byte %d/%d\n", offset, len(fullAAC))
-				os.Exit(1)
+				return
 			}
 			frameLen := (int(fullAAC[offset+3]&0x03) << 11) | (int(fullAAC[offset+4]) << 3) | (int(fullAAC[offset+5]&0xE0) >> 5)
 			if frameLen < 7 || offset+frameLen > len(fullAAC) {
 				fmt.Fprintf(os.Stderr, "Truncated/invalid ADTS frame length %d at byte %d/%d\n", frameLen, offset, len(fullAAC))
-				os.Exit(1)
+				return
 			}
 			frames++
 			offset += frameLen
