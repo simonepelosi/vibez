@@ -245,7 +245,7 @@ func DownloadCDM(dest string, progress func(string)) error {
 	sum := sha512.Sum512(crxBytes)
 	gotHash := hex.EncodeToString(sum[:])
 	if !strings.EqualFold(gotHash, plat.HashValue) {
-		return fmt.Errorf("Widevine CRX3 SHA-512 mismatch: got %s, want %s", gotHash, plat.HashValue)
+		return fmt.Errorf("widevine CRX3 SHA-512 mismatch: got %s, want %s", gotHash, plat.HashValue)
 	}
 
 	progress("Extracting libwidevinecdm.so...")

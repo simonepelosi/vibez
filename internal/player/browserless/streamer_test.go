@@ -172,10 +172,8 @@ func buildFakeCRX3(t *testing.T, name string, payload []byte) []byte {
 	var crx bytes.Buffer
 	crx.WriteString("Cr24")
 	_ = binary.Write(&crx, binary.LittleEndian, uint32(3))
-	_ = binary.Write(&crx, binary.LittleEndian, uint32(len(fakeProtoHeader)))
+	_ = binary.Write(&crx, binary.LittleEndian, uint32(17))
 	crx.Write(fakeProtoHeader)
 	crx.Write(zipBuf.Bytes())
 	return crx.Bytes()
 }
-
-
