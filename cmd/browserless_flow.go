@@ -80,7 +80,11 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			prog.Send(tui.InitStatusMsg("Starting browserless audio engine..."))
 		}
 		prov := apple.New(cfg)
-		blPlayer, err := browserless.New(cfg, prov)
+		blPlayer, err := browserless.New(cfg, prov, func(msg string) {
+			if !devTokenRejected {
+				prog.Send(tui.InitStatusMsg(msg))
+			}
+		})
 		if err != nil {
 			prog.Send(tui.InitErrMsg{Err: fmt.Errorf("audio engine: %w", err)})
 			return

@@ -44,8 +44,8 @@ type Player struct {
 }
 
 // New creates a ready browserless Player.
-func New(cfg *config.Config, prov *apple.AppleProvider) (*Player, error) {
-	cdmPath, err := EnsureCDM()
+func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)) (*Player, error) {
+	cdmPath, err := EnsureCDM(progress...)
 	if err != nil {
 		return nil, fmt.Errorf("browserless cdm: %w", err)
 	}
