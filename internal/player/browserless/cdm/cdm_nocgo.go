@@ -10,23 +10,32 @@ var errNoCgo = errors.New("browserless CDM requires CGo")
 
 type CDM struct{}
 
-func New(libraryPath string) (*CDM, error) {
+type Subsample struct {
+	ClearBytes  uint16
+	CipherBytes uint32
+}
+
+func New(_ string) (*CDM, error) {
 	return nil, errNoCgo
 }
 
-func (c *CDM) SetServerCertificate(cert []byte) error {
+func (c *CDM) SetServerCertificate(_ []byte) error {
 	return errNoCgo
 }
 
-func (c *CDM) GenerateChallenge(kid []byte) ([]byte, string, error) {
+func (c *CDM) GenerateChallenge(_ []byte) ([]byte, string, error) {
 	return nil, "", errNoCgo
 }
 
-func (c *CDM) UpdateSession(sessionID string, license []byte) error {
+func (c *CDM) UpdateSession(_ string, _ []byte) error {
 	return errNoCgo
 }
 
-func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
+func (c *CDM) Decrypt(_, _, _ []byte) ([]byte, error) {
+	return nil, errNoCgo
+}
+
+func (c *CDM) DecryptSubsamples(_, _, _ []byte, _ []Subsample) ([]byte, error) {
 	return nil, errNoCgo
 }
 
