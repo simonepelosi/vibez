@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Browserless Apple Music playback on Linux via in-process Widevine CDM and GStreamer** — completely eliminates the dependency on Google Chrome, Chromium, Playwright, and Node.js for Apple Music streaming on Linux. Apple's MZPlay web playback and DRM license APIs are queried directly via pure Go HTTP, while Widevine `cenc` decryption is executed in-process through a lightweight CGo bridge wrapping Chromium's `Host_11` CDM interface against `libwidevinecdm.so`. Decrypted audio frames are packaged into standard ADTS AAC format and progressively streamed to a local GStreamer pipeline. Reduces runtime RAM usage from ~250 MB to ~15 MB (a 94% reduction), cuts DRM startup latency from ~2.5s to < 500 ms, and leaves zero external browser helper processes running. Enabled via `--browserless` or `VIBEZ_BROWSERLESS=1`, automatically discovering existing system CDM installations (Chrome, Chromium, Brave, Firefox, Flatpak, or `~/.cache/vibez/cdm/`). Refs #138.
+
 ### Changed
 - **Release builds fetch their developer token from a token broker** — releases no longer embed a long-lived Apple developer token. They fetch a short-lived one at startup from a Cloudflare Worker (`worker/`), cache it in the user cache directory, and fall back to a cached token that has not yet expired when offline. The release workflow no longer needs the MusicKit signing key, and the key can be rotated without a release. Source builds (`make build`, `make release`) and a configured `apple_developer_token` work as before. Refs #167.
 

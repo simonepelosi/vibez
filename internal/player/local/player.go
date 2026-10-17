@@ -232,7 +232,16 @@ func (p *Player) SetShuffle(on bool) error {
 	return nil
 }
 
-func (p *Player) SetEqualizer(_ []player.EQBand) error { return nil }
+func (p *Player) SetEqualizer(bands []player.EQBand) error {
+	if p.gst != nil {
+		gains := make([]float64, len(bands))
+		for i, b := range bands {
+			gains[i] = b.Gain
+		}
+		p.gst.SetEqualizer(gains)
+	}
+	return nil
+}
 
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
