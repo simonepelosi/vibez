@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package browserless
 
@@ -90,4 +90,42 @@ func TestDownloadCDMReal(t *testing.T) {
 		t.Fatalf("extracted file too small: %d bytes", fi.Size())
 	}
 	t.Logf("Successfully downloaded and extracted official Widevine CDM: %s (%d bytes)", path, fi.Size())
+}
+
+// Every platform we can play on has to ship a pinned package: the manifest is
+// the preferred source, but this is what runs when it is unreachable.
+func TestFallbackCDNsAreWellFormed(t *testing.T) {
+	for _, key := range []string{"linux_amd64", "darwin_arm64", "darwin_amd64", "windows_amd64"} {
+		spec, ok := fallbackCDNs[key]
+		if !ok {
+			t.Errorf("no fallback package for %s", key)
+			continue
+		}
+		if !isAllowedCDMHost(spec.url) {
+			t.Errorf("%s: fallback URL %q is not on an allowed host", key, spec.url)
+		}
+		if len(spec.sha512) != 128 {
+			t.Errorf("%s: sha512 %q is not 128 hex characters", key, spec.sha512)
+		}
+		if spec.fileSize <= 0 {
+			t.Errorf("%s: missing file size", key)
+		}
+		if _, ok := mozillaPlatformKeys[key]; !ok {
+			t.Errorf("%s: no Mozilla manifest platform key", key)
+		}
+	}
+}
+
+func TestExtractCDMFromCRX3FindsWindowsDLL(t *testing.T) {
+	payload := make([]byte, 2*1024*1024)
+	copy(payload, "MZ")
+	crx := buildFakeCRX3(t, "_platform_specific/win_x64/widevinecdm.dll", payload)
+
+	got, err := extractCDMFromCRX3(crx)
+	if err != nil {
+		t.Fatalf("extractCDMFromCRX3: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Errorf("extracted %d bytes, want %d", len(got), len(payload))
+	}
 }

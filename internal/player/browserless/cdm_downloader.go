@@ -1,4 +1,4 @@
-//go:build linux || darwin
+//go:build linux || darwin || windows
 
 package browserless
 
@@ -52,6 +52,11 @@ var fallbackCDNs = map[string]cdmPackageSpec{
 		sha512:   "b16a01aed3b19ab648efc477d1c712454a39a2b5226d09a1e166e8cba4def6d6eeed5107cd80c577a4f79dec43cce6b4cd45bcc48ce026cf0f82b14b3d32ecca",
 		fileSize: 22867646,
 	},
+	"windows_amd64": {
+		url:      "https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acomjnhpjyodpde7g3m33u5nkqoa_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_win64_a5xadnsxzavp7cn4ay5kc6gq6u.crx3",
+		sha512:   "ae8624becb7619dd9602f416203c54096ae0e23c4c2574c8069e633f9682b0b9bf5bbb95e94fca6610b9581746d5ed648fd41c47d762b174bd5d632937df6689",
+		fileSize: 22976546,
+	},
 	"linux_amd64": {
 		url:      "https://edgedl.me.gvt1.com/edgedl/release2/chrome_component/acqexsh26ysyu3zxeotqtsp63idq_4.10.3112.0/oimompecagnajdejgnnjijobebaeigek_4.10.3112.0_linux64_ad7kyx4q7wx7xknykmkbonbbmnwq.crx3",
 		sha512:   "4bc44f7e2010ff1dec995ab496702467ec02f45db2f4d977822be89e40043ee0dd75f3d777539ecf243617029bbe5b41a1171d293b2fa615ffeacf5cd7112f29",
@@ -60,9 +65,10 @@ var fallbackCDNs = map[string]cdmPackageSpec{
 }
 
 var mozillaPlatformKeys = map[string]string{
-	"darwin_arm64": "Darwin_aarch64-gcc3",
-	"darwin_amd64": "Darwin_x86_64-gcc3-u-i386-x86_64",
-	"linux_amd64":  "Linux_x86_64-gcc3",
+	"darwin_arm64":  "Darwin_aarch64-gcc3",
+	"darwin_amd64":  "Darwin_x86_64-gcc3-u-i386-x86_64",
+	"linux_amd64":   "Linux_x86_64-gcc3",
+	"windows_amd64": "WINNT_x86_64-msvc",
 }
 
 func isAllowedCDMHost(rawURL string) bool {
@@ -256,7 +262,7 @@ func extractCDMFromCRX3(crx []byte) ([]byte, error) {
 
 	for _, f := range zr.File {
 		base := filepath.Base(f.Name)
-		if base == "libwidevinecdm.so" || base == "libwidevinecdm.dylib" {
+		if base == "libwidevinecdm.so" || base == "libwidevinecdm.dylib" || base == "widevinecdm.dll" {
 			rc, err := f.Open()
 			if err != nil {
 				return nil, err

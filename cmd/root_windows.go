@@ -4,13 +4,19 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/player/browserless"
 	"github.com/simone-vibes/vibez/internal/player/cdp"
 	"github.com/simone-vibes/vibez/internal/tui"
 )
 
 func runPlatform(cfg *config.Config, _ string, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
+	wantBrowserless := browserlessFlag || os.Getenv("VIBEZ_BROWSERLESS") == "1"
+	if wantBrowserless && browserless.Available() {
+		return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
+	}
 	return runCDPFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps, cdpPlatformHooks{
 		initStatus: "Checking Google Chrome...",
 		helperPaths: func() []string {

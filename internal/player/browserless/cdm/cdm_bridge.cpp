@@ -5,13 +5,53 @@
 #include <vector>
 #include <chrono>
 #include <cstring>
-#include <dlfcn.h>
-#include <sys/time.h>
 #include <mutex>
 #include <condition_variable>
 #include <cstdlib>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <sys/time.h>
+#endif
+
 namespace {
+
+// Portable shared-library and wall-clock helpers. The CDM is a plain C-ABI
+// shared object everywhere; only how we load it differs.
+#ifdef _WIN32
+void* load_library(const char* utf8_path) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, nullptr, 0);
+    if (n <= 0) return nullptr;
+    std::vector<wchar_t> wide(static_cast<size_t>(n));
+    MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wide.data(), n);
+    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own dependencies from its directory.
+    return reinterpret_cast<void*>(LoadLibraryExW(wide.data(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+}
+void* load_symbol(void* lib, const char* name) {
+    return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(lib), name));
+}
+void unload_library(void* lib) { FreeLibrary(static_cast<HMODULE>(lib)); }
+double wall_time_seconds() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    // 100ns ticks since 1601-01-01 -> seconds since the Unix epoch.
+    return static_cast<double>(u.QuadPart - 116444736000000000ULL) / 10000000.0;
+}
+#else
+void* load_library(const char* path) { return dlopen(path, RTLD_NOW); }
+void* load_symbol(void* lib, const char* name) { return dlsym(lib, name); }
+void unload_library(void* lib) { dlclose(lib); }
+double wall_time_seconds() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1000000.0;
+}
+#endif
 
 class BufferImpl : public cdm::Buffer {
     std::vector<uint8_t> data_;
@@ -64,9 +104,7 @@ public:
     void SetTimer(int64_t delay_ms, void* context) override {}
 
     cdm::Time GetCurrentWallTime() override {
-        struct timeval tv;
-        gettimeofday(&tv, nullptr);
-        return static_cast<cdm::Time>(tv.tv_sec) + static_cast<cdm::Time>(tv.tv_usec) / 1000000.0;
+        return static_cast<cdm::Time>(wall_time_seconds());
     }
 
     void OnInitialized(bool success) override {
@@ -161,7 +199,7 @@ extern "C" {
 cdm_context_t* cdm_context_create(const char* library_path) {
     if (!library_path) return nullptr;
 
-    void* handle = dlopen(library_path, RTLD_NOW);
+    void* handle = load_library(library_path);
     if (!handle) {
         return nullptr;
     }
@@ -169,15 +207,15 @@ cdm_context_t* cdm_context_create(const char* library_path) {
     using InitFunc = void (*)(void);
     using CreateFunc = void* (*)(int, const char*, uint32_t, GetCdmHostFunc, void*);
 
-    InitFunc init_cdm = reinterpret_cast<InitFunc>(dlsym(handle, "InitializeCdmModule_4"));
-    CreateFunc create_cdm = reinterpret_cast<CreateFunc>(dlsym(handle, "CreateCdmInstance"));
+    InitFunc init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule_4"));
+    CreateFunc create_cdm = reinterpret_cast<CreateFunc>(load_symbol(handle, "CreateCdmInstance"));
 
     if (!init_cdm) {
-        init_cdm = reinterpret_cast<InitFunc>(dlsym(handle, "InitializeCdmModule"));
+        init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule"));
     }
 
     if (!create_cdm) {
-        dlclose(handle);
+        unload_library(handle);
         return nullptr;
     }
 
@@ -192,7 +230,7 @@ cdm_context_t* cdm_context_create(const char* library_path) {
     void* raw = create_cdm(11, key_system.data(), static_cast<uint32_t>(key_system.size()), GetCdmHostCallback, &ctx->host);
     if (!raw) {
         delete ctx;
-        dlclose(handle);
+        unload_library(handle);
         return nullptr;
     }
 
@@ -286,7 +324,8 @@ int cdm_context_generate_challenge(
         }
         std::memcpy(*out_challenge, ctx->host.sessionMessage.data(), *out_challenge_size);
 
-        *out_session_id = strdup(ctx->host.sessionId.c_str());
+        *out_session_id = static_cast<char*>(std::malloc(ctx->host.sessionId.size() + 1));
+        if (*out_session_id) std::memcpy(*out_session_id, ctx->host.sessionId.c_str(), ctx->host.sessionId.size() + 1);
         if (!*out_session_id) {
             std::free(*out_challenge);
             *out_challenge = nullptr;
@@ -403,7 +442,7 @@ void cdm_context_destroy(cdm_context_t* ctx) {
         ctx->cdm11 = nullptr;
     }
     if (ctx->lib_handle) {
-        dlclose(ctx->lib_handle);
+        unload_library(ctx->lib_handle);
         ctx->lib_handle = nullptr;
     }
     delete ctx;

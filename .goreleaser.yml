@@ -61,7 +61,10 @@ builds:
 
   - id: vibez-windows
     binary: vibez
-    # Cross-compiled by the Linux release job; no C toolchain is needed.
+    # Cross-compiled by the Linux release job with MinGW: the native browserless
+    # engine is a C++ CDM bridge plus a Media Foundation sink, so this is a cgo
+    # build. The runtime is linked statically (see the #cgo directives), leaving
+    # vibez.exe with imports only of DLLs every Windows install has.
     skip: '{{ eq (index .Env "VIBEZ_SKIP_WINDOWS") "1" }}'
     ldflags:
       - -s -w
@@ -69,7 +72,9 @@ builds:
       - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+      - CC=x86_64-w64-mingw32-gcc
+      - CXX=x86_64-w64-mingw32-g++
       - GOTOOLCHAIN=local
     goos:
       - windows

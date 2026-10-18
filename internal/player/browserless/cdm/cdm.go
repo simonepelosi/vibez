@@ -1,10 +1,11 @@
-//go:build (linux || darwin) && cgo
+//go:build (linux || darwin || windows) && cgo
 
 package cdm
 
 /*
 #cgo linux LDFLAGS: -ldl -lstdc++
 #cgo darwin LDFLAGS: -ldl -lc++
+#cgo windows LDFLAGS: -static -static-libgcc -static-libstdc++
 #include "cdm_bridge.h"
 #include <stdlib.h>
 */

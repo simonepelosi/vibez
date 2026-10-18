@@ -93,6 +93,7 @@ jobs:
         env:
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
+          # cgo: the native engine needs MinGW (a C++ CDM bridge and a Media Foundation sink).
           CGO_ENABLED: "1"
           CC: x86_64-w64-mingw32-gcc
           CXX: x86_64-w64-mingw32-g++
