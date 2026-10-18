@@ -22,12 +22,13 @@ typedef __int64 int64_t;
 #include <stdint.h>
 #endif
 
-// On Windows with MinGW GCC (Itanium C++ ABI), virtual destructors are placed
-// at the beginning of the vtable (slots 0 and 1). MSVC (which Widevine CDM is
-// compiled with) places virtual functions in strict declaration order, meaning
-// protected destructors at the bottom of the interface classes are placed at
-// the end of the vtable in MSVC, but at the top in MinGW. Making destructors
-// non-virtual under MinGW aligns the virtual methods with MSVC vtables.
+// Every CDM interface declares a protected destructor at the end of the class
+// and exposes an explicit Destroy() method instead of deleting through base
+// pointers. On Windows with MinGW (Itanium C++ ABI), a virtual destructor
+// emits two vtable slots (complete-object and deleting destructor), whereas
+// MSVC (which builds widevinecdm.dll) emits a single scalar-deleting
+// destructor slot. Keeping the protected destructors non-virtual under MinGW
+// avoids the two-slot destructor entry.
 #if defined(_WIN32) && !defined(_MSC_VER)
 #define CDM_VIRTUAL_DTOR
 #else
