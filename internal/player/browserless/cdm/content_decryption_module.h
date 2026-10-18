@@ -22,6 +22,18 @@ typedef __int64 int64_t;
 #include <stdint.h>
 #endif
 
+// On Windows with MinGW GCC (Itanium C++ ABI), virtual destructors are placed
+// at the beginning of the vtable (slots 0 and 1). MSVC (which Widevine CDM is
+// compiled with) places virtual functions in strict declaration order, meaning
+// protected destructors at the bottom of the interface classes are placed at
+// the end of the vtable in MSVC, but at the top in MinGW. Making destructors
+// non-virtual under MinGW aligns the virtual methods with MSVC vtables.
+#if defined(_WIN32) && !defined(_MSC_VER)
+#define CDM_VIRTUAL_DTOR
+#else
+#define CDM_VIRTUAL_DTOR virtual
+#endif
+
 // The version number must be rolled when the exported functions are updated!
 // If the CDM and the adapter use different versions of these functions, the
 // adapter will fail to load or crash!
@@ -491,7 +503,7 @@ class CDM_CLASS_API Buffer {
 
  protected:
   Buffer() {}
-  virtual ~Buffer() {}
+  CDM_VIRTUAL_DTOR ~Buffer() {}
 
  private:
   Buffer(const Buffer&);
@@ -511,7 +523,7 @@ class CDM_CLASS_API DecryptedBlock {
 
  protected:
   DecryptedBlock() {}
-  virtual ~DecryptedBlock() {}
+  CDM_VIRTUAL_DTOR ~DecryptedBlock() {}
 };
 
 // This intentionally avoids using an enum, since it will be used to do math
@@ -546,7 +558,7 @@ class CDM_CLASS_API VideoFrame {
 
  protected:
   VideoFrame() {}
-  virtual ~VideoFrame() {}
+  CDM_VIRTUAL_DTOR ~VideoFrame() {}
 };
 
 // Represents a decoded video frame. The CDM should call the interface methods
@@ -564,7 +576,7 @@ class CDM_CLASS_API VideoFrame_2 {
 
  protected:
   VideoFrame_2() {}
-  virtual ~VideoFrame_2() {}
+  CDM_VIRTUAL_DTOR ~VideoFrame_2() {}
 };
 
 // Represents decrypted and decoded audio frames. AudioFrames can contain
@@ -591,7 +603,7 @@ class CDM_CLASS_API AudioFrames {
 
  protected:
   AudioFrames() {}
-  virtual ~AudioFrames() {}
+  CDM_VIRTUAL_DTOR ~AudioFrames() {}
 };
 
 // FileIO interface provides a way for the CDM to store data in a file in
@@ -637,7 +649,7 @@ class CDM_CLASS_API FileIO {
 
  protected:
   FileIO() {}
-  virtual ~FileIO() {}
+  CDM_VIRTUAL_DTOR ~FileIO() {}
 };
 
 // Responses to FileIO calls. All responses will be called asynchronously.
@@ -673,7 +685,7 @@ class CDM_CLASS_API FileIOClient {
 
  protected:
   FileIOClient() {}
-  virtual ~FileIOClient() {}
+  CDM_VIRTUAL_DTOR ~FileIOClient() {}
 };
 
 // Metrics that will be reported from the CDM through the ReportMetrics()
@@ -915,7 +927,7 @@ class CDM_CLASS_API ContentDecryptionModule_10 {
 
  protected:
   ContentDecryptionModule_10() {}
-  virtual ~ContentDecryptionModule_10() {}
+  CDM_VIRTUAL_DTOR ~ContentDecryptionModule_10() {}
 };
 
 // ContentDecryptionModule interface that all CDMs need to implement.
@@ -1141,7 +1153,7 @@ class CDM_CLASS_API ContentDecryptionModule_11 {
 
  protected:
   ContentDecryptionModule_11() {}
-  virtual ~ContentDecryptionModule_11() {}
+  CDM_VIRTUAL_DTOR ~ContentDecryptionModule_11() {}
 };
 
 // ----- Note: CDM interface(s) below still in development and not stable! -----
@@ -1367,7 +1379,7 @@ class CDM_CLASS_API ContentDecryptionModule_12 {
 
  protected:
   ContentDecryptionModule_12() {}
-  virtual ~ContentDecryptionModule_12() {}
+  CDM_VIRTUAL_DTOR ~ContentDecryptionModule_12() {}
 };
 
 class CDM_CLASS_API Host_10 {
@@ -1503,7 +1515,7 @@ class CDM_CLASS_API Host_10 {
 
  protected:
   Host_10() {}
-  virtual ~Host_10() {}
+  CDM_VIRTUAL_DTOR ~Host_10() {}
 };
 
 class CDM_CLASS_API Host_11 {
@@ -1644,7 +1656,7 @@ class CDM_CLASS_API Host_11 {
 
  protected:
   Host_11() {}
-  virtual ~Host_11() {}
+  CDM_VIRTUAL_DTOR ~Host_11() {}
 };
 
 class CDM_CLASS_API Host_12 {
@@ -1785,7 +1797,7 @@ class CDM_CLASS_API Host_12 {
 
  protected:
   Host_12() {}
-  virtual ~Host_12() {}
+  CDM_VIRTUAL_DTOR ~Host_12() {}
 };
 
 }  // namespace cdm

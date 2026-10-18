@@ -75,7 +75,7 @@ public:
     cdm::Buffer* DecryptedBuffer() override { return buffer_; }
     void SetTimestamp(int64_t ts) override { ts_ = ts; }
     int64_t Timestamp() const override { return ts_; }
-    ~DecryptedBlockImpl() override {
+    ~DecryptedBlockImpl() {
         if (buffer_) buffer_->Destroy();
     }
 };
@@ -441,10 +441,10 @@ void cdm_context_destroy(cdm_context_t* ctx) {
         ctx->cdm11->Destroy();
         ctx->cdm11 = nullptr;
     }
-    if (ctx->lib_handle) {
-        unload_library(ctx->lib_handle);
-        ctx->lib_handle = nullptr;
-    }
+    // We intentionally do not call unload_library here: Widevine CDM spins up
+    // internal threads and TLS destructors that expect the library code to
+    // remain mapped until process termination.
+    ctx->lib_handle = nullptr;
     delete ctx;
 }
 
