@@ -889,6 +889,43 @@
           // else: end of queue — stay stopped cleanly
         });
 
+        // MusicKit only joins two songs seamlessly if the next one's manifest
+        // is queued before the current one ends. After a setQueue the first
+        // song often never gets one: onQueueChange calls prepareToPlayNextItem
+        // before the AudioPlayer has a buffer, which marks the next item
+        // isPreparedToPlay while preloadItem returns early, and the Preloader
+        // at 30% then skips it as already prepared. That first join is a full
+        // rebuild, 479-685 ms of silence in 4 of 6 measured starts (#180).
+        //
+        // So once a song is past 35% with nothing queued, queue the next one
+        // directly. Never near a join: nextManifest is briefly empty during
+        // the handover, and a setNextManifest then abandons the transition in
+        // flight and stalls playback. audioPlayer is MusicKit's own global;
+        // if a later build drops it or preloadItem, this does nothing.
+        function _preloadRescueTarget(m, ap, rescuedId) {
+          if (!ap?._buffer || ap.nextManifest || typeof ap.preloadItem !== 'function') return null;
+          if (ap._buffer.nextSeamlessTransition != null || m.playbackState !== 2) return null;
+          const next = m.queue?.nextPlayableItem;
+          if (!next || next.type !== 'song' || next.id === rescuedId) return null;
+          const dur = m.currentPlaybackDuration, t = m.currentPlaybackTime;
+          if (!(dur > 0) || t < dur * 0.35 || dur - t < 10) return null;
+          return next;
+        }
+        // _rescuedId stops a second call while preloadItem is still in flight.
+        // It is cleared whenever playback is back before 35%, so restarting an
+        // album or replaying a song gets its own rescue: the same next item
+        // can need one on every play-through.
+        let _rescuedId = null;
+        setInterval(() => {
+          const m = _m(), ap = window.audioPlayer;
+          if (!(m.currentPlaybackTime >= m.currentPlaybackDuration * 0.35)) _rescuedId = null;
+          const next = _preloadRescueTarget(m, ap, _rescuedId);
+          if (!next) return;
+          _rescuedId = next.id;
+          _log(`[js:preload] next ${next.id} not queued at ${Math.round(m.currentPlaybackTime)}s, queuing it`);
+          ap.preloadItem(next).catch(e => _log(`[js:preload] failed: ${errName(e)}`));
+        }, 500);
+
         window.vibezPlay = async () => {
           if (_busy) return; // An in-flight queue change starts playback itself.
           const m = _m();

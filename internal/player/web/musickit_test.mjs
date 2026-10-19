@@ -800,6 +800,74 @@ test('one-item mode is left alone: _doPlayAt already caught it', () => {
   eq(s.recoverAt, undefined, 'recovering twice would restart the track');
 });
 
+// ─── First-join preload rescue (#180) ────────────────────────────────────────
+// Copied verbatim from _preloadRescueTarget in musickit.html.
+function _preloadRescueTarget(m, ap, rescuedId) {
+  if (!ap?._buffer || ap.nextManifest || typeof ap.preloadItem !== 'function') return null;
+  if (ap._buffer.nextSeamlessTransition != null || m.playbackState !== 2) return null;
+  const next = m.queue?.nextPlayableItem;
+  if (!next || next.type !== 'song' || next.id === rescuedId) return null;
+  const dur = m.currentPlaybackDuration, t = m.currentPlaybackTime;
+  if (!(dur > 0) || t < dur * 0.35 || dur - t < 10) return null;
+  return next;
+}
+
+console.log('\n_preloadRescueTarget()');
+const NEXT = { id: '1065973704', type: 'song' };
+// The state the race leaves behind: a buffer, nothing queued, 40% through.
+const stuck = () => ({
+  m:  { playbackState: 2, currentPlaybackDuration: 100, currentPlaybackTime: 40,
+        queue: { nextPlayableItem: { ...NEXT } } },
+  ap: { _buffer: { nextSeamlessTransition: undefined }, nextManifest: undefined,
+        preloadItem: () => Promise.resolve() },
+});
+const rescue = (s, rescuedId = null) => _preloadRescueTarget(s.m, s.ap, rescuedId)?.id ?? null;
+
+test('nothing queued past 35% → rescues the next item', () => eq(rescue(stuck()), NEXT.id));
+test('next manifest already queued → leaves it alone', () => {
+  const s = stuck(); s.ap.nextManifest = { mediaItem: NEXT };
+  eq(rescue(s), null);
+});
+test('transition already scheduled → leaves it alone', () => {
+  const s = stuck(); s.ap._buffer.nextSeamlessTransition = 99.6;
+  eq(rescue(s), null, 'a setNextManifest now abandons the transition in flight');
+});
+test('before 35% → waits for MusicKit\'s own Preloader', () => {
+  const s = stuck(); s.m.currentPlaybackTime = 30;
+  eq(rescue(s), null);
+});
+test('within 10 s of the end → too close to the join', () => {
+  const s = stuck(); s.m.currentPlaybackTime = 91;
+  eq(rescue(s), null);
+});
+test('not playing → no rescue', () => {
+  for (const st of [1, 3, 4, 8]) { const s = stuck(); s.m.playbackState = st; eq(rescue(s), null, `state ${st}`); }
+});
+test('no next item (end of queue) → no rescue', () => {
+  const s = stuck(); s.m.queue.nextPlayableItem = undefined;
+  eq(rescue(s), null);
+});
+test('next item is not a song → no rescue', () => {
+  const s = stuck(); s.m.queue.nextPlayableItem = { id: 'x', type: 'music-videos' };
+  eq(rescue(s), null);
+});
+test('already rescued this item → not again', () => eq(rescue(stuck(), NEXT.id), null));
+test('unknown duration → no rescue', () => {
+  const s = stuck(); s.m.currentPlaybackDuration = 0;
+  eq(rescue(s), null);
+});
+test('MusicKit build without audioPlayer → does nothing', () => {
+  eq(_preloadRescueTarget(stuck().m, undefined, null), null);
+});
+test('audioPlayer without a buffer → does nothing', () => {
+  const s = stuck(); s.ap._buffer = undefined;
+  eq(rescue(s), null);
+});
+test('audioPlayer without preloadItem → does nothing', () => {
+  const s = stuck(); delete s.ap.preloadItem;
+  eq(rescue(s), null);
+});
+
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
