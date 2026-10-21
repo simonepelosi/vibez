@@ -53,6 +53,37 @@ func TestParseAudioConfigValid(t *testing.T) {
 	}
 }
 
+func TestParseAudioConfig_Ignores0x05ByteInBitrateFields(t *testing.T) {
+	// Real Apple Music init segments contain ES_Descriptor (0x03) ->
+	// DecoderConfigDescriptor (0x04, 13-byte header containing bufferSizeDB,
+	// maxBitrate, avgBitrate) -> DecSpecificInfo (0x05, payload 0x12 0x10).
+	// When bufferSizeDB or bitrate contains a 0x05 byte (e.g. 0x000500), a naive
+	// bytes.Index(..., {0x05}) matches inside the header instead of the real
+	// DecSpecificInfo tag and produces a bogus ADTS header that GStreamer's
+	// faad/avdec_aac rejects with "No valid frames decoded before end of stream".
+	payload := []byte{
+		0x00, 0x00, 0x00, 0x00, // version/flags
+		0x03, 0x19, // ES_Descriptor tag=0x03, len=25
+		0x00, 0x01, 0x00, // ES_ID=1, flags=0
+		0x04, 0x11, // DecoderConfigDescriptor tag=0x04, len=17
+		0x40, 0x15, // objectType=0x40 (Audio ISO/IEC 14496-3), streamType=0x15
+		0x00, 0x05, 0x00, // bufferSizeDB containing 0x05!
+		0x00, 0x03, 0xE8, 0x00, // maxBitrate = 256000
+		0x00, 0x03, 0xE8, 0x00, // avgBitrate = 256000
+		0x05, 0x02, 0x12, 0x10, // DecSpecificInfo tag=0x05, len=2, ASC=0x12 0x10 (AAC-LC, 44.1kHz, stereo)
+		0x06, 0x01, 0x02, // SLConfigDescriptor
+	}
+	box := makeBox("esds", payload)
+
+	cfg, err := ParseAudioConfig(box)
+	if err != nil {
+		t.Fatalf("ParseAudioConfig: %v", err)
+	}
+	if cfg.ObjectType != 2 || cfg.FreqIndex != 4 || cfg.ChanConfig != 2 {
+		t.Errorf("ParseAudioConfig = %+v, want {ObjectType:2 FreqIndex:4 ChanConfig:2}", cfg)
+	}
+}
+
 func TestDecryptSegmentTruncated(t *testing.T) {
 	dummyDecrypt := func(kid, iv, input []byte, subs []Subsample) ([]byte, error) {
 		return input, nil

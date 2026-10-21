@@ -19,7 +19,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <condition_variable>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -29,7 +30,43 @@
 
 namespace {
 
+constexpr int kBands = 10;
+constexpr double kBandHz[kBands] = {29, 59, 119, 237, 474, 947, 1889, 3770, 7523, 15011};
+constexpr double kBandQ = 1.4;
+
+struct Biquad {
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    double z1[2] = {0, 0}, z2[2] = {0, 0};
+    bool active = false;
+
+    void design(double fs, double f0, double gainDb) {
+        if (std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+            active = false;
+            return;
+        }
+        const double A = std::pow(10.0, gainDb / 40.0);
+        const double w0 = 2.0 * 3.14159265358979323846 * f0 / fs;
+        const double alpha = std::sin(w0) / (2.0 * kBandQ);
+        const double cw = std::cos(w0);
+        const double a0 = 1.0 + alpha / A;
+        b0 = (1.0 + alpha * A) / a0;
+        b1 = (-2.0 * cw) / a0;
+        b2 = (1.0 - alpha * A) / a0;
+        a1 = (-2.0 * cw) / a0;
+        a2 = (1.0 - alpha / A) / a0;
+        active = true;
+    }
+
+    double run(double x, int ch) {
+        const double y = b0 * x + z1[ch];
+        z1[ch] = b1 * x - a1 * y + z2[ch];
+        z2[ch] = b2 * x - a2 * y;
+        return y;
+    }
+};
+
 struct Session;
+struct Sink;
 
 static void onPropertyFound(
     void *inClientData,
@@ -61,13 +98,19 @@ struct Session : public std::enable_shared_from_this<Session> {
     std::atomic<bool> eosReached{false};
     std::atomic<int> enqueuedCount{0};
     std::atomic<double> lastPosition{0.0};
-
+    std::atomic<bool> nullOut{false};
+    std::atomic<uint64_t> nullFrames{0};
     int sock = -1;
     AudioFileStreamID streamID = nullptr;
     AudioQueueRef queue = nullptr;
+    AudioConverterRef converter = nullptr;
     AudioStreamBasicDescription asbd{};
+    AudioStreamBasicDescription pcmAsbd{};
     bool formatReady = false;
     std::vector<char> pendingMagicCookie;
+    Biquad eqBank[kBands];
+    uint32_t eqSeen = 0;
+    Sink* parentSink = nullptr;
 
     AudioQueueBufferRef buffers[kNumBuffers] = {nullptr};
     std::mutex bufferMutex;
@@ -110,6 +153,10 @@ struct Session : public std::enable_shared_from_this<Session> {
             AudioQueueDispose(queue, true);
             queue = nullptr;
         }
+        if (converter) {
+            AudioConverterDispose(converter);
+            converter = nullptr;
+        }
         if (streamID) {
             AudioFileStreamClose(streamID);
             streamID = nullptr;
@@ -143,7 +190,7 @@ struct Session : public std::enable_shared_from_this<Session> {
     }
 
     void flushCurrentBuffer() {
-        if (!curBuf || curPacketDescs.empty() || !queue) return;
+        if (!curBuf || curBufBytes == 0 || !queue) return;
 
         curBuf->mAudioDataByteSize = curBufBytes;
 
@@ -152,12 +199,7 @@ struct Session : public std::enable_shared_from_this<Session> {
             enqueuedCount++;
         }
 
-        OSStatus err = AudioQueueEnqueueBuffer(
-            queue,
-            curBuf,
-            static_cast<UInt32>(curPacketDescs.size()),
-            curPacketDescs.data()
-        );
+        OSStatus err = AudioQueueEnqueueBuffer(queue, curBuf, 0, nullptr);
 
         curBuf = nullptr;
         curBufBytes = 0;
@@ -181,8 +223,9 @@ struct Sink {
 
     std::atomic<float> volume{1.0f};
     std::atomic<bool> closed{false};
-
     std::mutex mu;
+    double eq[kBands] = {0};
+    std::atomic<uint32_t> eqVersion{1};
     std::shared_ptr<Session> curSession;
 
     std::shared_ptr<Session> currentSession() {
@@ -206,25 +249,48 @@ static void onPropertyFound(
         OSStatus err = AudioFileStreamGetProperty(inAudioFileStream, kAudioFileStreamProperty_DataFormat, &asbdSize, &asbd);
         if (err == noErr) {
             ses->asbd = asbd;
-            ses->formatReady = true;
 
-            err = AudioQueueNewOutput(&ses->asbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
+            AudioStreamBasicDescription pcm{};
+            pcm.mSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44100.0;
+            pcm.mFormatID = kAudioFormatLinearPCM;
+            pcm.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            pcm.mChannelsPerFrame = asbd.mChannelsPerFrame > 0 ? asbd.mChannelsPerFrame : 2;
+            pcm.mBitsPerChannel = 16;
+            pcm.mBytesPerFrame = pcm.mChannelsPerFrame * 2;
+            pcm.mFramesPerPacket = 1;
+            pcm.mBytesPerPacket = pcm.mBytesPerFrame;
+            ses->pcmAsbd = pcm;
+
+            err = AudioConverterNew(&ses->asbd, &ses->pcmAsbd, &ses->converter);
+            if (err != noErr) {
+                ses->reportError("Failed to create AudioConverter: " + std::to_string(err));
+                return;
+            }
+            if (!ses->pendingMagicCookie.empty()) {
+                AudioConverterSetProperty(ses->converter, kAudioConverterDecompressionMagicCookie,
+                                          static_cast<UInt32>(ses->pendingMagicCookie.size()),
+                                          ses->pendingMagicCookie.data());
+                ses->pendingMagicCookie.clear();
+            }
+
+            err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
             if (err == noErr) {
-                if (!ses->pendingMagicCookie.empty()) {
-                    AudioQueueSetProperty(ses->queue, kAudioQueueProperty_MagicCookie,
-                                          ses->pendingMagicCookie.data(),
-                                          static_cast<UInt32>(ses->pendingMagicCookie.size()));
-                    ses->pendingMagicCookie.clear();
-                }
-
                 std::lock_guard<std::mutex> lock(ses->bufferMutex);
                 for (int i = 0; i < Session::kNumBuffers; ++i) {
                     AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
                     ses->freeBuffers.push_back(ses->buffers[i]);
                 }
                 AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, ses->initialVolume.load());
+                ses->formatReady = true;
             } else {
-                ses->reportError("Failed to initialize AudioQueue: " + std::to_string(err));
+                const char* nullEnv = std::getenv("VIBEZ_NULL_AUDIO");
+                if (nullEnv && std::strcmp(nullEnv, "1") == 0) {
+                    ses->nullOut = true;
+                    ses->started = true;
+                    ses->formatReady = true;
+                } else {
+                    ses->reportError("Failed to initialize AudioQueue: " + std::to_string(err));
+                }
             }
         }
     } else if (inPropertyID == kAudioFileStreamProperty_MagicCookieData) {
@@ -235,14 +301,45 @@ static void onPropertyFound(
             std::vector<char> cookie(cookieSize);
             err = AudioFileStreamGetProperty(inAudioFileStream, kAudioFileStreamProperty_MagicCookieData, &cookieSize, cookie.data());
             if (err == noErr) {
-                if (ses->queue) {
-                    AudioQueueSetProperty(ses->queue, kAudioQueueProperty_MagicCookie, cookie.data(), cookieSize);
+                if (ses->converter) {
+                    AudioConverterSetProperty(ses->converter, kAudioConverterDecompressionMagicCookie,
+                                              cookieSize, cookie.data());
                 } else {
                     ses->pendingMagicCookie = std::move(cookie);
                 }
             }
         }
     }
+}
+
+struct PacketContext {
+    const void* data;
+    UInt32 size;
+    AudioStreamPacketDescription desc;
+    bool consumed;
+};
+
+static OSStatus converterInputProc(
+    AudioConverterRef inAudioConverter,
+    UInt32* ioNumberDataPackets,
+    AudioBufferList* ioData,
+    AudioStreamPacketDescription** outDataPacketDescription,
+    void* inUserData) {
+    (void)inAudioConverter;
+    PacketContext* ctx = static_cast<PacketContext*>(inUserData);
+    if (ctx->consumed) {
+        *ioNumberDataPackets = 0;
+        return 100; // no more input in this single-packet call
+    }
+    ctx->consumed = true;
+    *ioNumberDataPackets = 1;
+    ioData->mBuffers[0].mData = const_cast<void*>(ctx->data);
+    ioData->mBuffers[0].mDataByteSize = ctx->size;
+    ioData->mBuffers[0].mNumberChannels = 0;
+    if (outDataPacketDescription) {
+        *outDataPacketDescription = &ctx->desc;
+    }
+    return noErr;
 }
 
 static void onPacketsParsed(
@@ -253,47 +350,92 @@ static void onPacketsParsed(
     AudioStreamPacketDescription *inPacketDescriptions) {
 
     Session* ses = static_cast<Session*>(inClientData);
-    if (!ses || ses->cancelled.load() || !ses->queue || !ses->formatReady) return;
+    if (!ses || ses->cancelled.load() || (!ses->queue && !ses->nullOut.load()) || !ses->converter || !ses->formatReady) return;
+    const int channels = static_cast<int>(ses->pcmAsbd.mChannelsPerFrame);
+    const double rate = ses->pcmAsbd.mSampleRate;
+
+    if (ses->parentSink) {
+        const uint32_t ver = ses->parentSink->eqVersion.load();
+        if (ver != ses->eqSeen) {
+            double gains[kBands];
+            {
+                std::lock_guard<std::mutex> lk(ses->parentSink->mu);
+                std::memcpy(gains, ses->parentSink->eq, sizeof(gains));
+            }
+            for (int b = 0; b < kBands; ++b) ses->eqBank[b].design(rate, kBandHz[b], gains[b]);
+            ses->eqSeen = ver;
+        }
+    }
+
+    bool eqOn = channels > 0 && channels <= 2;
+    if (eqOn) {
+        eqOn = false;
+        for (int b = 0; b < kBands; ++b) eqOn = eqOn || ses->eqBank[b].active;
+    }
+
+    int16_t pcmFrameBuf[4096];
 
     for (UInt32 i = 0; i < inNumberPackets; ++i) {
         if (ses->cancelled.load()) return;
 
         SInt64 packetOffset = inPacketDescriptions ? inPacketDescriptions[i].mStartOffset : 0;
         UInt32 packetSize = inPacketDescriptions ? inPacketDescriptions[i].mDataByteSize : inNumberBytes;
+        if (packetSize == 0) continue;
 
-        if (packetSize == 0 || packetSize > Session::kBufferSize) continue;
+        PacketContext pctx{};
+        pctx.data = static_cast<const char*>(inInputData) + packetOffset;
+        pctx.size = packetSize;
+        pctx.desc.mStartOffset = 0;
+        pctx.desc.mDataByteSize = packetSize;
+        pctx.desc.mVariableFramesInPacket = inPacketDescriptions ? inPacketDescriptions[i].mVariableFramesInPacket : 0;
+        pctx.consumed = false;
+
+        AudioBufferList outAbl{};
+        outAbl.mNumberBuffers = 1;
+        outAbl.mBuffers[0].mNumberChannels = ses->pcmAsbd.mChannelsPerFrame;
+        outAbl.mBuffers[0].mDataByteSize = sizeof(pcmFrameBuf);
+        outAbl.mBuffers[0].mData = pcmFrameBuf;
+
+        UInt32 ioFrames = static_cast<UInt32>(sizeof(pcmFrameBuf)) / ses->pcmAsbd.mBytesPerFrame;
+        OSStatus err = AudioConverterFillComplexBuffer(ses->converter, converterInputProc, &pctx, &ioFrames, &outAbl, nullptr);
+        if ((err != noErr && err != 100) || ioFrames == 0) continue;
+
+        const UInt32 pcmBytes = ioFrames * ses->pcmAsbd.mBytesPerFrame;
+        if (eqOn) {
+            for (UInt32 f = 0; f < ioFrames; ++f) {
+                for (int c = 0; c < channels; ++c) {
+                    double x = pcmFrameBuf[f * channels + c];
+                    for (int b = 0; b < kBands; ++b) {
+                        if (ses->eqBank[b].active) x = ses->eqBank[b].run(x, c);
+                    }
+                    if (x > 32767.0) x = 32767.0;
+                    if (x < -32768.0) x = -32768.0;
+                    pcmFrameBuf[f * channels + c] = static_cast<int16_t>(x);
+                }
+            }
+        }
+
+        if (ses->nullOut.load()) {
+            ses->nullFrames.fetch_add(ioFrames);
+            if (rate > 0) {
+                ses->lastPosition = static_cast<double>(ses->nullFrames.load()) / rate;
+            }
+            continue;
+        }
 
         if (!ses->curBuf) {
             ses->curBuf = ses->getFreeBuffer();
             if (!ses->curBuf) return;
             ses->curBufBytes = 0;
-            ses->curPacketDescs.clear();
         }
-
-        if (ses->curBufBytes + packetSize > Session::kBufferSize ||
-            ses->curPacketDescs.size() >= Session::kMaxPacketsPerBuffer) {
+        if (ses->curBufBytes + pcmBytes > Session::kBufferSize) {
             ses->flushCurrentBuffer();
             ses->curBuf = ses->getFreeBuffer();
             if (!ses->curBuf) return;
             ses->curBufBytes = 0;
-            ses->curPacketDescs.clear();
         }
-
-        std::memcpy(static_cast<char*>(ses->curBuf->mAudioData) + ses->curBufBytes,
-                    static_cast<const char*>(inInputData) + packetOffset,
-                    packetSize);
-
-        AudioStreamPacketDescription desc{};
-        if (inPacketDescriptions) {
-            desc = inPacketDescriptions[i];
-        } else {
-            desc.mDataByteSize = packetSize;
-            desc.mVariableFramesInPacket = 0;
-        }
-        desc.mStartOffset = ses->curBufBytes;
-        ses->curPacketDescs.push_back(desc);
-
-        ses->curBufBytes += packetSize;
+        std::memcpy(static_cast<char*>(ses->curBuf->mAudioData) + ses->curBufBytes, pcmFrameBuf, pcmBytes);
+        ses->curBufBytes += pcmBytes;
     }
 }
 
@@ -530,11 +672,11 @@ void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     if (sink->closed.load()) return;
 
     auto newSession = std::make_shared<Session>();
+    newSession->parentSink = sink;
     newSession->userData = sink->user;
     newSession->onEos = sink->onEos;
     newSession->onErr = sink->onErr;
     newSession->initialVolume = sink->volume.load();
-
     std::shared_ptr<Session> oldSession;
     {
         std::lock_guard<std::mutex> lock(sink->mu);
@@ -606,16 +748,32 @@ void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
     }
 }
 
+void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, int count) {
+    if (!handle) return;
+    Sink* sink = static_cast<Sink*>(handle);
+    {
+        std::lock_guard<std::mutex> lock(sink->mu);
+        for (int i = 0; i < kBands; ++i) {
+            double g = (gains_db && i < count) ? gains_db[i] : 0.0;
+            if (g > 24.0) g = 24.0;
+            if (g < -24.0) g = -24.0;
+            sink->eq[i] = g;
+        }
+    }
+    sink->eqVersion++;
+}
+
 double vibez_darwinsink_position(vibez_darwinsink_t handle) {
     if (!handle) return 0.0;
     Sink* sink = static_cast<Sink*>(handle);
     auto ses = sink->currentSession();
-    if (!ses || !ses->queue || !ses->started.load()) return 0.0;
-
+    if (!ses || !ses->started.load()) return 0.0;
+    if (ses->nullOut.load()) return ses->lastPosition.load();
+    if (!ses->queue) return 0.0;
     AudioTimeStamp ts{};
     OSStatus err = AudioQueueGetCurrentTime(ses->queue, NULL, &ts, NULL);
-    if (err == noErr && (ts.mFlags & kAudioTimeStampSampleTimeValid) && ses->asbd.mSampleRate > 0) {
-        double sec = ts.mSampleTime / ses->asbd.mSampleRate;
+    if (err == noErr && (ts.mFlags & kAudioTimeStampSampleTimeValid) && ses->pcmAsbd.mSampleRate > 0) {
+        double sec = ts.mSampleTime / ses->pcmAsbd.mSampleRate;
         if (sec >= 0.0) {
             ses->lastPosition = sec;
             return sec;

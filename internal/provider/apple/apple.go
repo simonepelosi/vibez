@@ -1412,36 +1412,47 @@ type ratingAttributes struct {
 	Value int `json:"value"` // 1 = love, -1 = dislike, 0 = neutral
 }
 
-// LoveSong adds the catalog song to the user's Apple Music library and marks it
-// as Loved (rating value = 1). Pass loved=false to remove the rating.
-// catalogID must be the Apple Music catalog ID (not a library "i." prefix ID).
+// LoveSong adds the song to the user's Apple Music library and marks it as
+// Loved (rating value = 1). Pass loved=false to remove the rating. If
+// catalogID is a library ID ("i.XXXX"), it resolves the catalog ID first and
+// falls back to the library song ratings endpoint if the track has no catalog
+// equivalent.
 func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bool) error {
+	ratingEndpoint := "/me/ratings/songs/" + url.PathEscape(catalogID)
+	if strings.HasPrefix(catalogID, "i.") {
+		if resolved, err := a.resolveCatalogSongID(ctx, catalogID); err == nil && resolved != "" {
+			catalogID = resolved
+			ratingEndpoint = "/me/ratings/songs/" + url.PathEscape(catalogID)
+		} else {
+			ratingEndpoint = "/me/ratings/library-songs/" + url.PathEscape(catalogID)
+		}
+	}
+
 	// Add to library first (idempotent — safe to call even if already in library).
-	if loved {
-		libURL := fmt.Sprintf("%s/me/library?ids[songs]=%s", a.baseURL, url.QueryEscape(catalogID))
-		addReq, err := http.NewRequestWithContext(ctx, http.MethodPost, libURL, http.NoBody) //nolint:gosec // G107: URL is constructed from config, not user input
+	if loved && !strings.HasPrefix(catalogID, "i.") {
+		addReq, err := a.newRequest(ctx, http.MethodPost, "/me/library?ids[songs]="+url.QueryEscape(catalogID))
 		if err != nil {
 			return fmt.Errorf("LoveSong: add to library: %w", err)
 		}
-		addReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-		addReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
 		if err := a.do(addReq, nil); err != nil {
 			// Non-fatal: song may already be in library.
 			_ = err
 		}
 	}
 
-	ratingURL := fmt.Sprintf("%s/me/ratings/songs/%s", a.baseURL, url.QueryEscape(catalogID))
-
 	if !loved {
-		// Remove rating (un-love).
-		delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, ratingURL, http.NoBody) //nolint:gosec // G107: URL is constructed from config, not user input
+		delReq, err := a.newRequest(ctx, http.MethodDelete, ratingEndpoint)
 		if err != nil {
 			return fmt.Errorf("LoveSong: delete rating: %w", err)
 		}
-		delReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-		delReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
-		return a.do(delReq, nil)
+		if err := a.do(delReq, nil); err != nil {
+			// Deleting a rating that wasn't set returns 404; treat as success.
+			if strings.Contains(err.Error(), "404") {
+				return nil
+			}
+			return err
+		}
+		return nil
 	}
 
 	body := ratingRequest{
@@ -1452,12 +1463,12 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 	if err != nil {
 		return fmt.Errorf("LoveSong: marshal: %w", err)
 	}
-	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, ratingURL, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
+	putReq, err := a.newRequest(ctx, http.MethodPut, ratingEndpoint)
 	if err != nil {
 		return fmt.Errorf("LoveSong: %w", err)
 	}
-	putReq.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	putReq.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	putReq.Body = io.NopCloser(bytes.NewReader(raw))
+	putReq.ContentLength = int64(len(raw))
 	putReq.Header.Set("Content-Type", "application/json")
 	return a.do(putReq, nil)
 }
@@ -1471,10 +1482,19 @@ type ratingResponse struct {
 	} `json:"data"`
 }
 
-// GetSongRating returns true when the given catalog song is marked as Loved
-// in the user's Apple Music account.
+// GetSongRating returns true when the given song is marked as Loved in the
+// user's Apple Music account. If catalogID is a library ID ("i.XXXX"), it
+// resolves the catalog ID first and falls back to /me/ratings/library-songs/{id}.
 func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bool, error) {
-	ep := fmt.Sprintf("/me/ratings/songs/%s", url.QueryEscape(catalogID))
+	ep := "/me/ratings/songs/" + url.PathEscape(catalogID)
+	if strings.HasPrefix(catalogID, "i.") {
+		if resolved, err := a.resolveCatalogSongID(ctx, catalogID); err == nil && resolved != "" {
+			catalogID = resolved
+			ep = "/me/ratings/songs/" + url.PathEscape(catalogID)
+		} else {
+			ep = "/me/ratings/library-songs/" + url.PathEscape(catalogID)
+		}
+	}
 	req, err := a.newRequest(ctx, http.MethodGet, ep)
 	if err != nil {
 		return false, fmt.Errorf("GetSongRating: %w", err)

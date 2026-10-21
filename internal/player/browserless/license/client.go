@@ -14,6 +14,13 @@ import (
 	"github.com/simone-vibes/vibez/internal/config"
 )
 
+// ErrUnauthorized indicates that Apple Music rejected the credentials (HTTP 401/403).
+var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrTrackUnavailable indicates that Apple Music returned no playable stream
+// assets for the requested track (e.g. region-restricted or unavailable).
+var ErrTrackUnavailable = errors.New("CONTENT_RESTRICTED: track unavailable")
+
 type Client struct {
 	cfg        *config.Config
 	httpClient *http.Client
@@ -62,6 +69,10 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, string(raw))
@@ -79,8 +90,8 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding webPlayback response: %w", err)
 	}
-	if len(result.SongList) == 0 {
-		return nil, errors.New("webPlayback returned empty songList")
+	if len(result.SongList) == 0 || len(result.SongList[0].Assets) == 0 {
+		return nil, fmt.Errorf("%w (song %s)", ErrTrackUnavailable, songID)
 	}
 
 	item := result.SongList[0]
@@ -168,6 +179,10 @@ func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challeng
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("%w: acquire license HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+	}
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("acquire license failed (HTTP %d): %s", resp.StatusCode, string(raw))

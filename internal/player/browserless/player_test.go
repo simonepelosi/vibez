@@ -1,12 +1,18 @@
-//go:build linux
+//go:build linux || darwin || windows
 
 package browserless
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -112,5 +118,284 @@ func TestStreamServerSecurity(t *testing.T) {
 	s.handleStream(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("expected 404 Not Found for non-existent stream, got %d", rr.Code)
+	}
+}
+
+type noopSink struct{}
+
+func (noopSink) PlayURI(string)             {}
+func (noopSink) SetNextURI(string)          {}
+func (noopSink) Play()                      {}
+func (noopSink) Pause()                     {}
+func (noopSink) Stop()                      {}
+func (noopSink) Seek(time.Duration)         {}
+func (noopSink) SetVolume(float64)          {}
+func (noopSink) SetEqualizer([]float64)     {}
+func (noopSink) Position() time.Duration    { return 0 }
+func (noopSink) OnEOS(func())               {}
+func (noopSink) OnError(func(error))        {}
+func (noopSink) OnStreamStart(func(string)) {}
+func (noopSink) Destroy()                   {}
+
+type rewriteTransport struct {
+	target string
+	rt     http.RoundTripper
+}
+
+func (t rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	u, _ := url.Parse(t.target)
+	clone.URL.Scheme = u.Scheme
+	clone.URL.Host = u.Host
+	return t.rt.RoundTrip(clone)
+}
+
+func TestPlayTrack_TriggersOnSessionExpiredOn401(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "expired"}
+	lic := license.NewClient(cfg)
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = rewriteTransport{target: srv.URL, rt: origTransport}
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = streamer.Close() }()
+
+	var expiredCalls atomic.Int32
+	done := make(chan struct{}, 1)
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      noopSink{},
+		OnSessionExpired: func() {
+			expiredCalls.Add(1)
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		},
+	}
+
+	p.playTrack(provider.Track{ID: "123", Title: "Song"})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for OnSessionExpired")
+	}
+	if got := expiredCalls.Load(); got != 1 {
+		t.Errorf("OnSessionExpired called %d times, want 1", got)
+	}
+}
+
+func TestPlayTrack_SkipsUnavailableTrackAndAdvances(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"songList":[]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClient(cfg)
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = rewriteTransport{target: srv.URL, rt: origTransport}
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = streamer.Close() }()
+
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      noopSink{},
+		queue: []provider.Track{
+			{ID: "unavail-1", Title: "Blocked"},
+			{ID: "unavail-2", Title: "Next"},
+		},
+		idx: 0,
+	}
+	sub := p.Subscribe()
+	p.playTrack(p.queue[0])
+
+	deadline := time.After(2 * time.Second)
+	sawSkipped := false
+	for !sawSkipped {
+		select {
+		case st := <-sub:
+			if st.SkippedID == "unavail-1" {
+				sawSkipped = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for SkippedID=unavail-1 broadcast")
+		}
+	}
+}
+
+type spySink struct {
+	noopSink
+	plays         atomic.Int32
+	pauses        atomic.Int32
+	mu            sync.Mutex
+	nextURI       string
+	onStreamStart func(string)
+}
+
+func (s *spySink) Play()  { s.plays.Add(1) }
+func (s *spySink) Pause() { s.pauses.Add(1) }
+
+func (s *spySink) SetNextURI(uri string) {
+	s.mu.Lock()
+	s.nextURI = uri
+	s.mu.Unlock()
+}
+
+func (s *spySink) OnStreamStart(fn func(string)) {
+	s.mu.Lock()
+	s.onStreamStart = fn
+	s.mu.Unlock()
+}
+func TestPlayWhileLoadingDoesNotCallSinkPlay(t *testing.T) {
+	sink := &spySink{}
+	p := &Player{sink: sink}
+	p.state.Loading = true
+
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if got := sink.plays.Load(); got != 0 {
+		t.Errorf("sink.Play() called %d times while Loading=true, want 0 (avoid GStreamer empty-URI error)", got)
+	}
+}
+
+func TestSinkErrorDoesNotPersistInPlayerState(t *testing.T) {
+	p := &Player{sink: noopSink{}}
+	p.mu.Lock()
+	p.streamErr = "stream 123: segment 1/10: decrypt: status 2"
+	p.mu.Unlock()
+
+	sub := p.Subscribe()
+	// Simulate sink reporting a generic error after stream failure.
+	p.mu.Lock()
+	s := p.state
+	s.Error = p.streamErr
+	p.mu.Unlock()
+	p.bcast.Send(s)
+
+	got := <-sub
+	if got.Error != "stream 123: segment 1/10: decrypt: status 2" {
+		t.Errorf("broadcast Error = %q, want streamErr", got.Error)
+	}
+	st, _ := p.GetState()
+	if st.Error != "" {
+		t.Errorf("stored p.state.Error = %q, want empty so pollPosition does not re-broadcast it", st.Error)
+	}
+}
+
+func TestGaplessStreamStartTransitionsToPreparedNextTrack(t *testing.T) {
+	sink := &spySink{}
+	breatheURL := "http://127.0.0.1:1234/stream/2-999/tok.aac"
+	prep := &preparedNext{
+		idx:       1,
+		track:     provider.Track{ID: "2", Title: "Breathe"},
+		streamURL: breatheURL,
+		duration:  169 * time.Second,
+	}
+	p := &Player{
+		sink: sink,
+		queue: []provider.Track{
+			{ID: "1", Title: "Speak to Me"},
+			{ID: "2", Title: "Breathe"},
+		},
+		idx:         0,
+		nextPrep:    prep,
+		stagedPreps: map[string]*preparedNext{breatheURL: prep},
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Playing = true
+	sink.OnStreamStart(p.handleStreamStart)
+
+	sub := p.Subscribe()
+	sink.onStreamStart(breatheURL)
+
+	st := <-sub
+	if st.Track == nil || st.Track.Title != "Breathe" || st.Track.Duration != 169*time.Second {
+		t.Fatalf("after stream-start: Track = %+v, want Breathe (169s)", st.Track)
+	}
+	if p.QueueIndex() != 1 {
+		t.Errorf("QueueIndex = %d, want 1", p.QueueIndex())
+	}
+}
+
+func TestGaplessStreamStartUsesCommittedURIAfterLateQueueRemoval(t *testing.T) {
+	sink := &spySink{}
+	breatheURL := "http://127.0.0.1:1234/stream/2-999/tok.aac"
+	onTheRunURL := "http://127.0.0.1:1234/stream/3-999/tok.aac"
+
+	breathePrep := &preparedNext{
+		idx:       1,
+		track:     provider.Track{ID: "2", Title: "Breathe"},
+		streamURL: breatheURL,
+		duration:  169 * time.Second,
+	}
+	onTheRunPrep := &preparedNext{
+		idx:       1,
+		track:     provider.Track{ID: "3", Title: "On the Run"},
+		streamURL: onTheRunURL,
+		duration:  225 * time.Second,
+	}
+
+	p := &Player{
+		sink: sink,
+		queue: []provider.Track{
+			{ID: "1", Title: "Speak to Me"},
+			{ID: "2", Title: "Breathe"},
+			{ID: "3", Title: "On the Run"},
+		},
+		idx:         0,
+		nextPrep:    breathePrep,
+		stagedPreps: map[string]*preparedNext{breatheURL: breathePrep},
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Playing = true
+	sink.OnStreamStart(p.handleStreamStart)
+
+	// Remove "Breathe" after playbin already committed to breatheURL on about-to-finish,
+	// and simulate re-prefetching "On the Run" before the audible join completes.
+	if err := p.RemoveFromQueue(1); err != nil {
+		t.Fatalf("RemoveFromQueue(1): %v", err)
+	}
+	p.mu.Lock()
+	p.nextPrep = onTheRunPrep
+	p.stagedPreps[onTheRunURL] = onTheRunPrep
+	p.mu.Unlock()
+
+	sub := p.Subscribe()
+	sink.onStreamStart(breatheURL)
+
+	st := <-sub
+	if st.Track == nil || st.Track.Title != "Breathe" {
+		t.Fatalf("after stream-start for committed Breathe URI: Track = %+v, want Breathe", st.Track)
+	}
+	// Because Breathe was removed from the queue, idx must stay at 0 so the
+	// subsequent join advances to On the Run (now at index 1) rather than skipping it.
+	if gotIdx := p.QueueIndex(); gotIdx != 0 {
+		t.Errorf("QueueIndex = %d, want 0 so On the Run (idx 1) plays next", gotIdx)
+	}
+	p.mu.RLock()
+	nextIdx, nextTrack, ok := p.nextCandidateLocked()
+	p.mu.RUnlock()
+	if !ok || nextIdx != 1 || nextTrack.ID != "3" {
+		t.Errorf("nextCandidate after committed removed track = (%d, %q, %v), want (1, \"3\", true)", nextIdx, nextTrack.ID, ok)
 	}
 }

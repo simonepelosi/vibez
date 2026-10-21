@@ -9,6 +9,7 @@ package local
 #cgo LDFLAGS: -framework AudioToolbox -framework CoreFoundation
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,16 +17,63 @@ package local
 #define kNumBuffers 3
 // Buffer size 32KB per buffer (in bytes)
 #define kBufferSize 32768
+#define kEQBands 10
+
+static const double kEQBandHz[kEQBands] = {29, 59, 119, 237, 474, 947, 1889, 3770, 7523, 15011};
+#define kEQBandQ 1.4
+
+typedef struct {
+	double b0, b1, b2, a1, a2;
+	double z1[2], z2[2];
+	int active;
+} vibez_biquad;
+
+static void vibez_biquad_design(vibez_biquad *bq, double fs, double f0, double gainDb) {
+	if (fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+		bq->active = 0;
+		return;
+	}
+	double A = pow(10.0, gainDb / 40.0);
+	double w0 = 2.0 * 3.14159265358979323846 * f0 / fs;
+	double alpha = sin(w0) / (2.0 * kEQBandQ);
+	double cw = cos(w0);
+	double a0 = 1.0 + alpha / A;
+	bq->b0 = (1.0 + alpha * A) / a0;
+	bq->b1 = (-2.0 * cw) / a0;
+	bq->b2 = (1.0 - alpha * A) / a0;
+	bq->a1 = (-2.0 * cw) / a0;
+	bq->a2 = (1.0 - alpha / A) / a0;
+	bq->active = 1;
+}
+
+static double vibez_biquad_run(vibez_biquad *bq, double x, int ch) {
+	double y = bq->b0 * x + bq->z1[ch];
+	bq->z1[ch] = bq->b1 * x - bq->a1 * y + bq->z2[ch];
+	bq->z2[ch] = bq->b2 * x - bq->a2 * y;
+	return y;
+}
 
 typedef struct {
 	AudioQueueRef queue;
 	ExtAudioFileRef file;
 	AudioStreamBasicDescription format;
 	AudioQueueBufferRef bufs[3];
+	vibez_biquad eq[kEQBands];
 	int done;
 	int playing;
 	uintptr_t goPlayer;
 } vibez_audio_state;
+
+static void vibez_set_eq_gains(vibez_audio_state *s, const double *gains, int count) {
+	if (!s) return;
+	double fs = s->format.mSampleRate > 0 ? s->format.mSampleRate : 44100.0;
+	for (int i = 0; i < kEQBands; i++) {
+		double g = (gains && i < count) ? gains[i] : 0.0;
+		if (g > 24.0) g = 24.0;
+		if (g < -24.0) g = -24.0;
+		vibez_biquad_design(&s->eq[i], fs, kEQBandHz[i], g);
+	}
+}
 
 // This is called from C back into GO when the track ends
 extern void vibezOnEOS(uintptr_t handle);
@@ -45,6 +93,26 @@ static int vibez_fill_buffer(vibez_audio_state *s, AudioQueueBufferRef buf) {
 
 	ExtAudioFileRead(s->file, &numFrames, &abl);
 	buf->mAudioDataByteSize = numFrames * s->format.mBytesPerFrame;
+	if (numFrames > 0 && s->format.mChannelsPerFrame == 2 && s->format.mBitsPerChannel == 16) {
+		int eqOn = 0;
+		for (int b = 0; b < kEQBands; b++) {
+			if (s->eq[b].active) { eqOn = 1; break; }
+		}
+		if (eqOn) {
+			int16_t *pcm = (int16_t *)buf->mAudioData;
+			for (UInt32 f = 0; f < numFrames; f++) {
+				for (int c = 0; c < 2; c++) {
+					double x = pcm[f * 2 + c];
+					for (int b = 0; b < kEQBands; b++) {
+						if (s->eq[b].active) x = vibez_biquad_run(&s->eq[b], x, c);
+					}
+					if (x > 32767.0) x = 32767.0;
+					if (x < -32768.0) x = -32768.0;
+					pcm[f * 2 + c] = (int16_t)x;
+				}
+			}
+		}
+	}
 	return numFrames == 0;
 }
 
@@ -250,6 +318,7 @@ type Player struct {
 	eosCh      chan struct{}
 	audioWg    sync.WaitGroup
 	allTracks  []provider.Track
+	eqGains    []float64
 	closeOnce  sync.Once
 }
 
@@ -376,6 +445,7 @@ func (p *Player) playTrack(t provider.Track) {
 	if duration > 0 {
 		p.state.Track.Duration = duration
 	}
+	eqGains := append([]float64(nil), p.eqGains...)
 	s := p.state
 	p.mu.Unlock()
 
@@ -384,6 +454,13 @@ func (p *Player) playTrack(t provider.Track) {
 	}
 	if !ref.acquire() {
 		return
+	}
+	if len(eqGains) > 0 {
+		cg := make([]C.double, len(eqGains))
+		for i, g := range eqGains {
+			cg[i] = C.double(g)
+		}
+		C.vibez_set_eq_gains(raw, &cg[0], C.int(len(cg)))
 	}
 	C.vibez_start(raw)
 	ref.release()
@@ -576,7 +653,29 @@ func (p *Player) SetRepeat(mode int) error {
 	return nil
 }
 
-func (p *Player) SetEqualizer(_ []player.EQBand) error { return nil }
+func (p *Player) SetEqualizer(bands []player.EQBand) error {
+	gains := make([]float64, len(bands))
+	for i, b := range bands {
+		gains[i] = b.Gain
+	}
+	p.mu.Lock()
+	p.eqGains = gains
+	ref := p.audio
+	p.mu.Unlock()
+	if ref != nil && ref.acquire() {
+		if len(gains) == 0 {
+			C.vibez_set_eq_gains(ref.s, nil, 0)
+		} else {
+			cg := make([]C.double, len(gains))
+			for i, g := range gains {
+				cg[i] = C.double(g)
+			}
+			C.vibez_set_eq_gains(ref.s, &cg[0], C.int(len(cg)))
+		}
+		ref.release()
+	}
+	return nil
+}
 
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()

@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -122,6 +123,7 @@ struct Session {
     HWAVEOUT hwo = nullptr;
     std::atomic<uint32_t> sampleRate{0};
     std::atomic<uint32_t> bytesPerSec{0};
+    std::atomic<uint64_t> nullFrames{0};
 };
 
 struct Sink {
@@ -227,17 +229,23 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     HWAVEOUT hwo = nullptr;
     MMRESULT mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
     CoTaskMemFree(wfx);
+    wchar_t nullEnv[8] = {};
+    bool nullOut = GetEnvironmentVariableW(L"VIBEZ_NULL_AUDIO", nullEnv, 8) == 1 && nullEnv[0] == L'1';
     if (mm != MMSYSERR_NOERROR) {
-        CloseHandle(ev);
-        return reportError(sink, ses, "cannot open audio output device", static_cast<HRESULT>(mm));
+        if (!nullOut) {
+            CloseHandle(ev);
+            return reportError(sink, ses, "cannot open audio output device", static_cast<HRESULT>(mm));
+        }
+    } else if (nullOut) {
+        waveOutClose(hwo);
+        hwo = nullptr;
     }
-    {
+    if (!nullOut) {
         std::lock_guard<std::mutex> lk(ses->mu);
         ses->hwo = hwo;
         // Pause() can arrive before the device is open (a seek while paused).
         if (ses->paused) waveOutPause(hwo);
     }
-
     std::vector<Buf> bufs(kNumBuffers);
     for (auto& b : bufs) std::memset(&b.hdr, 0, sizeof(WAVEHDR));
 
@@ -273,7 +281,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
 
         Buf& b = bufs[next];
-        if (!waitFree(b, hwo, ev, *ses)) {
+        if (!nullOut && !waitFree(b, hwo, ev, *ses)) {
             mb->Unlock();
             break;
         }
@@ -319,6 +327,20 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             }
         }
 
+        if (nullOut) {
+            const size_t frameSize = sizeof(int16_t) * static_cast<size_t>(channels > 0 ? channels : 2);
+            const uint64_t frames = frameSize > 0 ? b.data.size() / frameSize : 0;
+            ses->nullFrames.fetch_add(frames);
+            while (ses->paused && !ses->cancel) {
+                Sleep(20);
+            }
+            if (rate > 0 && frames > 0) {
+                const DWORD ms = static_cast<DWORD>((frames * 1000ULL) / rate);
+                if (ms > 0) Sleep(ms);
+            }
+            continue;
+        }
+
         b.hdr.lpData = b.data.data();
         b.hdr.dwBufferLength = static_cast<DWORD>(b.data.size());
         b.hdr.dwFlags = 0;
@@ -331,24 +353,25 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         next = (next + 1) % kNumBuffers;
     }
 
-    if (endOfStream) {
-        // Let the tail finish before announcing the end of the track.
-        for (auto& b : bufs) {
-            while (b.queued && !ses->cancel && !(b.hdr.dwFlags & WHDR_DONE)) WaitForSingleObject(ev, 50);
+    if (!nullOut) {
+        if (endOfStream) {
+            // Let the tail finish before announcing the end of the track.
+            for (auto& b : bufs) {
+                while (b.queued && !ses->cancel && !(b.hdr.dwFlags & WHDR_DONE)) WaitForSingleObject(ev, 50);
+            }
         }
-    }
 
-    {
-        std::lock_guard<std::mutex> lk(ses->mu);
-        ses->hwo = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(ses->mu);
+            ses->hwo = nullptr;
+        }
+        waveOutReset(hwo);
+        for (auto& b : bufs) {
+            if (b.queued) waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+        }
+        waveOutClose(hwo);
     }
-    waveOutReset(hwo);
-    for (auto& b : bufs) {
-        if (b.queued) waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
-    }
-    waveOutClose(hwo);
     CloseHandle(ev);
-
     if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) sink->onEos(sink->user);
 }
 
@@ -475,7 +498,13 @@ double vibez_winsink_position(vibez_winsink_t handle) {
     }
     if (!ses) return 0.0;
     std::lock_guard<std::mutex> lk(ses->mu);
-    if (!ses->hwo) return 0.0;
+    if (!ses->hwo) {
+        const uint64_t nf = ses->nullFrames.load();
+        if (nf > 0 && ses->sampleRate > 0) {
+            return static_cast<double>(nf) / static_cast<double>(ses->sampleRate);
+        }
+        return 0.0;
+    }
     MMTIME t;
     std::memset(&t, 0, sizeof(t));
     t.wType = TIME_SAMPLES;

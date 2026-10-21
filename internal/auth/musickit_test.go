@@ -123,6 +123,28 @@ func TestLoginHandler_ServesHTML(t *testing.T) {
 	}
 }
 
+func TestLoginHTML_UsesDirectAppleAuthorizePopupWithoutMusicKitCDN(t *testing.T) {
+	tmpl, err := template.New("login").Parse(string(loginHTML))
+	if err != nil {
+		t.Fatalf("parsing loginHTML: %v", err)
+	}
+	mux := buildMux("TEST_DEV_TOKEN", testState, tmpl, make(chan string, 1), make(chan error, 1))
+	req := httptest.NewRequest(http.MethodGet, "/login?state="+testState, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Referrer-Policy"); got != "strict-origin" {
+		t.Errorf("Referrer-Policy = %q, want %q", got, "strict-origin")
+	}
+	body := w.Body.String()
+	if containsSubstr(body, "js-cdn.music.apple.com") {
+		t.Error("login.html should not load musickit.js from Apple CDN")
+	}
+	if !containsSubstr(body, "https://authorize.music.apple.com") {
+		t.Error("login.html missing direct Apple authorization popup origin")
+	}
+}
+
 // --- /callback handler ---
 
 func TestCallbackHandler_AcceptsValidToken(t *testing.T) {

@@ -31,7 +31,7 @@
 
 vibez is an open-source TUI Apple Music player for Linux, macOS, and Windows. Search, queue, and control playback entirely from the keyboard.
 
-Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-downloaded into vibez's private cache; on Linux arm64, vibez uses a system-installed Chromium plus a system Widevine CDM (Google publishes no arm64 Chrome for Linux). Where neither is available, WebKit + GStreamer remains available as a 30-second preview backend. On macOS and Windows, install Google Chrome before using Apple Music playback.
+Full tracks stream natively with an in-process Widevine CDM and platform-native audio output (GStreamer on Linux, Core Audio on macOS, and Media Foundation + `waveOut` on Windows) — no Google Chrome, Chromium, Playwright, WebKit, or Node.js required. If no existing Widevine CDM library is found on the system, vibez automatically downloads the standalone Widevine component into its cache on first launch.
 
 ---
 
@@ -39,8 +39,7 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 
 ### 🎵 Music Playback
 
-- **Full-track streaming** via headless Chrome + Widevine DRM — the real deal, not 30-second clips
-- **Linux preview backend** via WebKit + GStreamer (30 s previews) when CDP playback is not selected
+- **Native full-track streaming** via in-process Widevine CDM (~15 MB RAM, sub-second startup, zero browser processes)
 - **Playback controls** — play/pause, next, previous, seek ±10 s, volume up/down
 - **Repeat modes** — cycle through off, repeat-all, and repeat-one
 - **Shuffle** — randomise your queue with a single keypress
@@ -49,7 +48,7 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 
 - **Browse your library** — playlists, albums, and tracks all in one place
 - **Real-time catalog search** — find any song, album, or artist from the full Apple Music catalog as you type
-- **Secure authentication** — MusicKit OAuth flow via an embedded Chrome window
+- **Secure authentication** — MusicKit OAuth sign-in flow in your default browser
 
 ### 📋 Queue Management
 
@@ -65,7 +64,7 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 - **No external music player needed** — vibez does not depend on Cider, VLC, or Music.app
 - **Last.fm scrobbling** — optional integration; connect with `vibez auth lastfm login` and your listening history is tracked automatically
 - **Discord Rich Presence** — broadcasts currently playing track, artist, album, artwork, and elapsed/remaining time to your Discord profile; enabled by default (disable with `--no-discord` or in config)
-- **WSL2 support** — set `"wsl": true` in config to enable audio workarounds for WSL2 environments
+- **Zero browser dependencies** — runs entirely in-process without Chrome, Chromium, WebKit, or Node.js
 
 ### 🌀 Vibe Mode
 
@@ -105,7 +104,7 @@ Full tracks stream via Chrome with Widevine DRM. On Linux amd64, Chrome is auto-
 
 - **10-band parametric EQ** — press `e` to open a full-width equalizer panel
 - **Per-band control** — adjust frequency (32 Hz–16 kHz), Q factor, and gain (±12 dB) for each band
-- **Live preview** — changes apply immediately to the audio stream via Web Audio API
+- **Live preview** — changes apply immediately to the audio stream
 - **Persistent settings** — your EQ curve is saved to `~/.config/vibez/config.json` and restored on next launch
 
 ### 🎨 Themes
@@ -134,17 +133,9 @@ binary yet — build [from source](#from-source) instead.
 
 > **Custom install dir:** `VIBEZ_INSTALL_DIR=/usr/local/bin curl ... | sh`
 
-### macOS Chrome
-
-Install Google Chrome before using Apple Music playback on macOS:
-
-```sh
-brew install --cask google-chrome
-```
-
 ### Windows (x64)
 
-Install Google Chrome, then build from PowerShell with Go 1.26+:
+Download `vibez_windows_amd64.zip` from the latest release, or cross-compile / build from source with Go 1.26+ and MinGW-w64 (`CGO_ENABLED=1`):
 
 ```powershell
 go build -o vibez.exe .
@@ -152,17 +143,11 @@ go build -o vibez.exe .
 .\vibez.exe --local --music-dir "$env:USERPROFILE\Music"
 ```
 
-No WSL, C compiler, or Apple credentials are needed for demo or local mode. Local playback uses a private headless Chrome session for MP3, FLAC, M4A/AAC, and OGG, with seek, queue controls, and equalization. Codec support follows Chrome; not every codec inside an M4A container is supported.
+Both Apple Music streaming and `--local` file playback (MP3, FLAC, M4A) run natively via Windows Media Foundation and `waveOut` with a 10-band equalizer — no browser installation required.
 
-Chrome is discovered in per-user/system installation folders, App Paths registry entries, or `PATH`. Override it with `$env:VIBEZ_CHROME_PATH = 'C:\path\to\chrome.exe'` (`CHROME_PATH` is also supported). An invalid explicit override is reported rather than silently selecting a different browser.
+Configuration lives at `%APPDATA%\vibez\config.json`; the cached Widevine CDM and icon live under `%LOCALAPPDATA%\vibez`. `--config` overrides the configuration file.
 
-Configuration lives at `%APPDATA%\vibez\config.json`; the Playwright driver and cached icon live under `%LOCALAPPDATA%\vibez`. `--config` overrides the configuration file. The driver is downloaded on the first audio launch; Chrome itself is not downloaded.
-
-The Windows release target produces `vibez_windows_amd64.zip` containing `vibez.exe`. Extract a published build into a writable folder; self-update verifies its available checksum, replaces the executable, and restarts without releasing the console to the shell. Discord Rich Presence uses Windows named pipes. Linux MPRIS desktop integration is not available on Windows.
-
-**Verification status:** native CLI/TUI, local playback, Chrome Widevine capability, and the MusicKit invalid-token error path have been exercised on Windows. Apple sign-in and full-track Apple Music playback still need verification with an authorized developer token. A maintainer-built Dev Build can embed that token without sharing the MusicKit private key. An Apple Music subscription is still required, and this Chrome/MusicKit backend does not add lossless Apple Music streaming.
-
-
+The Windows release target produces `vibez_windows_amd64.zip` containing `vibez.exe`. Extract a published build into a writable folder; self-update verifies its available checksum, replaces the executable, and restarts without releasing the console to the shell. Discord Rich Presence uses Windows named pipes.
 ### From source
 
 ```bash
@@ -177,7 +162,7 @@ make install            # same, plus copies the binary to ~/.local/bin
 Embedded tokens expire after 30 days — re-run it when the catalog starts
 returning 401s. Override the location with `make install PREFIX=/usr/local`.
 
-**Requirements:** Linux x86-64 or arm64, macOS, or Windows x64 · Go 1.26+ · WebKit/GStreamer development packages on Linux · Google Chrome on macOS/Windows · on Linux arm64, a system Chromium + Widevine CDM for full-track playback (e.g. `pacman -S chromium widevine`) · a MusicKit developer token for Apple Music (embedded in maintainer builds, or generated with your own Apple Developer account)
+**Requirements:** Linux x86-64 or arm64, macOS, or Windows x64 · Go 1.26+ · on Linux: GStreamer development headers (`libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`) to build, plus GStreamer runtime plugins including an AAC decoder (`gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav` on Debian/Ubuntu, or `gst-plugins-base gst-plugins-good gst-libav` on Arch/Fedora) · MinGW-w64 on Windows · a MusicKit developer token for Apple Music (fetched automatically via the token broker in release builds, or generated with your own Apple Developer account)
 
 ---
 
@@ -186,7 +171,7 @@ returning 401s. Override the location with `make install PREFIX=/usr/local`.
 ```bash
 vibez                       # launch the TUI
 vibez --demo                # try vibez with built-in fake tracks — no account needed
-vibez auth login            # open Apple ID login (Chrome window)
+vibez auth login            # open Apple ID login in your browser
 vibez auth status           # check current auth state
 vibez auth logout           # clear saved tokens
 vibez auth lastfm login     # connect your Last.fm account (optional)
@@ -364,39 +349,18 @@ Use `↑` / `↓` (or `ctrl+p` / `ctrl+n`) to cycle through suggestions, and `ta
 
 ---
 
-## Audio Engines
+## Audio Engine
 
-| Engine | Tracks | How it works |
-|--------|--------|--------------|
-| **Chrome + Widevine** | Full tracks | Chrome (amd64) or system Chromium (arm64) via Playwright; MusicKit JS + Widevine DRM |
-| **WebKit + GStreamer** *(Linux fallback)* | 30 s previews | Embedded webkit2gtk-4.1; GStreamer decodes preview URLs |
-| **Chrome local audio** *(Windows)* | Local files | HTML audio decoding and Web Audio EQ; registered library files served only over loopback |
+| Platform | Full Apple Music Tracks | Local Files (`--local`) |
+|----------|-------------------------|-------------------------|
+| **Linux** | In-process Widevine CDM + GStreamer (`playbin` + 10-band EQ) | GStreamer |
+| **macOS** | In-process Widevine CDM + Core Audio (`AudioFileStream` + `AudioQueue`) | Core Audio (`ExtAudioFile` + `AudioQueue`) |
+| **Windows** | In-process Widevine CDM + Media Foundation + `waveOut` (10-band biquad EQ) | Media Foundation + `waveOut` (10-band biquad EQ) |
 
-On Linux amd64, Chrome is downloaded once to `~/.cache/vibez/chrome`. On Linux arm64, vibez uses the system Chromium with a persistent profile in `~/.cache/vibez/chromium-arm64` and a system-registered Widevine CDM (registered on a one-time warm-up launch). Setting `VIBEZ_CHROME_PATH` (or `CHROME_PATH`) to a browser binary selects that system browser on amd64 as well, with the same persistent profile (`~/.cache/vibez/chromium-amd64`) and Widevine lookup, and nothing is downloaded. The Playwright driver is stored in `~/.cache/vibez/driver`. On macOS and Windows, vibez uses installed Google Chrome; Windows stores the driver in `%LOCALAPPDATA%\vibez\driver`.
+vibez discovers an existing Widevine CDM library from standard system paths (Chrome, Chromium, Brave, Edge, Firefox) or automatically downloads the official standalone Widevine CDM into the user cache directory (`~/.cache/vibez/cdm` on Linux, `~/Library/Caches/vibez/cdm` on macOS, `%LOCALAPPDATA%\vibez\cdm` on Windows).
 
----
 
-## WSL2 Audio Setup
-
-Running vibez inside WSL2 can cause audio underruns or sample-rate distortion because the Hyper-V scheduler introduces jitter and PulseAudio / Windows may run at mismatched rates (44 100 Hz vs 48 000 Hz).
-
-Enable the WSL2 workaround by adding `"wsl": true` to `~/.config/vibez/config.json`:
-
-```json
-{
-  "wsl": true
-}
-```
-
-When enabled, vibez launches Chrome with:
-
-| Flag | Purpose |
-|------|---------|
-| `--audio-buffer-size=4096` | Larger buffer absorbs Hyper-V scheduler jitter |
-| `--disable-features=…,AudioServiceOutOfProcess` | Disables out-of-process audio service that causes distortion at mismatched sample rates |
-
-The flag is `false` by default so native Linux users are unaffected.
-
+> **Linux runtime dependencies:** GStreamer needs `playbin`, `equalizer-10bands`, and an AAC decoder (`avdec_aac`, `faad`, or `fdkaacdec`). Install `gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav` on Debian/Ubuntu, or `gst-plugins-base gst-plugins-good gst-libav` (or `gst-plugins-bad`) on Arch/Fedora.
 ### Audio quality
 
 Set `audio_quality` in `~/.config/vibez/config.json`:
@@ -407,8 +371,7 @@ Set `audio_quality` in `~/.config/vibez/config.json`:
 }
 ```
 
-Supported values: `"high"`/`"256"` for 256 kbps AAC (default), `"standard"`/`"64"` for 64 kbps AAC. MusicKit JS/web playback maxes out at 256 kbps AAC; lossless and Hi-Res/ALAC are not available through the Chrome/CDP backend. WebKit + GStreamer uses fixed 30 s preview URLs and cannot change bitrate at runtime.
-
+Supported values: `"high"`/`"256"` for 256 kbps AAC (default), `"standard"`/`"64"` for 64 kbps AAC.
 ---
 
 ## Architecture
@@ -422,9 +385,9 @@ vibez/
 │   ├── lastfm/             # Last.fm scrobbling (optional)
 │   ├── provider/           # Provider interface + Apple Music implementation
 │   ├── player/
-│   │   ├── cdp/            # Chrome CDP player (Widevine, full tracks)
-│   │   ├── webkit/         # WebKit player (30 s previews, Linux)
-│   │   ├── gst/            # GStreamer decoder (Linux)
+│   │   ├── browserless/    # In-process Widevine CDM + native audio sinks (Linux/macOS/Windows)
+│   │   ├── local/          # Local file player (GStreamer / Core Audio / Media Foundation)
+│   │   ├── gst/            # GStreamer pipeline wrapper (Linux)
 │   │   └── mpris/          # Linux MPRIS D-Bus server
 │   ├── tui/
 │   │   ├── model.go        # Bubble Tea model + key handling

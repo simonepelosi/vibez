@@ -12,24 +12,16 @@ tags:
   - apple-music
 
 finish-args:
-  # Apple Music API + MusicKit.js CDN
+  # Apple Music API + Widevine CDM download on first run
   - --share=network
-  # Shared memory for IPC (Chrome needs this even with --disable-dev-shm-usage)
-  - --share=ipc
-  # Wayland + X11 fallback (login window on first run)
-  - --socket=wayland
-  - --socket=fallback-x11
   # Audio output (PulseAudio; PipeWire uses this socket for compat)
   - --socket=pulseaudio
-  # DRI for Chrome GPU process (required even with --disable-gpu on some drivers)
-  - --device=dri
   # MPRIS D-Bus interface so the desktop can control playback
   - --socket=session-bus
   - --talk-name=org.mpris.MediaPlayer2.*
   - --own-name=org.mpris.MediaPlayer2.vibez
-  # Chrome is downloaded and extracted here on first run (pure-Go ar parser +
-  # system tar — no dpkg-deb required). Flatpak remaps $XDG_CACHE_HOME →
-  # ~/.var/app/APP_ID/cache/ automatically, so this maps to the host path.
+  # Standalone Widevine CDM is cached here on first run. Flatpak remaps
+  # $XDG_CACHE_HOME → ~/.var/app/APP_ID/cache/ automatically.
   - --filesystem=xdg-cache/vibez:create
   # Config and auth tokens
   - --filesystem=xdg-config/vibez:create

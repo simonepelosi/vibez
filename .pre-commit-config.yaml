@@ -5,21 +5,21 @@ repos:
       - id: go-build
         name: go build
         language: system
-        entry: bash -c 'PKG_CONFIG_PATH="$(pwd)/pkg-config" go build ./...'
+        entry: go build ./...
         types: [go]
         pass_filenames: false
 
       - id: go-vet
         name: go vet
         language: system
-        entry: bash -c 'PKG_CONFIG_PATH="$(pwd)/pkg-config" go vet ./...'
+        entry: go vet ./...
         types: [go]
         pass_filenames: false
 
       - id: go-test
         name: go test
         language: system
-        entry: bash -c 'PKG_CONFIG_PATH="$(pwd)/pkg-config" go test ./...'
+        entry: go test ./...
         types: [go]
         pass_filenames: false
 
@@ -41,16 +41,9 @@ repos:
         types: [go]
         pass_filenames: false
 
-  # ── JS (musickit.html pure-logic tests) ──────────────────────────────────
+  # ── JS (Cloudflare Worker token broker tests) ─────────────────────────────
   - repo: local
     hooks:
-      - id: musickit-js-test
-        name: musickit js test
-        language: system
-        entry: node internal/player/web/musickit_test.mjs
-        files: '^internal/player/(web|webkit/web)/musickit'
-        pass_filenames: false
-
       - id: worker-js-test
         name: worker js test
         language: system

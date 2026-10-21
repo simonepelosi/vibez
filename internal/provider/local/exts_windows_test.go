@@ -2,4 +2,4 @@
 
 package local_test
 
-const wantAudioFileCount = 4
+const wantAudioFileCount = 3

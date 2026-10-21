@@ -7,14 +7,13 @@ import (
 
 // Options configures optional TUI features at startup.
 type Options struct {
-	// MemProfiling enables live RSS display (vibez + helper) in the header.
+	// MemProfiling enables live RSS display in the header.
 	// Activate with --mem-profiling on the command line.
 	MemProfiling bool
 	// IconPath is the absolute path of the installed app icon (may be empty).
 	IconPath string
 	// Backend is a human-readable description of the audio backend, logged in
-	// the debug view on startup. Leave empty if the engine starts asynchronously
-	// (CDP path uses EngineReadyMsg.Backend instead).
+	// the debug view on startup. Leave empty if the engine starts asynchronously.
 	Backend string
 	// InitialTracks pre-populates the queue panel on launch (used by local mode).
 	InitialTracks []provider.Track
@@ -32,10 +31,9 @@ type InitStatusMsg string
 
 // EngineReadyMsg is sent when the audio engine and provider are both ready.
 type EngineReadyMsg struct {
-	Player      player.Player
-	Provider    provider.Provider
-	HelperPaths []string // absolute paths of the Chrome helper binary (for RSS tracking)
-	Backend     string   // human-readable backend description, shown in the debug log
+	Player   player.Player
+	Provider provider.Provider
+	Backend  string // human-readable backend description, shown in the debug log
 }
 
 // InitErrMsg is sent when initialization fails fatally.

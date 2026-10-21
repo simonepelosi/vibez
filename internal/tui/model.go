@@ -167,13 +167,16 @@ type vibeResultMsg struct {
 	radioGen  int      // radio generation that produced this result
 }
 type loveSongMsg struct {
-	title string
-	loved bool
-	err   error
+	trackID   string
+	catalogID string
+	title     string
+	loved     bool
+	err       error
 }
 type songRatingMsg struct {
-	trackID string
-	loved   bool
+	trackID   string
+	catalogID string
+	loved     bool
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -377,7 +380,6 @@ type Model struct {
 	// Memory profiling (enabled with --mem-profiling)
 	memProfiling bool
 	memStats     string
-	helperPaths  []string
 
 	// Mute: preMuteVol holds the volume before mute so it can be restored.
 	// -1 means not muted.
@@ -501,9 +503,9 @@ func introTick() tea.Cmd {
 	return tea.Tick(60*time.Millisecond, func(t time.Time) tea.Msg { return introTickMsg(t) })
 }
 
-func memTick(helperPaths []string) tea.Cmd {
+func memTick() tea.Cmd {
 	return tea.Tick(3*time.Second, func(_ time.Time) tea.Msg {
-		return memTickMsg{stats: collectMemStats(helperPaths)}
+		return memTickMsg{stats: collectMemStats()}
 	})
 }
 
@@ -660,10 +662,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
 			}
 		}
-		if s.Track != nil && (m.playerState.Track == nil || m.playerState.Track.Title != s.Track.Title) {
+		if s.Track != nil && (m.playerState.Track == nil ||
+			views.PlaybackID(*m.playerState.Track) != views.PlaybackID(*s.Track) ||
+			m.playerState.Track.Title != s.Track.Title) {
 			m.applyTrackPalette(s.Track)
 			m.appendLog("[playing] " + s.Track.Artist + " — " + s.Track.Title)
-			// Log playParams so we can confirm which ID path MusicKit will use.
+			// Log playParams so we can confirm which ID path is used.
 			trackType := "catalog"
 			if strings.HasPrefix(s.Track.ID, "i.") {
 				trackType = "library"
@@ -675,7 +679,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(pp)
 			// Check whether the new track is already loved on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
-			// Fetch lyrics for the new track: immediately if the panel is
 			// visible, otherwise mark stale so the fetch is deferred until
 			// the user opens the panel (lazy loading).
 			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
@@ -756,7 +759,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.trackID != "" {
 			m.favorites[msg.trackID] = msg.loved
 		}
-
+		if msg.catalogID != "" {
+			m.favorites[msg.catalogID] = msg.loved
+		}
 	case DebugLogMsg:
 		m.appendLog(string(msg))
 
@@ -963,15 +968,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loveSongMsg:
 		if msg.err != nil {
+			// Revert optimistic toggle on failure.
+			if msg.trackID != "" {
+				m.favorites[msg.trackID] = !msg.loved
+			}
+			if msg.catalogID != "" {
+				m.favorites[msg.catalogID] = !msg.loved
+			}
+			m.errMsg = fmt.Sprintf("favorite failed: %v", msg.err)
+			m.errExpiry = time.Now().Add(4 * time.Second)
 			m.appendLog(fmt.Sprintf("[fav] ✗ %s: %v", msg.title, msg.err))
 		} else {
+			if msg.trackID != "" {
+				m.favorites[msg.trackID] = msg.loved
+			}
+			if msg.catalogID != "" {
+				m.favorites[msg.catalogID] = msg.loved
+			}
+			m.library.m.InvalidateTracksCache()
 			state := "♡"
 			if msg.loved {
 				state = "♥"
 			}
 			m.appendLog(fmt.Sprintf("[fav] %s %s synced to Apple Music", state, msg.title))
 		}
-
 	case searchDebounceMsg:
 		// Drop stale debounce ticks — only the latest keystroke wins.
 		if msg.gen != m.searchGen || m.provider == nil {
@@ -1100,18 +1120,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.library.SetSize(max(0, inner-2), m.panelHeight())
 		}
 		m.search = views.NewSearch(msg.Provider)
-		m.helperPaths = msg.HelperPaths
 		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
 		cmds = append(cmds, m.restoreAudioSettings()...)
 		if m.memProfiling {
-			cmds = append(cmds, memTick(m.helperPaths))
+			cmds = append(cmds, memTick())
 		}
 
 	case memTickMsg:
 		m.memStats = msg.stats
 		if m.memProfiling {
-			return m, memTick(m.helperPaths)
+			return m, memTick()
 		}
 
 	case InitErrMsg:
@@ -2232,15 +2251,18 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	case "f":
 		m.lastKey = ""
 		if m.playerState.Track != nil {
-			id := m.playerState.Track.ID
-			m.favorites[id] = !m.favorites[id]
-			loved := m.favorites[id]
-			m.appendLog(fmt.Sprintf("[fav] %s → %v", m.playerState.Track.Title, loved))
-			// Sync to Apple Music asynchronously.
 			t := m.playerState.Track
+			if t.CatalogID == "" {
+				if idx := playingQueueIdx(m.queueTracks, t); idx >= 0 && idx < len(m.queueTracks) {
+					t.CatalogID = m.queueTracks[idx].CatalogID
+				}
+			}
+			loved := !m.isTrackFavorite(t)
+			m.setTrackFavorite(t, loved)
+			m.appendLog(fmt.Sprintf("[fav] %s → %v", t.Title, loved))
+			// Sync to Apple Music asynchronously.
 			return m.loveSongCmd(t, loved)
 		}
-
 	case "d":
 		m.lastKey = ""
 		if m.discovery.enabled {
@@ -2515,6 +2537,32 @@ func dedupeStrings(s []string) []string {
 }
 
 // loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
+func (m *Model) isTrackFavorite(t *provider.Track) bool {
+	if t == nil {
+		return false
+	}
+	if t.ID != "" && m.favorites[t.ID] {
+		return true
+	}
+	if t.CatalogID != "" && m.favorites[t.CatalogID] {
+		return true
+	}
+	return false
+}
+
+func (m *Model) setTrackFavorite(t *provider.Track, loved bool) {
+	if t == nil {
+		return
+	}
+	if t.ID != "" {
+		m.favorites[t.ID] = loved
+	}
+	if t.CatalogID != "" {
+		m.favorites[t.CatalogID] = loved
+	}
+}
+
+// loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
 func (m *Model) loveSongCmd(t *provider.Track, loved bool) tea.Cmd {
 	if m.provider == nil || t == nil {
 		return nil
@@ -2523,13 +2571,14 @@ func (m *Model) loveSongCmd(t *provider.Track, loved bool) tea.Cmd {
 	if catalogID == "" {
 		catalogID = t.ID
 	}
+	trackID := t.ID
 	title := t.Title
 	prov := m.provider
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := prov.LoveSong(ctx, catalogID, loved)
-		return loveSongMsg{title: title, loved: loved, err: err}
+		return loveSongMsg{trackID: trackID, catalogID: catalogID, title: title, loved: loved, err: err}
 	}
 }
 
@@ -2549,7 +2598,7 @@ func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		loved, _ := prov.GetSongRating(ctx, catalogID)
-		return songRatingMsg{trackID: trackID, loved: loved}
+		return songRatingMsg{trackID: trackID, catalogID: catalogID, loved: loved}
 	}
 }
 
@@ -3549,7 +3598,7 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 	}
 
 	heartIcon, heartStyle := "♡", muted
-	if m.favorites[t.ID] {
+	if m.isTrackFavorite(t) {
 		heartIcon, heartStyle = "♥", styles.FavoriteActive
 	}
 

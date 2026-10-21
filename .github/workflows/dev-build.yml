@@ -75,14 +75,13 @@ jobs:
           [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
+        run: sudo apt-get update && sudo apt-get install -y --fix-missing libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
 
       - name: Build (linux/amd64)
         env:
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "1"
-          PKG_CONFIG_PATH: ${{ github.workspace }}/pkg-config
           GOTOOLCHAIN: local
         run: |
           go build -o vibez-linux-amd64 \

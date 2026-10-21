@@ -160,9 +160,9 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	var keyURI string
 	var initURI string
 	var initOffset, initLength int64
+	var nextByteRangeEnd int64
 	var segments []segmentRef
 	var currDuration float64
-
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
 		switch {
@@ -180,7 +180,14 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 			}
 			if _, rest, ok := strings.Cut(line, "BYTERANGE=\""); ok {
 				if rangeStr, _, ok := strings.Cut(rest, "\""); ok {
-					_, _ = fmt.Sscanf(rangeStr, "%d@%d", &initLength, &initOffset)
+					if lStr, oStr, hasAt := strings.Cut(rangeStr, "@"); hasAt {
+						initLength, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
+						initOffset, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
+					} else {
+						initLength, _ = strconv.ParseInt(strings.TrimSpace(rangeStr), 10, 64)
+						initOffset = 0
+					}
+					nextByteRangeEnd = initOffset + initLength
 				}
 			}
 		case strings.HasPrefix(line, "#EXTINF:"):
@@ -191,8 +198,16 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 			dur, _ := strconv.ParseFloat(strings.TrimSpace(val), 64)
 			currDuration = dur
 		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
+			rangeSpec := strings.TrimSpace(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"))
 			var l, o int64
-			_, _ = fmt.Sscanf(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"), "%d@%d", &l, &o)
+			if lStr, oStr, hasAt := strings.Cut(rangeSpec, "@"); hasAt {
+				l, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
+				o, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
+			} else {
+				l, _ = strconv.ParseInt(rangeSpec, 10, 64)
+				o = nextByteRangeEnd
+			}
+			nextByteRangeEnd = o + l
 			for i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
 				i++
 			}

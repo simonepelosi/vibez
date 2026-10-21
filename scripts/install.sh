@@ -95,7 +95,7 @@ case "${OS}" in
     linux)
         PLATFORM="Linux ${ARCH_RAW}"
         [ "${ARCH}" = "amd64" ] || \
-            die "no prebuilt Linux/${ARCH} binary is published yet — build from source: git clone https://github.com/simonepelosi/vibez && cd vibez && make build (arm64 full-track playback needs a system Chromium + Widevine CDM installed)"
+            die "no prebuilt Linux/${ARCH} binary is published yet — build from source: git clone https://github.com/simonepelosi/vibez && cd vibez && make build"
         ;;
     darwin)
         PLATFORM="macOS ${ARCH_RAW}"
@@ -222,35 +222,6 @@ if [ "${OS}" = "linux" ]; then
         && gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
     success "Desktop file and icon installed"
-fi
-
-# ── Chrome check (macOS) ──────────────────────────────────────────────────────
-
-# vibez plays full tracks through an installed Google Chrome on macOS; it never
-# downloads one. Mirrors the lookup order in internal/player/cdp/browser_darwin.go
-# so the installer warns about exactly what the player would fail to find.
-if [ "${OS}" = "darwin" ]; then
-    step "Checking Google Chrome…"
-
-    CHROME=""
-    for candidate in \
-        "${VIBEZ_CHROME_PATH:-}" \
-        "${CHROME_PATH:-}" \
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-        "${HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    do
-        if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
-            CHROME="${candidate}"
-            break
-        fi
-    done
-
-    if [ -n "${CHROME}" ]; then
-        success "${CHROME}"
-    else
-        warn "Google Chrome not found — full-track playback needs it."
-        info "Install it with: brew install --cask google-chrome"
-    fi
 fi
 
 

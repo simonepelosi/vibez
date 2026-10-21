@@ -2,4 +2,4 @@
 
 package tui
 
-func collectMemStats(_ []string) string { return "" }
+func collectMemStats() string { return "" }

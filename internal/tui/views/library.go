@@ -149,6 +149,13 @@ func (m *LibraryModel) ResetTopLevel() {
 	m.showSections()
 }
 
+// InvalidateTracksCache marks the cached library tracks as stale so the next
+// Songs or Favorites view reloads fresh data from the provider.
+func (m *LibraryModel) InvalidateTracksCache() {
+	m.tracksLoaded = false
+	m.libraryTracksTime = time.Time{}
+}
+
 func (m *LibraryModel) Back() bool {
 	switch m.pane {
 	case paneSections:

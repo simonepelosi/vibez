@@ -1,23 +1,21 @@
 //go:build windows
 
 // Package local provides a Player for the audio files in the user's music
-// directory. On Windows it plays them in the installed Google Chrome: a
-// loopback-only HTTP server hands a headless page the registered library
-// files, and an HTMLAudioElement feeding a Web Audio equalizer decodes and
-// outputs them. No cgo, codecs or Apple credentials are involved.
+// directory. On Windows it decodes and plays them natively through Media
+// Foundation and waveOut with a 10-band equalizer. No browser, WebView, or
+// Apple credentials are involved.
 package local
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/audioquality"
 	"github.com/simone-vibes/vibez/internal/player"
-	"github.com/simone-vibes/vibez/internal/player/cdp"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -35,22 +33,34 @@ const restartThreshold = 3 * time.Second
 // equalizer panel offers.
 const maxEQGain = 12.0
 
-// Player implements player.Player for local audio files played in Chrome.
-//
-// Go owns the queue and decides what plays next; the page plays the track it
-// is told to and reports what its audio element is doing. Each load gets a new
-// generation and page snapshots for any other generation are dropped, so a
-// late event from a replaced track can neither change the state nor move the
-// queue.
+// snapshot is what the native engine reports about the loaded track, both as
+// the reply to a command and as an asynchronous event. Gen names the track it
+// describes (0 when none is loaded) and Seq orders snapshots across both paths.
+type snapshot struct {
+	Gen      uint64
+	Seq      uint64
+	Kind     string // event type ("ended", "error", "timeupdate", ...); empty in command replies
+	Playing  bool
+	Loading  bool
+	Position float64 // seconds
+	Duration float64 // seconds; 0 until known
+	Error    string  // why the command or the decoder failed
+}
+
+// engine runs commands on the native Windows audio sink. A command that fails
+// for a media reason returns a snapshot with Error set; an error return means
+// the audio engine itself could not be used.
+type engine interface {
+	call(method string, args ...any) (snapshot, error)
+	close()
+}
+
+// Player implements player.Player for local audio files played via Media
+// Foundation and waveOut on Windows.
 type Player struct {
 	eng   engine
-	media *mediaServer
 	bcast player.Broadcast
 
-	// cmdMu serializes page commands and is held across the round trip, so
-	// commands reach the page in the order they were issued. mu guards the
-	// fields below and is never held across a round trip, so page events can
-	// land while a command waits on the page.
 	cmdMu sync.Mutex
 	mu    sync.Mutex
 
@@ -59,7 +69,7 @@ type Player struct {
 	state   player.State // Error and Logs are never stored, only sent
 	gen     uint64       // generation of the loaded track; 0 when none is
 	lastGen uint64
-	seq     uint64 // newest page snapshot applied
+	seq     uint64 // newest engine snapshot applied
 	ended   bool   // the loaded track finished with nothing queued after it
 	eq      []any  // equalizer bands awaiting applyEqualizer
 	eqDirty bool
@@ -68,42 +78,28 @@ type Player struct {
 	closeOnce sync.Once
 }
 
-// New starts a headless Chrome session for local playback. Nothing plays
-// until the queue is loaded and started. onProgress reports browser setup
-// status before the TUI starts; nil disables progress reporting.
-func New(onProgress func(string)) (*Player, error) {
-	if onProgress == nil {
-		onProgress = func(string) {}
-	}
-	if err := cdp.EnsureBrowser(onProgress); err != nil {
-		return nil, fmt.Errorf("local player: %w", err)
-	}
-	media, err := newMediaServer()
+// New starts a native Windows audio engine for local playback. Nothing plays
+// until the queue is loaded and started.
+func New(_ func(string)) (*Player, error) {
+	p := newPlayer()
+	eng, err := openNativeEngine(p)
 	if err != nil {
-		return nil, fmt.Errorf("local player: %w", err)
-	}
-	p := newPlayer(media)
-	eng, err := openPage(media, p)
-	if err != nil {
-		media.close()
 		return nil, fmt.Errorf("local player: %w", err)
 	}
 	p.eng = eng
 	return p, nil
 }
 
-func newPlayer(media *mediaServer) *Player {
+func newPlayer() *Player {
 	return &Player{
-		media:   media,
 		library: map[string]provider.Track{},
 		q:       newQueue(),
 		state:   player.State{Volume: 1},
 	}
 }
 
-// LoadTracks registers the scanned library, making exactly these files
-// reachable from the page, and queues all of it without starting playback.
-// Anything loaded before is stopped.
+// LoadTracks registers the scanned library and queues all of it without
+// starting playback. Anything loaded before is stopped.
 func (p *Player) LoadTracks(tracks []provider.Track) {
 	p.cmdMu.Lock()
 	defer p.cmdMu.Unlock()
@@ -116,7 +112,6 @@ func (p *Player) LoadTracks(tracks []provider.Track) {
 	for _, t := range tracks {
 		p.library[t.ID] = t
 	}
-	p.media.setTracks(tracks)
 	p.q.reset(tracks)
 	p.mu.Unlock()
 	if err := p.unload(); err != nil {
@@ -338,9 +333,8 @@ func (p *Player) SetShuffle(on bool) error {
 }
 
 // SetEqualizer validates bands and applies them in the background. The TUI
-// calls it from its update loop, which must not wait on a page round trip, or
-// on a load that holds the command lock. A page failure is broadcast as an
-// error.
+// calls it from its update loop, which must not wait on a load that holds the
+// command lock.
 func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	arg, err := eqArg(bands)
 	if err != nil {
@@ -358,7 +352,7 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	return nil
 }
 
-// applyEqualizer sends the newest requested bands to the page. Each call
+// applyEqualizer sends the newest requested bands to the engine. Each call
 // takes whatever is newest rather than the bands it was started for, so a
 // burst of changes cannot land out of order.
 func (p *Player) applyEqualizer() {
@@ -442,20 +436,17 @@ func (p *Player) Subscribe() <-chan player.State {
 	return p.bcast.Subscribe()
 }
 
-// Close stops Chrome, the Playwright driver and the media server, then
-// closes every subscription. It is safe to call more than once.
+// Close stops the native audio sink, then closes every subscription. It is
+// safe to call more than once.
 func (p *Player) Close() error {
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closed = true
 		p.gen = 0
 		p.mu.Unlock()
-		// Closing the page first fails a command still waiting on it, so the
-		// command lock is not held hostage by a stuck round trip. Taking it
-		// lets that command finish its last broadcast before subscriptions
-		// close.
-		p.eng.close()
-		p.media.close()
+		if p.eng != nil {
+			p.eng.close()
+		}
 		p.cmdMu.Lock()
 		p.bcast.Close()
 		p.cmdMu.Unlock()
@@ -511,10 +502,9 @@ func (p *Player) loadCurrent(autoplay bool) error {
 		p.mu.Unlock()
 		return errEmptyQueue
 	}
-	url, ok := p.media.url(t.ID)
-	if !ok {
+	path, hasPrefix := strings.CutPrefix(t.ID, "local:")
+	if !hasPrefix || path == "" {
 		p.mu.Unlock()
-		// Whatever was loaded is no longer the current entry, so it goes.
 		if err := p.unload(); err != nil {
 			return err
 		}
@@ -532,7 +522,7 @@ func (p *Player) loadCurrent(autoplay bool) error {
 	p.mu.Unlock()
 	p.bcast.Send(s)
 
-	snap, err := p.eng.call("load", url, gen, autoplay)
+	snap, err := p.eng.call("load", path, gen, autoplay)
 	if err != nil {
 		p.stalled(gen)
 		return fmt.Errorf("local player: load %q: %w", t.Title, err)
@@ -544,7 +534,7 @@ func (p *Player) loadCurrent(autoplay bool) error {
 	return nil
 }
 
-// command runs method on the loaded track and applies the page's reply. The
+// command runs method on the loaded track and applies the engine's reply. The
 // caller holds cmdMu.
 func (p *Player) command(method string, args ...any) error {
 	p.mu.Lock()
@@ -584,7 +574,7 @@ func (p *Player) unload() error {
 	return nil
 }
 
-// stalled records that the page could not be reached about generation gen,
+// stalled records that the engine could not be reached about generation gen,
 // so the state stops claiming it plays.
 func (p *Player) stalled(gen uint64) {
 	p.mu.Lock()
@@ -632,15 +622,9 @@ func (p *Player) applyLocked(snap snapshot) bool {
 	return true
 }
 
-// onEvent handles an event the page pushes. It runs on a Playwright
-// goroutine and must not call into the page, so the advance after a track
-// ends is handed to its own goroutine.
-func (p *Player) onEvent(raw string) {
-	var snap snapshot
-	if err := json.Unmarshal([]byte(raw), &snap); err != nil {
-		p.sendLog("[local] unreadable page event: " + err.Error())
-		return
-	}
+// onEvent handles an event the engine pushes. The advance after a track ends
+// is handed to its own goroutine so callbacks never contend on cmdMu.
+func (p *Player) onEvent(snap snapshot) {
 	p.mu.Lock()
 	if p.closed || snap.Gen == 0 || snap.Gen != p.gen {
 		p.mu.Unlock()
@@ -659,8 +643,6 @@ func (p *Player) onEvent(raw string) {
 		p.bcast.Send(s)
 		return
 	case "ended":
-		// Acted on even when a newer snapshot got in first: that one cannot
-		// have undone the end of the track, and advanceAfterEnd checks again.
 		go p.advanceAfterEnd(snap.Gen)
 	}
 	if applied {
@@ -690,24 +672,6 @@ func (p *Player) advanceAfterEnd(gen uint64) {
 	}
 }
 
-// pageCrashed drops the loaded track: the page that held it is gone.
-func (p *Player) pageCrashed() {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return
-	}
-	p.gen = 0
-	p.state.Track = nil
-	p.state.Playing = false
-	p.state.Loading = false
-	p.state.Position = 0
-	s := p.state
-	p.mu.Unlock()
-	s.Error = "local player: Chrome page crashed; restart vibez to play again"
-	p.bcast.Send(s)
-}
-
 // sendError broadcasts err once without storing it in the state.
 func (p *Player) sendError(err error) {
 	p.mu.Lock()
@@ -717,15 +681,8 @@ func (p *Player) sendError(err error) {
 	p.bcast.Send(s)
 }
 
-func (p *Player) sendLog(msg string) {
-	p.mu.Lock()
-	s := p.state
-	p.mu.Unlock()
-	p.bcast.SendLog(s, msg)
-}
-
-// eqArg validates bands and copies them into the form the page takes. The
-// copy matters: the TUI keeps mutating the slice it passes in.
+// eqArg validates bands and copies them into a fresh slice. The copy matters:
+// the TUI keeps mutating the slice it passes in.
 func eqArg(bands []player.EQBand) ([]any, error) {
 	out := make([]any, len(bands))
 	for i, b := range bands {

@@ -92,6 +92,9 @@ func (s *darwinAudioSink) PlayURI(uri string) {
 	}
 }
 
+func (s *darwinAudioSink) SetNextURI(_ string)          {}
+func (s *darwinAudioSink) OnStreamStart(_ func(string)) {}
+
 func (s *darwinAudioSink) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,8 +135,21 @@ func (s *darwinAudioSink) SetVolume(v float64) {
 	}
 }
 
-func (s *darwinAudioSink) SetEqualizer(_ []float64) {
-	// Equalizer on compressed AAC AudioQueue is a no-op.
+func (s *darwinAudioSink) SetEqualizer(gains []float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle == nil {
+		return
+	}
+	if len(gains) == 0 {
+		C.vibez_darwinsink_set_eq(s.handle, nil, 0)
+		return
+	}
+	cg := make([]C.double, len(gains))
+	for i, g := range gains {
+		cg[i] = C.double(g)
+	}
+	C.vibez_darwinsink_set_eq(s.handle, &cg[0], C.int(len(cg)))
 }
 
 func (s *darwinAudioSink) Position() time.Duration {

@@ -8,6 +8,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/lastfm"
 	"github.com/simone-vibes/vibez/internal/openurl"
+	playerpkg "github.com/simone-vibes/vibez/internal/player"
 	"github.com/spf13/cobra"
 )
 
@@ -115,4 +116,20 @@ var lastfmStatusCmd = &cobra.Command{
 func init() {
 	lastfmCmd.AddCommand(lastfmLoginCmd, lastfmLogoutCmd, lastfmStatusCmd)
 	authCmd.AddCommand(lastfmCmd)
+}
+
+func startLastfmScrobbler(cfg *config.Config, player interface {
+	Subscribe() <-chan playerpkg.State
+}, log func(string)) {
+	if cfg.LastfmAPIKey == "" || cfg.LastfmAPISecret == "" || cfg.LastfmSessionKey == "" {
+		return
+	}
+	lfmClient := lastfm.NewClient(cfg.LastfmAPIKey, cfg.LastfmAPISecret, cfg.LastfmSessionKey)
+	scrobbler := lastfm.NewScrobbler(lfmClient)
+	scrobbler.SetLogger(log)
+	go func() {
+		for st := range player.Subscribe() {
+			scrobbler.Update(st)
+		}
+	}()
 }

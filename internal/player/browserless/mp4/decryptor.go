@@ -22,38 +22,102 @@ func DefaultAudioConfig() AudioConfig {
 	}
 }
 
+// readDescriptorHeader reads an ISO/IEC 14496-1 expandable descriptor tag and
+// length from data[offset:], returning the tag, payload length, and the offset
+// of the payload bytes.
+func readDescriptorHeader(data []byte, offset int) (tag byte, length, payloadOffset int, ok bool) {
+	if offset >= len(data) {
+		return 0, 0, 0, false
+	}
+	tag = data[offset]
+	offset++
+	for range 4 {
+		if offset >= len(data) {
+			return 0, 0, 0, false
+		}
+		b := data[offset]
+		offset++
+		length = (length << 7) | int(b&0x7F)
+		if (b & 0x80) == 0 {
+			return tag, length, offset, true
+		}
+	}
+	return 0, 0, 0, false
+}
+
+func applyAudioSpecificConfig(asc []byte, cfg *AudioConfig) bool {
+	if len(asc) < 2 {
+		return false
+	}
+	b1, b2 := asc[0], asc[1]
+	objType := int(b1 >> 3)
+	freqIdx := int(((b1 & 0x07) << 1) | (b2 >> 7))
+	chanCfg := int((b2 >> 3) & 0x0F)
+	// Sanity-check extracted fields: AAC-LC/SBR/PS (1..5), valid sample rate index (0..12), 1..7 channels.
+	if objType < 1 || objType > 5 || freqIdx > 12 || chanCfg < 1 || chanCfg > 7 {
+		return false
+	}
+	// ADTS profile is 2 bits (audioObjectType - 1); HE-AAC (SBR=5) signals base AAC-LC (2) in ADTS headers.
+	if objType > 4 {
+		objType = 2
+	}
+	cfg.ObjectType = objType
+	cfg.FreqIndex = freqIdx
+	cfg.ChanConfig = chanCfg
+	return true
+}
+
 // ParseAudioConfig parses the AudioSpecificConfig from the init segment (ftyp + moov).
 func ParseAudioConfig(initData []byte) (AudioConfig, error) {
 	cfg := DefaultAudioConfig()
 	esdsIdx := bytes.Index(initData, []byte("esds"))
-	if esdsIdx == -1 {
-		return cfg, nil // Fallback to default
+	if esdsIdx == -1 || esdsIdx+8 > len(initData) {
+		return cfg, nil
 	}
 
-	// Scan for tag 0x05 (DecSpecificInfoTag) within esds box
 	boxEnd := min(len(initData), esdsIdx+128)
-	esdsData := initData[esdsIdx:boxEnd]
-	tag5Idx := bytes.Index(esdsData, []byte{0x05})
-	if tag5Idx != -1 && tag5Idx+5 < len(esdsData) {
-		// Variable length descriptor: length could be 0x80 0x80 0x80 0x02 or 0x02
-		offset := tag5Idx + 1
-		for offset < len(esdsData) && (esdsData[offset]&0x80) != 0 {
-			offset++
+	if esdsIdx >= 4 {
+		boxSize := int(binary.BigEndian.Uint32(initData[esdsIdx-4 : esdsIdx]))
+		if boxSize >= 12 && esdsIdx-4+boxSize <= len(initData) {
+			boxEnd = esdsIdx - 4 + boxSize
 		}
-		offset++ // Skip length byte
+	}
+	// Skip "esds" (4 bytes) + version/flags (4 bytes)
+	esdsPayload := initData[esdsIdx+8 : boxEnd]
 
-		if offset+2 <= len(esdsData) {
-			b1 := esdsData[offset]
-			b2 := esdsData[offset+1]
-
-			// AudioSpecificConfig bits:
-			// 5 bits: audioObjectType
-			// 4 bits: samplingFrequencyIndex
-			// 4 bits: channelConfiguration
-			cfg.ObjectType = int(b1 >> 3)
-			cfg.FreqIndex = int(((b1 & 0x07) << 1) | (b2 >> 7))
-			cfg.ChanConfig = int((b2 >> 3) & 0x0F)
+	// Proper ISO/IEC 14496-1 descriptor walk:
+	// ES_Descriptor (0x03) -> DecoderConfigDescriptor (0x04) -> DecSpecificInfo (0x05).
+	if tag, _, off, ok := readDescriptorHeader(esdsPayload, 0); ok && tag == 0x03 {
+		// ES_Descriptor header: ES_ID (2 bytes) + flags (1 byte)
+		if off+3 <= len(esdsPayload) {
+			flags := esdsPayload[off+2]
+			off += 3
+			if (flags & 0x80) != 0 { // streamDependenceFlag
+				off += 2
+			}
+			if (flags & 0x40) != 0 { // URL_Flag
+				if off < len(esdsPayload) {
+					off += 1 + int(esdsPayload[off])
+				}
+			}
+			if (flags & 0x20) != 0 { // OCRstreamFlag
+				off += 2
+			}
+			if tag4, _, off4, ok4 := readDescriptorHeader(esdsPayload, off); ok4 && tag4 == 0x04 {
+				// DecoderConfigDescriptor header: objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4) = 13 bytes
+				off5 := off4 + 13
+				if tag5, len5, ascOff, ok5 := readDescriptorHeader(esdsPayload, off5); ok5 && tag5 == 0x05 && ascOff+len5 <= len(esdsPayload) {
+					if applyAudioSpecificConfig(esdsPayload[ascOff:ascOff+len5], &cfg) {
+						return cfg, nil
+					}
+				}
+			}
 		}
+	}
+
+	// Fallback for synthetic/minimal esds payloads in unit tests that place tag 0x05 directly.
+	if tag, length, ascOff, ok := readDescriptorHeader(esdsPayload, 0); ok && tag == 0x05 && ascOff+length <= len(esdsPayload) {
+		applyAudioSpecificConfig(esdsPayload[ascOff:ascOff+length], &cfg)
 	}
 
 	return cfg, nil
@@ -126,20 +190,27 @@ func DecryptSegment(
 	if sencStart+16 > len(moofData) {
 		return nil, fmt.Errorf("truncated senc box: need at least 16 bytes, got %d", len(moofData)-sencStart)
 	}
+	sencSize := int(binary.BigEndian.Uint32(moofData[sencStart : sencStart+4]))
+	if sencSize < 16 || sencStart+sencSize > len(moofData) {
+		sencSize = len(moofData) - sencStart
+	}
+	sencEnd := sencStart + sencSize
 	flags := binary.BigEndian.Uint32(moofData[sencStart+8:sencStart+12]) & 0x00FFFFFF
 	hasSubsamples := (flags & 0x02) != 0
 	sampleCount := binary.BigEndian.Uint32(moofData[sencStart+12 : sencStart+16])
 
 	// Sanity-bound sampleCount against remaining senc buffer to prevent OOM
-	remainingSencBytes := len(moofData) - (sencStart + 16)
+	remainingSencBytes := sencEnd - (sencStart + 16)
 	if remainingSencBytes < 0 || int64(sampleCount) > int64(remainingSencBytes)/8 || sampleCount > 65536 {
 		return nil, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, remainingSencBytes)
 	}
 
 	samplesEnc := make([]SampleEncInfo, sampleCount)
 	offset := sencStart + 16
-	ivSize := 8 // Standard for Apple Music CENC
-
+	ivSize := 8
+	if !hasSubsamples && sampleCount > 0 && remainingSencBytes == int(sampleCount)*16 {
+		ivSize = 16
+	}
 	for i := range sampleCount {
 		if offset+ivSize > len(moofData) {
 			return nil, fmt.Errorf("unexpected EOF in senc IVs at sample %d", i)

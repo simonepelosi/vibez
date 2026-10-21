@@ -19,6 +19,7 @@ void vibez_darwinsink_pause(vibez_darwinsink_t handle);
 void vibez_darwinsink_stop(vibez_darwinsink_t handle);
 void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds);
 void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume);
+void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, int count);
 double vibez_darwinsink_position(vibez_darwinsink_t handle);
 void vibez_darwinsink_destroy(vibez_darwinsink_t handle);
 

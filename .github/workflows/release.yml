@@ -78,7 +78,7 @@ jobs:
           cache: true
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --fix-missing libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
+        run: sudo apt-get update && sudo apt-get install -y --fix-missing libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
 
       - name: Download darwin archives
         uses: actions/download-artifact@v4
@@ -126,6 +126,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
-          PROJECT_DIR: ${{ github.workspace }}
           VIBEZ_SKIP_DARWIN: '1'
           GOTOOLCHAIN: local

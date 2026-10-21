@@ -25,7 +25,7 @@ jobs:
           cache: true
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+        run: sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - name: Download Go modules
-        run: PKG_CONFIG_PATH=${{ github.workspace }}/pkg-config go mod download
+        run: go mod download

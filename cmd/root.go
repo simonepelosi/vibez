@@ -30,7 +30,6 @@ var noUpdate bool
 var local bool
 var musicDir string
 var noDiscord bool
-var browserlessFlag bool
 
 var rootCmd = &cobra.Command{
 	Use:   "vibez",
@@ -49,13 +48,12 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default: ~/.config/vibez/config.json; Windows: %APPDATA%\\vibez\\config.json)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "enable debug logging")
-	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS for vibez and its Chrome helper in the header")
+	rootCmd.PersistentFlags().BoolVar(&memProfiling, "mem-profiling", false, "show live RSS in the header")
 	rootCmd.PersistentFlags().BoolVar(&demo, "demo", false, "run with built-in fake data — no Apple account or internet required")
 	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 	rootCmd.PersistentFlags().BoolVar(&local, "local", false, "run with local music files (no Apple account required)")
 	rootCmd.PersistentFlags().StringVar(&musicDir, "music-dir", "", "path to your music directory (saved to config)")
 	rootCmd.PersistentFlags().BoolVar(&noDiscord, "no-discord", false, "disable Discord Rich Presence")
-	rootCmd.PersistentFlags().BoolVar(&browserlessFlag, "browserless", false, "use experimental in-process Widevine CDM player without Chrome")
 }
 
 func runTUI(_ *cobra.Command, _ []string) error {
@@ -190,6 +188,6 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	return runPlatform(cfg, iconPath, opts, onUserToken, onStorefront, audioBitrateKbps)
+	return runBrowserlessFlow(cfg, opts, onUserToken, onStorefront, audioBitrateKbps)
 
 }

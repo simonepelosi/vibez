@@ -1421,6 +1421,62 @@ func TestLoveSong_ContinuesAfterAddFailure(t *testing.T) {
 	}
 }
 
+func TestLoveSong_ResolvesLibraryIDToCatalogID(t *testing.T) {
+	var putPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/me/library/songs/i.LIB1":
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSONWithCatalog("i.LIB1", "617154366", "Get Lucky", "Daft Punk", "RAM", 248000, "")},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/me/library":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut:
+			putPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+			writeJSON(t, w, map[string]any{})
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.LoveSong(context.Background(), "i.LIB1", true); err != nil {
+		t.Fatalf("LoveSong(i.LIB1): %v", err)
+	}
+	if putPath != "/me/ratings/songs/617154366" {
+		t.Errorf("PUT path = %q, want /me/ratings/songs/617154366", putPath)
+	}
+}
+
+func TestGetSongRating_ResolvesLibraryIDToCatalogID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/me/library/songs/i.LIB1":
+			writeJSON(t, w, map[string]any{
+				"data": []any{songJSONWithCatalog("i.LIB1", "617154366", "Get Lucky", "Daft Punk", "RAM", 248000, "")},
+			})
+		case "/me/ratings/songs/617154366":
+			writeJSON(t, w, map[string]any{
+				"data": []any{map[string]any{"attributes": map[string]any{"value": 1}}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	loved, err := p.GetSongRating(context.Background(), "i.LIB1")
+	if err != nil {
+		t.Fatalf("GetSongRating(i.LIB1): %v", err)
+	}
+	if !loved {
+		t.Error("GetSongRating(i.LIB1) = false, want true")
+	}
+}
+
 // --- GetSongRating ---
 
 func TestGetSongRating_Loved(t *testing.T) {

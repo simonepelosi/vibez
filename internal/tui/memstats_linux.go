@@ -64,40 +64,6 @@ func readVmRSS(pid int) int64 {
 	return 0
 }
 
-// findHelperStats returns the total PSS and process count for all processes
-// whose /proc/<pid>/exe resolves to one of the provided binary paths.
-func findHelperStats(binPaths ...string) (totalPSS int64, count int) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0, 0
-	}
-
-	pathSet := make(map[string]bool, len(binPaths))
-	for _, p := range binPaths {
-		pathSet[p] = true
-	}
-
-	self := os.Getpid()
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid == self {
-			continue
-		}
-		exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-		if err != nil {
-			continue
-		}
-		if pathSet[exePath] {
-			totalPSS += readPSS(pid)
-			count++
-		}
-	}
-	return totalPSS, count
-}
-
 // fmtBytes formats a byte count as a compact human-readable string.
 func fmtBytes(b int64) string {
 	switch {
@@ -112,16 +78,7 @@ func fmtBytes(b int64) string {
 	}
 }
 
-// collectMemStats returns a compact memory summary for the header, e.g.
-// "55M+340M×6" where 340M is the total PSS of 6 vibez-helper processes.
-// PSS (Proportional Set Size) counts shared library pages only once across
-// all processes, giving a realistic view of actual physical memory cost.
-func collectMemStats(helperPaths []string) string {
-	selfPSS := readPSS(os.Getpid())
-	helperPSS, count := findHelperStats(helperPaths...)
-	self := fmtBytes(selfPSS)
-	if helperPSS > 0 {
-		return fmt.Sprintf("%s+%s×%d", self, fmtBytes(helperPSS), count)
-	}
-	return self
+// collectMemStats returns a compact memory summary for the header (e.g. "15M").
+func collectMemStats() string {
+	return fmtBytes(readPSS(os.Getpid()))
 }

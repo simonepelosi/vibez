@@ -3,9 +3,7 @@
 package local
 
 import (
-	"encoding/json"
 	"errors"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,8 +14,8 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-// fakeEngine stands in for the Chrome page. It keeps just enough element
-// state to reply the way web/engine.js does, and records every command.
+// fakeEngine stands in for the native Windows Media Foundation engine. It
+// keeps just enough state to reply and emit events, and records every command.
 type fakeEngine struct {
 	mu      sync.Mutex
 	seq     uint64
@@ -37,7 +35,7 @@ func (e *fakeEngine) call(method string, args ...any) (snapshot, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closes > 0 {
-		return snapshot{}, errors.New("page closed")
+		return snapshot{}, errors.New("engine closed")
 	}
 	e.calls = append(e.calls, fakeCall{method, args})
 	var position float64
@@ -68,15 +66,14 @@ func (e *fakeEngine) close() {
 	e.mu.Unlock()
 }
 
-// event builds a page event for generation gen, sequenced after everything
+// event builds an engine event for generation gen, sequenced after everything
 // the fake has replied so far.
-func (e *fakeEngine) event(kind string, gen uint64, position float64) string {
+func (e *fakeEngine) event(kind string, gen uint64, position float64) snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.seq++
 	playing := kind != "ended" && kind != "pause" && kind != "error"
-	raw, _ := json.Marshal(snapshot{Gen: gen, Seq: e.seq, Kind: kind, Playing: playing, Position: position, Duration: 200})
-	return string(raw)
+	return snapshot{Gen: gen, Seq: e.seq, Kind: kind, Playing: playing, Position: position, Duration: 200}
 }
 
 func (e *fakeEngine) loadedGen() uint64 {
@@ -111,11 +108,7 @@ func (e *fakeEngine) lastCall(method string) (fakeCall, bool) {
 
 func newTestPlayer(t *testing.T, titles ...string) (*Player, *fakeEngine, []provider.Track) {
 	t.Helper()
-	media, err := newMediaServer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := newPlayer(media)
+	p := newPlayer()
 	eng := &fakeEngine{fail: map[string]string{}}
 	p.eng = eng
 	t.Cleanup(func() { _ = p.Close() })
@@ -169,12 +162,12 @@ func TestLoadTracksStartsNothingUntilPlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	call, _ := eng.lastCall("load")
-	want, _ := p.media.url(tracks[0].ID)
+	want := strings.TrimPrefix(tracks[0].ID, "local:")
 	if call.args[0] != want || call.args[2] != true {
 		t.Fatalf("Play loaded %v, want autoplay of %s", call.args, want)
 	}
 	if s, _ := p.GetState(); nowPlaying(t, p) != "A" || !s.Playing || s.Track.Duration != 200*time.Second {
-		t.Fatalf("state %+v, want A playing with its duration from the page", s)
+		t.Fatalf("state %+v, want A playing with its duration from the engine", s)
 	}
 }
 
@@ -234,7 +227,7 @@ func TestEndOfTrackAdvancesAndStaleEventsAreIgnored(t *testing.T) {
 		t.Fatalf("after A ended: playing %q, want B", nowPlaying(t, p))
 	}
 
-	// A's element can still deliver events after B replaced it.
+	// A's worker can still deliver events after B replaced it.
 	p.onEvent(eng.event("ended", genA, 200))
 	p.onEvent(eng.event("timeupdate", genA, 150))
 	time.Sleep(50 * time.Millisecond)
@@ -246,8 +239,8 @@ func TestEndOfTrackAdvancesAndStaleEventsAreIgnored(t *testing.T) {
 	}
 }
 
-// Snapshots race each other through Playwright; an older one arriving late
-// must not roll the state back.
+// Snapshots can race each other; an older one arriving late must not roll the
+// state back.
 func TestOlderSnapshotIsIgnored(t *testing.T) {
 	p, eng, tracks := newTestPlayer(t, "A")
 	if err := p.SetQueue(ids(tracks...)); err != nil {
@@ -363,7 +356,7 @@ func TestMoveInQueueFollowsTheTUIsPlayNext(t *testing.T) {
 
 func TestLoadFailureIsReportedNotPlayed(t *testing.T) {
 	p, eng, tracks := newTestPlayer(t, "A")
-	eng.fail["load"] = "unsupported format (DEMUXER_ERROR_NO_SUPPORTED_STREAMS)"
+	eng.fail["load"] = "unsupported format"
 	err := p.SetQueue(ids(tracks...))
 	if err == nil || !strings.Contains(err.Error(), "unsupported format") {
 		t.Fatalf("SetQueue of an undecodable file: %v", err)
@@ -405,8 +398,6 @@ func TestSetEqualizer(t *testing.T) {
 		}
 	}
 
-	// The TUI keeps editing the slice it passed; what reaches the page is the
-	// value at the time of the call.
 	bands := player.DefaultEQBands()
 	bands[0].Gain = 6
 	if err := p.SetEqualizer(bands); err != nil {
@@ -414,7 +405,7 @@ func TestSetEqualizer(t *testing.T) {
 	}
 	bands[0].Gain = -6
 	var sent []any
-	waitFor(t, "the EQ to reach the page", func() bool {
+	waitFor(t, "the EQ to reach the engine", func() bool {
 		call, ok := eng.lastCall("setEqualizer")
 		if ok {
 			sent = call.args[0].([]any)
@@ -422,7 +413,7 @@ func TestSetEqualizer(t *testing.T) {
 		return ok
 	})
 	if len(sent) != 10 || sent[0].(map[string]any)["gain"] != 6.0 {
-		t.Fatalf("page got %v, want 10 bands with the first at +6 dB", sent)
+		t.Fatalf("engine got %v, want 10 bands with the first at +6 dB", sent)
 	}
 
 	if err := p.SetEqualizer(nil); err != nil {
@@ -460,18 +451,13 @@ func TestCloseReleasesEverythingOnce(t *testing.T) {
 	if err := p.SetQueue(ids(tracks...)); err != nil {
 		t.Fatal(err)
 	}
-	pageURL := p.media.pageURL()
 	for range 2 {
 		if err := p.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if eng.closes != 1 {
-		t.Fatalf("page closed %d times, want once", eng.closes)
-	}
-	if resp, err := http.Get(pageURL); err == nil { //nolint:gosec // G107: loopback test server URL
-		_ = resp.Body.Close()
-		t.Fatal("media server still answering after Close")
+		t.Fatalf("engine closed %d times, want once", eng.closes)
 	}
 	deadline := time.After(2 * time.Second)
 	for open := true; open; {

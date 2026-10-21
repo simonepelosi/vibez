@@ -95,6 +95,9 @@ func (s *windowsAudioSink) PlayURI(uri string) {
 	}
 }
 
+func (s *windowsAudioSink) SetNextURI(_ string)          {}
+func (s *windowsAudioSink) OnStreamStart(_ func(string)) {}
+
 func (s *windowsAudioSink) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

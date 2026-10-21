@@ -1,5 +1,3 @@
-GOFLAGS=-tags webkit2gtk_4_1
-PKG_CONFIG_PATH=$(CURDIR)/pkg-config
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
@@ -11,25 +9,14 @@ ifeq ($(shell uname -s),Linux)
 	@pkg-config --exists gstreamer-1.0 2>/dev/null || \
 		{ echo ""; \
 		echo "ERROR: gstreamer-1.0 not found."; \
-		echo "Please install: gstreamer, gstreamer-plugins-base, gstreamer-plugins-good"; \
+		echo "Please install: gstreamer, gstreamer-plugins-base, gstreamer-plugins-good, and gst-libav (or gstreamer1.0-libav / gstreamer1.0-plugins-bad)"; \
 		echo ""; exit 1; }
 
-	@pkg-config --exists gtk+-3.0 2>/dev/null || \
-		{ echo ""; \
-		echo "ERROR: gtk+-3.0 not found"; \
-		echo "Please install: gtk3 (or libgtk-3-dev on Debian based distros)"; \
-		echo ""; exit 1; }
-
-	@pkg-config --exists webkit2gtk-4.1 2>/dev/null || pkg-config --exists webkit2gtk-4.0 2>/dev/null || \
-		{ echo ""; \
-		echo "ERROR: webkit2gtk not found (checked 4.1 and 4.0)."; \
-		echo "Please install: webkit2gtk-4.1 (or libwebkit2gtk-4.1-dev on Debian based distros)"; \
-		echo ""; exit 1; }
 	@echo "All dependencies found."
 endif
 
 build: check-deps
-	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go build -o vibez .
+	go build -o vibez .
 
 # build-with-token embeds the Apple developer token without obfuscation.
 # Use this for local testing of the embedded-token flow.
@@ -41,7 +28,7 @@ build-with-token:
 	@test -n "$$APPLE_PRIVATE_KEY" || { echo "APPLE_PRIVATE_KEY is not set"; exit 1; }
 	@set -e; \
 	echo "Generating developer token..."; \
-	TOKEN=$$(GOFLAGS= go run ./scripts/gen-devtoken 2>/dev/null); \
+	TOKEN=$$(go run ./scripts/gen-devtoken 2>/dev/null); \
 	test -n "$$TOKEN" || { echo "gen-devtoken produced no output — check credentials"; exit 1; }; \
 	LDFLAGS="-X 'github.com/simone-vibes/vibez/internal/auth.devToken=$$TOKEN'"; \
 	if [ -n "$$LASTFM_API_KEY" ] && [ -n "$$LASTFM_API_SECRET" ]; then \
@@ -50,7 +37,7 @@ build-with-token:
 		echo "Embedding Last.fm API keys..."; \
 	fi; \
 	echo "Building with embedded token..."; \
-	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go build \
+	go build \
 		-ldflags "$$LDFLAGS" \
 		-o vibez . && echo "Done. Run: vibez auth login"
 
@@ -67,7 +54,7 @@ release: check-deps
 	@test -n "$$LASTFM_API_SECRET" || { echo "LASTFM_API_SECRET is not set"; exit 1; }
 	@set -e; \
 	echo "Building release binary..."; \
-	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go build \
+	go build \
 		-ldflags "-s -w \
 		          -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=$$VIBEZ_TOKEN_URL' \
 		          -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=$$VIBEZ_CLIENT_KEY' \
@@ -95,7 +82,7 @@ refresh-token:
 	test -n "$$APPLE_TEAM_ID"     || { echo "APPLE_TEAM_ID is not set (env or .env)";     exit 1; }; \
 	test -n "$$APPLE_PRIVATE_KEY" || { echo "APPLE_PRIVATE_KEY or APPLE_PRIVATE_KEY_FILE is not set (env or .env)"; exit 1; }; \
 	export APPLE_KEY_ID APPLE_TEAM_ID APPLE_PRIVATE_KEY; \
-	GOFLAGS= go run ./scripts/gen-devtoken -write
+	go run ./scripts/gen-devtoken -write
 
 # install rebuilds with an embedded developer token and copies the binary onto
 # PATH, so the installed copy cannot silently go stale behind a newer ./vibez in
@@ -127,10 +114,10 @@ run: build
 	./vibez
 
 test:
-	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) go test ./...
+	go test ./...
 
 lint:
-	PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) golangci-lint run
+	golangci-lint run
 
 clean:
 	rm -f vibez

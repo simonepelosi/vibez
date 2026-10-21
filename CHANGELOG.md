@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Browserless engine is now the sole playback engine across all platforms** — made the native in-process Widevine CDM player the default on Linux, macOS, and Windows and removed the legacy Chrome/CDP (`playwright-go`), WebKitGTK (`webview_go`), and JS local-audio engines along with all embedded HTML/JS player bundles and Node.js/WebKit dependencies. Windows `--local` playback now uses native Media Foundation and `waveOut` with a 10-band equalizer.
+
 ## [1.1.2] — 2026-10-21
 
 ### Added

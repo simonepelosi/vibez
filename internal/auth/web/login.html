@@ -97,11 +97,90 @@
     </div>
   </div>
 
-  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js"
-          data-web-components crossorigin></script>
   <script>
     const developerToken = "{{.DeveloperToken}}";
     const callbackState = "{{.State}}";
+    const authorizeOrigin = "https://authorize.music.apple.com";
+
+    function requestAppleMusicUserToken() {
+      const thirdPartyInfo = JSON.stringify({
+        thirdPartyName: window.location.host || "vibez",
+        thirdPartyToken: developerToken,
+      });
+      const params = new URLSearchParams({
+        a: btoa(thirdPartyInfo),
+        referrer: window.location.href,
+      });
+      const popupURL = `${authorizeOrigin}/woa?${params.toString()}`;
+      const width = 650, height = 650;
+      const left = Math.max(0, Math.round((window.screenX || 0) + ((window.outerWidth || width) - width) / 2));
+      const top = Math.max(0, Math.round((window.screenY || 0) + ((window.outerHeight || height) - height) / 2));
+      const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,resizable=no,scrollbars=no,status=no,toolbar=no`;
+
+      return new Promise((resolve, reject) => {
+        const win = window.open(popupURL, "apple-music-service-view", features);
+        if (!win) {
+          reject(new Error("Popup blocked by browser — allow popups for localhost and try again"));
+          return;
+        }
+        let settled = false;
+        const cleanup = () => {
+          window.removeEventListener("message", onMessage);
+          clearInterval(pollTimer);
+        };
+        const finish = (fn, val) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          fn(val);
+        };
+        const pollTimer = setInterval(() => {
+          if (win.closed) {
+            finish(reject, new Error("Authorization window closed"));
+          }
+        }, 500);
+
+        function onMessage(event) {
+          if (event.origin !== authorizeOrigin) return;
+          const data = event.data;
+          if (!data || data.jsonrpc !== "2.0" || !data.method) return;
+          const reply = (result) => {
+            try {
+              win.postMessage({ jsonrpc: "2.0", id: data.id, result }, authorizeOrigin);
+            } catch (_) {}
+          };
+          const paramsArr = Array.isArray(data.params) ? data.params : [];
+          switch (data.method) {
+            case "thirdPartyInfo":
+              reply(thirdPartyInfo);
+              break;
+            case "authorize": {
+              const token = paramsArr[0];
+              reply({});
+              if (typeof token === "string" && token.length > 0) {
+                finish(resolve, token);
+              } else {
+                finish(reject, new Error("Authorization failed"));
+              }
+              break;
+            }
+            case "decline":
+              reply({});
+              finish(reject, new Error("Authorization declined"));
+              break;
+            case "unavailable":
+              reply({});
+              finish(reject, new Error("Apple Music authorization unavailable"));
+              break;
+            case "close":
+            case "switchUserId":
+              reply({});
+              break;
+          }
+        }
+        window.addEventListener("message", onMessage);
+      });
+    }
 
     async function connectAppleMusic() {
       const btn = document.getElementById("connectBtn");
@@ -110,17 +189,10 @@
       btn.disabled = true;
       btn.textContent = "Connecting…";
       status.className = "status";
-      status.textContent = "Initializing MusicKit…";
+      status.textContent = "Waiting for Apple Music authorization…";
 
       try {
-        await MusicKit.configure({
-          developerToken,
-          app: { name: "vibez", build: "0.1.0" },
-        });
-
-        status.textContent = "Waiting for authorization…";
-        const music = MusicKit.getInstance();
-        const userToken = await music.authorize();
+        const userToken = await requestAppleMusicUserToken();
 
         status.textContent = "Sending token to vibez…";
         const resp = await fetch("/callback", {
@@ -138,7 +210,7 @@
         btn.textContent = "Connected ✓";
       } catch (err) {
         status.className = "status error";
-        status.textContent = "Error: " + err.message;
+        status.textContent = "Error: " + (err.message || String(err));
         btn.disabled = false;
         btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg> Try Again`;
       }

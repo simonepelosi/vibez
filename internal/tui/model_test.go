@@ -1249,10 +1249,15 @@ func TestModel_Update_LoveSongMsg_Success(t *testing.T) {
 	}
 }
 
-func TestModel_Update_LoveSongMsg_Error(t *testing.T) {
+func TestModel_Update_LoveSongMsg_ErrorRevertsOptimisticFavorite(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(loveSongMsg{title: "Song", err: errors.New("api error")})
+	m.favorites["i.1"] = true
+	m.favorites["cat1"] = true
+	_, cmd := m.Update(loveSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", loved: true, err: errors.New("api error")})
 	_ = cmd
+	if m.favorites["i.1"] || m.favorites["cat1"] {
+		t.Errorf("favorites = %v, want optimistic toggle reverted on LoveSong error", m.favorites)
+	}
 }
 
 func TestModel_Update_LoveSongMsg_Unlove(t *testing.T) {
@@ -1263,10 +1268,10 @@ func TestModel_Update_LoveSongMsg_Unlove(t *testing.T) {
 
 func TestModel_Update_SongRatingMsg(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(songRatingMsg{trackID: "track123", loved: true})
+	_, cmd := m.Update(songRatingMsg{trackID: "i.1", catalogID: "track123", loved: true})
 	_ = cmd
-	if !m.favorites["track123"] {
-		t.Error("songRatingMsg should set favorites entry")
+	if !m.favorites["i.1"] || !m.favorites["track123"] {
+		t.Errorf("songRatingMsg should set both trackID and catalogID in favorites: %v", m.favorites)
 	}
 }
 
@@ -1444,10 +1449,9 @@ func TestModel_Update_EngineReadyMsg(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 
 	_, cmd := m.Update(EngineReadyMsg{
-		Player:      mp,
-		Provider:    &mockProvider{},
-		HelperPaths: []string{"/usr/bin/helper"},
-		Backend:     "cdp",
+		Player:   mp,
+		Provider: &mockProvider{},
+		Backend:  "browserless",
 	})
 	_ = cmd
 	if m.player == nil {
