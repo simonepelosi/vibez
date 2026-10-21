@@ -94,7 +94,7 @@ func (p *lyricsPanel) NavLabel() string                   { return "lyrics" }
 func (p *lyricsPanel) SetSize(w, h int)                   { p.m.SetSize(w, h) }
 func (p *lyricsPanel) Update(msg tea.KeyPressMsg) tea.Cmd { return p.m.Update(msg) }
 func (p *lyricsPanel) View() string                       { return p.m.View() }
-func (p *lyricsPanel) Back() bool                         { return false }
+func (p *lyricsPanel) Back() bool                         { return p.m.Back() }
 
 // feedPanel wraps views.FeedModel to satisfy ContentView.
 type feedPanel struct{ m *views.FeedModel }
@@ -767,9 +767,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.err != nil {
 				m.appendLog(fmt.Sprintf("[lyrics] not found: %v", msg.err))
 			} else {
+				m.lyricsP.m.SetPosition(m.playerState.Position)
 				m.appendLog("[lyrics] loaded")
 			}
 		}
+
+	case views.LyricsSeekMsg:
+		m.playerState.Position = msg.Position
+		m.lyricsP.m.SetPosition(msg.Position)
+		m.appendLog(fmt.Sprintf("[lyrics] seek → %s", views.FormatDuration(msg.Position)))
+		pos := msg.Position
+		cmds = append(cmds, m.playerCmd(func(p player.Player) error { return p.Seek(pos) }))
 
 	case feedResultMsg:
 		if msg.err != nil {
@@ -3767,6 +3775,7 @@ func (m *Model) statusNavLines(w int) []string {
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
 			parts = []string{
 				styles.ModeNormal.Render("LYRICS"),
+				accent.Render("Enter") + muted.Render(" seek"),
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("g/G") + muted.Render(" top/bottom"),
 				accent.Render("esc") + muted.Render(" close"),
