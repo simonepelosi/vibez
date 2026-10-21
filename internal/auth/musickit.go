@@ -186,7 +186,11 @@ func buildMux(devToken, state string, tmpl *template.Template, tokenCh chan stri
 		h := w.Header()
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Cache-Control", "no-store")
-		h.Set("Referrer-Policy", "no-referrer")
+		// strict-origin strips the path and ?state= query from Referer while
+		// still sending the origin to https://authorize.music.apple.com so the
+		// popup's document.referrer check records the caller origin in
+		// sessionStorage["ac"] for postMessage token delivery (see #182).
+		h.Set("Referrer-Policy", "strict-origin")
 		if err := tmpl.Execute(w, map[string]string{
 			"DeveloperToken": devToken,
 			"State":          state,

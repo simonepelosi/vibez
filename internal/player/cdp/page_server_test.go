@@ -40,6 +40,14 @@ func TestPageServer_ServesPageOnPrefix(t *testing.T) {
 	if code != http.StatusOK || body != testPage {
 		t.Fatalf("GET %s = %d %q, want 200 %q", s.pageURL(), code, body, testPage)
 	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(s.pageURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if got := resp.Header.Get("Referrer-Policy"); got != "strict-origin" {
+		t.Errorf("Referrer-Policy = %q, want %q", got, "strict-origin")
+	}
 }
 
 func TestPageServer_RejectsOtherPathsAndMethods(t *testing.T) {

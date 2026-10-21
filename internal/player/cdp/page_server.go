@@ -55,7 +55,9 @@ func (s *pageServer) handler(html string) http.Handler {
 		h := w.Header()
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Cache-Control", "no-store")
-		h.Set("Referrer-Policy", "no-referrer")
+		// strict-origin keeps the per-session path prefix out of Referer while
+		// still sending the origin for MusicKit's authorize() popup handshake.
+		h.Set("Referrer-Policy", "strict-origin")
 		h.Set("X-Content-Type-Options", "nosniff")
 		_, _ = w.Write(body)
 	})

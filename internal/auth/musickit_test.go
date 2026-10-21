@@ -115,6 +115,12 @@ func TestLoginHandler_ServesHTML(t *testing.T) {
 	if !containsSubstr(body, "TEST_DEV_TOKEN") {
 		t.Errorf("developer token not found in response body: %s", body)
 	}
+	// Referrer-Policy must strip the ?state= query (not "unsafe-url" / empty)
+	// while still sending the origin so Apple's authorize popup has a non-empty
+	// document.referrer for its postMessage handshake (#182).
+	if got := w.Header().Get("Referrer-Policy"); got != "strict-origin" {
+		t.Errorf("Referrer-Policy = %q, want %q", got, "strict-origin")
+	}
 }
 
 // --- /callback handler ---
