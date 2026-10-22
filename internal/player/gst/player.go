@@ -15,7 +15,69 @@ package gst
 typedef struct {
     GMutex mu;
     gchar* next_uri;
+    gboolean trim_next; // the next stream to start is a whole track
+    gboolean trim_cur;  // the current stream's first segment still needs trimming
+    guint64 trimmed;    // time cut from earlier streams since the last flush
 } VibezGstState;
+
+// AAC encoder delay: iTunes-encoded AAC starts with 2112 priming samples
+// that ADTS has no field to describe, so the decoder plays them and every
+// gapless join carries ~48 ms of near-silence. HE-AAC decoders add SBR delay
+// on top; that part varies by decoder and is left alone.
+#define VIBEZ_AAC_PRIMING 2112
+
+// A start_seg stream begins mid-track (a seek), past the priming.
+static gboolean vibez_uri_is_whole_track(const gchar* uri) {
+    return uri && !strstr(uri, "start_seg=");
+}
+
+// on_filter_event moves each whole-track stream's segment start past the
+// priming, so the sink drops those samples. Runs on the streaming thread.
+static GstPadProbeReturn on_filter_event(GstPad* pad, GstPadProbeInfo* info, gpointer user_data) {
+    VibezGstState* st = (VibezGstState*)user_data;
+    GstEvent* ev = GST_PAD_PROBE_INFO_EVENT(info);
+    if (GST_EVENT_TYPE(ev) == GST_EVENT_STREAM_START) {
+        g_mutex_lock(&st->mu);
+        st->trim_cur = st->trim_next;
+        st->trim_next = FALSE;
+        g_mutex_unlock(&st->mu);
+        return GST_PAD_PROBE_OK;
+    }
+    if (GST_EVENT_TYPE(ev) != GST_EVENT_SEGMENT)
+        return GST_PAD_PROBE_OK;
+
+    const GstSegment* seg = NULL;
+    gst_event_parse_segment(ev, &seg);
+    // A base of zero is a fresh start (new URI or flush), even for a stream
+    // that is not trimmed, such as a seek's start_seg stream.
+    if (seg->base == 0) st->trimmed = 0;
+    if (!st->trim_cur)
+        return GST_PAD_PROBE_OK;
+    gint rate = 0;
+    GstCaps* caps = gst_pad_get_current_caps(pad);
+    if (caps) {
+        gst_structure_get_int(gst_caps_get_structure(caps, 0), "rate", &rate);
+        gst_caps_unref(caps);
+    }
+    if (seg->format != GST_FORMAT_TIME || rate <= 0)
+        return GST_PAD_PROBE_OK;
+    st->trim_cur = FALSE;
+
+    GstSegment s2;
+    gst_segment_copy_into(seg, &s2);
+    guint64 delay = gst_util_uint64_scale_int(VIBEZ_AAC_PRIMING, GST_SECOND, rate);
+    // Upstream places each gapless stream at the untrimmed end of the
+    // previous one, so pull it back by everything cut so far.
+    s2.base -= MIN(s2.base, st->trimmed);
+    st->trimmed += delay;
+    s2.start += delay;
+    if (s2.position < s2.start) s2.position = s2.start;
+    GstEvent* nev = gst_event_new_segment(&s2);
+    gst_event_set_seqnum(nev, gst_event_get_seqnum(ev));
+    gst_event_unref(ev);
+    GST_PAD_PROBE_INFO_DATA(info) = nev;
+    return GST_PAD_PROBE_OK;
+}
 
 static void on_about_to_finish(GstElement* playbin, gpointer user_data) {
     VibezGstState* st = (VibezGstState*)user_data;
@@ -26,6 +88,7 @@ static void on_about_to_finish(GstElement* playbin, gpointer user_data) {
         uri = st->next_uri;
         st->next_uri = NULL;
     }
+    if (uri) st->trim_next = vibez_uri_is_whole_track(uri);
     g_mutex_unlock(&st->mu);
     if (!uri) return;
 
@@ -77,7 +140,8 @@ static int vibez_gst_has_aac_decoder(void) {
 }
 
 // vibez_gst_new creates a playbin3 pipeline, falling back to playbin, and
-// attaches a 10-band equalizer audio-filter when gstreamer1.0-plugins-good is installed.
+// attaches a 10-band equalizer audio-filter when gstreamer1.0-plugins-good is
+// installed (an identity filter otherwise, to carry the priming trim).
 static GstElement* vibez_gst_new(GstElement** eqOut, VibezGstState* st) {
     GstElement* p = gst_element_factory_make("playbin3", "vibez-audio");
     if (!p) p = gst_element_factory_make("playbin", "vibez-audio");
@@ -91,11 +155,19 @@ static GstElement* vibez_gst_new(GstElement** eqOut, VibezGstState* st) {
                 g_object_set(G_OBJECT(p), "audio-sink", fake, NULL);
             }
         }
+        GstElement* filter = NULL;
         if (eqOut) {
-            GstElement* eq = gst_element_factory_make("equalizer-10bands", "vibez-eq");
-            if (eq) {
-                g_object_set(G_OBJECT(p), "audio-filter", eq, NULL);
-                *eqOut = eq;
+            filter = gst_element_factory_make("equalizer-10bands", "vibez-eq");
+            *eqOut = filter;
+        }
+        // The priming trim needs a filter pad to sit on, equalizer or not.
+        if (!filter) filter = gst_element_factory_make("identity", "vibez-filter");
+        if (filter) {
+            g_object_set(G_OBJECT(p), "audio-filter", filter, NULL);
+            GstPad* sp = gst_element_get_static_pad(filter, "sink");
+            if (sp) {
+                gst_pad_add_probe(sp, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, on_filter_event, st, NULL);
+                gst_object_unref(sp);
             }
         }
     }
@@ -111,13 +183,16 @@ static void vibez_gst_set_eq_band(GstElement* eq, gint idx, gdouble gain) {
     g_object_set(G_OBJECT(eq), prop, gain, NULL);
 }
 
-static void vibez_gst_set_uri(GstElement* p, const char* uri) {
+static void vibez_gst_set_uri(GstElement* p, VibezGstState* st, const char* uri) {
     // Use READY (not NULL) to release the current media while keeping the
     // pipeline and its PipeWire/PulseAudio connection alive. Going to NULL
     // would tear down the audio sink and create a new OS-level player entry
     // on every track change, causing dozens of stale entries in notification
     // centres that track MPRIS/PipeWire streams.
     gst_element_set_state(p, GST_STATE_READY);
+    g_mutex_lock(&st->mu);
+    st->trim_next = vibez_uri_is_whole_track(uri);
+    g_mutex_unlock(&st->mu);
     g_object_set(G_OBJECT(p), "uri", uri, NULL);
 }
 
@@ -290,7 +365,7 @@ func (p *Player) PlayURI(uri string) {
 		C.vibez_gst_state_set_next_uri(p.st, nil)
 	}
 	p.committedURI = ""
-	C.vibez_gst_set_uri(p.pipeline, cs)
+	C.vibez_gst_set_uri(p.pipeline, p.st, cs)
 	C.vibez_gst_play(p.pipeline)
 	p.mu.Unlock()
 }
