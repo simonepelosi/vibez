@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
-
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -76,6 +76,45 @@ func TestHandleStreamCancelledIsNotAFailure(t *testing.T) {
 	}
 	if panicked != nil {
 		t.Errorf("handler panicked with %v for a cancelled request, want a plain return", panicked)
+	}
+}
+
+func TestHandleStreamServesCachedSegment0WithoutUpstreamFetch(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(upstream.Close)
+
+	wantAAC := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0xbf, 0xfc, 0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c}
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID:  "123",
+				baseURI:  upstream.URL + "/",
+				segments: []segmentRef{{uri: "seg0.mp4", duration: 10.0}},
+				seg0AAC:  wantAAC,
+			},
+		},
+	}
+
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/stream/s1/tok.aac", nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		rr := httptest.NewRecorder()
+		s.handleStream(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		if !bytes.Equal(rr.Body.Bytes(), wantAAC) {
+			t.Errorf("body = %x, want %x", rr.Body.Bytes(), wantAAC)
+		}
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Errorf("upstream hits = %d, want 0 when segment 0 is already cached", got)
 	}
 }
 

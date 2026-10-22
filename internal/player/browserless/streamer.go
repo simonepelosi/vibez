@@ -37,6 +37,9 @@ type trackStream struct {
 	segments  []segmentRef
 	totalDur  time.Duration
 	createdAt time.Time
+
+	seg0Mu  sync.Mutex
+	seg0AAC []byte
 }
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
@@ -302,6 +305,17 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	s.streams[streamID] = st
 	s.mu.Unlock()
 
+	// Warm decrypted segment 0 asynchronously so both initial playback and
+	// seek-to-start (0:00) can write the first ~10s of ADTS frames immediately
+	// without waiting for an upstream CDN round-trip.
+	if len(segments) > 0 && s.cdmEngine != nil {
+		go func() {
+			warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			_, _, _ = s.getOrFetchSegment0(warmCtx, &http.Client{Timeout: 10 * time.Second}, st)
+		}()
+	}
+
 	streamURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s.aac", s.port, streamID, s.authToken)
 	return streamURL, totalDur, nil
 }
@@ -430,54 +444,23 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		seg := st.segments[i]
-		segURL := seg.uri
-		if !strings.HasPrefix(segURL, "http://") && !strings.HasPrefix(segURL, "https://") {
-			segURL = st.baseURI + seg.uri
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
-		if err != nil {
-			fail(i, "build request", err)
-			return
-		}
-		if seg.length > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.offset, seg.offset+seg.length-1))
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			fail(i, "fetch", err)
-			return
-		}
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			_ = resp.Body.Close()
-			fail(i, "fetch", fmt.Errorf("status %s", resp.Status))
-			return
-		}
-
-		segData, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			fail(i, "read", err)
-			return
-		}
-
-		// Decrypt segment into ADTS AAC frames passing subsamples
-		aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
-			cdmSubs := make([]cdm.Subsample, len(subs))
-			for si, sb := range subs {
-				cdmSubs[si] = cdm.Subsample{
-					ClearBytes:  sb.ClearBytes,
-					CipherBytes: sb.CipherBytes,
-				}
+		var aacData []byte
+		if i == 0 {
+			var stage string
+			var err error
+			aacData, stage, err = s.getOrFetchSegment0(ctx, client, st)
+			if err != nil {
+				fail(i, stage, err)
+				return
 			}
-			return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
-		})
-		if err != nil {
-			fail(i, "decrypt", err)
-			return
+		} else {
+			var stage string
+			var err error
+			aacData, stage, err = s.fetchAndDecryptSegment(ctx, client, st, st.segments[i])
+			if err != nil {
+				fail(i, stage, err)
+				return
+			}
 		}
 
 		// Write to HTTP client (GStreamer). A failed write means the client
@@ -492,6 +475,66 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *StreamServer) getOrFetchSegment0(ctx context.Context, client *http.Client, st *trackStream) ([]byte, string, error) {
+	st.seg0Mu.Lock()
+	defer st.seg0Mu.Unlock()
+	if len(st.seg0AAC) > 0 {
+		return st.seg0AAC, "", nil
+	}
+	aacData, stage, err := s.fetchAndDecryptSegment(ctx, client, st, st.segments[0])
+	if err != nil {
+		return nil, stage, err
+	}
+	st.seg0AAC = aacData
+	return aacData, "", nil
+}
+
+func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.Client, st *trackStream, seg segmentRef) ([]byte, string, error) {
+	segURL := seg.uri
+	if !strings.HasPrefix(segURL, "http://") && !strings.HasPrefix(segURL, "https://") {
+		segURL = st.baseURI + seg.uri
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
+	if err != nil {
+		return nil, "build request", err
+	}
+	if seg.length > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.offset, seg.offset+seg.length-1))
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "fetch", err
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		return nil, "fetch", fmt.Errorf("status %s", resp.Status)
+	}
+
+	segData, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, "read", err
+	}
+
+	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
+		cdmSubs := make([]cdm.Subsample, len(subs))
+		for si, sb := range subs {
+			cdmSubs[si] = cdm.Subsample{
+				ClearBytes:  sb.ClearBytes,
+				CipherBytes: sb.CipherBytes,
+			}
+		}
+		return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
+	})
+	if err != nil {
+		return nil, "decrypt", err
+	}
+	return aacData, "", nil
 }
 
 // Close terminates the local HTTP stream server.
