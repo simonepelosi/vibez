@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
