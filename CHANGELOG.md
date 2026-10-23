@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] — 2026-10-23
+
+### Added
+- **Windows System Media Transport Controls (SMTC) integration** — publishes browserless playback metadata, artwork, status, and timeline to Windows SMTC via a hidden `WS_EX_TOOLWINDOW` on a dedicated STA thread (`ISystemMediaTransportControlsInterop::GetForWindow`), enabling hardware media keys, the Windows volume flyout, and desktop widgets such as YASB. Refs #194.
+- **Native gapless track transitions and AAC priming trim on macOS and Windows** — implements `SetNextURI`, `OnStreamStart`, and 2112-sample AAC encoder priming trim across the macOS Core Audio (`AudioFileStream` + `AudioConverter` + `AudioQueue`) and Windows Media Foundation (`IMFSourceReader` + `waveOut`) sinks without closing or recreating the audio output device. Refs #191.
+- **First-segment prefetching and automatic HLS segment retry** — asynchronously warms and caches decrypted HLS segment 0 during `PrepareTrack` for instant playback/seek-to-start, and retries transient CDN network/read errors and HTTP `408`/`429`/`5xx` segment responses with exponential backoff. Refs #189, #190.
+
+### Fixed
+- **Explicit GStreamer audio sink fallback without `autoaudiosink` and stricter ADTS sync** — falls back to `pipewiresink` → `pulsesink` → `alsasink` when `autoaudiosink` (`libgstautodetect` in `gst-plugins-good`) is not installed, and validates consecutive ADTS frame headers while resetting parser state across stream-start/segment events in `vibezaacparse`. Closes #188, refs #192.
+- **Queue auto-advance at end of stream on Windows** — records the final `waveOut` device playback position before closing the device handle on EOS so `OnEOS` does not mistake natural track completion for a premature `0:00` EOS. Refs #193.
+
 ## [2.0.3] — 2026-10-22
 
 ### Fixed
@@ -771,7 +782,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.4...HEAD
+[2.0.4]: https://github.com/simonepelosi/vibez/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/simonepelosi/vibez/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/simonepelosi/vibez/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/simonepelosi/vibez/compare/v2.0.0...v2.0.1
