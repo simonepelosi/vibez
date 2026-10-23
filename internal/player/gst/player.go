@@ -237,10 +237,20 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
 static gboolean vibez_aac_parse_sink_event(GstPad* pad, GstObject* parent, GstEvent* event) {
     VibezAacParse* self = (VibezAacParse*)parent;
     switch (GST_EVENT_TYPE(event)) {
+    case GST_EVENT_STREAM_START:
+        g_byte_array_set_size(self->adapter, 0);
+        if (self->pending_segment) {
+            gst_event_unref(self->pending_segment);
+            self->pending_segment = NULL;
+        }
+        self->synced = FALSE;
+        self->frames_pushed = 0;
+        return gst_pad_event_default(pad, parent, event);
     case GST_EVENT_CAPS:
         gst_event_unref(event);
         return TRUE;
     case GST_EVENT_SEGMENT: {
+        self->frames_pushed = 0;
         GstSegment seg;
         gst_segment_init(&seg, GST_FORMAT_TIME);
         GstEvent* tev = gst_event_new_segment(&seg);

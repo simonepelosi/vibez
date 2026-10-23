@@ -31,11 +31,13 @@ func TestEmbeddedGoodPluginsFallback(t *testing.T) {
 	setElementRank("souphttpsrc", 0)
 	setElementRank("curlhttpsrc", 0)
 	setElementRank("equalizer-10bands", 0)
+	setElementRank("autoaudiosink", 0)
 	t.Cleanup(func() {
 		setElementRank("aacparse", 257)
 		setElementRank("souphttpsrc", 256)
 		setElementRank("curlhttpsrc", 128)
 		setElementRank("equalizer-10bands", 0)
+		setElementRank("autoaudiosink", 256)
 	})
 
 	p, err := New()
