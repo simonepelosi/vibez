@@ -13,7 +13,7 @@ func browserlessBackendLabel(audioBitrateKbps int) string {
 	return fmt.Sprintf("Browserless (In-Process Widevine + GStreamer) · %d kbps AAC", audioBitrateKbps)
 }
 
-func setupBrowserlessPlatform(p *browserless.Player) {
+func setupBrowserlessPlatform(p *browserless.Player, _ func(string)) {
 	if srv, mprisErr := mpris.NewServer(p); mprisErr == nil {
 		go func() {
 			defer func() { _ = srv.Close() }()

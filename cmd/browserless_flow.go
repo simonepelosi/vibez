@@ -109,11 +109,12 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 		playerCh <- blPlayer
 
-		setupBrowserlessPlatform(blPlayer)
+		debugLog := func(msg string) { prog.Send(tui.DebugLogMsg(msg)) }
+		setupBrowserlessPlatform(blPlayer, debugLog)
 
 		// Last.fm scrobbler & Discord RPC integration
-		startLastfmScrobbler(cfg, blPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
-		stopRPC = startDiscordRPC(cfg, blPlayer, func(msg string) { prog.Send(tui.DebugLogMsg(msg)) })
+		startLastfmScrobbler(cfg, blPlayer, debugLog)
+		stopRPC = startDiscordRPC(cfg, blPlayer, debugLog)
 
 		backendLabel := browserlessBackendLabel(audioBitrateKbps)
 		prog.Send(tui.EngineReadyMsg{

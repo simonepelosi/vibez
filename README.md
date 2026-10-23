@@ -61,6 +61,7 @@ Full tracks stream natively with an in-process Widevine CDM and platform-native 
 
 - **Desktop notifications** — see the current track in your notification area
 - **MPRIS D-Bus on Linux** — desktop media keys and notifications integrate with supported desktop environments
+- **System Media Transport Controls on Windows** — media keys, the volume flyout and widgets such as YASB show the current track and control playback
 - **No external music player needed** — vibez does not depend on Cider, VLC, or Music.app
 - **Last.fm scrobbling** — optional integration; connect with `vibez auth lastfm login` and your listening history is tracked automatically
 - **Discord Rich Presence** — broadcasts currently playing track, artist, album, artwork, and elapsed/remaining time to your Discord profile; enabled by default (disable with `--no-discord` or in config)
@@ -388,7 +389,8 @@ vibez/
 │   │   ├── browserless/    # In-process Widevine CDM + native audio sinks (Linux/macOS/Windows)
 │   │   ├── local/          # Local file player (GStreamer / Core Audio / Media Foundation)
 │   │   ├── gst/            # GStreamer pipeline wrapper (Linux)
-│   │   └── mpris/          # Linux MPRIS D-Bus server
+│   │   ├── mpris/          # Linux MPRIS D-Bus server
+│   │   └── smtc/           # Windows System Media Transport Controls bridge
 │   ├── tui/
 │   │   ├── model.go        # Bubble Tea model + key handling
 │   │   ├── views/          # Search, queue, library, now-playing, bear
