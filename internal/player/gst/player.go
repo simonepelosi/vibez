@@ -82,6 +82,8 @@ typedef struct {
     gint rate;
     gint channels;
     gboolean caps_set;
+    gboolean synced;
+    guint8 hdr_proto[4];
     guint64 frames_pushed;
 } VibezAacParse;
 
@@ -126,7 +128,8 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
     const guint8* data = self->adapter->data;
 
     while (offset + 7 <= len) {
-        if (data[offset] != 0xFF || (data[offset + 1] & 0xF0) != 0xF0) {
+        if (data[offset] != 0xFF || (data[offset + 1] & 0xF6) != 0xF0) {
+            self->synced = FALSE;
             offset++;
             continue;
         }
@@ -134,21 +137,47 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
         guint frame_len = ((guint)(data[offset + 3] & 0x03) << 11) |
                           ((guint)data[offset + 4] << 3) |
                           ((guint)(data[offset + 5] >> 5) & 0x07);
-        if (frame_len <= hdr_len) {
+        int freq_idx = (data[offset + 2] >> 2) & 0x0F;
+        int chan_cfg = ((data[offset + 2] & 0x01) << 2) | ((data[offset + 3] >> 6) & 0x03);
+        int rate = vibez_adts_rates[freq_idx];
+        if (frame_len <= hdr_len || rate <= 0 || chan_cfg == 0) {
+            self->synced = FALSE;
+            offset++;
+            continue;
+        }
+        if (self->synced &&
+            (data[offset + 1] != self->hdr_proto[1] ||
+             data[offset + 2] != self->hdr_proto[2] ||
+             (data[offset + 3] & 0xFC) != (self->hdr_proto[3] & 0xFC))) {
+            self->synced = FALSE;
             offset++;
             continue;
         }
         if (offset + frame_len > len) {
             break;
         }
+        // When unsynced, verify that the byte immediately after this candidate
+        // frame is another valid ADTS header with matching stream parameters.
+        if (!self->synced) {
+            if (offset + frame_len + 7 <= len) {
+                const guint8* next = data + offset + frame_len;
+                if (next[0] != 0xFF ||
+                    next[1] != data[offset + 1] ||
+                    next[2] != data[offset + 2] ||
+                    (next[3] & 0xFC) != (data[offset + 3] & 0xFC)) {
+                    offset++;
+                    continue;
+                }
+            } else if (offset > 0) {
+                // Wait for more bytes to confirm mid-buffer resync candidate.
+                break;
+            }
+            self->synced = TRUE;
+            memcpy(self->hdr_proto, data + offset, 4);
+        }
 
         int profile = ((data[offset + 2] >> 6) & 0x03) + 1;
-        int freq_idx = (data[offset + 2] >> 2) & 0x0F;
-        int chan_cfg = ((data[offset + 2] & 0x01) << 2) | ((data[offset + 3] >> 6) & 0x03);
-        int rate = vibez_adts_rates[freq_idx];
-        int channels = (chan_cfg == 7) ? 8 : (chan_cfg > 0 ? chan_cfg : 2);
-        if (rate <= 0) rate = 44100;
-
+        int channels = (chan_cfg == 7) ? 8 : chan_cfg;
         if (!self->caps_set || self->rate != rate || self->channels != channels) {
             self->rate = rate;
             self->channels = channels;
@@ -208,10 +237,20 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
 static gboolean vibez_aac_parse_sink_event(GstPad* pad, GstObject* parent, GstEvent* event) {
     VibezAacParse* self = (VibezAacParse*)parent;
     switch (GST_EVENT_TYPE(event)) {
+    case GST_EVENT_STREAM_START:
+        g_byte_array_set_size(self->adapter, 0);
+        if (self->pending_segment) {
+            gst_event_unref(self->pending_segment);
+            self->pending_segment = NULL;
+        }
+        self->synced = FALSE;
+        self->frames_pushed = 0;
+        return gst_pad_event_default(pad, parent, event);
     case GST_EVENT_CAPS:
         gst_event_unref(event);
         return TRUE;
     case GST_EVENT_SEGMENT: {
+        self->frames_pushed = 0;
         GstSegment seg;
         gst_segment_init(&seg, GST_FORMAT_TIME);
         GstEvent* tev = gst_event_new_segment(&seg);
@@ -230,10 +269,12 @@ static gboolean vibez_aac_parse_sink_event(GstPad* pad, GstObject* parent, GstEv
             gst_event_unref(self->pending_segment);
             self->pending_segment = NULL;
         }
+        self->synced = FALSE;
         self->frames_pushed = 0;
         return gst_pad_event_default(pad, parent, event);
     case GST_EVENT_EOS:
         g_byte_array_set_size(self->adapter, 0);
+        self->synced = FALSE;
         return gst_pad_event_default(pad, parent, event);
     default:
         return gst_pad_event_default(pad, parent, event);
@@ -249,6 +290,7 @@ static GstStateChangeReturn vibez_aac_parse_change_state(GstElement* element, Gs
             self->pending_segment = NULL;
         }
         self->caps_set = FALSE;
+        self->synced = FALSE;
         self->frames_pushed = 0;
     }
     return GST_ELEMENT_CLASS(vibez_aac_parse_parent_class)->change_state(element, transition);
@@ -744,6 +786,18 @@ static GstElement* vibez_gst_new(GstElement** eqOut, VibezGstState* st) {
             if (fake) {
                 g_object_set(G_OBJECT(fake), "sync", (gboolean)TRUE, NULL);
                 g_object_set(G_OBJECT(p), "audio-sink", fake, NULL);
+            }
+        } else if (!vibez_gst_has_element("autoaudiosink")) {
+            // autoaudiosink ships in gst-plugins-good (libgstautodetect). When
+            // it is absent, explicitly select pipewiresink, pulsesink, or
+            // alsasink (which ships in gst-plugins-base).
+            const char* sinks[] = {"pipewiresink", "pulsesink", "alsasink", NULL};
+            for (int i = 0; sinks[i] != NULL; i++) {
+                GstElement* sink = gst_element_factory_make(sinks[i], "vibez-sink");
+                if (sink) {
+                    g_object_set(G_OBJECT(p), "audio-sink", sink, NULL);
+                    break;
+                }
             }
         }
         GstElement* filter = NULL;
