@@ -11,9 +11,11 @@ typedef void* vibez_darwinsink_t;
 
 typedef void (*vibez_darwinsink_eos_cb_t)(uintptr_t user_data);
 typedef void (*vibez_darwinsink_err_cb_t)(uintptr_t user_data, char* err_msg);
+typedef void (*vibez_darwinsink_stream_start_cb_t)(uintptr_t user_data, char* uri);
 
-vibez_darwinsink_t vibez_darwinsink_create(uintptr_t user_data, vibez_darwinsink_eos_cb_t on_eos, vibez_darwinsink_err_cb_t on_err);
+vibez_darwinsink_t vibez_darwinsink_create(uintptr_t user_data, vibez_darwinsink_eos_cb_t on_eos, vibez_darwinsink_err_cb_t on_err, vibez_darwinsink_stream_start_cb_t on_stream_start);
 void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri);
+void vibez_darwinsink_set_next_uri(vibez_darwinsink_t handle, const char* uri);
 void vibez_darwinsink_play(vibez_darwinsink_t handle);
 void vibez_darwinsink_pause(vibez_darwinsink_t handle);
 void vibez_darwinsink_stop(vibez_darwinsink_t handle);
