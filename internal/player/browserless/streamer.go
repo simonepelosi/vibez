@@ -310,7 +310,7 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	// without waiting for an upstream CDN round-trip.
 	if len(segments) > 0 && s.cdmEngine != nil {
 		go func() {
-			warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			warmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			_, _, _ = s.getOrFetchSegment0(warmCtx, &http.Client{Timeout: 10 * time.Second}, st)
 		}()
