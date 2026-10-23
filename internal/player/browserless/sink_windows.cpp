@@ -124,7 +124,27 @@ struct Session {
     std::atomic<uint32_t> sampleRate{0};
     std::atomic<uint32_t> bytesPerSec{0};
     std::atomic<uint64_t> nullFrames{0};
+    // Seconds played when the device closed, or -1 while it is open. The
+    // player reads the position inside its end-of-stream callback, after the
+    // device is gone, to tell a finished track from a premature end.
+    std::atomic<double> endPosition{-1.0};
 };
+
+// devicePosition is how far the device has played, in seconds. Call it with
+// ses.mu held and ses.hwo open.
+double devicePosition(const Session& ses) {
+    MMTIME t;
+    std::memset(&t, 0, sizeof(t));
+    t.wType = TIME_SAMPLES;
+    if (waveOutGetPosition(ses.hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return 0.0;
+    if (t.wType == TIME_SAMPLES && ses.sampleRate > 0) {
+        return static_cast<double>(t.u.sample) / static_cast<double>(ses.sampleRate);
+    }
+    if (t.wType == TIME_BYTES && ses.bytesPerSec > 0) {
+        return static_cast<double>(t.u.cb) / static_cast<double>(ses.bytesPerSec);
+    }
+    return 0.0;
+}
 
 struct Sink {
     uintptr_t user = 0;
@@ -363,6 +383,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
 
         {
             std::lock_guard<std::mutex> lk(ses->mu);
+            // Keep the final position: onEos fires after the device closes, and
+            // a position of 0 there reads as a premature end, so the queue
+            // would never advance.
+            if (endOfStream && !ses->cancel) ses->endPosition = devicePosition(*ses);
             ses->hwo = nullptr;
         }
         waveOutReset(hwo);
@@ -499,23 +523,15 @@ double vibez_winsink_position(vibez_winsink_t handle) {
     if (!ses) return 0.0;
     std::lock_guard<std::mutex> lk(ses->mu);
     if (!ses->hwo) {
+        const double end = ses->endPosition.load();
+        if (end >= 0.0) return end;
         const uint64_t nf = ses->nullFrames.load();
         if (nf > 0 && ses->sampleRate > 0) {
             return static_cast<double>(nf) / static_cast<double>(ses->sampleRate);
         }
         return 0.0;
     }
-    MMTIME t;
-    std::memset(&t, 0, sizeof(t));
-    t.wType = TIME_SAMPLES;
-    if (waveOutGetPosition(ses->hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return 0.0;
-    if (t.wType == TIME_SAMPLES && ses->sampleRate > 0) {
-        return static_cast<double>(t.u.sample) / static_cast<double>(ses->sampleRate);
-    }
-    if (t.wType == TIME_BYTES && ses->bytesPerSec > 0) {
-        return static_cast<double>(t.u.cb) / static_cast<double>(ses->bytesPerSec);
-    }
-    return 0.0;
+    return devicePosition(*ses);
 }
 
 void vibez_winsink_destroy(vibez_winsink_t handle) {
