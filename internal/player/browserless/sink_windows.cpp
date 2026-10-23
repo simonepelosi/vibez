@@ -39,7 +39,11 @@ constexpr int kBands = 10;
 constexpr double kBandHz[kBands] = {29, 59, 119, 237, 474, 947, 1889, 3770, 7523, 15011};
 constexpr double kBandQ = 1.4;
 constexpr int kNumBuffers = 8;
+constexpr size_t kAACPrimingFrames = 2112;
 
+bool isWholeTrackURI(const std::string& u) {
+    return u.find("start_seg=") == std::string::npos;
+}
 // Media Foundation is resolved at run time instead of linked in. On Windows N
 // editions without the Media Feature Pack mfplat.dll and mfreadwrite.dll do not
 // exist, and importing them would stop vibez.exe from starting at all, even when
@@ -124,24 +128,25 @@ struct Session {
     std::atomic<uint32_t> sampleRate{0};
     std::atomic<uint32_t> bytesPerSec{0};
     std::atomic<uint64_t> nullFrames{0};
-    // Seconds played when the device closed, or -1 while it is open. The
-    // player reads the position inside its end-of-stream callback, after the
-    // device is gone, to tell a finished track from a premature end.
+    std::atomic<uint32_t> baseSamples{0};
+    std::atomic<uint32_t> baseBytes{0};
     std::atomic<double> endPosition{-1.0};
 };
 
-// devicePosition is how far the device has played, in seconds. Call it with
-// ses.mu held and ses.hwo open.
 double devicePosition(const Session& ses) {
     MMTIME t;
     std::memset(&t, 0, sizeof(t));
     t.wType = TIME_SAMPLES;
     if (waveOutGetPosition(ses.hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return 0.0;
     if (t.wType == TIME_SAMPLES && ses.sampleRate > 0) {
-        return static_cast<double>(t.u.sample) / static_cast<double>(ses.sampleRate);
+        const uint32_t base = ses.baseSamples.load();
+        const uint32_t rel = t.u.sample >= base ? (t.u.sample - base) : 0;
+        return static_cast<double>(rel) / static_cast<double>(ses.sampleRate);
     }
     if (t.wType == TIME_BYTES && ses.bytesPerSec > 0) {
-        return static_cast<double>(t.u.cb) / static_cast<double>(ses.bytesPerSec);
+        const uint32_t base = ses.baseBytes.load();
+        const uint32_t rel = t.u.cb >= base ? (t.u.cb - base) : 0;
+        return static_cast<double>(rel) / static_cast<double>(ses.bytesPerSec);
     }
     return 0.0;
 }
@@ -150,9 +155,11 @@ struct Sink {
     uintptr_t user = 0;
     vibez_winsink_eos_cb_t onEos = nullptr;
     vibez_winsink_err_cb_t onErr = nullptr;
+    vibez_winsink_stream_start_cb_t onStreamStart = nullptr;
 
-    std::mutex mu;  // guards cur and eq
+    std::mutex mu;  // guards cur, nextURI, and eq
     std::shared_ptr<Session> cur;
+    std::string nextURI;
     double eq[kBands] = {0};
     std::atomic<uint32_t> eqVersion{1};
     std::atomic<double> volume{1.0};
@@ -213,12 +220,13 @@ bool waitFree(Buf& b, HWAVEOUT hwo, HANDLE ev, const Session& ses) {
     return true;
 }
 
-void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
-              const std::wstring& url) {
-    Com<IMFSourceReader> reader;
+bool openSourceReader(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
+                      const std::wstring& url, Com<IMFSourceReader>& reader) {
     HRESULT hr = mf.createSourceReader(url.c_str(), nullptr, &reader);
-    if (FAILED(hr)) return reportError(sink, ses, "cannot open audio stream", hr);
-
+    if (FAILED(hr)) {
+        reportError(sink, ses, "cannot open audio stream", hr);
+        return false;
+    }
     reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
 
@@ -228,8 +236,19 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
     want->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, want.p);
-    if (FAILED(hr)) return reportError(sink, ses, "cannot decode audio stream", hr);
+    if (FAILED(hr)) {
+        reportError(sink, ses, "cannot decode audio stream", hr);
+        return false;
+    }
+    return true;
+}
 
+void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
+              std::string curURI) {
+    Com<IMFSourceReader> reader;
+    if (!openSourceReader(mf, sink, ses, widen(curURI.c_str()), reader)) return;
+
+    HRESULT hr = S_OK;
     Com<IMFMediaType> got;
     hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got);
     if (FAILED(hr)) return reportError(sink, ses, "cannot read audio format", hr);
@@ -273,7 +292,9 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     uint32_t eqSeen = 0;
     int next = 0;
     bool endOfStream = false;
-
+    size_t trimRemaining = isWholeTrackURI(curURI) ? kAACPrimingFrames : 0;
+    uint32_t enqueuedSamples = 0;
+    uint32_t enqueuedBytes = 0;
     for (;;) {
         if (ses->cancel) break;
 
@@ -286,6 +307,32 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             break;
         }
         if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+            std::string nextURI;
+            {
+                std::lock_guard<std::mutex> lk(sink->mu);
+                nextURI = std::move(sink->nextURI);
+                sink->nextURI.clear();
+            }
+            if (!nextURI.empty()) {
+                Com<IMFSourceReader> nextReader;
+                if (openSourceReader(mf, sink, ses, widen(nextURI.c_str()), nextReader)) {
+                    if (reader.p) reader.p->Release();
+                    reader.p = nextReader.p;
+                    nextReader.p = nullptr;
+                    curURI = std::move(nextURI);
+                    trimRemaining = isWholeTrackURI(curURI) ? kAACPrimingFrames : 0;
+                    ses->baseSamples = enqueuedSamples;
+                    ses->baseBytes = enqueuedBytes;
+                    ses->nullFrames = 0;
+                    if (sink->onStreamStart) {
+                        std::vector<char> u(curURI.begin(), curURI.end());
+                        u.push_back('\0');
+                        sink->onStreamStart(sink->user, u.data());
+                    }
+                    continue;
+                }
+                break;
+            }
             endOfStream = true;
             break;
         }
@@ -300,17 +347,30 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             continue;
         }
 
+        const size_t frameBytes = sizeof(int16_t) * static_cast<size_t>(channels > 0 ? channels : 2);
+        size_t skipBytes = 0;
+        if (pcm16 && trimRemaining > 0 && frameBytes > 0) {
+            const size_t totalFrames = static_cast<size_t>(len) / frameBytes;
+            const size_t cut = trimRemaining < totalFrames ? trimRemaining : totalFrames;
+            trimRemaining -= cut;
+            skipBytes = cut * frameBytes;
+            if (skipBytes >= static_cast<size_t>(len)) {
+                mb->Unlock();
+                continue;
+            }
+        }
+
         Buf& b = bufs[next];
         if (!nullOut && !waitFree(b, hwo, ev, *ses)) {
             mb->Unlock();
             break;
         }
-        b.data.assign(reinterpret_cast<char*>(src), reinterpret_cast<char*>(src) + len);
+        b.data.assign(reinterpret_cast<char*>(src + skipBytes), reinterpret_cast<char*>(src) + len);
         mb->Unlock();
 
         if (pcm16) {
             int16_t* s = reinterpret_cast<int16_t*>(b.data.data());
-            const size_t frames = b.data.size() / (sizeof(int16_t) * static_cast<size_t>(channels));
+            const size_t frames = b.data.size() / frameBytes;
 
             const uint32_t ver = sink->eqVersion.load();
             if (ver != eqSeen) {
@@ -361,6 +421,9 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             continue;
         }
 
+        const size_t bufFrames = frameBytes > 0 ? b.data.size() / frameBytes : 0;
+        enqueuedSamples += static_cast<uint32_t>(bufFrames);
+        enqueuedBytes += static_cast<uint32_t>(b.data.size());
         b.hdr.lpData = b.data.data();
         b.hdr.dwBufferLength = static_cast<DWORD>(b.data.size());
         b.hdr.dwFlags = 0;
@@ -383,9 +446,6 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
 
         {
             std::lock_guard<std::mutex> lk(ses->mu);
-            // Keep the final position: onEos fires after the device closes, and
-            // a position of 0 there reads as a premature end, so the queue
-            // would never advance.
             if (endOfStream && !ses->cancel) ses->endPosition = devicePosition(*ses);
             ses->hwo = nullptr;
         }
@@ -399,7 +459,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) sink->onEos(sink->user);
 }
 
-void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::wstring url) {
+void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::string url) {
     const MfApi* mf = mfApi();
     if (!mf) {
         reportError(sink, ses,
@@ -410,26 +470,30 @@ void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::w
     const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const HRESULT hrMf = mf->startup(MF_VERSION, MFSTARTUP_FULL);
     if (SUCCEEDED(hrMf)) {
-        playLoop(*mf, sink, ses, url);
+        playLoop(*mf, sink, ses, std::move(url));
         mf->shutdown();
     } else {
         reportError(sink, ses, "Media Foundation failed to start", hrMf);
     }
     if (SUCCEEDED(hrCo)) CoUninitialize();
 }
-
 Sink* sinkOf(vibez_winsink_t h) { return h ? static_cast<Handle*>(h)->sink.get() : nullptr; }
 
 }  // namespace
 
 extern "C" {
 
-vibez_winsink_t vibez_winsink_create(uintptr_t user_data, vibez_winsink_eos_cb_t on_eos, vibez_winsink_err_cb_t on_err) {
+vibez_winsink_t vibez_winsink_create(
+    uintptr_t user_data,
+    vibez_winsink_eos_cb_t on_eos,
+    vibez_winsink_err_cb_t on_err,
+    vibez_winsink_stream_start_cb_t on_stream_start) {
     auto* h = new Handle();
     h->sink = std::make_shared<Sink>();
     h->sink->user = user_data;
     h->sink->onEos = on_eos;
     h->sink->onErr = on_err;
+    h->sink->onStreamStart = on_stream_start;
     return h;
 }
 
@@ -440,13 +504,21 @@ void vibez_winsink_play_uri(vibez_winsink_t handle, const char* uri_utf8) {
     std::shared_ptr<Session> old;
     {
         std::lock_guard<std::mutex> lk(sink->mu);
+        sink->nextURI.clear();
         old = sink->cur;
         sink->cur = ses;
     }
     cancelSession(old);
     // The worker owns shared references to the sink and session, so a stale
     // session blocked on the network can finish by itself after it is replaced.
-    std::thread(runSession, sink, ses, widen(uri_utf8)).detach();
+    std::thread(runSession, sink, ses, std::string(uri_utf8)).detach();
+}
+
+void vibez_winsink_set_next_uri(vibez_winsink_t handle, const char* uri_utf8) {
+    Sink* sink = sinkOf(handle);
+    if (!sink) return;
+    std::lock_guard<std::mutex> lk(sink->mu);
+    sink->nextURI = uri_utf8 ? uri_utf8 : "";
 }
 
 void vibez_winsink_play(vibez_winsink_t handle) {

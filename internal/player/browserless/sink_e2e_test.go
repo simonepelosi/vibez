@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -90,14 +89,12 @@ func TestNativeSinkPlaysADTSStreamEndToEnd(t *testing.T) {
 	}
 }
 
-// TestNativeSinkGaplessTransitionEndToEnd verifies that on Linux (GStreamer
-// playbin3/playbin) pre-staging a second ADTS stream via SetNextURI transitions
-// gaplessly on about-to-finish, fires OnStreamStart with the exact committed
-// URI, and then reaches OnEOS at the end of the second stream.
+// TestNativeSinkGaplessTransitionEndToEnd verifies that across Linux (GStreamer),
+// macOS (Core Audio), and Windows (Media Foundation + waveOut), pre-staging a
+// second ADTS stream via SetNextURI transitions gaplessly without closing the
+// audio device, fires OnStreamStart with the exact committed URI, and then
+// reaches OnEOS at the end of the second stream.
 func TestNativeSinkGaplessTransitionEndToEnd(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("SetNextURI / OnStreamStart gapless sink handoff is specific to GStreamer")
-	}
 	t.Setenv("VIBEZ_NULL_AUDIO", "1")
 
 	adts := buildTestADTSStream()

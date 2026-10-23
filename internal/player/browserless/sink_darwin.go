@@ -10,9 +10,10 @@ package browserless
 
 extern void vibezDarwinOnEOS(uintptr_t userData);
 extern void vibezDarwinOnError(uintptr_t userData, char* errMsg);
+extern void vibezDarwinOnStreamStart(uintptr_t userData, char* uri);
 
 static inline vibez_darwinsink_t vibez_create_darwin_sink(uintptr_t userData) {
-    return vibez_darwinsink_create(userData, vibezDarwinOnEOS, vibezDarwinOnError);
+    return vibez_darwinsink_create(userData, vibezDarwinOnEOS, vibezDarwinOnError, vibezDarwinOnStreamStart);
 }
 */
 import "C"
@@ -26,11 +27,12 @@ import (
 )
 
 type darwinAudioSink struct {
-	mu      sync.Mutex
-	handle  C.vibez_darwinsink_t
-	cgoH    cgo.Handle
-	onEOS   func()
-	onError func(error)
+	mu            sync.Mutex
+	handle        C.vibez_darwinsink_t
+	cgoH          cgo.Handle
+	onEOS         func()
+	onError       func(error)
+	onStreamStart func(string)
 }
 
 func newAudioSink() (audioSink, error) {
@@ -82,6 +84,21 @@ func vibezDarwinOnError(userData C.uintptr_t, cErrMsg *C.char) {
 	}
 }
 
+//export vibezDarwinOnStreamStart
+func vibezDarwinOnStreamStart(userData C.uintptr_t, cURI *C.char) {
+	uri := C.GoString(cURI)
+	s := sinkFromHandle(userData)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cb := s.onStreamStart
+	s.mu.Unlock()
+	if cb != nil {
+		go cb(uri)
+	}
+}
+
 func (s *darwinAudioSink) PlayURI(uri string) {
 	cs := C.CString(uri)
 	defer C.free(unsafe.Pointer(cs))
@@ -92,9 +109,24 @@ func (s *darwinAudioSink) PlayURI(uri string) {
 	}
 }
 
-func (s *darwinAudioSink) SetNextURI(_ string)          {}
-func (s *darwinAudioSink) OnStreamStart(_ func(string)) {}
+func (s *darwinAudioSink) SetNextURI(uri string) {
+	var cs *C.char
+	if uri != "" {
+		cs = C.CString(uri)
+		defer C.free(unsafe.Pointer(cs))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle != nil {
+		C.vibez_darwinsink_set_next_uri(s.handle, cs)
+	}
+}
 
+func (s *darwinAudioSink) OnStreamStart(fn func(string)) {
+	s.mu.Lock()
+	s.onStreamStart = fn
+	s.mu.Unlock()
+}
 func (s *darwinAudioSink) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

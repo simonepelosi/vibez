@@ -9,9 +9,10 @@ package browserless
 
 extern void vibezWinOnEOS(uintptr_t userData);
 extern void vibezWinOnError(uintptr_t userData, char* errMsg);
+extern void vibezWinOnStreamStart(uintptr_t userData, char* uri);
 
 static inline vibez_winsink_t vibez_create_win_sink(uintptr_t userData) {
-    return vibez_winsink_create(userData, vibezWinOnEOS, vibezWinOnError);
+    return vibez_winsink_create(userData, vibezWinOnEOS, vibezWinOnError, vibezWinOnStreamStart);
 }
 */
 import "C"
@@ -27,11 +28,12 @@ import (
 // windowsAudioSink plays the loopback AAC stream with Media Foundation and
 // waveOut (see sink_windows.cpp).
 type windowsAudioSink struct {
-	mu      sync.Mutex
-	handle  C.vibez_winsink_t
-	cgoH    cgo.Handle
-	onEOS   func()
-	onError func(error)
+	mu            sync.Mutex
+	handle        C.vibez_winsink_t
+	cgoH          cgo.Handle
+	onEOS         func()
+	onError       func(error)
+	onStreamStart func(string)
 }
 
 func newAudioSink() (audioSink, error) {
@@ -85,6 +87,21 @@ func vibezWinOnError(userData C.uintptr_t, cErrMsg *C.char) {
 	}
 }
 
+//export vibezWinOnStreamStart
+func vibezWinOnStreamStart(userData C.uintptr_t, cURI *C.char) {
+	uri := C.GoString(cURI)
+	s := sinkFromHandle(userData)
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	cb := s.onStreamStart
+	s.mu.Unlock()
+	if cb != nil {
+		go cb(uri)
+	}
+}
+
 func (s *windowsAudioSink) PlayURI(uri string) {
 	cs := C.CString(uri)
 	defer C.free(unsafe.Pointer(cs))
@@ -95,9 +112,24 @@ func (s *windowsAudioSink) PlayURI(uri string) {
 	}
 }
 
-func (s *windowsAudioSink) SetNextURI(_ string)          {}
-func (s *windowsAudioSink) OnStreamStart(_ func(string)) {}
+func (s *windowsAudioSink) SetNextURI(uri string) {
+	var cs *C.char
+	if uri != "" {
+		cs = C.CString(uri)
+		defer C.free(unsafe.Pointer(cs))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle != nil {
+		C.vibez_winsink_set_next_uri(s.handle, cs)
+	}
+}
 
+func (s *windowsAudioSink) OnStreamStart(fn func(string)) {
+	s.mu.Lock()
+	s.onStreamStart = fn
+	s.mu.Unlock()
+}
 func (s *windowsAudioSink) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
