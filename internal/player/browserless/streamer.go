@@ -497,30 +497,10 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 		segURL = st.baseURI + seg.uri
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
+	segData, stage, err := fetchSegmentWithRetry(ctx, client, segURL, seg.offset, seg.length)
 	if err != nil {
-		return nil, "build request", err
+		return nil, stage, err
 	}
-	if seg.length > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.offset, seg.offset+seg.length-1))
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, "fetch", err
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		_ = resp.Body.Close()
-		return nil, "fetch", fmt.Errorf("status %s", resp.Status)
-	}
-
-	segData, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
-		return nil, "read", err
-	}
-
 	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
 		cdmSubs := make([]cdm.Subsample, len(subs))
 		for si, sb := range subs {
@@ -535,6 +515,77 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 		return nil, "decrypt", err
 	}
 	return aacData, "", nil
+}
+
+// segmentRetryBackoffs defines the wait intervals between retry attempts for
+// transient CDN network or 5xx/429 errors when fetching an HLS segment.
+var segmentRetryBackoffs = []time.Duration{
+	200 * time.Millisecond,
+	500 * time.Millisecond,
+}
+
+// fetchSegmentWithRetry downloads one HLS byte-range or segment URL, retrying
+// transient network/read errors and HTTP 429/5xx responses before giving up.
+func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL string, offset, length int64) ([]byte, string, error) {
+	var lastStage string
+	var lastErr error
+
+	for attempt := 0; attempt <= len(segmentRetryBackoffs); attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(segmentRetryBackoffs[attempt-1])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, lastStage, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, segURL, nil)
+		if err != nil {
+			return nil, "build request", err
+		}
+		if length > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			lastStage = "fetch"
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, lastStage, lastErr
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			_ = resp.Body.Close()
+			lastStage = "fetch"
+			lastErr = fmt.Errorf("status %s", resp.Status)
+			// Only retry 408 Request Timeout, 429 Too Many Requests, or 5xx server errors.
+			if resp.StatusCode != http.StatusRequestTimeout &&
+				resp.StatusCode != http.StatusTooManyRequests &&
+				resp.StatusCode < http.StatusInternalServerError {
+				return nil, lastStage, lastErr
+			}
+			continue
+		}
+
+		segData, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastStage = "read"
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, lastStage, lastErr
+			}
+			continue
+		}
+		return segData, "", nil
+	}
+
+	return nil, lastStage, lastErr
 }
 
 // Close terminates the local HTTP stream server.

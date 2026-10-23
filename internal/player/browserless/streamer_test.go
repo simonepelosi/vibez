@@ -119,6 +119,67 @@ func TestHandleStreamServesCachedSegment0WithoutUpstreamFetch(t *testing.T) {
 	}
 }
 
+func TestFetchSegmentWithRetry_RecoversFromTransient502AndEOF(t *testing.T) {
+	origBackoffs := segmentRetryBackoffs
+	segmentRetryBackoffs = []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { segmentRetryBackoffs = origBackoffs })
+
+	var attempts atomic.Int32
+	var gotRange string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		gotRange = r.Header.Get("Range")
+		switch n {
+		case 1:
+			w.WriteHeader(http.StatusBadGateway)
+		case 2:
+			// Simulate mid-body connection drop via Content-Length mismatch.
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("short"))
+		default:
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("recovered-segment-payload"))
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	data, stage, err := fetchSegmentWithRetry(context.Background(), upstream.Client(), upstream.URL+"/seg.mp4", 100, 25)
+	if err != nil {
+		t.Fatalf("fetchSegmentWithRetry failed: stage=%q err=%v", stage, err)
+	}
+	if string(data) != "recovered-segment-payload" {
+		t.Errorf("data = %q, want %q", string(data), "recovered-segment-payload")
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Errorf("attempts = %d, want 3", got)
+	}
+	if gotRange != "bytes=100-124" {
+		t.Errorf("Range header = %q, want %q", gotRange, "bytes=100-124")
+	}
+}
+
+func TestFetchSegmentWithRetry_DoesNotRetryPermanent403(t *testing.T) {
+	origBackoffs := segmentRetryBackoffs
+	segmentRetryBackoffs = []time.Duration{5 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { segmentRetryBackoffs = origBackoffs })
+
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(upstream.Close)
+
+	_, stage, err := fetchSegmentWithRetry(context.Background(), upstream.Client(), upstream.URL+"/seg.mp4", 0, 0)
+	if err == nil || stage != "fetch" {
+		t.Fatalf("expected fetch error on 403, got stage=%q err=%v", stage, err)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1 (403 must not be retried)", got)
+	}
+}
+
 func TestStreamIDFromURL(t *testing.T) {
 	got := streamIDFromURL("http://127.0.0.1:4321/stream/123-1700000000/abcdef.aac")
 	if got != "123-1700000000" {
