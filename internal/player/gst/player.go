@@ -94,11 +94,14 @@ typedef struct {
 static GType vibez_aac_parse_get_type(void);
 G_DEFINE_TYPE(VibezAacParse, vibez_aac_parse, GST_TYPE_ELEMENT)
 
+// ADTS only. qtdemux hands decodebin3 raw framed AAC for local .m4a files;
+// ranked above aacparse, this parser would otherwise be plugged after it,
+// find no syncwords, and drop every buffer.
 static GstStaticPadTemplate vibez_aac_sink_tmpl = GST_STATIC_PAD_TEMPLATE(
     "sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS("audio/mpeg, mpegversion=(int){ 2, 4 }")
+    GST_STATIC_CAPS("audio/mpeg, mpegversion=(int){ 2, 4 }, stream-format=(string)adts")
 );
 
 static GstStaticPadTemplate vibez_aac_src_tmpl = GST_STATIC_PAD_TEMPLATE(
