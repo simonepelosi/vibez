@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/provider/apple"
 )
 
 func TestPlayerQueueIndexAdjustments(t *testing.T) {
@@ -478,5 +480,51 @@ func TestEndOfQueue_AppendQueueStartsFirstAppendedTrack(t *testing.T) {
 	}
 	if p.playCtx != nil {
 		p.playCtx()
+	}
+}
+
+// A library song with no catalog equivalent (uploaded or unmatched) cannot be
+// resolved to a catalog ID. Playback then asks Apple for the library ID,
+// which comes back unavailable, so the failed lookup must be logged or the
+// skip has no visible cause.
+func TestPlayLogsLibraryResolveFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/library/songs/i.uploaded" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"i.uploaded","type":"library-songs","attributes":{"name":"Home Demo","playParams":{"id":"i.uploaded","kind":"song","isLibrary":true}}}]}`))
+	}))
+	defer srv.Close()
+
+	prov := apple.New(&config.Config{ //nolint:gosec // G101: test credentials, not real secrets
+		AppleDeveloperToken: "test-dev-token",
+		AppleUserToken:      "test-user-token",
+		StoreFront:          "us",
+	})
+	prov.SetBaseURL(srv.URL)
+
+	p := &Player{provider: prov, sink: noopSink{}}
+	states := p.bcast.Subscribe()
+	if err := p.SetQueue([]string{"i.uploaded"}); err != nil {
+		t.Fatalf("SetQueue: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case s := <-states:
+			for _, line := range s.Logs {
+				if strings.HasPrefix(line, "[resolve] i.uploaded: ") && strings.Contains(line, "no Apple Music catalog equivalent") {
+					return
+				}
+				if strings.HasPrefix(line, "[resolve] ") {
+					t.Fatalf("unexpected resolve log %q", line)
+				}
+			}
+		case <-deadline:
+			t.Fatal("no [resolve] log for a library song without a catalog ID")
+		}
 	}
 }

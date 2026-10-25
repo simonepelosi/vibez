@@ -593,6 +593,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				title := "track"
 				if s.Track != nil {
 					title = s.Track.Artist + " — " + s.Track.Title
+					if s.Track.Artist == "" && s.Track.Title == "" {
+						title = s.Track.ID // placeholder queued by ID only
+					}
 				}
 				m.appendLog(fmt.Sprintf("[skip] restricted: %s", title))
 				if m.player != nil {
@@ -673,7 +676,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				trackType = "library"
 			}
 			pp := fmt.Sprintf("[playParams] id=%s type=%s", s.Track.ID, trackType)
-			if s.Track.CatalogID != "" {
+			if s.Track.CatalogID != "" && s.Track.CatalogID != s.Track.ID {
 				pp += " catalogId=" + s.Track.CatalogID
 			}
 			m.appendLog(pp)
