@@ -405,6 +405,17 @@ func (p *Player) playTrack(t provider.Track) {
 				tCopy := t
 				p.state.Track = &tCopy
 				p.mu.Unlock()
+			} else if ctx.Err() == nil {
+				// Playback goes on with the library ID, which Apple reports
+				// as unavailable; say why so the skip is diagnosable.
+				reason := "no catalog ID"
+				if err != nil {
+					reason = err.Error()
+				}
+				p.mu.RLock()
+				s := p.state
+				p.mu.RUnlock()
+				p.bcast.SendLog(s, "[resolve] "+catalogID+": "+reason)
 			}
 		}
 
@@ -458,7 +469,7 @@ func (p *Player) playTrack(t provider.Track) {
 				s.SkippedID = skippedID
 				hasMore := len(p.queue) > 1 && (p.idx < len(p.queue)-1 || p.state.RepeatMode == player.RepeatModeAll || p.state.ShuffleMode)
 				p.mu.Unlock()
-				p.bcast.SendLog(s, "[skip] "+skippedID)
+				p.bcast.SendLog(s, "[skip] "+skippedID+": "+err.Error())
 				if hasMore {
 					_ = p.Next()
 				}
