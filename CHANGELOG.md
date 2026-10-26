@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5] — 2026-10-26
+
+### Fixed
+- **Rank `vibezaacparse` above GStreamer `aacparse` for ADTS streams** — prevents `aacparse`'s initial lost-sync mode from dropping early 23 ms frames when `souphttpsrc` reads end mid-header, while restricting `vibezaacparse` sink caps to `stream-format=adts` so local `.m4a` files (`stream-format=raw` from `qtdemux`) continue to play through `aacparse`/`avdec_aac`. Refs #195.
+- **Embed Last.fm API credentials in release builds** — passes `LASTFM_API_KEY` and `LASTFM_API_SECRET` through `.github/workflows/release.yml` and `.goreleaser.yml` `-ldflags` across Linux, macOS, and Windows release archives so `vibez auth lastfm login` works out of the box on prebuilt releases. Closes #198.
+- **Diagnostic logging for skipped / unmatched library tracks** — logs `[resolve]` and the underlying error in `[skip]` when a library track (`i.XXXX`, such as an iCloud uploaded track) has no Apple Music catalog equivalent. Refs #196, #197.
+
 ## [2.0.4] — 2026-10-23
 
 ### Added
@@ -782,7 +789,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.4...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.5...HEAD
+[2.0.5]: https://github.com/simonepelosi/vibez/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/simonepelosi/vibez/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/simonepelosi/vibez/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/simonepelosi/vibez/compare/v2.0.1...v2.0.2
