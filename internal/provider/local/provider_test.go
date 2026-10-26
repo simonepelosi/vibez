@@ -25,6 +25,9 @@ func newTestProvider(t *testing.T) *local.Provider {
 		"Artist1 - Album1 - Track2.flac",
 		"Artist2 - Album2 - Track1.m4a",
 		"Artist2 - Album2 - Track2.ogg",
+		"Artist3 - Album3 - Track1.wav",
+		"Artist3 - Album3 - Track2.aiff",
+		"Artist3 - Album3 - Track3.aif",
 		"ignored.txt",
 		"ignored.pdf",
 	}

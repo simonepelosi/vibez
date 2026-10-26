@@ -92,7 +92,8 @@ static void audioQueueCallback(
 
 struct Session : public std::enable_shared_from_this<Session> {
     static constexpr int kNumBuffers = 6;
-    static constexpr UInt32 kBufferSize = 32768;
+    // 8192 stereo float32 frames, about 186 ms at 44.1 kHz per buffer.
+    static constexpr UInt32 kBufferSize = 65536;
     static constexpr size_t kMaxPacketsPerBuffer = 512;
 
     std::atomic<bool> cancelled{false};
@@ -261,10 +262,10 @@ static void onPropertyFound(
             AudioStreamBasicDescription pcm{};
             pcm.mSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44100.0;
             pcm.mFormatID = kAudioFormatLinearPCM;
-            pcm.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            pcm.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
             pcm.mChannelsPerFrame = asbd.mChannelsPerFrame > 0 ? asbd.mChannelsPerFrame : 2;
-            pcm.mBitsPerChannel = 16;
-            pcm.mBytesPerFrame = pcm.mChannelsPerFrame * 2;
+            pcm.mBitsPerChannel = 32;
+            pcm.mBytesPerFrame = pcm.mChannelsPerFrame * sizeof(float);
             pcm.mFramesPerPacket = 1;
             pcm.mBytesPerPacket = pcm.mBytesPerFrame;
             ses->pcmAsbd = pcm;
@@ -389,7 +390,7 @@ static void onPacketsParsed(
         for (int b = 0; b < kBands; ++b) eqOn = eqOn || ses->eqBank[b].active;
     }
 
-    int16_t pcmFrameBuf[4096];
+    float pcmFrameBuf[4096];
 
     for (UInt32 i = 0; i < inNumberPackets; ++i) {
         if (ses->cancelled.load()) return;
@@ -424,7 +425,7 @@ static void onPacketsParsed(
             ioFrames -= cut;
             if (ioFrames == 0) continue;
         }
-        int16_t* pcmStart = pcmFrameBuf + startFrame * static_cast<UInt32>(channels);
+        float* pcmStart = pcmFrameBuf + startFrame * static_cast<UInt32>(channels);
         const UInt32 pcmBytes = ioFrames * ses->pcmAsbd.mBytesPerFrame;
         if (eqOn) {
             for (UInt32 f = 0; f < ioFrames; ++f) {
@@ -433,9 +434,9 @@ static void onPacketsParsed(
                     for (int b = 0; b < kBands; ++b) {
                         if (ses->eqBank[b].active) x = ses->eqBank[b].run(x, c);
                     }
-                    if (x > 32767.0) x = 32767.0;
-                    if (x < -32768.0) x = -32768.0;
-                    pcmStart[f * channels + c] = static_cast<int16_t>(x);
+                    if (x > 1.0) x = 1.0;
+                    if (x < -1.0) x = -1.0;
+                    pcmStart[f * channels + c] = static_cast<float>(x);
                 }
             }
         }
