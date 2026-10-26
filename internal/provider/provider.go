@@ -39,6 +39,10 @@ type Track struct {
 	IsAppleDigitalMaster bool           // true when mastered as an Apple Digital Master
 	ReleaseDate          string         // ISO release date ("YYYY-MM-DD" or "YYYY")
 	ArtworkPalette       ArtworkPalette // per-artwork color palette from Apple Music
+	// AudioVariants lists the formats Apple Music holds for the song, such as
+	// "lossless", "hi-res-lossless" or "dolby-atmos". It describes the
+	// catalog, not what vibez outputs: streaming is always AAC.
+	AudioVariants []string
 }
 
 // ReleaseYear returns the 4-digit release year from ReleaseDate, or "" if unavailable.

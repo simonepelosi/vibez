@@ -169,13 +169,22 @@ func (a *AppleProvider) do(req *http.Request, dst any) error {
 	}()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("%s", formatAPIError(resp.StatusCode, resp.Status, body))
+		return &apiError{status: resp.StatusCode, msg: formatAPIError(resp.StatusCode, resp.Status, body)}
 	}
 	if dst == nil || len(body) == 0 {
 		return nil
 	}
 	return json.Unmarshal(body, dst)
 }
+
+// apiError is an HTTP error response from the Apple Music API. It keeps the
+// status code so callers can branch on it without parsing the message.
+type apiError struct {
+	status int
+	msg    string
+}
+
+func (e *apiError) Error() string { return e.msg }
 
 func formatAPIError(statusCode int, status string, body []byte) string {
 	msg := fmt.Sprintf("apple music api %s", status)
@@ -256,6 +265,10 @@ type songAttributes struct {
 	ContentRating        string      `json:"contentRating"`
 	IsAppleDigitalMaster bool        `json:"isAppleDigitalMaster"`
 	ReleaseDate          string      `json:"releaseDate"`
+	// AudioVariants arrives only when the request asks for
+	// extend=audioVariants. AudioTraits is amp-api's name for the same data.
+	AudioVariants []string `json:"audioVariants"`
+	AudioTraits   []string `json:"audioTraits"`
 }
 
 type songResource struct {
@@ -388,11 +401,95 @@ func toTrack(s songResource) provider.Track {
 		IsAppleDigitalMaster: s.Attributes.IsAppleDigitalMaster,
 		ReleaseDate:          strings.TrimSpace(provider.Clean(s.Attributes.ReleaseDate)),
 		ArtworkPalette:       s.Attributes.Artwork.palette(),
+		AudioVariants:        normalizeAudioVariants(s.Attributes.AudioVariants, s.Attributes.AudioTraits),
 	}
 	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
 		t.CatalogID = s.Attributes.PlayParams.CatalogID
 	}
 	return t
+}
+
+// normalizeAudioVariants merges the audioVariants and audioTraits lists into
+// one lowercase, de-duplicated list in audioVariants' vocabulary, so callers
+// need not care which host answered. amp-api says "atmos" where the standard
+// API says "dolby-atmos".
+func normalizeAudioVariants(lists ...[]string) []string {
+	var out []string
+	for _, list := range lists {
+		for _, v := range list {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v == "atmos" {
+				v = "dolby-atmos"
+			}
+			if v != "" && !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// audioVariantsExtend is the extend value that adds audioVariants to catalog
+// song resources on api.music.apple.com. That host rejects amp-api's
+// "audioTraits" with a 400. Library resources carry no audio variants, so only
+// catalog song requests ask for it.
+const audioVariantsExtend = "audioVariants"
+
+// withAudioVariants returns endpoint with extend=audioVariants set. An
+// endpoint that does not parse is returned unchanged.
+func withAudioVariants(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	q := u.Query()
+	q.Set("extend", audioVariantsExtend)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// withoutAudioVariants undoes withAudioVariants.
+func withoutAudioVariants(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	q := u.Query()
+	q.Del("extend")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func hasAudioVariants(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	return err == nil && u.Query().Get("extend") == audioVariantsExtend
+}
+
+// isBadRequest reports whether err is an HTTP 400 from do.
+func isBadRequest(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.status == http.StatusBadRequest
+}
+
+// getExtended fetches endpoint into dst. If the request asked for
+// extend=audioVariants and Apple answered 400, it retries once without the
+// extension, so an endpoint that refuses it costs the format badge rather
+// than the whole call. It returns the endpoint that was used last.
+func (a *AppleProvider) getExtended(ctx context.Context, build func(context.Context, string, string) (*http.Request, error), endpoint string, dst any) (string, error) {
+	req, err := build(ctx, http.MethodGet, endpoint)
+	if err != nil {
+		return endpoint, err
+	}
+	err = a.do(req, dst)
+	if !isBadRequest(err) || !hasAudioVariants(endpoint) {
+		return endpoint, err
+	}
+	endpoint = withoutAudioVariants(endpoint)
+	req, err = build(ctx, http.MethodGet, endpoint)
+	if err != nil {
+		return endpoint, err
+	}
+	return endpoint, a.do(req, dst)
 }
 
 func toAlbum(r albumResource) provider.Album {
@@ -481,15 +578,10 @@ func (a *AppleProvider) Search(ctx context.Context, query string) (*provider.Sea
 			catSongsCh <- catSongsOut{err: err}
 			return
 		}
-		ep := fmt.Sprintf("/catalog/%s/search?term=%s&types=songs&limit=25",
-			sf, url.QueryEscape(query))
-		req, err := a.newRequest(ctx, http.MethodGet, ep)
-		if err != nil {
-			catSongsCh <- catSongsOut{err: err}
-			return
-		}
+		ep := withAudioVariants(fmt.Sprintf("/catalog/%s/search?term=%s&types=songs&limit=25",
+			sf, url.QueryEscape(query)))
 		var resp searchResponse
-		if err := a.do(req, &resp); err != nil {
+		if _, err := a.getExtended(ctx, a.newRequest, ep, &resp); err != nil {
 			catSongsCh <- catSongsOut{err: err}
 			return
 		}
@@ -620,14 +712,12 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 		reqBuilder = a.newCatalogRequest
 	}
 
-	req, err := reqBuilder(ctx, http.MethodGet, baseEndpoint)
+	var firstPage paginatedSongs
+	baseEndpoint, err := a.getExtended(ctx, reqBuilder, baseEndpoint, &firstPage)
 	if err != nil {
 		return nil, err
 	}
-	var firstPage paginatedSongs
-	if err := a.do(req, &firstPage); err != nil {
-		return nil, err
-	}
+	extended := hasAudioVariants(baseEndpoint)
 
 	total := firstPage.Meta.Total
 	if total == 0 {
@@ -640,6 +730,10 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 		}
 		endpoint := firstPage.Next
 		for endpoint != "" {
+			// Apple's next links need not repeat the request's extend.
+			if extended {
+				endpoint = withAudioVariants(endpoint)
+			}
 			req, err := reqBuilder(ctx, http.MethodGet, endpoint)
 			if err != nil {
 				return nil, err
@@ -994,7 +1088,7 @@ func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]p
 	if err != nil {
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
 	}
-	endpoint := fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, url.PathEscape(albumID))
+	endpoint := withAudioVariants(fmt.Sprintf("/catalog/%s/albums/%s/tracks?limit=100", sf, url.PathEscape(albumID)))
 	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
@@ -1048,7 +1142,7 @@ func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID
 	if err != nil {
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
 	}
-	endpoint := fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, url.PathEscape(playlistID))
+	endpoint := withAudioVariants(fmt.Sprintf("/catalog/%s/playlists/%s/tracks?limit=100", sf, url.PathEscape(playlistID)))
 	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
@@ -1599,15 +1693,11 @@ func (a *AppleProvider) GetCatalogTracks(ctx context.Context, ids []string) ([]p
 	if err != nil {
 		return nil, err
 	}
-	ep := fmt.Sprintf("/catalog/%s/songs?ids=%s", sf, url.QueryEscape(strings.Join(ids, ",")))
-	req, err := a.newRequest(ctx, http.MethodGet, ep)
-	if err != nil {
-		return nil, err
-	}
+	ep := withAudioVariants(fmt.Sprintf("/catalog/%s/songs?ids=%s", sf, url.QueryEscape(strings.Join(ids, ","))))
 	var resp struct {
 		Data []songResource `json:"data"`
 	}
-	if err := a.do(req, &resp); err != nil {
+	if _, err := a.getExtended(ctx, a.newRequest, ep, &resp); err != nil {
 		return nil, err
 	}
 	tracks := make([]provider.Track, len(resp.Data))
