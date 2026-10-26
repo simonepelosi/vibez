@@ -94,11 +94,14 @@ typedef struct {
 static GType vibez_aac_parse_get_type(void);
 G_DEFINE_TYPE(VibezAacParse, vibez_aac_parse, GST_TYPE_ELEMENT)
 
+// ADTS only. qtdemux hands decodebin3 raw framed AAC for local .m4a files;
+// ranked above aacparse, this parser would otherwise be plugged after it,
+// find no syncwords, and drop every buffer.
 static GstStaticPadTemplate vibez_aac_sink_tmpl = GST_STATIC_PAD_TEMPLATE(
     "sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
-    GST_STATIC_CAPS("audio/mpeg, mpegversion=(int){ 2, 4 }")
+    GST_STATIC_CAPS("audio/mpeg, mpegversion=(int){ 2, 4 }, stream-format=(string)adts")
 );
 
 static GstStaticPadTemplate vibez_aac_src_tmpl = GST_STATIC_PAD_TEMPLATE(
@@ -658,10 +661,13 @@ static void vibez_gst_state_free(VibezGstState* st) {
 static void vibez_gst_init(void) {
     if (!gst_is_initialized())
         gst_init(NULL, NULL);
-    // Register embedded fallback elements with rank MARGINAL + 1 so system
-    // plugins (if installed) are used first, and our embedded implementations
-    // seamlessly take over when gst-plugins-good (souphttpsrc / aacparse) is absent.
-    gst_element_register(NULL, "vibezaacparse", GST_RANK_MARGINAL + 1, vibez_aac_parse_get_type());
+    // vibezaacparse outranks aacparse (PRIMARY + 1). aacparse stays in
+    // lost-sync mode after a stream starts and drops a whole frame whenever a
+    // read ends a few bytes into the next ADTS header, which loses several
+    // 23 ms frames at the start of every track. Our stream always comes from
+    // our own server as clean ADTS, which vibezaacparse frames exactly.
+    gst_element_register(NULL, "vibezaacparse", GST_RANK_PRIMARY + 2, vibez_aac_parse_get_type());
+    // vibezhttpsrc only takes over when souphttpsrc (gst-plugins-good) is absent.
     gst_element_register(NULL, "vibezhttpsrc", GST_RANK_MARGINAL + 1, vibez_http_src_get_type());
 }
 
