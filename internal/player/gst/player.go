@@ -562,9 +562,10 @@ static void vibez_http_src_init(VibezHttpSrc* self) {
 // on top; that part varies by decoder and is left alone.
 #define VIBEZ_AAC_PRIMING 2112
 
-// A start_seg stream begins mid-track (a seek), past the priming.
+// A start_seg stream begins mid-track (a seek), past the priming. Only the
+// .aac streams carry AAC priming; library uploads are served as .mp3 or .m4a.
 static gboolean vibez_uri_is_whole_track(const gchar* uri) {
-    return uri && !strstr(uri, "start_seg=");
+    return uri && strstr(uri, ".aac") && !strstr(uri, "start_seg=");
 }
 
 // on_filter_event moves each whole-track stream's segment start past the

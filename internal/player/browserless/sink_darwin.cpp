@@ -35,8 +35,15 @@ constexpr double kBandHz[kBands] = {29, 59, 119, 237, 474, 947, 1889, 3770, 7523
 constexpr double kBandQ = 1.4;
 constexpr UInt32 kAACPrimingFrames = 2112;
 
+// Only the .aac streams carry AAC priming; library uploads are .mp3 or .m4a.
 static bool isWholeTrackURI(const std::string& url) {
-    return url.find("start_seg=") == std::string::npos;
+    return url.find(".aac") != std::string::npos && url.find("start_seg=") == std::string::npos;
+}
+
+static AudioFileTypeID fileTypeHint(const std::string& url) {
+    if (url.find(".mp3") != std::string::npos) return kAudioFileMP3Type;
+    if (url.find(".m4a") != std::string::npos) return kAudioFileM4AType;
+    return kAudioFileAAC_ADTSType;
 }
 struct Biquad {
     double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
@@ -604,7 +611,7 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
         ses.get(),
         onPropertyFound,
         onPacketsParsed,
-        kAudioFileAAC_ADTSType,
+        fileTypeHint(url),
         &ses->streamID
     );
     if (err != noErr) {

@@ -278,3 +278,84 @@ func buildFakeCRX3(t *testing.T, name string, payload []byte) []byte {
 	crx.Write(zipBuf.Bytes())
 	return crx.Bytes()
 }
+
+func TestFetchRawHeadReadsSizeFromContentRange(t *testing.T) {
+	body := bytes.Repeat([]byte{0xab}, 100000)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(body))
+	}))
+	t.Cleanup(upstream.Close)
+
+	head, size, err := fetchRawHead(context.Background(), upstream.URL+"/upload.mp3")
+	if err != nil {
+		t.Fatalf("fetchRawHead: %v", err)
+	}
+	if size != int64(len(body)) {
+		t.Errorf("size = %d, want %d", size, len(body))
+	}
+	if len(head) != 65536 {
+		t.Errorf("head length = %d, want 65536", len(head))
+	}
+}
+
+func TestHandleStreamPassesRawUploadThrough(t *testing.T) {
+	body := []byte("0123456789abcdefghij")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(body))
+	}))
+	t.Cleanup(upstream.Close)
+
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID: "i.abc",
+				segments: []segmentRef{
+					{uri: upstream.URL, offset: 0, length: 8, duration: 4},
+					{uri: upstream.URL, offset: 8, length: 8, duration: 4},
+					{uri: upstream.URL, offset: 16, length: 4, duration: 2},
+				},
+				raw:       true,
+				rawFormat: rawFormat{ext: ".mp3", contentType: "audio/mpeg", seekable: true},
+			},
+		},
+	}
+
+	for _, tc := range []struct{ query, want string }{
+		{"", string(body)},
+		{"?start_seg=1", string(body[8:])},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/stream/s1/tok.mp3"+tc.query, nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		rr := httptest.NewRecorder()
+		s.handleStream(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%q: status = %d, want 200", tc.query, rr.Code)
+		}
+		if got := rr.Body.String(); got != tc.want {
+			t.Errorf("%q: body = %q, want %q", tc.query, got, tc.want)
+		}
+		if ct := rr.Header().Get("Content-Type"); ct != "audio/mpeg" {
+			t.Errorf("%q: Content-Type = %q, want audio/mpeg", tc.query, ct)
+		}
+	}
+}
+
+func TestSeekTargetRefusesMidFileSeekInMP4Upload(t *testing.T) {
+	s := &StreamServer{
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID:   "i.abc",
+				segments:  []segmentRef{{uri: "https://example.invalid/upload.m4a", length: 1 << 20}},
+				raw:       true,
+				rawFormat: rawFormat{ext: ".m4a", contentType: "audio/mp4"},
+			},
+		},
+	}
+	if _, _, ok := s.SeekTarget("s1", 30*time.Second); ok {
+		t.Error("SeekTarget(30s) on an MP4 upload = ok, want refused")
+	}
+	if idx, off, ok := s.SeekTarget("s1", 0); !ok || idx != 0 || off != 0 {
+		t.Errorf("SeekTarget(0) = (%d, %v, %v), want (0, 0, true)", idx, off, ok)
+	}
+}

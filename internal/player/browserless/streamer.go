@@ -38,6 +38,11 @@ type trackStream struct {
 	totalDur  time.Duration
 	createdAt time.Time
 
+	// raw marks an unencrypted library upload: segments are byte ranges of
+	// the file itself and pass through without decryption.
+	raw       bool
+	rawFormat rawFormat
+
 	seg0Mu  sync.Mutex
 	seg0AAC []byte
 }
@@ -116,6 +121,11 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
 // parses the HLS manifest, and returns a local HTTP streaming URL and total duration.
 func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer256k bool) (string, time.Duration, error) {
+	// A library ID reaches here only when it has no catalog song.
+	if strings.HasPrefix(trackID, "i.") {
+		return s.prepareRawTrack(ctx, trackID)
+	}
+
 	// 1. Fetch playback info via MZPlay
 	info, err := s.licClient.FetchPlaybackInfo(ctx, trackID, prefer256k)
 	if err != nil {
@@ -294,6 +304,98 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 		createdAt: time.Now(),
 	}
 
+	return s.register(ctx, streamID, st, ".aac"), totalDur, nil
+}
+
+// rawSegmentBytes is the size of each byte range an upload is split into.
+// About ten seconds of a 192 kbps MP3, like an HLS segment.
+const rawSegmentBytes = 256 << 10
+
+// prepareRawTrack serves a library upload, which Apple hands out as a plain
+// file with no DRM. The file is split into byte-range segments so retries,
+// segment 0 warming and start_seg seeking work as they do for HLS.
+func (s *StreamServer) prepareRawTrack(ctx context.Context, libraryID string) (string, time.Duration, error) {
+	assetURL, err := s.licClient.FetchLibraryAssetURL(ctx, libraryID)
+	if err != nil {
+		return "", 0, fmt.Errorf("fetch playback info: %w", err)
+	}
+
+	head, size, err := fetchRawHead(ctx, assetURL)
+	if err != nil {
+		return "", 0, fmt.Errorf("fetch upload: %w", err)
+	}
+	format, ok := sniffRawFormat(head, size)
+	if !ok {
+		return "", 0, fmt.Errorf("%w: unsupported upload format (library item %s)", license.ErrTrackUnavailable, libraryID)
+	}
+
+	var segments []segmentRef
+	if !format.seekable {
+		// One segment: an MP4 cannot be cut, and its whole file goes out as is.
+		segments = []segmentRef{{uri: assetURL, offset: 0, length: size}}
+	} else {
+		for off := int64(0); off < size; off += rawSegmentBytes {
+			n := min(int64(rawSegmentBytes), size-off)
+			segments = append(segments, segmentRef{
+				uri:      assetURL,
+				offset:   off,
+				length:   n,
+				duration: format.duration.Seconds() * float64(n) / float64(size),
+			})
+		}
+	}
+
+	streamID := fmt.Sprintf("%s-%d", libraryID, time.Now().UnixNano())
+	st := &trackStream{
+		trackID:   libraryID,
+		segments:  segments,
+		totalDur:  format.duration,
+		createdAt: time.Now(),
+		raw:       true,
+		rawFormat: format,
+	}
+	return s.register(ctx, streamID, st, format.ext), format.duration, nil
+}
+
+// fetchRawHead reads the first 64 KiB of an upload, enough to identify it,
+// and its total size.
+func fetchRawHead(ctx context.Context, assetURL string) ([]byte, int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Range", "bytes=0-65535")
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var size int64
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		// Content-Range: bytes 0-65535/<total>
+		if _, total, ok := strings.Cut(resp.Header.Get("Content-Range"), "/"); ok {
+			size, _ = strconv.ParseInt(total, 10, 64)
+		}
+	case http.StatusOK:
+		size = resp.ContentLength
+	default:
+		return nil, 0, fmt.Errorf("status %s", resp.Status)
+	}
+	if size <= 0 {
+		return nil, 0, fmt.Errorf("unknown size")
+	}
+	head, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if err != nil {
+		return nil, 0, err
+	}
+	return head, size, nil
+}
+
+// register stores a prepared stream and returns its loopback URL. The sinks
+// apply the AAC priming trim only to .aac streams.
+func (s *StreamServer) register(ctx context.Context, streamID string, st *trackStream, ext string) string {
 	s.mu.Lock()
 	// Prune inactive/stale streams older than 2 hours
 	now := time.Now()
@@ -305,10 +407,10 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	s.streams[streamID] = st
 	s.mu.Unlock()
 
-	// Warm decrypted segment 0 asynchronously so both initial playback and
-	// seek-to-start (0:00) can write the first ~10s of ADTS frames immediately
+	// Warm segment 0 asynchronously so both initial playback and
+	// seek-to-start (0:00) can write the first ~10s immediately
 	// without waiting for an upstream CDN round-trip.
-	if len(segments) > 0 && s.cdmEngine != nil {
+	if len(st.segments) > 0 && (st.raw || s.cdmEngine != nil) {
 		go func() {
 			warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
@@ -316,8 +418,7 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 		}()
 	}
 
-	streamURL := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s.aac", s.port, streamID, s.authToken)
-	return streamURL, totalDur, nil
+	return fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s%s", s.port, streamID, s.authToken, ext)
 }
 
 // streamIDFromURL returns the stream ID a PrepareTrack URL carries.
@@ -334,6 +435,9 @@ func (s *StreamServer) SeekTarget(streamID string, target time.Duration) (int, t
 	st, ok := s.streams[streamID]
 	s.mu.RUnlock()
 	if !ok || len(st.segments) == 0 {
+		return 0, 0, false
+	}
+	if st.raw && !st.rawFormat.seekable && target > 0 {
 		return 0, 0, false
 	}
 	if target <= 0 {
@@ -373,7 +477,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Path format: /stream/{streamID}/{token}.aac
+	// Path format: /stream/{streamID}/{token}.{aac,mp3,m4a}
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
 	parts := strings.SplitN(path, "/", 2)
 	if len(parts) != 2 {
@@ -382,7 +486,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	streamID := parts[0]
 	filePart := parts[1]
-	token := strings.TrimSuffix(filePart, ".aac")
+	token, _, _ := strings.Cut(filePart, ".")
 	if token != s.authToken {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -416,7 +520,11 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "audio/aac")
+	contentType := "audio/aac"
+	if st.raw {
+		contentType = st.rawFormat.contentType
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
 
@@ -500,6 +608,9 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 	segData, stage, err := fetchSegmentWithRetry(ctx, client, segURL, seg.offset, seg.length)
 	if err != nil {
 		return nil, stage, err
+	}
+	if st.raw {
+		return segData, "", nil
 	}
 	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
 		cdmSubs := make([]cdm.Subsample, len(subs))
