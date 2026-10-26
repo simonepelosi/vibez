@@ -34,9 +34,9 @@ lastfm_api_secret in that file first (obtain them from https://www.last.fm/api/a
 		lastfm.ApplyEmbedded(cfg)
 
 		if cfg.LastfmAPIKey == "" || cfg.LastfmAPISecret == "" {
-			return fmt.Errorf(`last.fm API credentials are not available.
+			return fmt.Errorf(`last.fm API credentials are not configured.
 
-If you built vibez from source, register an application at
+Register a Last.fm API application at
   https://www.last.fm/api/account/create
 and add to your vibez config file:
   "lastfm_api_key":    "<your API key>",
@@ -100,9 +100,9 @@ var lastfmStatusCmd = &cobra.Command{
 		lastfm.ApplyEmbedded(cfg)
 
 		switch {
-		case cfg.LastfmAPIKey == "":
-			fmt.Println("Last.fm: not configured (no API key).")
-			fmt.Println("Run 'vibez auth lastfm login' to connect your account.")
+		case cfg.LastfmAPIKey == "" || cfg.LastfmAPISecret == "":
+			fmt.Println("Last.fm: not configured (no API credentials).")
+			fmt.Println("Set lastfm_api_key and lastfm_api_secret in your config file, then run 'vibez auth lastfm login'.")
 		case cfg.LastfmSessionKey == "":
 			fmt.Println("Last.fm: API credentials available, but not authenticated.")
 			fmt.Println("Run 'vibez auth lastfm login' to connect your account.")

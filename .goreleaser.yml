@@ -15,6 +15,8 @@ builds:
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiKey={{ .Env.LASTFM_API_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiSecret={{ .Env.LASTFM_API_SECRET }}'
     env:
       - CGO_ENABLED=1
       - GOTOOLCHAIN=local
@@ -38,6 +40,8 @@ builds:
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiKey={{ .Env.LASTFM_API_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiSecret={{ .Env.LASTFM_API_SECRET }}'
     env:
       - CGO_ENABLED=1
       - GOTOOLCHAIN=local
@@ -69,6 +73,8 @@ builds:
       - -X 'github.com/simone-vibes/vibez/internal/version.Version={{ .Version }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL={{ .Env.VIBEZ_TOKEN_URL }}'
       - -X 'github.com/simone-vibes/vibez/internal/auth.clientKey={{ .Env.VIBEZ_CLIENT_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiKey={{ .Env.LASTFM_API_KEY }}'
+      - -X 'github.com/simone-vibes/vibez/internal/lastfm.apiSecret={{ .Env.LASTFM_API_SECRET }}'
     env:
       - CGO_ENABLED=1
       - CC=x86_64-w64-mingw32-gcc

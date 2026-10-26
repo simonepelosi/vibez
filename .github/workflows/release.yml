@@ -48,6 +48,8 @@ jobs:
         env:
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           VIBEZ_SKIP_LINUX: '1'
           VIBEZ_SKIP_WINDOWS: '1'
           GOTOOLCHAIN: local
@@ -126,5 +128,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
+          LASTFM_API_KEY: ${{ secrets.LASTFM_API_KEY }}
+          LASTFM_API_SECRET: ${{ secrets.LASTFM_API_SECRET }}
           VIBEZ_SKIP_DARWIN: '1'
           GOTOOLCHAIN: local
