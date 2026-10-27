@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.6] — 2026-10-27
+
+### Added
+- **iCloud-uploaded library track playback** — requests unencrypted library assets via `{"universalLibraryId": id, "isLibrary": true}` on `MZPlay.woa/wa/webPlayback` when a library song (`i.XXXX`) has no catalog equivalent, sniffs `.mp3` (with ID3v2 skip and Xing/Info/VBRI/CBR duration calculation) and `.m4a` formats, and streams 256 KiB byte-range segments through `StreamServer` with segment-0 warming, retry, and `start_seg` seeking. Closes #196, refs #199.
+- **Catalog audio variants and active format badge in Now Playing** — requests `extend=audioVariants` on Apple Music catalog song endpoints (with automatic fallback on HTTP 400 and preservation across paginated `next` links) and displays the active output format alongside catalog capabilities (e.g. `AAC 256 (catalog: Hi-Res, Atmos)` for streaming, or `FLAC` / `WAV` / `MP3` for `--local` files). Refs #185, #200.
+- **32-bit float PCM pipeline and WAV/AIFF playback on macOS** — upgrades both the macOS browserless Core Audio sink (`sink_darwin.cpp`) and local player (`player_darwin.go`) from 16-bit integer to 32-bit float (`kAudioFormatFlagsNativeFloatPacked`) at the file's native sample rate (up to 192 kHz) with duration-scaled buffers, and adds `.wav`, `.aiff`, and `.aif` support to `--local` on macOS. Refs #185, #201.
+
+### Fixed
+- **Square album art on terminals that report `0x0` pixel geometry at startup** — re-measures the terminal cell height/width aspect ratio (`artCellAsp`) on every `tea.WindowSizeMsg` so terminals launched alongside `vibez` (such as `foot`) update from the 2.0 fallback once the window is configured. Refs #202.
+- **Scope AAC encoder priming trim to `.aac` streams** — applies the 2112-sample priming trim only to `.aac` URIs across Linux, macOS, and Windows sinks so uploaded `.mp3`/`.m4a` tracks and `--local` files keep their initial 48 ms intact. Refs #199.
+
 ## [2.0.5] — 2026-10-26
 
 ### Fixed
@@ -789,7 +800,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.5...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.6...HEAD
+[2.0.6]: https://github.com/simonepelosi/vibez/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/simonepelosi/vibez/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/simonepelosi/vibez/compare/v2.0.3...v2.0.4
 [2.0.3]: https://github.com/simonepelosi/vibez/compare/v2.0.2...v2.0.3
