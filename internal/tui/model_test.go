@@ -279,6 +279,16 @@ func TestModel_Update_WindowSizeMsg(t *testing.T) {
 	}
 }
 
+func TestModel_Update_WindowSizeMsgRemeasuresCellAspect(t *testing.T) {
+	m := newModel(nil)
+	m.artCellAsp = 2.0 // startup read the fallback before the window had pixels
+	m.measureCellAsp = func() float64 { return 2.43 }
+	m.Update(tea.WindowSizeMsg{Width: 130, Height: 28})
+	if m.artCellAsp != 2.43 {
+		t.Errorf("artCellAsp = %v after resize, want 2.43", m.artCellAsp)
+	}
+}
+
 // --- Update: tickMsg ---
 
 func TestModel_Update_TickMsg(t *testing.T) {
