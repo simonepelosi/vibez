@@ -142,10 +142,14 @@ func TestHiResFilesPlayAtTheirOwnRate(t *testing.T) {
 				t.Errorf("duration = %v, want 2s", s.Track.Duration)
 			}
 
+			// Compare against measured wall time, not the nominal sleep: a busy
+			// CI VM can oversleep by hundreds of milliseconds.
+			start, t0 := s.Position, time.Now()
 			time.Sleep(time.Second)
 			s, _ = p.GetState()
-			if s.Position < 700*time.Millisecond || s.Position > 1300*time.Millisecond {
-				t.Errorf("position after 1s = %v, want about 1s", s.Position)
+			wall := time.Since(t0)
+			if got := s.Position - start; got < wall*7/10 || got > wall*13/10 {
+				t.Errorf("position advanced %v in %v of wall time", got, wall)
 			}
 		})
 	}
