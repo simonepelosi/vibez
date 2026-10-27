@@ -315,6 +315,7 @@ type Model struct {
 	artHTTP          *http.Client
 	supportsArtColor func() bool
 	artCellAsp       float64          // terminal cell height/width ratio, for square art
+	measureCellAsp   func() float64   // re-reads artCellAsp on resize, see cellAspect
 	queueIDs         []string         // current playback queue (for "add to queue")
 	queueTracks      []provider.Track // full track objects parallel to queueIDs
 	queueMiniOffset  int              // scroll offset for the mini-queue in the split view
@@ -410,7 +411,8 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		supportsArtColor: art.SupportsColor,
 		renderArt:        artRenderer(),
 		// Measured cell height/width ratio, so album art renders as a true square.
-		artCellAsp: cellAspect(),
+		artCellAsp:     cellAspect(),
+		measureCellAsp: cellAspect,
 	}
 	if plyr != nil {
 		m.stateCh = plyr.Subscribe()
@@ -544,6 +546,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// A terminal can start us before its window has a size: foot reports
+		// 80x24 with zero pixels for the first few milliseconds, which leaves
+		// the startup measurement at the 2.0 fallback. The resize that follows
+		// carries the real pixel geometry, so measure again.
+		if m.measureCellAsp != nil {
+			m.artCellAsp = m.measureCellAsp()
+		}
 		inner := max(0, m.width-2)
 		contentW := max(0, inner-2)
 		panelH := m.panelHeight()
