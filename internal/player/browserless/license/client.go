@@ -125,6 +125,52 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 	}, nil
 }
 
+// FetchLibraryAssetURL requests the stream for a library item that has no
+// catalog song, such as an iCloud upload. Apple answers with songId -1 and a
+// single flavorless asset: a plain file URL with no DRM, so there is no
+// playlist or license step.
+func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (string, error) {
+	u := "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
+	body, _ := json.Marshal(map[string]any{
+		"universalLibraryId": libraryID,
+		"isLibrary":          true,
+	})
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("webPlayback request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		raw, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+	}
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, string(raw))
+	}
+
+	var result struct {
+		SongList []struct {
+			Assets []Asset `json:"assets"`
+		} `json:"songList"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decoding webPlayback response: %w", err)
+	}
+	if len(result.SongList) == 0 || len(result.SongList[0].Assets) == 0 || result.SongList[0].Assets[0].URL == "" {
+		return "", fmt.Errorf("%w (library item %s)", ErrTrackUnavailable, libraryID)
+	}
+	return result.SongList[0].Assets[0].URL, nil
+}
+
 // FetchServerCertificate downloads Apple's Widevine service certificate.
 func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]byte, error) {
 	if certURL == "" {

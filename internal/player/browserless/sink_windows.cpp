@@ -41,8 +41,9 @@ constexpr double kBandQ = 1.4;
 constexpr int kNumBuffers = 8;
 constexpr size_t kAACPrimingFrames = 2112;
 
+// Only the .aac streams carry AAC priming; library uploads are .mp3 or .m4a.
 bool isWholeTrackURI(const std::string& u) {
-    return u.find("start_seg=") == std::string::npos;
+    return u.find(".aac") != std::string::npos && u.find("start_seg=") == std::string::npos;
 }
 // Media Foundation is resolved at run time instead of linked in. On Windows N
 // editions without the Media Feature Pack mfplat.dll and mfreadwrite.dll do not
