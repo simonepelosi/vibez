@@ -72,3 +72,85 @@ func TestSwitchNearEndOfTrack(t *testing.T) {
 		_ = p.Next()
 	}
 }
+
+// writePCM writes frames of 24-bit stereo silence at rate as a WAV or AIFF
+// file, chosen by the path's extension.
+func writePCM(t *testing.T, path string, rate uint32, frames uint32) {
+	t.Helper()
+	data := frames * 6
+	var buf bytes.Buffer
+	if filepath.Ext(path) == ".wav" {
+		for _, v := range []any{
+			[4]byte{'R', 'I', 'F', 'F'}, uint32(36 + data),
+			[4]byte{'W', 'A', 'V', 'E'}, [4]byte{'f', 'm', 't', ' '},
+			uint32(16), uint16(1), uint16(2), rate, rate * 6, uint16(6), uint16(24),
+			[4]byte{'d', 'a', 't', 'a'}, data,
+		} {
+			_ = binary.Write(&buf, binary.LittleEndian, v)
+		}
+	} else {
+		// AIFF stores the rate as an 80-bit extended float: a biased
+		// exponent, then a 64-bit mantissa with an explicit leading one.
+		exp := 63
+		mant := uint64(rate)
+		for mant&(1<<63) == 0 {
+			mant <<= 1
+			exp--
+		}
+		for _, v := range []any{
+			[4]byte{'F', 'O', 'R', 'M'}, uint32(4 + 26 + 16 + data),
+			[4]byte{'A', 'I', 'F', 'F'}, [4]byte{'C', 'O', 'M', 'M'},
+			uint32(18), uint16(2), frames, uint16(24), uint16(16383 + exp), mant,
+			[4]byte{'S', 'S', 'N', 'D'}, uint32(8 + data), uint32(0), uint32(0),
+		} {
+			_ = binary.Write(&buf, binary.BigEndian, v)
+		}
+	}
+	buf.Write(make([]byte, data))
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHiResFilesPlayAtTheirOwnRate plays 24-bit 96 kHz WAV and AIFF files and
+// checks the reported duration and that the queue's clock keeps to the wall
+// clock. The queue runs at the file's own rate, so a format mismatch between
+// the decoder and the queue would show up as drift.
+func TestHiResFilesPlayAtTheirOwnRate(t *testing.T) {
+	const rate = 96000
+	for _, name := range []string{"hires.wav", "hires.aiff"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			writePCM(t, path, rate, rate*2)
+			id := "local:" + path
+
+			p, err := New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = p.Close() }()
+			p.LoadTracks([]provider.Track{{ID: id}})
+			_ = p.SetQueue([]string{id})
+			s, _ := p.GetState()
+			if s.Error != "" {
+				t.Skipf("no audio output available: %s", s.Error)
+			}
+			if s.Track == nil {
+				t.Fatal("no track playing")
+			}
+			if s.Track.Duration != 2*time.Second {
+				t.Errorf("duration = %v, want 2s", s.Track.Duration)
+			}
+
+			// Compare against measured wall time, not the nominal sleep: a busy
+			// CI VM can oversleep by hundreds of milliseconds.
+			start, t0 := s.Position, time.Now()
+			time.Sleep(time.Second)
+			s, _ = p.GetState()
+			wall := time.Since(t0)
+			if got := s.Position - start; got < wall*7/10 || got > wall*13/10 {
+				t.Errorf("position advanced %v in %v of wall time", got, wall)
+			}
+		})
+	}
+}

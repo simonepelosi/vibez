@@ -7,8 +7,13 @@ package local
 // cannot be acted on.
 const platformName = "macOS"
 
+// ExtAudioFile decodes uncompressed WAV and AIFF natively, at their own bit
+// depth and sample rate.
 var supportedExts = map[string]bool{
 	".mp3":  true,
 	".flac": true,
 	".m4a":  true,
+	".wav":  true,
+	".aiff": true,
+	".aif":  true,
 }

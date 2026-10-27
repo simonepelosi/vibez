@@ -15,8 +15,9 @@ package local
 
 // the buffers in the queue
 #define kNumBuffers 3
-// Buffer size 32KB per buffer (in bytes)
-#define kBufferSize 32768
+// Each buffer holds kBufferSeconds of audio, sized from the file's own rate so
+// a 192 kHz file gets the same headroom against underruns as a 44.1 kHz one.
+#define kBufferSeconds 0.2
 #define kEQBands 10
 
 static const double kEQBandHz[kEQBands] = {29, 59, 119, 237, 474, 947, 1889, 3770, 7523, 15011};
@@ -57,7 +58,8 @@ typedef struct {
 	AudioQueueRef queue;
 	ExtAudioFileRef file;
 	AudioStreamBasicDescription format;
-	AudioQueueBufferRef bufs[3];
+	AudioQueueBufferRef bufs[kNumBuffers];
+	UInt32 bufFrames;
 	vibez_biquad eq[kEQBands];
 	int done;
 	int playing;
@@ -93,22 +95,22 @@ static int vibez_fill_buffer(vibez_audio_state *s, AudioQueueBufferRef buf) {
 
 	ExtAudioFileRead(s->file, &numFrames, &abl);
 	buf->mAudioDataByteSize = numFrames * s->format.mBytesPerFrame;
-	if (numFrames > 0 && s->format.mChannelsPerFrame == 2 && s->format.mBitsPerChannel == 16) {
+	if (numFrames > 0 && s->format.mChannelsPerFrame == 2) {
 		int eqOn = 0;
 		for (int b = 0; b < kEQBands; b++) {
 			if (s->eq[b].active) { eqOn = 1; break; }
 		}
 		if (eqOn) {
-			int16_t *pcm = (int16_t *)buf->mAudioData;
+			float *pcm = (float *)buf->mAudioData;
 			for (UInt32 f = 0; f < numFrames; f++) {
 				for (int c = 0; c < 2; c++) {
 					double x = pcm[f * 2 + c];
 					for (int b = 0; b < kEQBands; b++) {
 						if (s->eq[b].active) x = vibez_biquad_run(&s->eq[b], x, c);
 					}
-					if (x > 32767.0) x = 32767.0;
-					if (x < -32768.0) x = -32768.0;
-					pcm[f * 2 + c] = (int16_t)x;
+					if (x > 1.0) x = 1.0;
+					if (x < -1.0) x = -1.0;
+					pcm[f * 2 + c] = (float)x;
 				}
 			}
 		}
@@ -143,17 +145,32 @@ static vibez_audio_state* vibez_open(const char *uri){
 	CFRelease(url);
 	if(err != noErr) {free(s); return NULL;}
 
-    // Request signed 16-bit stereo PCM at 44100 Hz output.
-	s->format.mSampleRate = 44100.0;
+	// Decode to 32-bit float stereo at the file's own sample rate, so a
+	// 24-bit or hi-res file reaches the EQ and the queue without being
+	// truncated to 16 bits or resampled. CoreAudio converts to the device.
+	AudioStreamBasicDescription fileFormat;
+	UInt32 size = sizeof(fileFormat);
+	double rate = 0;
+	if (ExtAudioFileGetProperty(s->file, kExtAudioFileProperty_FileDataFormat, &size, &fileFormat) == noErr) {
+		rate = fileFormat.mSampleRate;
+	}
+	if (rate <= 0) rate = 44100.0;
+	s->format.mSampleRate = rate;
 	s->format.mFormatID = kAudioFormatLinearPCM;
-	s->format.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+	s->format.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
 	s->format.mChannelsPerFrame = 2;
-	s->format.mBitsPerChannel = 16;
-	s->format.mBytesPerFrame = 4;
+	s->format.mBitsPerChannel = 32;
+	s->format.mBytesPerFrame = 8;
 	s->format.mFramesPerPacket = 1;
-	s->format.mBytesPerPacket = 4;
+	s->format.mBytesPerPacket = 8;
+	s->bufFrames = (UInt32)(rate * kBufferSeconds);
 
-	ExtAudioFileSetProperty(s->file, kExtAudioFileProperty_ClientDataFormat, sizeof(s->format), &s->format);
+	err = ExtAudioFileSetProperty(s->file, kExtAudioFileProperty_ClientDataFormat, sizeof(s->format), &s->format);
+	if(err != noErr){
+		ExtAudioFileDispose(s->file);
+		free(s);
+		return NULL;
+	}
 
 	err = AudioQueueNewOutput(&s->format, vibez_audio_callback, s, NULL, NULL, 0, &s->queue);
 	if(err != noErr){
@@ -167,7 +184,7 @@ static vibez_audio_state* vibez_open(const char *uri){
 static void vibez_start(vibez_audio_state *s){
 	// Pre filling all buffers before starting
 	for(int i=0; i<kNumBuffers; i++){
-		AudioQueueAllocateBuffer(s->queue, kBufferSize, &s->bufs[i]);
+		AudioQueueAllocateBuffer(s->queue, s->bufFrames * s->format.mBytesPerFrame, &s->bufs[i]);
 		if(vibez_fill_buffer(s, s->bufs[i])){
 			s->done = 1;
 			break;
