@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -3407,7 +3408,7 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 }
 
 // enrichTrackFromQueue merges catalog metadata (content rating, digital master,
-// release date, artwork palette, genres) from the queued provider.Track into
+// release date, artwork palette, genres, audio variants) from the queued provider.Track into
 // the player-reported Track, since the JS player bridge only reports playback
 // fields (id, title, artist, album, artworkURL, duration).
 func (m *Model) enrichTrackFromQueue(t *provider.Track) {
@@ -3442,6 +3443,9 @@ func (m *Model) enrichTrackFromQueue(t *provider.Track) {
 	}
 	if !t.ArtworkPalette.HasColors() && qt.ArtworkPalette.HasColors() {
 		t.ArtworkPalette = qt.ArtworkPalette
+	}
+	if len(t.AudioVariants) == 0 {
+		t.AudioVariants = qt.AudioVariants
 	}
 }
 
@@ -3507,20 +3511,70 @@ func (m *Model) renderAlbumMetaLine(t *provider.Track, contentW int, truncate bo
 	elapsed := views.FormatDuration(m.playerState.Position)
 	total := views.FormatDuration(t.Duration)
 
-	var line string
-	if t.IsAppleDigitalMaster {
-		line = styles.NowPlayingAlbum.Render(albumText+" • ") +
-			styles.NowPlayingLabel.Render("✦ Master") +
-			styles.NowPlayingAlbum.Render(" • ") +
-			styles.NowPlayingTime.Render(elapsed+" / "+total)
-	} else {
-		line = styles.NowPlayingAlbum.Render(albumText+" • ") +
-			styles.NowPlayingTime.Render(elapsed+" / "+total)
+	build := func(withFormat bool) string {
+		line := styles.NowPlayingAlbum.Render(albumText + " • ")
+		if t.IsAppleDigitalMaster {
+			line += styles.NowPlayingLabel.Render("✦ Master") + styles.NowPlayingAlbum.Render(" • ")
+		}
+		if output, catalog := formatBadge(t, m.playerState.Bitrate); withFormat && (output != "" || catalog != "") {
+			if output != "" {
+				line += styles.NowPlayingLabel.Render(output)
+			}
+			if catalog != "" {
+				if output != "" {
+					line += styles.NowPlayingAlbum.Render(" ")
+				}
+				line += styles.NowPlayingAlbum.Render("(catalog: " + catalog + ")")
+			}
+			line += styles.NowPlayingAlbum.Render(" • ")
+		}
+		return line + styles.NowPlayingTime.Render(elapsed+" / "+total)
 	}
+	line := build(true)
 	if truncate {
+		// The format badge is the first thing to go on a narrow panel, so
+		// truncation never eats the time instead.
+		if lipgloss.Width(line) > contentW {
+			line = build(false)
+		}
 		line = ansi.Truncate(line, contentW, "…")
 	}
 	return centerStr(line, contentW)
+}
+
+// formatBadge describes the playing track's audio for the Now Playing panel.
+// output is what vibez is playing: the AAC bitrate for streaming, the file's
+// format for a local file. catalog names what Apple Music holds beyond lossy
+// stereo ("Hi-Res", "Lossless", "Atmos"). The two are kept apart because
+// streaming is AAC whatever the catalog holds, and "Lossless" on its own would
+// read as what is coming out of the speakers. Streaming tracks whose catalog
+// entry offers nothing more return no badge: the header already shows the
+// bitrate.
+func formatBadge(t *provider.Track, bitrateKbps int) (output, catalog string) {
+	if t == nil {
+		return "", ""
+	}
+	if path, ok := strings.CutPrefix(t.ID, "local:"); ok {
+		ext := strings.TrimPrefix(filepath.Ext(path), ".")
+		return strings.ToUpper(ext), ""
+	}
+	var parts []string
+	switch {
+	case slices.Contains(t.AudioVariants, "hi-res-lossless"):
+		parts = append(parts, "Hi-Res")
+	case slices.Contains(t.AudioVariants, "lossless"):
+		parts = append(parts, "Lossless")
+	}
+	if slices.Contains(t.AudioVariants, "dolby-atmos") {
+		parts = append(parts, "Atmos")
+	}
+	if len(parts) == 0 {
+		return "", ""
+	}
+	if bitrateKbps > 0 {
+		output = fmt.Sprintf("AAC %d", bitrateKbps)
+	}
+	return output, strings.Join(parts, ", ")
 }
 
 // artRenderer picks the album-art renderer: dithered sextants where the

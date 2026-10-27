@@ -4302,6 +4302,62 @@ func TestNowPlaying_RendersExtendedBadgesAndEnrichesFromQueue(t *testing.T) {
 	}
 }
 
+func TestFormatBadge(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		track           *provider.Track
+		kbps            int
+		output, catalog string
+	}{
+		{"no track", nil, 256, "", ""},
+		{"no variants", &provider.Track{ID: "1"}, 256, "", ""},
+		{"lossy only", &provider.Track{ID: "1", AudioVariants: []string{"lossy-stereo"}}, 256, "", ""},
+		{"lossless", &provider.Track{ID: "1", AudioVariants: []string{"lossy-stereo", "lossless"}}, 256, "AAC 256", "Lossless"},
+		{"hi-res wins over lossless", &provider.Track{ID: "1", AudioVariants: []string{"lossless", "hi-res-lossless"}}, 256, "AAC 256", "Hi-Res"},
+		{"hi-res and atmos", &provider.Track{ID: "1", AudioVariants: []string{"lossless", "hi-res-lossless", "dolby-atmos"}}, 64, "AAC 64", "Hi-Res, Atmos"},
+		{"atmos only", &provider.Track{ID: "1", AudioVariants: []string{"dolby-atmos"}}, 256, "AAC 256", "Atmos"},
+		{"bitrate unknown", &provider.Track{ID: "1", AudioVariants: []string{"lossless"}}, 0, "", "Lossless"},
+		{"local flac", &provider.Track{ID: "local:/music/a.flac"}, 0, "FLAC", ""},
+		{"local file ignores variants", &provider.Track{ID: "local:/music/a.mp3", AudioVariants: []string{"lossless"}}, 256, "MP3", ""},
+	} {
+		output, catalog := formatBadge(tc.track, tc.kbps)
+		if output != tc.output || catalog != tc.catalog {
+			t.Errorf("%s: formatBadge = (%q, %q), want (%q, %q)", tc.name, output, catalog, tc.output, tc.catalog)
+		}
+	}
+}
+
+func TestNowPlaying_FormatBadgeNamesOutputAndCatalog(t *testing.T) {
+	m := newModel(nil)
+	m.queueTracks = []provider.Track{{
+		ID:            "617154366",
+		Title:         "Get Lucky",
+		Artist:        "Daft Punk",
+		Album:         "Random Access Memories",
+		Duration:      4 * time.Minute,
+		AudioVariants: []string{"lossy-stereo", "lossless", "hi-res-lossless", "dolby-atmos"},
+	}}
+	m.queueIDs = []string{"617154366"}
+	updated, _ := m.Update(playerStateMsg{
+		Playing: true,
+		Bitrate: 256,
+		Track:   &provider.Track{ID: "617154366", Title: "Get Lucky", Artist: "Daft Punk", Album: "Random Access Memories", Duration: 4 * time.Minute},
+	})
+	m = updated.(*Model)
+	defer styles.ClearArtworkPalette()
+
+	wide := ansi.Strip(m.renderAlbumMetaLine(m.playerState.Track, 100, true))
+	if !strings.Contains(wide, "AAC 256 (catalog: Hi-Res, Atmos)") {
+		t.Errorf("album line missing format badge: %q", wide)
+	}
+
+	// On a narrow panel the badge goes before the time does.
+	narrow := ansi.Strip(m.renderAlbumMetaLine(m.playerState.Track, 40, true))
+	if strings.Contains(narrow, "AAC") || !strings.Contains(narrow, "/ 4:00") {
+		t.Errorf("narrow album line = %q, want the time and no badge", narrow)
+	}
+}
+
 func TestEnrichTrackFromQueue_DoesNotCrossMatchSameTitleDifferentAlbum(t *testing.T) {
 	m := newModel(nil)
 	m.queueTracks = []provider.Track{
