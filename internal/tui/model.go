@@ -1021,6 +1021,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case searchResultMsg:
+		if msg.query != m.searchQuery {
+			break
+		}
 		if msg.err != nil {
 			m.appendLog(fmt.Sprintf("[search] error: %v", msg.err))
 			m.search.SetResults(nil, false, msg.err)
@@ -1128,11 +1131,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.library.m = views.NewLibrary(msg.Provider)
 		// Re-apply the window size that was stored from the earlier WindowSizeMsg,
 		// since the new inner LibraryModel starts with zero dimensions.
+		m.search = views.NewSearch(msg.Provider)
 		if m.width > 0 {
 			inner := max(0, m.width-2)
-			m.library.SetSize(max(0, inner-2), m.panelHeight())
+			contentW := max(0, inner-2)
+			panelH := m.panelHeight()
+			m.library.SetSize(contentW, panelH)
+			m.search.SetSize(contentW, panelH)
 		}
-		m.search = views.NewSearch(msg.Provider)
+		if m.searchQuery != "" {
+			cmds = append(cmds, m.scheduleSearch(m.searchQuery))
+		}
 		m.appendLog("[engine] backend: " + msg.Backend)
 		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
 		cmds = append(cmds, m.restoreAudioSettings()...)
@@ -1279,8 +1288,6 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 			return nil
 		}
 		m.mode = modeNormal
-		m.searchQuery = ""
-		m.searchCursor = 0
 		return nil
 	case "enter":
 		// Artist: open their albums in place of the results.
@@ -2356,10 +2363,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 	switch k {
 	case "/":
 		m.mode = modeSearch
-		m.searchQuery = ""
-		m.searchCursor = 0
-		m.search.SetState(nil, false, nil)
-
+		m.searchCursor = len([]rune(m.searchQuery))
 	case "j", "down":
 		m.lastKey = ""
 		if len(m.queueTracks) > 0 {
@@ -2415,6 +2419,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 func (m *Model) scheduleSearch(query string) tea.Cmd {
 	if query == "" {
+		m.searchGen++
 		m.search.SetResults(nil, false, nil)
 		return nil
 	}

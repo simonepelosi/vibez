@@ -892,7 +892,7 @@ func TestHandleNormalKey_CapitalLOpensTopLevelLibrary(t *testing.T) {
 	}
 }
 
-func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
+func TestHandleSearchKey_Esc_PreservesQueryAndExitsSearchMode(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
 	m.searchQuery = "test query"
@@ -902,8 +902,8 @@ func TestHandleSearchKey_Esc_ResetsMode(t *testing.T) {
 	if m.mode != modeNormal {
 		t.Errorf("mode after esc = %v, want modeNormal", m.mode)
 	}
-	if m.searchQuery != "" {
-		t.Errorf("searchQuery after esc = %q, want empty", m.searchQuery)
+	if m.searchQuery != "test query" {
+		t.Errorf("searchQuery after esc = %q, want %q", m.searchQuery, "test query")
 	}
 }
 
@@ -1104,16 +1104,134 @@ func TestHandleSearchKey_CtrlU_ClearsBeforeCursor(t *testing.T) {
 	}
 }
 
-func TestHandleSearchKey_Esc_ResetsCursor(t *testing.T) {
+func TestSearch_PreservesQueryResultsAndSelectionAcrossReopen(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.mode = modeSearch
+	m.searchQuery = "frank ocean"
+	m.searchCursor = 5 // mid-query before closing
+	m.search.SetSize(80, 20)
+	m.search.SetResults(&provider.SearchResult{
+		Tracks: []provider.Track{
+			{Title: "Nights", Artist: "Frank Ocean", CatalogID: "t1"},
+			{Title: "Pyramids", Artist: "Frank Ocean", CatalogID: "t2"},
+		},
+		Albums: []provider.Album{
+			{ID: "a1", Title: "Blonde", Artist: "Frank Ocean"},
+		},
+	}, false, nil)
+
+	// Navigate down to the second track ("Pyramids").
+	m.handleSearchKey("down", tea.KeyPressMsg{Code: tea.KeyDown})
+	if got := m.search.SelectedTrack(); got == nil || got.Title != "Pyramids" {
+		t.Fatalf("selected track before enter = %+v, want Pyramids", got)
+	}
+
+	// Press Enter to play the selected track; search closes to modeNormal.
+	cmd := m.handleSearchKey("enter", tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		cmd()
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("mode after enter = %v, want modeNormal", m.mode)
+	}
+
+	// Reopen search with '/': query, results, and selection on "Pyramids" remain intact,
+	// and the input cursor sits at the end of the query.
+	m.handleNormalKey(tea.KeyPressMsg{Code: '/', Text: "/"}, "/")
+	if m.mode != modeSearch {
+		t.Fatalf("mode after '/' = %v, want modeSearch", m.mode)
+	}
+	if m.searchQuery != "frank ocean" {
+		t.Errorf("searchQuery after reopen = %q, want %q", m.searchQuery, "frank ocean")
+	}
+	if m.searchCursor != len([]rune("frank ocean")) {
+		t.Errorf("searchCursor after reopen = %d, want %d", m.searchCursor, len([]rune("frank ocean")))
+	}
+	if got := m.search.SelectedTrack(); got == nil || got.Title != "Pyramids" {
+		t.Errorf("selected track after reopen = %+v, want Pyramids preserved", got)
+	}
+}
+
+func TestSearch_PreservesArtistDrilldownAndAlbumSelectionAcrossPlay(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.mode = modeSearch
+	m.searchQuery = "radiohead"
+	m.searchCursor = len([]rune(m.searchQuery))
+	m.search.SetSize(80, 20)
+	m.search.SetResults(&provider.SearchResult{
+		Artists: []provider.Artist{{ID: "ar1", Name: "Radiohead"}},
+	}, false, nil)
+
+	// Open the artist and deliver their albums.
+	m.search.OpenArtist(provider.Artist{ID: "ar1", Name: "Radiohead"})
+	m.Update(artistAlbumsMsg{
+		artist: provider.Artist{ID: "ar1", Name: "Radiohead"},
+		albums: []provider.Album{
+			{ID: "alb1", Title: "OK Computer"},
+			{ID: "alb2", Title: "In Rainbows"},
+		},
+	})
+	m.handleSearchKey("down", tea.KeyPressMsg{Code: tea.KeyDown})
+	if al := m.search.SelectedAlbum(); al == nil || al.Title != "In Rainbows" {
+		t.Fatalf("selected album = %+v, want In Rainbows", al)
+	}
+
+	// Playing the album transitions to modeNormal once tracks arrive.
+	m.Update(searchCollectionTracksMsg{
+		label:  "In Rainbows",
+		tracks: []provider.Track{{ID: "1", Title: "15 Step", CatalogID: "c1"}},
+		play:   true,
+	})
+	if m.mode != modeNormal {
+		t.Fatalf("mode after album play = %v, want modeNormal", m.mode)
+	}
+
+	// Reopening search with '/' returns directly to the artist's albums with
+	// "In Rainbows" still selected, and Esc steps back to the search results.
+	m.handleNormalKey(tea.KeyPressMsg{Code: '/', Text: "/"}, "/")
+	if !m.search.InArtist() {
+		t.Fatal("expected artist drill-down to remain open when reopening search")
+	}
+	if al := m.search.SelectedAlbum(); al == nil || al.Title != "In Rainbows" {
+		t.Fatalf("selected album after reopen = %+v, want In Rainbows", al)
+	}
+	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.search.InArtist() || m.mode != modeSearch {
+		t.Fatalf("first Esc after reopen should exit artist view back to search results")
+	}
+	if ar := m.search.SelectedArtist(); ar == nil || ar.Name != "Radiohead" {
+		t.Errorf("selected artist after Esc = %+v, want Radiohead", ar)
+	}
+}
+
+func TestSearch_StaleSearchResultDroppedAndEmptyQueryInvalidatesGen(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch
-	m.searchQuery = "test"
-	m.searchCursor = 4
+	m.searchQuery = "new query"
+	m.searchGen = 1
+	m.search.SetSize(80, 20)
 
-	m.handleSearchKey("esc", tea.KeyPressMsg{Code: tea.KeyEsc})
+	// A result arriving for an older query must be ignored.
+	m.Update(searchResultMsg{
+		query: "old query",
+		result: &provider.SearchResult{
+			Tracks: []provider.Track{{Title: "Stale Song", CatalogID: "s1"}},
+		},
+	})
+	if m.search.SelectedTrack() != nil {
+		t.Fatalf("stale searchResultMsg should be dropped, got %+v", m.search.SelectedTrack())
+	}
 
-	if m.searchCursor != 0 {
-		t.Errorf("searchCursor after esc = %d, want 0", m.searchCursor)
+	// Clearing the query with Ctrl+U must bump searchGen so an earlier debounce tick is ignored.
+	m.searchCursor = len([]rune(m.searchQuery))
+	m.handleSearchKey("ctrl+u", tea.KeyPressMsg{})
+	if m.searchQuery != "" {
+		t.Fatalf("searchQuery after ctrl+u = %q, want empty", m.searchQuery)
+	}
+	if _, cmd := m.Update(searchDebounceMsg{query: "new query", gen: 1}); cmd != nil {
+		t.Error("debounce tick from before query was cleared should be ignored")
 	}
 }
 
