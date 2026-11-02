@@ -15,14 +15,12 @@ const (
 	MaxPasteBytes = 4096
 )
 
-// isUnsafeInputRune rejects C0/C1 control codes, DEL, non-printable runes, and
-// Unicode BiDi override/isolate characters that could spoof or corrupt terminal
-// rendering or playlist names.
+// isUnsafeInputRune rejects C0/C1 control codes, DEL, non-printable runes
+// (except ZWNJ U+200C and ZWJ U+200D needed for scripts like Persian and emoji
+// sequences), and Unicode BiDi override/isolate characters that could spoof or
+// corrupt terminal rendering or playlist names.
 func isUnsafeInputRune(r rune) bool {
 	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-		return true
-	}
-	if !unicode.IsPrint(r) && r != ' ' {
 		return true
 	}
 	switch {
@@ -32,13 +30,20 @@ func isUnsafeInputRune(r rune) bool {
 		return true
 	case r == 0x200e || r == 0x200f || r == 0x061c: // LRM, RLM, ALM
 		return true
+	case r == '\u200c' || r == '\u200d': // ZWNJ, ZWJ
+		return false
+	}
+	if !unicode.IsPrint(r) && r != ' ' {
+		return true
 	}
 	return false
 }
 
 // SanitizeSingleLineInput strips terminal escape sequences, invalid UTF-8 bytes,
 // control characters, and BiDi overrides, returning at most maxRunes runes.
-// When collapseNewlines is true (paste), tabs and newlines are converted to single spaces.
+// Non-ASCII horizontal Unicode spaces (e.g. NBSP U+00A0, ideographic space U+3000)
+// are normalized to ASCII ' '. When collapseNewlines is true (paste), tabs and
+// line/paragraph breaks are collapsed into single spaces.
 func SanitizeSingleLineInput(s string, maxRunes int, collapseNewlines bool) []rune {
 	if maxRunes <= 0 || s == "" {
 		return nil
@@ -62,18 +67,21 @@ func SanitizeSingleLineInput(s string, maxRunes int, collapseNewlines bool) []ru
 		if r == utf8.RuneError && size == 1 {
 			continue
 		}
-		if collapseNewlines && (r == '\r' || r == '\n' || r == '\t' || r == '\v' || r == '\f' || r == '\u0085' || r == '\u2028' || r == '\u2029') {
-			if len(out) > 0 && !lastWasCollapsedSpace && out[len(out)-1] != ' ' {
+		if r == '\r' || r == '\n' || r == '\t' || r == '\v' || r == '\f' || r == '\u0085' || r == '\u2028' || r == '\u2029' {
+			if collapseNewlines && len(out) > 0 && !lastWasCollapsedSpace && out[len(out)-1] != ' ' {
 				out = append(out, ' ')
 				lastWasCollapsedSpace = true
 			}
 			continue
 		}
-		if isUnsafeInputRune(r) {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			continue
 		}
 		if r != ' ' && unicode.IsSpace(r) {
 			r = ' '
+		}
+		if isUnsafeInputRune(r) {
+			continue
 		}
 		lastWasCollapsedSpace = false
 		out = append(out, r)

@@ -4731,3 +4731,36 @@ func TestPaste_SanitizesANSIBiDiControlInvalidUTF8AndBoundsLength(t *testing.T) 
 		t.Fatalf("unexpected state mutation on normal-mode paste: search=%q cmd=%q", m2.searchQuery, m2.cmdBuf)
 	}
 }
+
+func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
+	// Pasted NBSP (U+00A0), ideographic space (U+3000), Persian ZWNJ (U+200C),
+	// and emoji ZWJ (U+200D) must be normalized/preserved rather than dropped.
+	pasteCases := []struct {
+		in   string
+		want string
+	}{
+		{"Sigur\u00a0Rós", "Sigur Rós"},
+		{"久石譲\u3000Summer", "久石譲 Summer"},
+		{"می\u200cخواهم", "می\u200cخواهم"},
+		{"👩\u200d🎤 Bowie", "👩\u200d🎤 Bowie"},
+	}
+	for _, tc := range pasteCases {
+		m := newModel(nil)
+		m.mode = modeSearch
+		m.Update(tea.PasteMsg{Content: tc.in})
+		if m.searchQuery != tc.want {
+			t.Errorf("paste %q -> %q, want %q", tc.in, m.searchQuery, tc.want)
+		}
+	}
+
+	// Typed CJK IME ideographic space (U+3000) and NBSP (U+00A0) via KeyPressMsg.Text.
+	m := newModel(nil)
+	m.mode = modeSearch
+	for _, s := range []string{"久", "石", "譲", "\u3000", "S", "u", "m", "m", "e", "r"} {
+		r, _ := utf8.DecodeRuneInString(s)
+		m.Update(tea.KeyPressMsg{Code: r, Text: s})
+	}
+	if m.searchQuery != "久石譲 Summer" {
+		t.Fatalf("typed CJK IME space query = %q, want %q", m.searchQuery, "久石譲 Summer")
+	}
+}
