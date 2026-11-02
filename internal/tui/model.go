@@ -3852,8 +3852,12 @@ func (m *Model) statusNavLines(w int) []string {
 		cur := min(m.searchCursor, len(runes))
 		before := styles.Header.Render(string(runes[:cur]))
 		after := styles.Header.Render(string(runes[cur:]))
-		return []string{styles.ModeSearch.Render("SEARCH") + "  " +
-			accent.Render("/") + before + accent.Render("█") + after}
+		parts := []string{
+			styles.ModeSearch.Render("SEARCH") + "  " +
+				accent.Render("/") + before + accent.Render("█") + after,
+			accent.Render("Ctrl+U") + muted.Render(" clear"),
+		}
+		return wrapFit(parts, dot, w)
 	case modeCommand:
 		return []string{styles.ModeCommand.Render("CMD") + "  " +
 			muted.Render(":") + m.cmdBuf + accent.Render("_") +

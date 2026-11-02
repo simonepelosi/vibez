@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Preserve search query, results, and selection across reopening** — pressing `Enter` to play a track, album, or playlist or `Esc` to close search now keeps the current query, result list, scroll offset, selected item, and open artist view intact when reopening search with `/`, placing the input cursor at the end of the query and dropping stale out-of-order search responses. Closes #204, refs #203.
+- **Preserve search query, results, and selection across reopening** — pressing `Enter` to play a track, album, or playlist or `Esc` to close search now keeps the current query, result list, scroll offset, selected item, and open artist view intact when reopening search with `/`, placing the input cursor at the end of the query (with a `Ctrl+U clear` hint in the search status bar to start fresh) and dropping stale out-of-order search responses. Closes #204, refs #203.
 
 ## [2.0.6] — 2026-10-27
 

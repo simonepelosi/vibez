@@ -1235,6 +1235,39 @@ func TestSearch_StaleSearchResultDroppedAndEmptyQueryInvalidatesGen(t *testing.T
 	}
 }
 
+func TestSearch_StatusNavLinesShowsCtrlUClearHint(t *testing.T) {
+	for _, w := range []int{40, 80, 120} {
+		m := newModel(nil)
+		m.width = w
+		m.height = 30
+		m.introStep = introDone
+		m.mode = modeSearch
+		m.searchQuery = "preserved search query"
+		m.searchCursor = len([]rune(m.searchQuery))
+
+		joined := strings.Join(m.statusNavLines(w-4), "\n")
+		for _, want := range []string{"SEARCH", "preserved search query", "Ctrl+U", "clear"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("width=%d: statusNavLines missing %q in %q", w, want, joined)
+			}
+		}
+
+		lines := strings.Split(m.View().Content, "\n")
+		if len(lines) != m.height {
+			t.Errorf("width=%d: View() rendered %d rows, want %d", w, len(lines), m.height)
+		}
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			if lw := lipgloss.Width(line); lw != w {
+				t.Errorf("width=%d: row is %d columns wide, want %d: %q", w, lw, w, line)
+				break
+			}
+		}
+	}
+}
+
 func TestModel_Update_VibeQueryMsg(t *testing.T) {
 	m := newModel(newMockPlayer())
 	_, cmd := m.Update(views.VibeQueryMsg{Query: "chill coding"})
