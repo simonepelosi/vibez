@@ -1235,6 +1235,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RestartMsg:
 		return m, tea.Quit
 
+	case tea.PasteMsg:
+		cmd := m.handlePaste(msg.Content)
+		cmds = append(cmds, cmd)
+
 	case tea.KeyPressMsg:
 		cmd := m.handleKey(msg)
 		cmds = append(cmds, cmd)
@@ -1272,11 +1276,25 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case modeSearch:
 		return m.handleSearchKey(k, msg)
 	case modeCommand:
-		return m.handleCommandKey(k)
+		return m.handleCommandKeyMsg(k, msg)
 	case modePlaylistPicker:
 		return m.handlePlaylistPickerKey(k)
 	default:
 		return m.handleNormalKey(msg, k)
+	}
+}
+
+func (m *Model) handlePaste(content string) tea.Cmd {
+	switch {
+	case m.mode == modeSearch:
+		return m.insertSearchText(content, true)
+	case m.mode == modeCommand:
+		m.insertCommandText(content, true)
+		return nil
+	case m.vibe.IsFocused():
+		return m.vibe.Update(tea.PasteMsg{Content: content})
+	default:
+		return nil
 	}
 }
 
@@ -1365,12 +1383,16 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		_, cmd := m.search.Update(msg)
 		return cmd
 	case "left":
+		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
 		if m.searchCursor > 0 {
 			m.searchCursor--
 		}
 		return nil
 	case "right":
-		if m.searchCursor < len([]rune(m.searchQuery)) {
+		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
+		if m.searchCursor < len(runes) {
 			m.searchCursor++
 		}
 		return nil
@@ -1381,8 +1403,9 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		m.searchCursor = len([]rune(m.searchQuery))
 		return nil
 	case "backspace":
+		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
 		if m.searchCursor > 0 {
-			runes := []rune(m.searchQuery)
 			runes = append(runes[:m.searchCursor-1], runes[m.searchCursor:]...)
 			m.searchQuery = string(runes)
 			m.searchCursor--
@@ -1391,6 +1414,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "delete":
 		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
 		if m.searchCursor < len(runes) {
 			runes = append(runes[:m.searchCursor], runes[m.searchCursor+1:]...)
 			m.searchQuery = string(runes)
@@ -1399,8 +1423,9 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "ctrl+w":
 		// Delete word before cursor.
+		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
 		if m.searchCursor > 0 {
-			runes := []rune(m.searchQuery)
 			i := m.searchCursor - 1
 			for i > 0 && runes[i-1] != ' ' {
 				i--
@@ -1414,6 +1439,7 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+u":
 		// Delete everything before cursor.
 		runes := []rune(m.searchQuery)
+		m.searchCursor = min(max(m.searchCursor, 0), len(runes))
 		m.searchQuery = string(runes[m.searchCursor:])
 		m.searchCursor = 0
 		return m.scheduleSearch(m.searchQuery)
@@ -1424,21 +1450,66 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case "space":
-		runes := []rune(m.searchQuery)
-		runes = append(runes[:m.searchCursor], append([]rune{' '}, runes[m.searchCursor:]...)...)
-		m.searchQuery = string(runes)
-		m.searchCursor++
-		return m.scheduleSearch(m.searchQuery)
+		return m.insertSearchText(" ", false)
 	default:
-		if len(k) == 1 && k[0] >= 32 {
-			runes := []rune(m.searchQuery)
-			runes = append(runes[:m.searchCursor], append([]rune{rune(k[0])}, runes[m.searchCursor:]...)...)
-			m.searchQuery = string(runes)
-			m.searchCursor++
-			return m.scheduleSearch(m.searchQuery)
+		if text := extractPrintableKeyText(k, msg); text != "" {
+			return m.insertSearchText(text, false)
 		}
 	}
 	return nil
+}
+
+const maxInputRunes = views.MaxInputRunes
+
+func sanitizeSingleLineInput(s string, maxRunes int, collapseNewlines bool) []rune {
+	return views.SanitizeSingleLineInput(s, maxRunes, collapseNewlines)
+}
+
+func extractPrintableKeyText(k string, msg tea.KeyPressMsg) string {
+	if msg.Mod&tea.ModCtrl != 0 {
+		return ""
+	}
+	if msg.Text != "" {
+		return msg.Text
+	}
+	if msg.Mod == 0 && utf8.RuneCountInString(k) == 1 {
+		return k
+	}
+	return ""
+}
+
+func (m *Model) insertSearchText(raw string, collapseNewlines bool) tea.Cmd {
+	runes := []rune(m.searchQuery)
+	m.searchCursor = min(max(m.searchCursor, 0), len(runes))
+	remaining := maxInputRunes - len(runes)
+	if remaining <= 0 {
+		return nil
+	}
+	ins := sanitizeSingleLineInput(raw, remaining, collapseNewlines)
+	if len(ins) == 0 {
+		return nil
+	}
+	next := make([]rune, 0, len(runes)+len(ins))
+	next = append(next, runes[:m.searchCursor]...)
+	next = append(next, ins...)
+	next = append(next, runes[m.searchCursor:]...)
+	m.searchQuery = string(next)
+	m.searchCursor += len(ins)
+	return m.scheduleSearch(m.searchQuery)
+}
+
+func (m *Model) insertCommandText(raw string, collapseNewlines bool) {
+	curLen := utf8.RuneCountInString(m.cmdBuf)
+	remaining := maxInputRunes - curLen
+	if remaining <= 0 {
+		return
+	}
+	ins := sanitizeSingleLineInput(raw, remaining, collapseNewlines)
+	if len(ins) == 0 {
+		return
+	}
+	m.cmdBuf += string(ins)
+	m.cmdSuggIdx = 0
 }
 
 // ── Command palette ───────────────────────────────────────────────────────
@@ -1480,6 +1551,10 @@ func (m *Model) commandSuggestions() []cmdEntry {
 }
 
 func (m *Model) handleCommandKey(k string) tea.Cmd {
+	return m.handleCommandKeyMsg(k, tea.KeyPressMsg{})
+}
+
+func (m *Model) handleCommandKeyMsg(k string, msg tea.KeyPressMsg) tea.Cmd {
 	switch k {
 	case "esc":
 		m.mode = modeNormal
@@ -1512,18 +1587,31 @@ func (m *Model) handleCommandKey(k string) tea.Cmd {
 		if len(suggs) > 0 {
 			m.cmdSuggIdx = min(len(suggs)-1, m.cmdSuggIdx+1)
 		}
+	case "ctrl+u":
+		m.cmdBuf = ""
+		m.cmdSuggIdx = 0
+	case "ctrl+w":
+		runes := []rune(m.cmdBuf)
+		i := len(runes)
+		for i > 0 && runes[i-1] == ' ' {
+			i--
+		}
+		for i > 0 && runes[i-1] != ' ' {
+			i--
+		}
+		m.cmdBuf = string(runes[:i])
+		m.cmdSuggIdx = 0
 	case "backspace":
 		if len(m.cmdBuf) > 0 {
-			m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-1]
+			_, size := utf8.DecodeLastRuneInString(m.cmdBuf)
+			m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-size]
 			m.cmdSuggIdx = 0
 		}
 	case "space":
-		m.cmdBuf += " "
-		m.cmdSuggIdx = 0
+		m.insertCommandText(" ", false)
 	default:
-		if len(k) == 1 && k[0] >= 32 {
-			m.cmdBuf += k
-			m.cmdSuggIdx = 0
+		if text := extractPrintableKeyText(k, msg); text != "" {
+			m.insertCommandText(text, false)
 		}
 	}
 	return nil
@@ -3792,7 +3880,7 @@ func (m *Model) searchLines(contentW, h int) []string {
 	cursor := accent.Render("█")
 
 	runes := []rune(m.searchQuery)
-	cur := min(m.searchCursor, len(runes))
+	cur := min(max(m.searchCursor, 0), len(runes))
 	before := textStyle.Render(string(runes[:cur]))
 	after := textStyle.Render(string(runes[cur:]))
 
@@ -3849,7 +3937,7 @@ func (m *Model) statusNavLines(w int) []string {
 	switch m.mode {
 	case modeSearch:
 		runes := []rune(m.searchQuery)
-		cur := min(m.searchCursor, len(runes))
+		cur := min(max(m.searchCursor, 0), len(runes))
 		before := styles.Header.Render(string(runes[:cur]))
 		after := styles.Header.Render(string(runes[cur:]))
 		parts := []string{

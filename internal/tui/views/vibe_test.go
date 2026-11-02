@@ -323,3 +323,52 @@ func TestVibe_SetResult_SingleTrackSingular(t *testing.T) {
 		t.Errorf("Lines should contain '1 track' (singular) for added=1, got %v", lines)
 	}
 }
+
+func TestVibe_Update_PasteAndUTF8Sanitization(t *testing.T) {
+	v := NewVibe()
+	v.Focus()
+
+	// Paste UTF-8 text with ANSI escapes, BiDi overrides, and trailing newline.
+	_ = v.Update(tea.PasteMsg{Content: "\x1b[31mCaffè\x1b[0m\t\u202e久石譲\u202c\n"})
+
+	var got tea.Msg
+	cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected VibeQueryMsg command after pasting valid text and pressing Enter")
+	}
+	got = cmd()
+	qm, ok := got.(VibeQueryMsg)
+	if !ok {
+		t.Fatalf("got %T, want VibeQueryMsg", got)
+	}
+	if qm.Query != "Caffè 久石譲" {
+		t.Errorf("VibeQueryMsg.Query = %q, want %q", qm.Query, "Caffè 久石譲")
+	}
+}
+
+func TestVibe_Update_PasteOversizedIsBounded(t *testing.T) {
+	v := NewVibe()
+	v.Focus()
+
+	_ = v.Update(tea.PasteMsg{Content: strings.Repeat("é", 500)})
+	cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected VibeQueryMsg command")
+	}
+	qm := cmd().(VibeQueryMsg)
+	if got := len([]rune(qm.Query)); got != vibeMaxRunes {
+		t.Errorf("rune length = %d, want %d", got, vibeMaxRunes)
+	}
+}
+
+func TestVibe_Update_PasteOnlyControlChars_Ignored(t *testing.T) {
+	v := NewVibe()
+	v.Focus()
+
+	if cmd := v.Update(tea.PasteMsg{Content: "\x1b[2J\x00\x07\u202e\n\r\t"}); cmd != nil {
+		t.Errorf("expected nil cmd when paste contains only unsafe/whitespace chars, got non-nil")
+	}
+	if cmd := v.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil {
+		t.Errorf("expected nil cmd on Enter with empty sanitized input")
+	}
+}
