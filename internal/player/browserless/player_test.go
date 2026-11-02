@@ -3,6 +3,7 @@
 package browserless
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -725,5 +726,68 @@ func TestSetVolume_NilSinkSafeAndClamped(t *testing.T) {
 	st, _ = p.GetState()
 	if st.Volume != 0.0 {
 		t.Errorf("Volume = %v, want 0.0", st.Volume)
+	}
+}
+
+func TestPlayTrackAndPrefetch_KeepSegment0WarmupAlive(t *testing.T) {
+	mp3Data := mp3Frame()
+	seg0Warmed := make(chan struct{}, 4)
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songList":[{"assets":[{"flavor":"128:ctrp256","URL":"` + srvURL + `/upload.mp3"}]}]}`))
+			return
+		}
+		// fetchRawHead requests bytes=0-65535; segment-0 warm-up requests bytes=0-63.
+		if r.Header.Get("Range") == "bytes=0-63" {
+			select {
+			case <-time.After(30 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+			http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(mp3Data))
+			seg0Warmed <- struct{}{}
+			return
+		}
+		http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(mp3Data))
+	}))
+	srvURL = srv.URL
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &lifecycleSink{}
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      sink,
+		queue: []provider.Track{
+			{ID: "i.up1", Title: "Upload 1"},
+			{ID: "i.up2", Title: "Upload 2"},
+		},
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	p.playTrack(p.queue[0])
+
+	// Both playTrack (Upload 1) and scheduleNextPrefetch (Upload 2) must keep
+	// their contexts alive long enough for async segment-0 warming to finish.
+	for i := range 2 {
+		select {
+		case <-seg0Warmed:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for segment-0 warm-up #%d (prematurely cancelled?)", i+1)
+		}
 	}
 }

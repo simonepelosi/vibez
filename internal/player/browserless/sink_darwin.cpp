@@ -244,12 +244,12 @@ struct Sink {
     }
 };
 
-struct Handle {
+struct SinkHandle {
     std::shared_ptr<Sink> sink;
 };
 
 static Sink* sinkOf(vibez_darwinsink_t h) {
-    return h ? static_cast<Handle*>(h)->sink.get() : nullptr;
+    return h ? static_cast<SinkHandle*>(h)->sink.get() : nullptr;
 }
 
 void Session::reportError(const std::string& msg) {
@@ -749,7 +749,7 @@ vibez_darwinsink_t vibez_darwinsink_create(
     vibez_darwinsink_eos_cb_t on_eos,
     vibez_darwinsink_err_cb_t on_err,
     vibez_darwinsink_stream_start_cb_t on_stream_start) {
-    auto* h = new Handle();
+    auto* h = new SinkHandle();
     h->sink = std::make_shared<Sink>();
     h->sink->user = user_data;
     h->sink->onEos = on_eos;
@@ -760,7 +760,7 @@ vibez_darwinsink_t vibez_darwinsink_create(
 
 void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     if (!handle || !uri) return;
-    auto sink = static_cast<Handle*>(handle)->sink;
+    auto sink = static_cast<SinkHandle*>(handle)->sink;
     if (!sink || sink->closed.load()) return;
 
     auto newSession = std::make_shared<Session>();
@@ -889,7 +889,7 @@ double vibez_darwinsink_position(vibez_darwinsink_t handle) {
 
 void vibez_darwinsink_destroy(vibez_darwinsink_t handle) {
     if (!handle) return;
-    auto* h = static_cast<Handle*>(handle);
+    auto* h = static_cast<SinkHandle*>(handle);
     if (h->sink) {
         h->sink->closed = true;
         std::shared_ptr<Session> old;

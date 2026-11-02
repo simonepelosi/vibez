@@ -341,6 +341,7 @@ func (p *Player) scheduleNextPrefetch() {
 		p.mu.Unlock()
 		return
 	}
+	//nolint:gosec // G118: cancel is stored in p.prefetchCtx and called on track change, Stop, ClearQueue, or Close
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	p.prefetchCtx = cancel
 	gen := p.prefetchGen
@@ -351,7 +352,6 @@ func (p *Player) scheduleNextPrefetch() {
 	p.mu.Unlock()
 	go func() {
 		defer p.bgWg.Done()
-		defer cancel()
 		catalogID := nextTrack.CatalogID
 		if catalogID == "" {
 			catalogID = nextTrack.ID
@@ -412,6 +412,7 @@ func (p *Player) playTrack(t provider.Track) {
 	}
 	p.playGen++
 	gen := p.playGen
+	//nolint:gosec // G118: cancel is stored in p.playCtx and called on track change, Stop, ClearQueue, or Close
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	p.playCtx = cancel
 
@@ -434,7 +435,6 @@ func (p *Player) playTrack(t provider.Track) {
 
 	go func() {
 		defer p.bgWg.Done()
-		defer cancel()
 		catalogID := t.CatalogID
 		if catalogID == "" {
 			catalogID = t.ID
