@@ -42,6 +42,9 @@ func (c *CDM) SetServerCertificate(cert []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if len(cert) == 0 {
+		return errors.New("empty server certificate")
+	}
 	if c.ctx == nil {
 		return errors.New("cdm context is closed")
 	}
@@ -69,11 +72,11 @@ func (c *CDM) GenerateChallenge(kid []byte) ([]byte, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.ctx == nil {
-		return nil, "", errors.New("cdm context is closed")
-	}
 	if len(kid) != 16 {
 		return nil, "", fmt.Errorf("invalid KID length: %d (expected 16)", len(kid))
+	}
+	if c.ctx == nil {
+		return nil, "", errors.New("cdm context is closed")
 	}
 
 	var outChallenge *C.uint8_t
@@ -105,6 +108,9 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if sessionID == "" || len(license) == 0 {
+		return errors.New("invalid session update payload")
+	}
 	if c.ctx == nil {
 		return errors.New("cdm context is closed")
 	}
@@ -140,6 +146,9 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if len(keyID) == 0 || len(iv) == 0 || len(input) == 0 {
+		return nil, errors.New("invalid decrypt input parameters")
+	}
 	if c.ctx == nil {
 		return nil, errors.New("cdm context is closed")
 	}
@@ -177,6 +186,9 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	)
 	if ret != 0 {
 		return nil, fmt.Errorf("decryption failed with status %d", ret)
+	}
+	if int(outSize) > len(decrypted) {
+		return nil, fmt.Errorf("decryption output size %d exceeds buffer %d", outSize, len(decrypted))
 	}
 
 	return decrypted[:outSize], nil

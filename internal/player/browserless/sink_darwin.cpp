@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -125,7 +126,7 @@ struct Session : public std::enable_shared_from_this<Session> {
     std::vector<char> pendingMagicCookie;
     Biquad eqBank[kBands];
     uint32_t eqSeen = 0;
-    Sink* parentSink = nullptr;
+    std::weak_ptr<Sink> parentSink;
 
     AudioQueueBufferRef buffers[kNumBuffers] = {nullptr};
     std::mutex bufferMutex;
@@ -182,14 +183,7 @@ struct Session : public std::enable_shared_from_this<Session> {
         }
     }
 
-    void reportError(const std::string& msg) {
-        if (cancelled.load()) return;
-        if (onErr) {
-            std::vector<char> errMsg(msg.begin(), msg.end());
-            errMsg.push_back('\0');
-            onErr(userData, errMsg.data());
-        }
-    }
+    void reportError(const std::string& msg);
 
     AudioQueueBufferRef getFreeBuffer() {
         std::unique_lock<std::mutex> lock(bufferMutex);
@@ -249,6 +243,25 @@ struct Sink {
         return curSession;
     }
 };
+
+struct Handle {
+    std::shared_ptr<Sink> sink;
+};
+
+static Sink* sinkOf(vibez_darwinsink_t h) {
+    return h ? static_cast<Handle*>(h)->sink.get() : nullptr;
+}
+
+void Session::reportError(const std::string& msg) {
+    if (cancelled.load()) return;
+    auto ps = parentSink.lock();
+    if (!ps || ps->closed.load()) return;
+    if (onErr) {
+        std::vector<char> errMsg(msg.begin(), msg.end());
+        errMsg.push_back('\0');
+        onErr(userData, errMsg.data());
+    }
+}
 
 static void onPropertyFound(
     void *inClientData,
@@ -378,13 +391,13 @@ static void onPacketsParsed(
     const int channels = static_cast<int>(ses->pcmAsbd.mChannelsPerFrame);
     const double rate = ses->pcmAsbd.mSampleRate;
 
-    if (ses->parentSink) {
-        const uint32_t ver = ses->parentSink->eqVersion.load();
+    if (auto sink = ses->parentSink.lock(); sink && !sink->closed.load()) {
+        const uint32_t ver = sink->eqVersion.load();
         if (ver != ses->eqSeen) {
             double gains[kBands];
             {
-                std::lock_guard<std::mutex> lk(ses->parentSink->mu);
-                std::memcpy(gains, ses->parentSink->eq, sizeof(gains));
+                std::lock_guard<std::mutex> lk(sink->mu);
+                std::memcpy(gains, sink->eq, sizeof(gains));
             }
             for (int b = 0; b < kBands; ++b) ses->eqBank[b].design(rate, kBandHz[b], gains[b]);
             ses->eqSeen = ver;
@@ -493,6 +506,9 @@ static void audioQueueCallback(
 }
 
 static bool parseURL(const std::string& url, std::string& host, int& port, std::string& path) {
+    if (url.empty() || url.find_first_of("\r\n \t") != std::string::npos) {
+        return false;
+    }
     std::string u = url;
     const std::string httpPrefix = "http://";
     if (u.find(httpPrefix) == 0) {
@@ -514,13 +530,13 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
         try {
             port = std::stoi(hostPort.substr(colonPos + 1));
         } catch (...) {
-            port = 80;
+            return false;
         }
     } else {
         host = hostPort;
         port = 80;
     }
-    return true;
+    return !host.empty() && port > 0 && port <= 65535;
 }
 
 static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
@@ -672,22 +688,22 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
     return true;
 }
 
-static void runSession(std::shared_ptr<Session> ses, std::string url) {
+static void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::string url) {
     for (;;) {
         if (!streamOneURI(ses, url)) return;
 
         std::string next;
-        if (ses->parentSink && !ses->cancelled.load()) {
-            std::lock_guard<std::mutex> lk(ses->parentSink->mu);
-            next = std::move(ses->parentSink->nextURI);
-            ses->parentSink->nextURI.clear();
+        if (sink && !sink->closed.load() && !ses->cancelled.load()) {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            next = std::move(sink->nextURI);
+            sink->nextURI.clear();
         }
         if (next.empty()) break;
 
         ses->baseSampleTime = static_cast<double>(ses->enqueuedFrames);
         ses->nullFrames = 0;
         ses->lastPosition = 0.0;
-        if (ses->onStreamStart) {
+        if (ses->onStreamStart && sink && !sink->closed.load() && !ses->cancelled.load()) {
             std::vector<char> uriBuf(next.begin(), next.end());
             uriBuf.push_back('\0');
             ses->onStreamStart(ses->userData, uriBuf.data());
@@ -717,7 +733,7 @@ static void runSession(std::shared_ptr<Session> ses, std::string url) {
         return ses->eosReached.load() || ses->cancelled.load();
     });
 
-    if (ses->eosReached.load() && !ses->cancelled.load()) {
+    if (ses->eosReached.load() && !ses->cancelled.load() && sink && !sink->closed.load()) {
         if (ses->onEos) {
             ses->onEos(ses->userData);
         }
@@ -733,18 +749,19 @@ vibez_darwinsink_t vibez_darwinsink_create(
     vibez_darwinsink_eos_cb_t on_eos,
     vibez_darwinsink_err_cb_t on_err,
     vibez_darwinsink_stream_start_cb_t on_stream_start) {
-    Sink* sink = new Sink();
-    sink->user = user_data;
-    sink->onEos = on_eos;
-    sink->onErr = on_err;
-    sink->onStreamStart = on_stream_start;
-    return static_cast<vibez_darwinsink_t>(sink);
+    auto* h = new Handle();
+    h->sink = std::make_shared<Sink>();
+    h->sink->user = user_data;
+    h->sink->onEos = on_eos;
+    h->sink->onErr = on_err;
+    h->sink->onStreamStart = on_stream_start;
+    return static_cast<vibez_darwinsink_t>(h);
 }
 
 void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     if (!handle || !uri) return;
-    Sink* sink = static_cast<Sink*>(handle);
-    if (sink->closed.load()) return;
+    auto sink = static_cast<Handle*>(handle)->sink;
+    if (!sink || sink->closed.load()) return;
 
     auto newSession = std::make_shared<Session>();
     newSession->parentSink = sink;
@@ -766,21 +783,23 @@ void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     }
 
     std::string urlStr(uri);
-    std::thread([newSession, urlStr]() {
-        runSession(newSession, urlStr);
+    // Own shared references to both Sink and Session so an unwinding worker
+    // never touches freed Sink memory after vibez_darwinsink_destroy.
+    std::thread([sink, newSession, urlStr]() {
+        runSession(sink, newSession, urlStr);
     }).detach();
 }
 
 void vibez_darwinsink_set_next_uri(vibez_darwinsink_t handle, const char* uri) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
     std::lock_guard<std::mutex> lock(sink->mu);
     sink->nextURI = uri ? uri : "";
 }
 
 void vibez_darwinsink_play(vibez_darwinsink_t handle) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
     auto ses = sink->currentSession();
     if (!ses) return;
     ses->paused = false;
@@ -790,8 +809,8 @@ void vibez_darwinsink_play(vibez_darwinsink_t handle) {
 }
 
 void vibez_darwinsink_pause(vibez_darwinsink_t handle) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
     auto ses = sink->currentSession();
     if (!ses) return;
     ses->paused = true;
@@ -801,11 +820,12 @@ void vibez_darwinsink_pause(vibez_darwinsink_t handle) {
 }
 
 void vibez_darwinsink_stop(vibez_darwinsink_t handle) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink) return;
     std::shared_ptr<Session> old;
     {
         std::lock_guard<std::mutex> lock(sink->mu);
+        sink->nextURI.clear();
         old = sink->curSession;
         sink->curSession.reset();
     }
@@ -821,8 +841,8 @@ void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds) {
 }
 
 void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     sink->volume = volume;
@@ -833,8 +853,8 @@ void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
 }
 
 void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, int count) {
-    if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
     {
         std::lock_guard<std::mutex> lock(sink->mu);
         for (int i = 0; i < kBands; ++i) {
@@ -848,8 +868,8 @@ void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, 
 }
 
 double vibez_darwinsink_position(vibez_darwinsink_t handle) {
-    if (!handle) return 0.0;
-    Sink* sink = static_cast<Sink*>(handle);
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return 0.0;
     auto ses = sink->currentSession();
     if (!ses || !ses->started.load()) return 0.0;
     if (ses->nullOut.load()) return ses->lastPosition.load();
@@ -869,18 +889,21 @@ double vibez_darwinsink_position(vibez_darwinsink_t handle) {
 
 void vibez_darwinsink_destroy(vibez_darwinsink_t handle) {
     if (!handle) return;
-    Sink* sink = static_cast<Sink*>(handle);
-    sink->closed = true;
-    std::shared_ptr<Session> old;
-    {
-        std::lock_guard<std::mutex> lock(sink->mu);
-        old = sink->curSession;
-        sink->curSession.reset();
+    auto* h = static_cast<Handle*>(handle);
+    if (h->sink) {
+        h->sink->closed = true;
+        std::shared_ptr<Session> old;
+        {
+            std::lock_guard<std::mutex> lock(h->sink->mu);
+            h->sink->nextURI.clear();
+            old = h->sink->curSession;
+            h->sink->curSession.reset();
+        }
+        if (old) {
+            old->cancel();
+        }
     }
-    if (old) {
-        old->cancel();
-    }
-    delete sink;
+    delete h;
 }
 
 } // extern "C"

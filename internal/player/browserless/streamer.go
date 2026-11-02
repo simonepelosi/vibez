@@ -5,6 +5,7 @@ package browserless
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -47,18 +48,30 @@ type trackStream struct {
 	seg0AAC []byte
 }
 
+const (
+	maxHLSPlaylistBytes = 4 << 20  // 4 MiB cap on HLS media playlist
+	maxInitSegmentBytes = 4 << 20  // 4 MiB cap on MP4 init segment
+	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single media segment
+)
+
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
 type StreamServer struct {
-	cdmEngine *cdm.CDM
-	licClient *license.Client
-	listener  net.Listener
-	server    *http.Server
-	port      int
-	authToken string
+	cdmEngine  *cdm.CDM
+	licClient  *license.Client
+	httpClient *http.Client
+	listener   net.Listener
+	server     *http.Server
+	port       int
+	authToken  string
 
-	mu         sync.RWMutex
-	streams    map[string]*trackStream
-	serverCert []byte
+	mu          sync.RWMutex
+	closed      bool
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
+	closeOnce   sync.Once
+	bgWg        sync.WaitGroup
+	streams     map[string]*trackStream
+	serverCert  []byte
 
 	// onFail and onLog are set once, before the first stream is prepared.
 	// The local client cannot be told why a stream stopped once the 200 has
@@ -91,14 +104,19 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	}
 	authToken := hex.EncodeToString(tokenBytes)
 
+	//nolint:gosec // G118: closeCancel is stored on StreamServer and invoked in Close()
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	port := ln.Addr().(*net.TCPAddr).Port
 	s := &StreamServer{
-		cdmEngine: cdmEngine,
-		licClient: licClient,
-		listener:  ln,
-		port:      port,
-		authToken: authToken,
-		streams:   make(map[string]*trackStream),
+		cdmEngine:   cdmEngine,
+		licClient:   licClient,
+		httpClient:  licClient.HTTPClient(),
+		listener:    ln,
+		port:        port,
+		authToken:   authToken,
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
+		streams:     make(map[string]*trackStream),
 	}
 
 	mux := http.NewServeMux()
@@ -116,6 +134,16 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	}()
 
 	return s, nil
+}
+
+func (s *StreamServer) upstreamClient() *http.Client {
+	if s.httpClient != nil {
+		return s.httpClient
+	}
+	if s.licClient != nil {
+		return s.licClient.HTTPClient()
+	}
+	return &http.Client{Timeout: 15 * time.Second}
 }
 
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
@@ -153,7 +181,7 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	if err != nil {
 		return "", 0, err
 	}
-	hlsResp, err := http.DefaultClient.Do(hlsReq)
+	hlsResp, err := s.upstreamClient().Do(hlsReq)
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch playlist: %w", err)
 	}
@@ -163,9 +191,12 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 		return "", 0, fmt.Errorf("fetch playlist status %d: %s", hlsResp.StatusCode, hlsResp.Status)
 	}
 
-	playlistBytes, err := io.ReadAll(hlsResp.Body)
+	playlistBytes, err := io.ReadAll(io.LimitReader(hlsResp.Body, maxHLSPlaylistBytes+1))
 	if err != nil {
 		return "", 0, fmt.Errorf("read playlist: %w", err)
+	}
+	if len(playlistBytes) > maxHLSPlaylistBytes {
+		return "", 0, fmt.Errorf("playlist exceeds maximum size (%d bytes)", maxHLSPlaylistBytes)
 	}
 
 	// 4. Parse HLS playlist
@@ -273,15 +304,17 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	var initBytes []byte
 	if initURI != "" {
 		fullInitURL := baseURI + initURI
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fullInitURL, nil)
-		if initLength > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", initOffset, initOffset+initLength-1))
-		}
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
-				initBytes, _ = io.ReadAll(resp.Body)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullInitURL, nil)
+		if err == nil {
+			if initLength > 0 {
+				req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", initOffset, initOffset+initLength-1))
 			}
-			_ = resp.Body.Close()
+			if resp, err := s.upstreamClient().Do(req); err == nil {
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+					initBytes, _ = io.ReadAll(io.LimitReader(resp.Body, maxInitSegmentBytes))
+				}
+				_ = resp.Body.Close()
+			}
 		}
 	}
 	audioCfg, _ := mp4.ParseAudioConfig(initBytes)
@@ -320,7 +353,7 @@ func (s *StreamServer) prepareRawTrack(ctx context.Context, libraryID string) (s
 		return "", 0, fmt.Errorf("fetch playback info: %w", err)
 	}
 
-	head, size, err := fetchRawHead(ctx, assetURL)
+	head, size, err := fetchRawHeadWithClient(ctx, s.upstreamClient(), assetURL)
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch upload: %w", err)
 	}
@@ -360,12 +393,16 @@ func (s *StreamServer) prepareRawTrack(ctx context.Context, libraryID string) (s
 // fetchRawHead reads the first 64 KiB of an upload, enough to identify it,
 // and its total size.
 func fetchRawHead(ctx context.Context, assetURL string) ([]byte, int64, error) {
+	return fetchRawHeadWithClient(ctx, &http.Client{Timeout: 15 * time.Second}, assetURL)
+}
+
+func fetchRawHeadWithClient(ctx context.Context, client *http.Client, assetURL string) ([]byte, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
 	req.Header.Set("Range", "bytes=0-65535")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -405,16 +442,30 @@ func (s *StreamServer) register(ctx context.Context, streamID string, st *trackS
 		}
 	}
 	s.streams[streamID] = st
+	shouldWarm := !s.closed && len(st.segments) > 0 && (st.raw || s.cdmEngine != nil)
+	baseCtx := ctx
+	if s.closeCtx != nil {
+		baseCtx = s.closeCtx
+	}
+	if shouldWarm {
+		s.bgWg.Add(1)
+	}
 	s.mu.Unlock()
 
 	// Warm segment 0 asynchronously so both initial playback and
 	// seek-to-start (0:00) can write the first ~10s immediately
 	// without waiting for an upstream CDN round-trip.
-	if len(st.segments) > 0 && (st.raw || s.cdmEngine != nil) {
+	if shouldWarm {
 		go func() {
-			warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer s.bgWg.Done()
+			if ctx.Err() != nil {
+				return
+			}
+			warmCtx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 			defer cancel()
-			_, _, _ = s.getOrFetchSegment0(warmCtx, &http.Client{Timeout: 10 * time.Second}, st)
+			stopAfter := context.AfterFunc(ctx, cancel)
+			defer stopAfter()
+			_, _, _ = s.getOrFetchSegment0(warmCtx, s.upstreamClient(), st)
 		}()
 	}
 
@@ -487,19 +538,27 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	streamID := parts[0]
 	filePart := parts[1]
 	token, _, _ := strings.Cut(filePart, ".")
-	if token != s.authToken {
+	if s.authToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) != 1 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	st, ok := s.streams[streamID]
-	s.mu.RUnlock()
-
 	if !ok {
+		s.mu.RUnlock()
 		http.NotFound(w, r)
 		return
 	}
+	closeCtx := s.closeCtx
+	s.bgWg.Add(1)
+	s.mu.RUnlock()
+	defer s.bgWg.Done()
 
 	// Support start_seg parameter for instant seeking
 	startSeg := 0
@@ -528,8 +587,13 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, _ := w.(http.Flusher)
 
-	ctx := r.Context()
-	client := &http.Client{Timeout: 15 * time.Second}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	if closeCtx != nil {
+		stopOnServerClose := context.AfterFunc(closeCtx, cancel)
+		defer stopOnServerClose()
+	}
+	client := s.upstreamClient()
 
 	// fail reports why the stream stopped early, then aborts the response so
 	// the client sees a truncated body rather than a clean end of stream. A
@@ -683,7 +747,7 @@ func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL stri
 			continue
 		}
 
-		segData, err := io.ReadAll(resp.Body)
+		segData, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaSegmentSize+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			lastStage = "read"
@@ -693,16 +757,30 @@ func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL stri
 			}
 			continue
 		}
+		if len(segData) > maxMediaSegmentSize {
+			return nil, "read", fmt.Errorf("segment exceeds maximum size (%d bytes)", maxMediaSegmentSize)
+		}
 		return segData, "", nil
 	}
 
 	return nil, lastStage, lastErr
 }
 
-// Close terminates the local HTTP stream server.
+// Close terminates the local HTTP stream server and waits for active stream
+// and prefetch handlers to exit before returning.
 func (s *StreamServer) Close() error {
-	if s.server != nil {
-		return s.server.Close()
-	}
-	return nil
+	var err error
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		if s.closeCancel != nil {
+			s.closeCancel()
+		}
+		s.mu.Unlock()
+		if s.server != nil {
+			err = s.server.Close()
+		}
+		s.bgWg.Wait()
+	})
+	return err
 }
