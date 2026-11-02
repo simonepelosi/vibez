@@ -284,6 +284,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `tab` | Add to queue |
 | `shift+tab` | Play next (insert after current track) |
 | `ctrl+r` | Start radio seeded by the selected track |
+| `ctrl+u` | Clear query (before cursor) |
 | `esc` | Close |
 
 ### Library (`l`)
