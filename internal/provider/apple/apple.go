@@ -1820,13 +1820,10 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 	if err != nil {
 		return fmt.Errorf("LoveSong: marshal: %w", err)
 	}
-	putReq, err := a.newRequest(ctx, http.MethodPut, ratingEndpoint)
+	putReq, err := a.newRequestWithBody(ctx, http.MethodPut, ratingEndpoint, "application/json", raw)
 	if err != nil {
 		return fmt.Errorf("LoveSong: %w", err)
 	}
-	putReq.Body = io.NopCloser(bytes.NewReader(raw))
-	putReq.ContentLength = int64(len(raw))
-	putReq.Header.Set("Content-Type", "application/json")
 	return a.do(putReq, nil)
 }
 

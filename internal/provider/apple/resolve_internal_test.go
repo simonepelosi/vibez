@@ -407,3 +407,55 @@ func TestStorefront_ConcurrentSearchRaceFree(t *testing.T) {
 		t.Errorf("expected /me/storefront to be fetched once, got %d", sfCalls.Load())
 	}
 }
+
+func TestLoveSong_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
+	var putCalls atomic.Int32
+	var bodies []string
+	var mu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/me/library":
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPut && r.URL.Path == "/me/ratings/songs/12345":
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			bodies = append(bodies, string(b))
+			mu.Unlock()
+			switch putCalls.Add(1) {
+			case 1:
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+			case 2:
+				w.WriteHeader(http.StatusServiceUnavailable)
+			default:
+				w.WriteHeader(http.StatusOK)
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := New(&config.Config{
+		AppleDeveloperToken: "dev",
+		AppleUserToken:      "usr",
+		StoreFront:          "us",
+	})
+	p.SetBaseURL(srv.URL)
+	p.retryBaseDelay = time.Millisecond
+
+	if err := p.LoveSong(context.Background(), "12345", true); err != nil {
+		t.Fatalf("LoveSong(true) failed across 429+503 retries: %v", err)
+	}
+	if got := putCalls.Load(); got != 3 {
+		t.Fatalf("PUT attempts = %d, want 3", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, body := range bodies {
+		if !strings.Contains(body, `"value":1`) {
+			t.Errorf("PUT attempt %d body = %q, want non-empty rating JSON", i+1, body)
+		}
+	}
+}
