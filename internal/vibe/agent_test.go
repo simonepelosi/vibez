@@ -470,3 +470,46 @@ func TestParse_SecuritySanitizesEscapeBiDiInvalidUTF8AndOversizedInput(t *testin
 		t.Fatalf("ToSearchQueries(control-only) = %#v, want non-nil empty slice", qs)
 	}
 }
+
+func TestParse_PluralsAndDerivationalStemsAndUnicodeSpaces(t *testing.T) {
+	a := newAgent()
+
+	matched := []struct {
+		input string
+		mood  string
+	}{
+		{"rainy nights", "introspective"},
+		{"late nights", "introspective"},
+		{"relaxation", "chill"},
+		{"danceable", "happy"},
+		{"parties", "happy"},
+		{"heartbreaks", "sad"},
+		{"sadness", "sad"},
+		{"loneliness", "sad"},
+		{"studies", "focused"},
+		{"concentration", "focused"},
+	}
+	for _, tc := range matched {
+		if v := a.Parse(tc.input); v.Mood != tc.mood {
+			t.Errorf("Parse(%q).Mood = %q, want %q", tc.input, v.Mood, tc.mood)
+		}
+	}
+
+	// Ensure stemmer does not over-strip short/unrelated words.
+	for _, trap := range []string{"demonstration", "table", "notable"} {
+		if v := a.Parse(trap); v.Mood != "unknown" {
+			t.Errorf("Parse(%q).Mood = %q, want unknown", trap, v.Mood)
+		}
+	}
+
+	// Non-ASCII spaces (U+3000 ideographic space, U+00A0 NBSP) and ZWNJ/ZWJ.
+	if v := a.Parse("雨の日\u3000チル"); a.ToSearchQuery(v) != "雨の日 チル" {
+		t.Errorf("ideographic space query = %q, want %q", a.ToSearchQuery(v), "雨の日 チル")
+	}
+	if v := a.Parse("Sigur\u00a0Rós"); a.ToSearchQuery(v) != "Sigur Rós" {
+		t.Errorf("NBSP query = %q, want %q", a.ToSearchQuery(v), "Sigur Rós")
+	}
+	if v := a.Parse("می\u200cخواهم"); a.ToSearchQuery(v) != "می\u200cخواهم" {
+		t.Errorf("ZWNJ query = %q, want %q", a.ToSearchQuery(v), "می\u200cخواهم")
+	}
+}

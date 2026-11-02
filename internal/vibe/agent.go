@@ -139,9 +139,6 @@ func isUnsafeRune(r rune) bool {
 	if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 		return true
 	}
-	if !unicode.IsPrint(r) && r != ' ' {
-		return true
-	}
 	switch {
 	case r >= 0x202a && r <= 0x202e:
 		return true
@@ -149,12 +146,18 @@ func isUnsafeRune(r rune) bool {
 		return true
 	case r == 0x200e || r == 0x200f || r == 0x061c:
 		return true
+	case r == '\u200c' || r == '\u200d': // ZWNJ, ZWJ
+		return false
+	}
+	if !unicode.IsPrint(r) && r != ' ' {
+		return true
 	}
 	return false
 }
 
 // sanitizeVibeText strips ANSI escape sequences, invalid UTF-8 bytes, C0/C1/DEL
-// control characters, and Unicode BiDi overrides, collapsing whitespace runs.
+// control characters, and Unicode BiDi overrides, normalizing Unicode spaces and
+// collapsing whitespace runs.
 func sanitizeVibeText(s string) string {
 	if s == "" {
 		return ""
@@ -183,13 +186,16 @@ func sanitizeVibeText(s string) string {
 			}
 			continue
 		}
-		if isUnsafeRune(r) {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			continue
 		}
 		if unicode.IsSpace(r) {
 			if len(out) > 0 && out[len(out)-1] != ' ' {
 				out = append(out, ' ')
 			}
+			continue
+		}
+		if isUnsafeRune(r) {
 			continue
 		}
 		out = append(out, r)
@@ -279,6 +285,54 @@ func isTokenNegated(clause []string, idx int) bool {
 	return false
 }
 
+// stemCandidates returns conservative plural and derivational base forms for a
+// token so inflections like "nights", "heartbreaks", "parties", "relaxation",
+// and "danceable" match their root keywords without reintroducing substring
+// false positives on unrelated words.
+func stemCandidates(tok string) []string {
+	if len(tok) < 4 {
+		return nil
+	}
+	var out []string
+	switch {
+	case len(tok) >= 5 && strings.HasSuffix(tok, "ies"):
+		out = append(out, tok[:len(tok)-3]+"y")
+	case len(tok) >= 5 && (strings.HasSuffix(tok, "ches") ||
+		strings.HasSuffix(tok, "shes") ||
+		strings.HasSuffix(tok, "xes") ||
+		strings.HasSuffix(tok, "zes") ||
+		strings.HasSuffix(tok, "sses")):
+		out = append(out, tok[:len(tok)-2])
+	case strings.HasSuffix(tok, "s") &&
+		!strings.HasSuffix(tok, "ss") &&
+		!strings.HasSuffix(tok, "us") &&
+		!strings.HasSuffix(tok, "is"):
+		out = append(out, tok[:len(tok)-1])
+		if len(tok) >= 5 && strings.HasSuffix(tok, "es") {
+			out = append(out, tok[:len(tok)-2])
+		}
+	}
+	if len(tok) >= 9 && strings.HasSuffix(tok, "ation") {
+		stem := tok[:len(tok)-5]
+		out = append(out, stem, stem+"e", stem+"ate")
+	}
+	if len(tok) >= 7 && strings.HasSuffix(tok, "able") {
+		stem := tok[:len(tok)-4]
+		if len(stem) >= 4 {
+			out = append(out, stem)
+		}
+		if len(stem) >= 3 {
+			out = append(out, stem+"e")
+		}
+	}
+	if len(tok) >= 8 && strings.HasSuffix(tok, "iness") {
+		out = append(out, tok[:len(tok)-5]+"y")
+	} else if len(tok) >= 7 && strings.HasSuffix(tok, "ness") {
+		out = append(out, tok[:len(tok)-4])
+	}
+	return out
+}
+
 func scoreRule(r *rule, clauses [][]string) int {
 	score := 0
 	for _, clause := range clauses {
@@ -287,7 +341,7 @@ func scoreRule(r *rule, clauses [][]string) int {
 		}
 		used := make([]bool, len(clause))
 
-		matchPhrase := func(phrase string) {
+		matchPhrase := func(phrase string, allowStem bool) {
 			parts := strings.Fields(phrase)
 			if len(parts) < 2 || len(parts) > len(clause) {
 				return
@@ -297,45 +351,63 @@ func scoreRule(r *rule, clauses [][]string) int {
 					continue
 				}
 				ok := true
+				exactCount := 0
 				for j, p := range parts {
-					if used[start+j] || clause[start+j] != p {
+					tok := clause[start+j]
+					if used[start+j] {
 						ok = false
 						break
 					}
+					if tok == p {
+						exactCount++
+						continue
+					}
+					if allowStem && slices.Contains(stemCandidates(tok), p) {
+						continue
+					}
+					ok = false
+					break
 				}
 				if ok {
 					for j := range parts {
 						used[start+j] = true
 					}
-					score += 2 * len(parts)
+					score += len(parts) + exactCount
 				}
 			}
 		}
 
-		matchWord := func(word string) {
+		matchWord := func(word string, allowStem bool) {
 			if strings.ContainsRune(word, ' ') {
 				return
 			}
 			for i, tok := range clause {
-				if used[i] || tok != word || isTokenNegated(clause, i) {
+				if used[i] || isTokenNegated(clause, i) {
 					continue
 				}
-				used[i] = true
-				score += 2
+				if tok == word {
+					used[i] = true
+					score += 2
+				} else if allowStem && slices.Contains(stemCandidates(tok), word) {
+					used[i] = true
+					score++
+				}
 			}
 		}
 
-		for _, kw := range r.keywords {
-			matchPhrase(kw)
-		}
-		for _, al := range r.aliases {
-			matchPhrase(al)
-		}
-		for _, kw := range r.keywords {
-			matchWord(kw)
-		}
-		for _, al := range r.aliases {
-			matchWord(al)
+		for _, allowStem := range []bool{false, true} {
+			for _, kw := range r.keywords {
+				matchPhrase(kw, allowStem)
+			}
+			for _, al := range r.aliases {
+				matchPhrase(al, allowStem)
+			}
+			for _, kw := range r.keywords {
+				matchWord(kw, allowStem)
+			}
+			for _, al := range r.aliases {
+				matchWord(al, allowStem)
+			}
 		}
 	}
 	return score
