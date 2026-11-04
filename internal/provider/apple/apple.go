@@ -28,32 +28,97 @@ const (
 	ratingBatchConcurrency = 5
 	// maxResponseBody bounds how much of any API response is read.
 	maxResponseBody = 32 << 20
+	// maxPaginatedItems caps slice pre-allocation and total items collected from
+	// paginated endpoints so an untrusted meta.total or runaway cursor cannot OOM.
+	maxPaginatedItems = 100_000
+	// maxPaginationPages caps sequential "next" cursor hops so a looping cursor terminates.
+	maxPaginationPages = 1000
+	// Retry settings for HTTP 429 and transient 502/503/504 responses.
+	defaultMaxRetries     = 2
+	defaultRetryBaseDelay = 250 * time.Millisecond
+	maxRetryAfter         = 10 * time.Second
 )
 
 // resolveURL turns an endpoint into the URL to request. A relative endpoint
-// is joined to base. An absolute one, which is how Apple's "next" pagination
-// links may arrive, is accepted only on base's own scheme and host: every
-// request carries the developer and user tokens, so it must not be possible
-// for a response to steer them to another server.
+// must start with a single "/" and is joined to base. An absolute one, which
+// is how Apple's "next" pagination links may arrive, is accepted only on
+// base's own scheme and host without userinfo: every request carries the
+// developer and user tokens, so it must not be possible for a response to
+// steer them to another server.
 func resolveURL(base, endpoint string) (string, error) {
-	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
-		if strings.HasPrefix(endpoint, "/v1/") {
-			endpoint = strings.TrimPrefix(endpoint, "/v1")
+	if endpoint == "" {
+		return "", errors.New("empty endpoint")
+	}
+	for i := 0; i < len(endpoint); i++ {
+		if endpoint[i] <= 0x20 || endpoint[i] == 0x7f {
+			return "", fmt.Errorf("invalid control or whitespace character in endpoint")
 		}
-		return base + endpoint, nil
 	}
 	b, err := url.Parse(base)
-	if err != nil {
-		return "", err
+	if err != nil || b.Scheme == "" || b.Host == "" || b.User != nil {
+		return "", fmt.Errorf("invalid base URL %q", base)
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		if strings.HasPrefix(endpoint, "//") {
+			return "", fmt.Errorf("refusing protocol-relative endpoint %q", endpoint)
+		}
+		if endpoint == "/v1" || strings.HasPrefix(endpoint, "/v1/") {
+			endpoint = strings.TrimPrefix(endpoint, "/v1")
+			if endpoint == "" {
+				endpoint = "/"
+			}
+		}
+		joined := strings.TrimRight(base, "/") + endpoint
+		u, err := url.Parse(joined)
+		if err != nil || u.User != nil || !strings.EqualFold(u.Scheme, b.Scheme) || !strings.EqualFold(u.Host, b.Host) {
+			return "", fmt.Errorf("refusing to send credentials to %q", endpoint)
+		}
+		return joined, nil
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil {
-		return "", err
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return "", fmt.Errorf("refusing invalid endpoint %q", endpoint)
 	}
-	if u.Scheme != b.Scheme || !strings.EqualFold(u.Host, b.Host) {
+	if !strings.EqualFold(u.Scheme, b.Scheme) || !strings.EqualFold(u.Host, b.Host) {
 		return "", fmt.Errorf("refusing to send credentials to %s://%s", u.Scheme, u.Host)
 	}
 	return endpoint, nil
+}
+
+// sameOriginRedirectPolicy refuses cross-origin or scheme-downgrading HTTP
+// redirects so custom headers like Music-User-Token (which net/http does not
+// strip on cross-domain redirects) and Authorization never leave the configured
+// Apple Music origin.
+func sameOriginRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	orig := via[0].URL
+	if req.URL.User != nil || !strings.EqualFold(req.URL.Scheme, orig.Scheme) || !strings.EqualFold(req.URL.Host, orig.Host) {
+		return fmt.Errorf("refusing cross-origin redirect to %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// validateStorefront ensures a storefront code is a safe path segment (e.g. "us", "it", "en-gb")
+// before interpolating it into /catalog/{sf}/... URLs.
+func validateStorefront(sf string) (string, error) {
+	sf = strings.TrimSpace(sf)
+	if len(sf) < 2 || len(sf) > 16 {
+		return "", fmt.Errorf("invalid storefront %q", sf)
+	}
+	for i := 0; i < len(sf); i++ {
+		c := sf[i]
+		isAlpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		isDigit := c >= '0' && c <= '9'
+		if !isAlpha && !isDigit && c != '-' {
+			return "", fmt.Errorf("invalid storefront %q", sf)
+		}
+	}
+	return sf, nil
 }
 
 type AppleProvider struct {
@@ -61,15 +126,22 @@ type AppleProvider struct {
 	client         *http.Client
 	baseURL        string
 	catalogBaseURL string
-	sf             string // cached storefront, populated on first use
+	retryBaseDelay time.Duration
+
+	sfMu sync.RWMutex
+	sf   string // cached storefront, populated on first use
 }
 
 func New(cfg *config.Config) *AppleProvider {
 	return &AppleProvider{
-		cfg:            cfg,
-		client:         &http.Client{Timeout: 15 * time.Second},
+		cfg: cfg,
+		client: &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: sameOriginRedirectPolicy,
+		},
 		baseURL:        defaultBaseURL,
 		catalogBaseURL: defaultCatalogURL,
+		retryBaseDelay: defaultRetryBaseDelay,
 	}
 }
 
@@ -81,11 +153,20 @@ type storefrontResponse struct {
 
 // storefront returns the user's Apple Music storefront ID: the one the startup
 // session check saved to config, or failing that the value reported by Apple's
-// /v1/me/storefront endpoint, fetched once and cached.
+// /v1/me/storefront endpoint, fetched once and cached safely across goroutines.
 func (a *AppleProvider) storefront(ctx context.Context) (string, error) {
 	if a.cfg.StoreFront != "" {
-		return a.cfg.StoreFront, nil
+		return validateStorefront(a.cfg.StoreFront)
 	}
+	a.sfMu.RLock()
+	cached := a.sf
+	a.sfMu.RUnlock()
+	if cached != "" {
+		return cached, nil
+	}
+
+	a.sfMu.Lock()
+	defer a.sfMu.Unlock()
 	if a.sf != "" {
 		return a.sf, nil
 	}
@@ -100,7 +181,11 @@ func (a *AppleProvider) storefront(ctx context.Context) (string, error) {
 	if len(resp.Data) == 0 {
 		return "", fmt.Errorf("storefront: empty response from Apple")
 	}
-	a.sf = resp.Data[0].ID
+	sf, err := validateStorefront(resp.Data[0].ID)
+	if err != nil {
+		return "", fmt.Errorf("storefront: %w", err)
+	}
+	a.sf = sf
 	return a.sf, nil
 }
 
@@ -108,10 +193,11 @@ func (a *AppleProvider) Name() string { return "apple" }
 
 // SetBaseURL overrides the API base URL. Intended for use in tests only.
 // It also sets catalogBaseURL to the same value so both sub-requests hit the
-// same test server.
+// same test server, and shortens retry backoff so error-path tests stay fast.
 func (a *AppleProvider) SetBaseURL(url string) {
 	a.baseURL = url
 	a.catalogBaseURL = url
+	a.retryBaseDelay = 5 * time.Millisecond
 }
 
 func (a *AppleProvider) IsAuthenticated() bool {
@@ -119,16 +205,27 @@ func (a *AppleProvider) IsAuthenticated() bool {
 }
 
 func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
+	return a.newRequestWithBody(ctx, method, endpoint, "", nil)
+}
+
+func (a *AppleProvider) newRequestWithBody(ctx context.Context, method, endpoint, contentType string, body []byte) (*http.Request, error) {
 	u, err := resolveURL(a.baseURL, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, bodyReader) //nolint:gosec // G107: URL is validated by resolveURL against configured baseURL
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
 	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	return req, nil
 }
 
@@ -146,7 +243,7 @@ func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint 
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is constructed from config, not user input
+	req, err := http.NewRequestWithContext(ctx, method, u, nil) //nolint:gosec // G107: URL is validated by resolveURL against configured catalogBaseURL
 	if err != nil {
 		return nil, err
 	}
@@ -156,25 +253,125 @@ func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint 
 	return req, nil
 }
 
-func (a *AppleProvider) do(req *http.Request, dst any) error {
-	resp, err := a.client.Do(req) //nolint:gosec // G704: URL is constructed from config, not user input
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return fmt.Errorf("request timed out: %w", err)
+func isIdempotentMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRetryStatus(method string, statusCode int) bool {
+	if statusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if !isIdempotentMethod(method) {
+		return false
+	}
+	switch statusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func parseRetryAfter(val string, fallback time.Duration) time.Duration {
+	val = strings.TrimSpace(val)
+	if val != "" {
+		if secs, err := strconv.Atoi(val); err == nil {
+			if secs <= 0 {
+				return 0
+			}
+			d := time.Duration(secs) * time.Second
+			if d > maxRetryAfter {
+				return maxRetryAfter
+			}
+			return d
 		}
-		return fmt.Errorf("http request: %w", err)
+		if t, err := http.ParseTime(val); err == nil {
+			d := time.Until(t)
+			if d <= 0 {
+				return 0
+			}
+			if d > maxRetryAfter {
+				return maxRetryAfter
+			}
+			return d
+		}
 	}
-	defer func() {
+	if fallback > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return fallback
+}
+
+func (a *AppleProvider) do(req *http.Request, dst any) error {
+	baseDelay := a.retryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = defaultRetryBaseDelay
+	}
+
+	var body []byte
+	var lastStatus int
+	var lastStatusText string
+
+	for attempt := 0; attempt <= defaultMaxRetries; attempt++ {
+		curReq := req
+		if attempt > 0 {
+			curReq = req.Clone(req.Context())
+			if req.Body != nil {
+				if req.GetBody == nil {
+					break
+				}
+				rc, err := req.GetBody()
+				if err != nil {
+					break
+				}
+				curReq.Body = rc
+			}
+		}
+
+		resp, err := a.client.Do(curReq) //nolint:gosec // G704: URL is validated by resolveURL and sameOriginRedirectPolicy
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("request timed out: %w", err)
+			}
+			return fmt.Errorf("http request: %w", err)
+		}
+		body, _ = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		_ = resp.Body.Close()
-	}()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-	if resp.StatusCode >= 400 {
-		return &apiError{status: resp.StatusCode, msg: formatAPIError(resp.StatusCode, resp.Status, body)}
+
+		lastStatus = resp.StatusCode
+		lastStatusText = resp.Status
+
+		if resp.StatusCode < 400 {
+			if dst == nil || len(body) == 0 {
+				return nil
+			}
+			return json.Unmarshal(body, dst)
+		}
+
+		if attempt < defaultMaxRetries && shouldRetryStatus(req.Method, resp.StatusCode) && (req.Body == nil || req.GetBody != nil) {
+			delay := parseRetryAfter(resp.Header.Get("Retry-After"), baseDelay<<attempt)
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-timer.C:
+				case <-req.Context().Done():
+					timer.Stop()
+					return req.Context().Err()
+				}
+			} else if err := req.Context().Err(); err != nil {
+				return err
+			}
+			continue
+		}
+		break
 	}
-	if dst == nil || len(body) == 0 {
-		return nil
-	}
-	return json.Unmarshal(body, dst)
+
+	return &apiError{status: lastStatus, msg: formatAPIError(lastStatus, lastStatusText, body)}
 }
 
 // apiError is an HTTP error response from the Apple Music API. It keeps the
@@ -336,6 +533,7 @@ type playlistWithTracksResponse struct {
 		Relationships struct {
 			Tracks struct {
 				Data []songResource `json:"data"`
+				Next string         `json:"next"`
 			} `json:"tracks"`
 		} `json:"relationships"`
 	} `json:"data"`
@@ -719,17 +917,24 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 	}
 	extended := hasAudioVariants(baseEndpoint)
 
-	total := firstPage.Meta.Total
+	total := min(max(firstPage.Meta.Total, 0), maxPaginatedItems)
 	if total == 0 {
-		tracks := make([]provider.Track, 0, len(firstPage.Data))
+		tracks := make([]provider.Track, 0, min(len(firstPage.Data), maxPaginatedItems))
 		for _, s := range firstPage.Data {
+			if len(tracks) >= maxPaginatedItems {
+				return tracks, nil
+			}
 			tracks = append(tracks, toTrack(s))
 		}
 		if firstPage.Next == "" {
 			return tracks, nil
 		}
 		endpoint := firstPage.Next
-		for endpoint != "" {
+		for range maxPaginationPages {
+			if endpoint == "" || len(tracks) >= maxPaginatedItems {
+				break
+			}
+			rawNext := endpoint
 			// Apple's next links need not repeat the request's extend.
 			if extended {
 				endpoint = withAudioVariants(endpoint)
@@ -748,15 +953,27 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 				}
 				return nil, err
 			}
+			if len(page.Data) == 0 {
+				break
+			}
 			for _, s := range page.Data {
+				if len(tracks) >= maxPaginatedItems {
+					break
+				}
 				tracks = append(tracks, toTrack(s))
+			}
+			if page.Next == rawNext || page.Next == endpoint {
+				break
 			}
 			endpoint = page.Next
 		}
 		return tracks, nil
 	}
 
-	limit := 100
+	pageSize := len(firstPage.Data)
+	if pageSize == 0 {
+		return nil, nil
+	}
 	tracks := make([]provider.Track, total)
 	for i, s := range firstPage.Data {
 		if i < total {
@@ -764,12 +981,12 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 		}
 	}
 
-	if total <= len(firstPage.Data) {
-		return tracks[:len(firstPage.Data)], nil
+	if total <= pageSize {
+		return tracks[:pageSize], nil
 	}
 
 	offsets := []int{}
-	for offset := len(firstPage.Data); offset < total; offset += limit {
+	for offset := pageSize; offset < total; offset += pageSize {
 		offsets = append(offsets, offset)
 	}
 
@@ -802,7 +1019,7 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 			}
 			q := u.Query()
 			q.Set("offset", strconv.Itoa(offset))
-			q.Set("limit", strconv.Itoa(limit))
+			q.Set("limit", strconv.Itoa(pageSize))
 			u.RawQuery = q.Encode()
 
 			req, err := reqBuilder(ctx, http.MethodGet, u.String())
@@ -826,6 +1043,9 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 			}
 
 			for j, s := range page.Data {
+				if j >= pageSize {
+					break
+				}
 				idx := offset + j
 				if idx < len(tracks) {
 					tracks[idx] = toTrack(s)
@@ -884,17 +1104,23 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 		return nil, err
 	}
 
-	total := firstPage.Meta.Total
+	total := min(max(firstPage.Meta.Total, 0), maxPaginatedItems)
 	if total == 0 {
-		playlists := make([]provider.Playlist, 0, len(firstPage.Data))
+		playlists := make([]provider.Playlist, 0, min(len(firstPage.Data), maxPaginatedItems))
 		for _, r := range firstPage.Data {
+			if len(playlists) >= maxPaginatedItems {
+				return playlists, nil
+			}
 			playlists = append(playlists, toPlaylist(r))
 		}
 		if firstPage.Next == "" {
 			return playlists, nil
 		}
 		endpoint := firstPage.Next
-		for endpoint != "" {
+		for range maxPaginationPages {
+			if endpoint == "" || len(playlists) >= maxPaginatedItems {
+				break
+			}
 			req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 			if err != nil {
 				return nil, err
@@ -909,15 +1135,27 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 				}
 				return nil, err
 			}
+			if len(page.Data) == 0 {
+				break
+			}
 			for _, r := range page.Data {
+				if len(playlists) >= maxPaginatedItems {
+					break
+				}
 				playlists = append(playlists, toPlaylist(r))
+			}
+			if page.Next == endpoint {
+				break
 			}
 			endpoint = page.Next
 		}
 		return playlists, nil
 	}
 
-	limit := 100
+	pageSize := len(firstPage.Data)
+	if pageSize == 0 {
+		return nil, nil
+	}
 	playlists := make([]provider.Playlist, total)
 	for i, r := range firstPage.Data {
 		if i < total {
@@ -925,12 +1163,12 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 		}
 	}
 
-	if total <= len(firstPage.Data) {
-		return playlists[:len(firstPage.Data)], nil
+	if total <= pageSize {
+		return playlists[:pageSize], nil
 	}
 
 	offsets := []int{}
-	for offset := len(firstPage.Data); offset < total; offset += limit {
+	for offset := pageSize; offset < total; offset += pageSize {
 		offsets = append(offsets, offset)
 	}
 
@@ -963,7 +1201,7 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 			}
 			q := u.Query()
 			q.Set("offset", strconv.Itoa(offset))
-			q.Set("limit", strconv.Itoa(limit))
+			q.Set("limit", strconv.Itoa(pageSize))
 			u.RawQuery = q.Encode()
 
 			req, err := a.newRequest(ctx, http.MethodGet, u.String())
@@ -987,6 +1225,9 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 			}
 
 			for j, r := range page.Data {
+				if j >= pageSize {
+					break
+				}
 				idx := offset + j
 				if idx < len(playlists) {
 					playlists[idx] = toPlaylist(r)
@@ -1074,7 +1315,40 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 				return nil, err
 			}
 			for _, s := range playlistResp.Data[0].Relationships.Tracks.Data {
+				if len(tracks) >= maxPaginatedItems {
+					return tracks, nil
+				}
 				tracks = append(tracks, toTrack(s))
+			}
+			nextEndpoint := playlistResp.Data[0].Relationships.Tracks.Next
+			for range maxPaginationPages {
+				if nextEndpoint == "" || len(tracks) >= maxPaginatedItems {
+					break
+				}
+				pageReq, pageReqErr := a.newRequest(ctx, http.MethodGet, nextEndpoint)
+				if pageReqErr != nil {
+					return nil, pageReqErr
+				}
+				var page paginatedSongs
+				if pageErr := a.do(pageReq, &page); pageErr != nil {
+					if len(tracks) > 0 && (strings.Contains(pageErr.Error(), "404 Not Found") || errors.Is(pageErr, context.DeadlineExceeded) || errors.Is(pageErr, context.Canceled) || ctx.Err() != nil) {
+						break
+					}
+					return nil, pageErr
+				}
+				if len(page.Data) == 0 {
+					break
+				}
+				for _, s := range page.Data {
+					if len(tracks) >= maxPaginatedItems {
+						break
+					}
+					tracks = append(tracks, toTrack(s))
+				}
+				if page.Next == nextEndpoint {
+					break
+				}
+				nextEndpoint = page.Next
 			}
 			return tracks, nil
 		}
@@ -1338,13 +1612,10 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 		return provider.Playlist{}, fmt.Errorf("CreatePlaylist: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+"/me/library/playlists", bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
+	req, err := a.newRequestWithBody(ctx, http.MethodPost, "/me/library/playlists", "application/json", raw)
 	if err != nil {
 		return provider.Playlist{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
-	req.Header.Set("Content-Type", "application/json")
 
 	var resp createPlaylistResponse
 	if err := a.do(req, &resp); err != nil {
@@ -1373,13 +1644,10 @@ func (a *AppleProvider) AddToPlaylist(ctx context.Context, playlistID, trackID s
 		return fmt.Errorf("AddToPlaylist: marshal: %w", err)
 	}
 	ep := "/me/library/playlists/" + url.PathEscape(playlistID) + "/tracks"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+ep, bytes.NewReader(raw)) //nolint:gosec // G107: URL is constructed from config, not user input
+	req, err := a.newRequestWithBody(ctx, http.MethodPost, ep, "application/json", raw)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
-	req.Header.Set("Content-Type", "application/json")
 	return a.do(req, nil)
 }
 
@@ -1409,12 +1677,10 @@ func (a *AppleProvider) ResolveCatalogSongID(ctx context.Context, libraryID stri
 // track), for which no per-song station exists.
 func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID string) (string, error) {
 	endpoint := "/me/library/songs/" + url.PathEscape(libraryID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.baseURL+endpoint, nil)
+	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
 
 	var resp stationTracksResponse // same shape: { data: [songResource] }
 	if err := a.do(req, &resp); err != nil {
@@ -1432,13 +1698,10 @@ func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID stri
 // (an empty object suffices — the ID carries the seed).
 func (a *AppleProvider) stationNextTracksPage(ctx context.Context, catalogID string) ([]provider.Track, error) {
 	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(catalogID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+endpoint, strings.NewReader("{}")) //nolint:gosec // G107: URL is constructed from a resolved catalog ID, not user input
+	req, err := a.newRequestWithBody(ctx, http.MethodPost, endpoint, "application/json", []byte("{}"))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
-	req.Header.Set("Content-Type", "application/json")
 
 	var resp stationTracksResponse
 	if err := a.do(req, &resp); err != nil {
@@ -1557,13 +1820,10 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 	if err != nil {
 		return fmt.Errorf("LoveSong: marshal: %w", err)
 	}
-	putReq, err := a.newRequest(ctx, http.MethodPut, ratingEndpoint)
+	putReq, err := a.newRequestWithBody(ctx, http.MethodPut, ratingEndpoint, "application/json", raw)
 	if err != nil {
 		return fmt.Errorf("LoveSong: %w", err)
 	}
-	putReq.Body = io.NopCloser(bytes.NewReader(raw))
-	putReq.ContentLength = int64(len(raw))
-	putReq.Header.Set("Content-Type", "application/json")
 	return a.do(putReq, nil)
 }
 

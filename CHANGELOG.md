@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Apple Music pagination caps, `429`/`5xx` retries, and credential boundary hardening** — steps parallel pagination offsets by `len(firstPage.Data)` instead of hardcoded `100` (preventing 25-item endpoints like `/v1/me/library/playlists` from dropping up to 75% of items), paginates `GetPlaylistTracks` 404 fallback `next` cursors, retries `429` (rewinding `req.GetBody`, including `LoveSong` `PUT` requests) and idempotent `502`/`503`/`504` responses with bounded `Retry-After` / exponential backoff, synchronizes and validates `storefront()` caching, and enforces same-origin `CheckRedirect` and `resolveURL` origin checks so `Music-User-Token` and `Authorization` never leave the Apple Music host. Closes #210, refs #206.
 - **Preserve search query, results, and selection across reopening** — pressing `Enter` to play a track, album, or playlist or `Esc` to close search now keeps the current query, result list, scroll offset, selected item, and open artist view intact when reopening search with `/`, placing the input cursor at the end of the query (with a `Ctrl+U clear` hint in the search status bar to start fresh) and dropping stale out-of-order search responses. Closes #204, refs #203.
 
 ## [2.0.6] — 2026-10-27
