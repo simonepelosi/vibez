@@ -363,6 +363,9 @@ vibez discovers an existing Widevine CDM library from standard system paths (Chr
 
 
 > **Linux runtime dependencies:** GStreamer needs `playbin`, `equalizer-10bands`, and an AAC decoder (`avdec_aac`, `faad`, or `fdkaacdec`). Install `gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav` on Debian/Ubuntu, or `gst-plugins-base gst-plugins-good gst-libav` (or `gst-plugins-bad`) on Arch/Fedora.
+>
+> **Optional for local 24/32-bit AIFF files:** install `gstreamer1.0-plugins-bad` (Debian/Ubuntu) or `gst-plugins-bad` (Arch/Fedora) for the `aiffparse` plugin. WAV and 16-bit AIFF work with the dependencies above.
+
 ### Audio quality
 
 Set `audio_quality` in `~/.config/vibez/config.json`:

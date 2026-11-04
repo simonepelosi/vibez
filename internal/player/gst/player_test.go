@@ -160,7 +160,7 @@ func TestLocalM4APlaysToEOS(t *testing.T) {
 
 // playToEOS plays a local file through the real pipeline and fails unless it
 // reaches end of stream.
-func playToEOS(t *testing.T, path string) {
+func playToEOS(t *testing.T, path string) time.Duration {
 	t.Helper()
 	p, err := New()
 	if err != nil {
@@ -193,6 +193,7 @@ func playToEOS(t *testing.T, path string) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for EOS: %s never played", name)
 	}
+	return p.Duration()
 }
 
 // pcmWAV returns a silent stereo WAV of the given bit depth and rate.
@@ -259,7 +260,45 @@ func TestLocalPCMPlaysToEOS(t *testing.T) {
 			if err := os.WriteFile(path, c.data, 0o600); err != nil {
 				t.Fatalf("writing fixture: %v", err)
 			}
-			playToEOS(t, path)
+			if d := playToEOS(t, path); d > 0 && (d < 240*time.Millisecond || d > 260*time.Millisecond) {
+				t.Errorf("Duration = %v, want approximately 250ms", d)
+			}
+		})
+	}
+}
+
+func TestLocalAIFFMissingParserHint(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	if hasElement("aiffparse") {
+		t.Skip("aiffparse installed; this test exercises the gst-libav fallback")
+	}
+	for _, name := range []string{"hires.aiff", "hires.AIF"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, pcmAIFF(24, 96000, 24000), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Destroy()
+			errors := make(chan error, 1)
+			p.OnError(func(err error) {
+				select {
+				case errors <- err:
+				default:
+				}
+			})
+			p.PlayURI("file://" + path)
+			select {
+			case err := <-errors:
+				if !strings.Contains(err.Error(), aiffParserHelp) {
+					t.Fatalf("error lacks AIFF plugin hint: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("timed out waiting for unsupported AIFF error")
+			}
 		})
 	}
 }
