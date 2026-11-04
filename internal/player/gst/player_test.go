@@ -4,6 +4,7 @@ package gst
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -154,6 +155,13 @@ func TestLocalM4APlaysToEOS(t *testing.T) {
 		t.Fatalf("writing fixture: %v", err)
 	}
 
+	playToEOS(t, path)
+}
+
+// playToEOS plays a local file through the real pipeline and fails unless it
+// reaches end of stream.
+func playToEOS(t *testing.T, path string) time.Duration {
+	t.Helper()
 	p, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -177,11 +185,120 @@ func TestLocalM4APlaysToEOS(t *testing.T) {
 
 	p.PlayURI("file://" + path)
 
+	name := filepath.Base(path)
 	select {
 	case <-eosCh:
 	case e := <-errCh:
-		t.Fatalf("pipeline error playing local .m4a: %v", e)
+		t.Fatalf("pipeline error playing %s: %v", name, e)
 	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for EOS: local .m4a never played")
+		t.Fatalf("timed out waiting for EOS: %s never played", name)
+	}
+	return p.Duration()
+}
+
+// pcmWAV returns a silent stereo WAV of the given bit depth and rate.
+func pcmWAV(depth uint16, rate, frames uint32) []byte {
+	block := 2 * depth / 8
+	data := frames * uint32(block)
+	var b bytes.Buffer
+	le := func(vs ...any) {
+		for _, v := range vs {
+			_ = binary.Write(&b, binary.LittleEndian, v)
+		}
+	}
+	b.WriteString("RIFF")
+	le(36 + data)
+	b.WriteString("WAVEfmt ")
+	le(uint32(16), uint16(1), uint16(2), rate, rate*uint32(block), block, depth)
+	b.WriteString("data")
+	le(data)
+	b.Write(make([]byte, data))
+	return b.Bytes()
+}
+
+// pcmAIFF returns a silent stereo AIFF of the given bit depth and rate.
+func pcmAIFF(depth uint16, rate, frames uint32) []byte {
+	data := frames * 2 * uint32(depth) / 8
+	// COMM stores the rate as an 80-bit IEEE extended float: normalize the
+	// mantissa so its top bit is set.
+	exp, mant := uint16(16383+31), uint64(rate)<<32
+	for mant&(1<<63) == 0 {
+		exp--
+		mant <<= 1
+	}
+	var b bytes.Buffer
+	be := func(vs ...any) {
+		for _, v := range vs {
+			_ = binary.Write(&b, binary.BigEndian, v)
+		}
+	}
+	b.WriteString("FORM")
+	be(4 + 26 + 16 + data)
+	b.WriteString("AIFFCOMM")
+	be(uint32(18), uint16(2), frames, depth, exp, mant)
+	b.WriteString("SSND")
+	be(8+data, uint32(0), uint32(0))
+	b.Write(make([]byte, data))
+	return b.Bytes()
+}
+
+// WAV and AIFF are decoded at their own bit depth and rate, so a hi-res WAV
+// and an AIFF both have to reach EOS. The AIFF is 16-bit: CI has no
+// gst-plugins-bad, and gst-libav's avdemux_aiff only covers 16-bit files.
+func TestLocalPCMPlaysToEOS(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"hires.wav", pcmWAV(24, 96000, 24000)},
+		{"cd.aiff", pcmAIFF(16, 44100, 11025)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), c.name)
+			if err := os.WriteFile(path, c.data, 0o600); err != nil {
+				t.Fatalf("writing fixture: %v", err)
+			}
+			if d := playToEOS(t, path); d > 0 && (d < 240*time.Millisecond || d > 260*time.Millisecond) {
+				t.Errorf("Duration = %v, want approximately 250ms", d)
+			}
+		})
+	}
+}
+
+func TestLocalAIFFMissingParserHint(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	if hasElement("aiffparse") {
+		t.Skip("aiffparse installed; this test exercises the gst-libav fallback")
+	}
+	for _, name := range []string{"hires.aiff", "hires.AIF"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, pcmAIFF(24, 96000, 24000), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Destroy()
+			errors := make(chan error, 1)
+			p.OnError(func(err error) {
+				select {
+				case errors <- err:
+				default:
+				}
+			})
+			p.PlayURI("file://" + path)
+			select {
+			case err := <-errors:
+				if !strings.Contains(err.Error(), aiffParserHelp) {
+					t.Fatalf("error lacks AIFF plugin hint: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("timed out waiting for unsupported AIFF error")
+			}
+		})
 	}
 }

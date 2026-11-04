@@ -945,6 +945,8 @@ import (
 
 const aacDecoderHelp = "install gstreamer1.0-libav or gstreamer1.0-plugins-bad (Debian/Ubuntu) / gst-libav or gst-plugins-bad (Arch/Fedora)"
 
+const aiffParserHelp = "24/32-bit AIFF playback needs aiffparse: install gstreamer1.0-plugins-bad (Debian/Ubuntu) / gst-plugins-bad (Arch/Fedora)"
+
 var once sync.Once
 
 // Player wraps a GStreamer playbin3 pipeline for URI-based audio playback.
@@ -1000,6 +1002,13 @@ func setElementRank(name string, rank int) {
 	cs := C.CString(name)
 	defer C.free(unsafe.Pointer(cs))
 	C.vibez_gst_set_element_rank(cs, C.int(rank))
+}
+
+func hasElement(name string) bool {
+	once.Do(func() { C.vibez_gst_init() })
+	cs := C.CString(name)
+	defer C.free(unsafe.Pointer(cs))
+	return C.vibez_gst_has_element(cs) != 0
 }
 
 // OnEOS registers a callback fired (in a goroutine) when the stream ends.
@@ -1207,7 +1216,12 @@ func (p *Player) drainBus() {
 				msg = C.GoString((*C.char)(unsafe.Pointer(strOut)))
 				C.vibez_gst_free(strOut)
 			}
-			if strings.Contains(msg, "No suitable plugins found") || strings.Contains(msg, "missing a plug-in") {
+			// gst-libav's AIFF demuxer only handles 16-bit, and playbin picks it
+			// only when aiffparse (plugins-bad) is missing. The debug text names
+			// the failing element; the pipeline URI may already be the next track.
+			if strings.Contains(msg, "avdemux_aiff") && !hasElement("aiffparse") {
+				msg = fmt.Sprintf("%s (%s)", msg, aiffParserHelp)
+			} else if strings.Contains(msg, "No suitable plugins found") || strings.Contains(msg, "missing a plug-in") {
 				msg = fmt.Sprintf("%s (%s)", msg, aacDecoderHelp)
 			}
 			p.mu.Lock()
