@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -4541,5 +4542,225 @@ func TestEnrichTrackFromQueue_DoesNotCrossMatchSameTitleDifferentAlbum(t *testin
 	m.enrichTrackFromQueue(playing)
 	if playing.ContentRating != "" || playing.IsAppleDigitalMaster || playing.ReleaseDate != "" {
 		t.Errorf("enrichTrackFromQueue cross-matched unrelated track with same title: %+v", playing)
+	}
+}
+
+func TestSearch_UTF8MultibyteTypingEditingAndAltGr(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+
+	// Type multi-byte runes: Latin accents, Nordic, CJK, and Option/AltGr printable chars.
+	inputs := []tea.KeyPressMsg{
+		{Code: 'B', Text: "B"},
+		{Code: 'j', Text: "j"},
+		{Code: 'ö', Text: "ö"},
+		{Code: 'r', Text: "r"},
+		{Code: 'k', Text: "k"},
+		{Code: tea.KeySpace},
+		{Code: '久', Text: "久"},
+		{Code: '石', Text: "石"},
+		{Code: '譲', Text: "譲"},
+		{Code: tea.KeySpace},
+		{Code: 'e', Mod: tea.ModAlt, Text: "€"},
+	}
+	for _, kp := range inputs {
+		m.Update(kp)
+		if !utf8.ValidString(m.searchQuery) {
+			t.Fatalf("searchQuery became invalid UTF-8: %q", m.searchQuery)
+		}
+	}
+	want := "Björk 久石譲 €"
+	if m.searchQuery != want {
+		t.Fatalf("searchQuery = %q, want %q", m.searchQuery, want)
+	}
+	if m.searchCursor != utf8.RuneCountInString(want) {
+		t.Fatalf("searchCursor = %d, want %d", m.searchCursor, utf8.RuneCountInString(want))
+	}
+
+	// Move left 3 runes (before "久"?"石"? wait: " €" is 2 runes, "譲" is 3rd from end -> cursor before "譲")
+	for range 3 {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	}
+	// Backspace removes "石" (2nd CJK char) cleanly on rune boundary.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if !utf8.ValidString(m.searchQuery) {
+		t.Fatalf("searchQuery invalid UTF-8 after backspace: %q", m.searchQuery)
+	}
+	if m.searchQuery != "Björk 久譲 €" {
+		t.Fatalf("searchQuery after mid-string backspace = %q, want %q", m.searchQuery, "Björk 久譲 €")
+	}
+
+	// Insert Italian accented rune mid-string.
+	m.Update(tea.KeyPressMsg{Code: 'è', Text: "è"})
+	if m.searchQuery != "Björk 久è譲 €" {
+		t.Fatalf("searchQuery after mid-string insert = %q, want %q", m.searchQuery, "Björk 久è譲 €")
+	}
+
+	// Delete removes "譲" after cursor cleanly.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyDelete})
+	if m.searchQuery != "Björk 久è €" {
+		t.Fatalf("searchQuery after delete = %q, want %q", m.searchQuery, "Björk 久è €")
+	}
+
+	// Ctrl+key combinations with non-empty Text must not insert printable text.
+	m.Update(tea.KeyPressMsg{Code: 'x', Mod: tea.ModCtrl, Text: "x"})
+	if m.searchQuery != "Björk 久è €" {
+		t.Fatalf("ctrl+x should not insert text, got %q", m.searchQuery)
+	}
+}
+
+func TestSearch_OutOfBoundsCursorClampedWithoutPanic(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.width = 100
+	m.height = 30
+	m.searchQuery = "Caffè"
+
+	m.searchCursor = -5
+	_ = m.searchLines(80, 12)
+	_ = m.statusNavLines(80)
+	m.handleSearchKey("backspace", tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.searchCursor != 0 || m.searchQuery != "Caffè" {
+		t.Fatalf("after negative cursor backspace: cursor=%d query=%q", m.searchCursor, m.searchQuery)
+	}
+
+	m.searchCursor = 999
+	m.handleSearchKey("backspace", tea.KeyPressMsg{Code: tea.KeyBackspace})
+	if m.searchQuery != "Caff" || m.searchCursor != 4 {
+		t.Fatalf("after oversized cursor backspace: cursor=%d query=%q, want 4 %q", m.searchCursor, m.searchQuery, "Caff")
+	}
+}
+
+func TestCommand_UTF8MultibyteTypingAndBackspace(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeCommand
+
+	target := "save Caffè 久石譲"
+	for _, r := range target {
+		if r == ' ' {
+			m.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+		} else {
+			m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+		}
+	}
+	if m.cmdBuf != target {
+		t.Fatalf("cmdBuf = %q, want %q", m.cmdBuf, target)
+	}
+
+	// Backspace each multi-byte rune one by one and ensure cmdBuf stays valid UTF-8.
+	wantSteps := []string{
+		"save Caffè 久石",
+		"save Caffè 久",
+		"save Caffè ",
+		"save Caffè",
+		"save Caff",
+	}
+	for _, want := range wantSteps {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
+		if !utf8.ValidString(m.cmdBuf) {
+			t.Fatalf("cmdBuf became invalid UTF-8 after backspace: %x", m.cmdBuf)
+		}
+		if m.cmdBuf != want {
+			t.Fatalf("cmdBuf = %q, want %q", m.cmdBuf, want)
+		}
+	}
+
+	// ctrl+w deletes the last word ("Caff"), ctrl+u clears the rest.
+	m.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
+	if m.cmdBuf != "save " {
+		t.Fatalf("cmdBuf after ctrl+w = %q, want %q", m.cmdBuf, "save ")
+	}
+	m.Update(tea.KeyPressMsg{Code: 'u', Mod: tea.ModCtrl})
+	if m.cmdBuf != "" {
+		t.Fatalf("cmdBuf after ctrl+u = %q, want empty", m.cmdBuf)
+	}
+}
+
+func TestPaste_SanitizesANSIBiDiControlInvalidUTF8AndBoundsLength(t *testing.T) {
+	// 1. Search mode paste: strips ANSI CSI/OSC/8-bit escapes, C0/C1, BiDi overrides,
+	// invalid UTF-8 bytes, and collapses tabs/newlines while trimming trailing newline.
+	m := newModel(nil)
+	m.mode = modeSearch
+	payload := "\x1b[31mSigur\x1b[0m\t\x1b]52;c;evil\x07Rós\r\n\x9b2J\u202eHoppípolla\u202c\u2066!\u2069\x00\x7f\u0085\xff\xfe\n"
+	m.Update(tea.PasteMsg{Content: payload})
+
+	want := "Sigur Rós Hoppípolla!"
+	if !utf8.ValidString(m.searchQuery) {
+		t.Fatalf("searchQuery is not valid UTF-8: %q", m.searchQuery)
+	}
+	if m.searchQuery != want {
+		t.Fatalf("searchQuery after paste = %q, want %q", m.searchQuery, want)
+	}
+	if m.searchCursor != utf8.RuneCountInString(want) {
+		t.Fatalf("searchCursor = %d, want %d", m.searchCursor, utf8.RuneCountInString(want))
+	}
+
+	// 2. Oversized paste with 4-byte emoji straddling MaxPasteBytes is capped cleanly at maxInputRunes.
+	m.searchQuery = ""
+	m.searchCursor = 0
+	oversized := strings.Repeat("🎵", 2000) // 8000 bytes > MaxPasteBytes
+	m.Update(tea.PasteMsg{Content: oversized})
+	if !utf8.ValidString(m.searchQuery) {
+		t.Fatalf("oversized paste produced invalid UTF-8")
+	}
+	if got := utf8.RuneCountInString(m.searchQuery); got != maxInputRunes {
+		t.Fatalf("searchQuery rune count = %d, want %d", got, maxInputRunes)
+	}
+
+	// 3. Command mode paste: sanitizes and enforces maxInputRunes.
+	m.mode = modeCommand
+	m.cmdBuf = ""
+	m.Update(tea.PasteMsg{Content: "save \x1b[1mCaffè\u202e Notturno\x1b[0m\n"})
+	if m.cmdBuf != "save Caffè Notturno" {
+		t.Fatalf("cmdBuf after paste = %q, want %q", m.cmdBuf, "save Caffè Notturno")
+	}
+
+	// 4. Vibe mode paste via Model.Update forwards sanitized content.
+	m.mode = modeNormal
+	m.vibe.Focus()
+	m.Update(tea.PasteMsg{Content: "\x1b[32mnight\t\u202edrive\x1b[0m\n"})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected vibe submit cmd")
+	}
+
+	// 5. Normal mode with unfocused vibe ignores paste completely.
+	m2 := newModel(nil)
+	m2.Update(tea.PasteMsg{Content: "should be ignored"})
+	if m2.searchQuery != "" || m2.cmdBuf != "" {
+		t.Fatalf("unexpected state mutation on normal-mode paste: search=%q cmd=%q", m2.searchQuery, m2.cmdBuf)
+	}
+}
+
+func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
+	// Pasted NBSP (U+00A0), ideographic space (U+3000), Persian ZWNJ (U+200C),
+	// and emoji ZWJ (U+200D) must be normalized/preserved rather than dropped.
+	pasteCases := []struct {
+		in   string
+		want string
+	}{
+		{"Sigur\u00a0Rós", "Sigur Rós"},
+		{"久石譲\u3000Summer", "久石譲 Summer"},
+		{"می\u200cخواهم", "می\u200cخواهم"},
+		{"👩\u200d🎤 Bowie", "👩\u200d🎤 Bowie"},
+	}
+	for _, tc := range pasteCases {
+		m := newModel(nil)
+		m.mode = modeSearch
+		m.Update(tea.PasteMsg{Content: tc.in})
+		if m.searchQuery != tc.want {
+			t.Errorf("paste %q -> %q, want %q", tc.in, m.searchQuery, tc.want)
+		}
+	}
+
+	// Typed CJK IME ideographic space (U+3000) and NBSP (U+00A0) via KeyPressMsg.Text.
+	m := newModel(nil)
+	m.mode = modeSearch
+	for _, s := range []string{"久", "石", "譲", "\u3000", "S", "u", "m", "m", "e", "r"} {
+		r, _ := utf8.DecodeRuneInString(s)
+		m.Update(tea.KeyPressMsg{Code: r, Text: s})
+	}
+	if m.searchQuery != "久石譲 Summer" {
+		t.Fatalf("typed CJK IME space query = %q, want %q", m.searchQuery, "久石譲 Summer")
 	}
 }

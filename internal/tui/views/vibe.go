@@ -84,10 +84,12 @@ type VibeModel struct {
 	pickerIdx int // selected row in the metric picker
 }
 
+const vibeMaxRunes = 80
+
 func NewVibe() *VibeModel {
 	ti := textinput.New()
 	ti.Placeholder = "late night coding, gym, rainy day…"
-	ti.CharLimit = 80
+	ti.CharLimit = vibeMaxRunes
 	ti.Prompt = ""
 	return &VibeModel{input: ti}
 }
@@ -166,38 +168,60 @@ func (v *VibeModel) SetDiscovery(info DiscoveryInfo) {
 // DiscoveryActive reports whether discovery mode is currently active.
 func (v *VibeModel) DiscoveryActive() bool { return v.discovery.Active }
 
-// Update processes keyboard input when the vibe panel is focused (vibeInputting)
-// or when the metric picker is open (vibeDiscoveryPicker).
+// Update processes keyboard and paste input when the vibe panel is focused
+// (vibeInputting) or when the metric picker is open (vibeDiscoveryPicker).
 // Returns a Cmd that dispatches VibeQueryMsg or DiscoveryMetricSelectedMsg.
-// All other key events are forwarded to the bubbles textinput.
+// All other key/paste events are forwarded to the bubbles textinput.
 func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
-	km, ok := msg.(tea.KeyPressMsg)
-	if !ok {
-		return nil
-	}
 	switch v.state {
 	case vibeInputting:
-		switch km.String() {
-		case "enter":
-			q := strings.TrimSpace(v.input.Value())
-			if q == "" {
+		switch km := msg.(type) {
+		case tea.PasteMsg:
+			clean := string(SanitizeSingleLineInput(km.Content, vibeMaxRunes, true))
+			if clean == "" {
 				return nil
 			}
-			v.lastQ = q
-			v.state = vibeSearching
-			v.input.Blur()
-			return func() tea.Msg { return VibeQueryMsg{Query: q} }
-		case "esc":
-			v.state = vibeIdle
-			v.input.Blur()
-			v.input.SetValue("")
+			var cmd tea.Cmd
+			v.input, cmd = v.input.Update(tea.PasteMsg{Content: clean})
+			return cmd
+		case tea.KeyPressMsg:
+			switch km.String() {
+			case "enter":
+				q := strings.TrimSpace(string(SanitizeSingleLineInput(v.input.Value(), vibeMaxRunes, true)))
+				if q == "" {
+					return nil
+				}
+				v.lastQ = q
+				v.state = vibeSearching
+				v.input.Blur()
+				return func() tea.Msg { return VibeQueryMsg{Query: q} }
+			case "esc":
+				v.state = vibeIdle
+				v.input.Blur()
+				v.input.SetValue("")
+				return nil
+			}
+			if km.Text != "" {
+				if km.Mod&tea.ModCtrl != 0 {
+					return nil
+				}
+				km.Text = string(SanitizeSingleLineInput(km.Text, vibeMaxRunes, false))
+				if km.Text == "" {
+					return nil
+				}
+			}
+			var cmd tea.Cmd
+			v.input, cmd = v.input.Update(km)
+			return cmd
+		default:
 			return nil
 		}
-		var cmd tea.Cmd
-		v.input, cmd = v.input.Update(msg)
-		return cmd
 
 	case vibeDiscoveryPicker:
+		km, ok := msg.(tea.KeyPressMsg)
+		if !ok {
+			return nil
+		}
 		switch km.String() {
 		case "up", "k":
 			if v.pickerIdx > 0 {
