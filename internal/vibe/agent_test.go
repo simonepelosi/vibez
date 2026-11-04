@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/simone-vibes/vibez/internal/vibe"
 )
@@ -324,4 +325,191 @@ func TestToSearchQueries_NeverReturnsNil(t *testing.T) {
 
 func containsGenre(genres []string, want string) bool {
 	return slices.Contains(genres, want)
+}
+
+func TestParse_WorkoutDoesNotFalseMatchWork(t *testing.T) {
+	a := newAgent()
+	for _, input := range []string{"workout", "workout!", "work out", "working out"} {
+		v := a.Parse(input)
+		if v.Mood != "aggressive" {
+			t.Errorf("Parse(%q).Mood = %q, want %q", input, v.Mood, "aggressive")
+		}
+		if !containsGenre(v.Genres, "phonk") {
+			t.Errorf("Parse(%q).Genres = %v, want phonk", input, v.Genres)
+		}
+	}
+
+	for _, input := range []string{"deep work", "working", "studying"} {
+		v := a.Parse(input)
+		if v.Mood != "focused" {
+			t.Errorf("Parse(%q).Mood = %q, want %q", input, v.Mood, "focused")
+		}
+	}
+}
+
+func TestParse_WordBoundariesPreventSubstringFalsePositives(t *testing.T) {
+	a := newAgent()
+	falsePositives := []string{
+		"uneasy",       // contains "easy"
+		"grunge",       // contains "run"
+		"drunk",        // contains "run"
+		"transmission", // contains "miss"
+		"chocolate",    // contains "late"
+		"lemon",        // contains "emo"
+		"memory",       // contains "emo"
+		"network",      // contains "work"
+		"artwork",      // contains "work"
+		"mandate",      // contains "date"
+		"glove",        // contains "love"
+	}
+	for _, input := range falsePositives {
+		v := a.Parse(input)
+		if v.Mood != "unknown" {
+			t.Errorf("Parse(%q).Mood = %q, want %q (false-positive substring match)", input, v.Mood, "unknown")
+		}
+		if v.Query != input {
+			t.Errorf("Parse(%q).Query = %q, want %q", input, v.Query, input)
+		}
+	}
+}
+
+func TestParse_NegationAndClauseBoundaries(t *testing.T) {
+	a := newAgent()
+
+	if v := a.Parse("not sad, party!"); v.Mood != "happy" {
+		t.Errorf("Parse('not sad, party!').Mood = %q, want happy", v.Mood)
+	}
+	if v := a.Parse("no chill, gym"); v.Mood != "aggressive" {
+		t.Errorf("Parse('no chill, gym').Mood = %q, want aggressive", v.Mood)
+	}
+	if v := a.Parse("don't want sad songs, hype"); v.Mood != "happy" {
+		t.Errorf("Parse(\"don't want sad songs, hype\").Mood = %q, want happy", v.Mood)
+	}
+	if v := a.Parse("not chill"); v.Mood != "unknown" {
+		t.Errorf("Parse('not chill').Mood = %q, want unknown", v.Mood)
+	}
+	if v := a.Parse("don't want, chill"); v.Mood != "chill" {
+		t.Errorf("Parse(\"don't want, chill\").Mood = %q, want chill", v.Mood)
+	}
+}
+
+func TestToSearchQuery_UnknownUsesQueryInsteadOfLiteralUnknown(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("radiohead")
+	if got := a.ToSearchQuery(v); got != "radiohead" {
+		t.Errorf("ToSearchQuery(Parse('radiohead')) = %q, want %q", got, "radiohead")
+	}
+
+	if got := a.ToSearchQuery(nil); got != "" {
+		t.Errorf("ToSearchQuery(nil) = %q, want empty", got)
+	}
+	if qs := a.ToSearchQueries(nil); qs == nil || len(qs) != 0 {
+		t.Errorf("ToSearchQueries(nil) = %#v, want non-nil empty slice", qs)
+	}
+}
+
+func TestToSearchQueries_MorningDoesNotReturnPartyClubTerms(t *testing.T) {
+	a := newAgent()
+	v := a.Parse("morning coffee")
+	queries := a.ToSearchQueries(v)
+	for _, q := range queries {
+		if q == "edm" || q == "club music" || q == "banger playlist" {
+			t.Errorf("ToSearchQueries('morning coffee') returned party term %q: %v", q, queries)
+		}
+	}
+	if !slices.Contains(queries, "morning vibes") && !slices.Contains(queries, "coffee shop") {
+		t.Errorf("ToSearchQueries('morning coffee') missing morning terms: %v", queries)
+	}
+}
+
+func TestParse_ReturnedSlicesAreIsolatedCopies(t *testing.T) {
+	a := newAgent()
+	v1 := a.Parse("coding")
+	v1.Genres[0] = "corrupted-genre"
+	v1.Keywords[0] = "corrupted-keyword"
+
+	v2 := a.Parse("coding")
+	if v2.Genres[0] == "corrupted-genre" || v2.Keywords[0] == "corrupted-keyword" {
+		t.Fatalf("mutating returned Vibe corrupted global rules: %+v", v2)
+	}
+}
+
+func TestParse_SecuritySanitizesEscapeBiDiInvalidUTF8AndOversizedInput(t *testing.T) {
+	a := newAgent()
+
+	// ANSI escapes + BiDi override + invalid UTF-8 around a known keyword.
+	vKnown := a.Parse("\x1b[31m\u202eworkout\u202c\x1b[0m\xff\xfe\n")
+	if vKnown.Mood != "aggressive" {
+		t.Fatalf("Mood = %q, want aggressive", vKnown.Mood)
+	}
+
+	// Unknown input must be stripped of escapes/BiDi/control chars before becoming a query.
+	vUnknown := a.Parse("\x1b]52;c;evil\x07\x1b[31mSigur\t\u202eRós\u202c\x00\x7f\u0085\xff\n")
+	if !utf8.ValidString(vUnknown.Query) {
+		t.Fatalf("Query is invalid UTF-8: %q", vUnknown.Query)
+	}
+	if vUnknown.Query != "Sigur Rós" {
+		t.Fatalf("Query = %q, want %q", vUnknown.Query, "Sigur Rós")
+	}
+
+	// Oversized multi-kilobyte input with 4-byte emoji straddling byte cap is bounded cleanly.
+	vHuge := a.Parse(strings.Repeat("🎸", 1000))
+	if !utf8.ValidString(vHuge.Query) {
+		t.Fatalf("oversized Query is invalid UTF-8")
+	}
+	if utf8.RuneCountInString(vHuge.Query) > 256 {
+		t.Fatalf("oversized Query rune count = %d, want <= 256", utf8.RuneCountInString(vHuge.Query))
+	}
+
+	// Control-only input produces empty sanitized query and non-nil empty ToSearchQueries slice.
+	vCtrl := a.Parse("\x1b[2J\x00\u202e\r\n\t")
+	if vCtrl.Query != "" {
+		t.Fatalf("control-only Query = %q, want empty", vCtrl.Query)
+	}
+	if qs := a.ToSearchQueries(vCtrl); qs == nil || len(qs) != 0 {
+		t.Fatalf("ToSearchQueries(control-only) = %#v, want non-nil empty slice", qs)
+	}
+}
+
+func TestParse_PluralsAndDerivationalStemsAndUnicodeSpaces(t *testing.T) {
+	a := newAgent()
+
+	matched := []struct {
+		input string
+		mood  string
+	}{
+		{"rainy nights", "introspective"},
+		{"late nights", "introspective"},
+		{"relaxation", "chill"},
+		{"danceable", "happy"},
+		{"parties", "happy"},
+		{"heartbreaks", "sad"},
+		{"sadness", "sad"},
+		{"loneliness", "sad"},
+		{"studies", "focused"},
+		{"concentration", "focused"},
+	}
+	for _, tc := range matched {
+		if v := a.Parse(tc.input); v.Mood != tc.mood {
+			t.Errorf("Parse(%q).Mood = %q, want %q", tc.input, v.Mood, tc.mood)
+		}
+	}
+
+	// Ensure stemmer does not over-strip short/unrelated words.
+	for _, trap := range []string{"demonstration", "table", "notable"} {
+		if v := a.Parse(trap); v.Mood != "unknown" {
+			t.Errorf("Parse(%q).Mood = %q, want unknown", trap, v.Mood)
+		}
+	}
+
+	// Non-ASCII spaces (U+3000 ideographic space, U+00A0 NBSP) and ZWNJ/ZWJ.
+	if v := a.Parse("雨の日\u3000チル"); a.ToSearchQuery(v) != "雨の日 チル" {
+		t.Errorf("ideographic space query = %q, want %q", a.ToSearchQuery(v), "雨の日 チル")
+	}
+	if v := a.Parse("Sigur\u00a0Rós"); a.ToSearchQuery(v) != "Sigur Rós" {
+		t.Errorf("NBSP query = %q, want %q", a.ToSearchQuery(v), "Sigur Rós")
+	}
+	if v := a.Parse("می\u200cخواهم"); a.ToSearchQuery(v) != "می\u200cخواهم" {
+		t.Errorf("ZWNJ query = %q, want %q", a.ToSearchQuery(v), "می\u200cخواهم")
+	}
 }
