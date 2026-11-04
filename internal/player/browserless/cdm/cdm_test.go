@@ -37,8 +37,8 @@ func TestCDM_InputValidationAndClosedGuards(t *testing.T) {
 	if _, err := c.Decrypt([]byte{1}, nil, []byte{1}); err == nil {
 		t.Fatal("Decrypt nil iv = nil, want error without panicking")
 	}
-	if _, err := c.Decrypt([]byte{1}, []byte{1}, nil); err == nil {
-		t.Fatal("Decrypt nil ciphertext = nil, want error without panicking")
+	if out, err := c.Decrypt([]byte{1}, []byte{1}, nil); err != nil || len(out) != 0 {
+		t.Fatalf("Decrypt empty ciphertext = (%v, %v), want empty slice and nil error", out, err)
 	}
 	if _, err := c.Decrypt([]byte{1}, []byte{1}, []byte{1}); err == nil {
 		t.Fatal("Decrypt on closed CDM = nil, want closed error")

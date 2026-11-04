@@ -843,7 +843,7 @@ void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds) {
 void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
     Sink* sink = sinkOf(handle);
     if (!sink || sink->closed.load()) return;
-    if (volume < 0.0f) volume = 0.0f;
+    if (std::isnan(volume) || volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     sink->volume = volume;
     auto ses = sink->currentSession();
@@ -859,6 +859,7 @@ void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, 
         std::lock_guard<std::mutex> lock(sink->mu);
         for (int i = 0; i < kBands; ++i) {
             double g = (gains_db && i < count) ? gains_db[i] : 0.0;
+            if (std::isnan(g)) g = 0.0;
             if (g > 24.0) g = 24.0;
             if (g < -24.0) g = -24.0;
             sink->eq[i] = g;

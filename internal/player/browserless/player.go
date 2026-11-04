@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"strings"
 	"sync"
@@ -60,12 +61,15 @@ type Player struct {
 
 	mu                 sync.RWMutex
 	closed             bool
+	sinkMu             sync.RWMutex
+	sinkDestroyed      bool
 	state              player.State
 	bcast              player.Broadcast
 	queue              []provider.Track
 	idx                int
 	playCtx            context.CancelFunc
 	playGen            uint64
+	loadTimeout        time.Duration // 0 uses defaultLoadTimeout (45s)
 	prefetchCtx        context.CancelFunc
 	prefetchGen        uint64
 	nextPrep           *preparedNext
@@ -86,6 +90,23 @@ func (p *Player) ResetSessionExpired() {
 	p.mu.Lock()
 	p.sessionExpiredOnce = sync.Once{}
 	p.mu.Unlock()
+}
+
+func (p *Player) withSink(fn func(audioSink)) {
+	p.sinkMu.RLock()
+	defer p.sinkMu.RUnlock()
+	if !p.sinkDestroyed && p.sink != nil {
+		fn(p.sink)
+	}
+}
+
+func (p *Player) sinkPosition() (pos time.Duration, ok bool) {
+	p.sinkMu.RLock()
+	defer p.sinkMu.RUnlock()
+	if p.sinkDestroyed || p.sink == nil {
+		return 0, false
+	}
+	return p.sink.Position(), true
 }
 
 // New creates a ready browserless Player.
@@ -136,7 +157,6 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 		p.mu.RLock()
 		closed := p.closed
 		playing := p.state.Playing
-		sink := p.sink
 		seekOff := p.seekOffset
 		var dur time.Duration
 		if p.state.Track != nil {
@@ -144,10 +164,14 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 		}
 		p.mu.RUnlock()
 
-		if closed || !playing || sink == nil {
+		if closed || !playing {
 			return
 		}
-		pos := seekOff + sink.Position()
+		sinkPos, ok := p.sinkPosition()
+		if !ok {
+			return
+		}
+		pos := seekOff + sinkPos
 		if dur > 5*time.Second && pos < dur-5*time.Second {
 			// Ignore premature EOS
 			return
@@ -216,14 +240,16 @@ func (p *Player) pollPosition() {
 			closed := p.closed
 			playing := p.state.Playing
 			loading := p.state.Loading
-			sink := p.sink
 			p.mu.RUnlock()
 
-			if closed || sink == nil {
+			if closed {
 				return
 			}
 			if playing && !loading {
-				pos := sink.Position()
+				pos, ok := p.sinkPosition()
+				if !ok {
+					return
+				}
 				p.mu.Lock()
 				if p.closed {
 					p.mu.Unlock()
@@ -245,8 +271,8 @@ func (p *Player) cancelPrefetchLocked() {
 		p.prefetchCtx = nil
 	}
 	p.nextPrep = nil
-	if !p.closed && p.sink != nil {
-		p.sink.SetNextURI("")
+	if !p.closed {
+		p.withSink(func(s audioSink) { s.SetNextURI("") })
 	}
 }
 
@@ -286,6 +312,11 @@ func (p *Player) handleStreamStart(uri string) {
 	if prep == nil {
 		p.mu.Unlock()
 		return
+	}
+	p.playGen++
+	if p.playCtx != nil {
+		p.playCtx()
+		p.playCtx = nil
 	}
 	p.cancelPrefetchLocked()
 	p.stagedPreps = nil
@@ -390,12 +421,18 @@ func (p *Player) scheduleNextPrefetch() {
 			p.stagedPreps = make(map[string]*preparedNext)
 		}
 		p.stagedPreps[streamURL] = prep
-		sink := p.sink
 		p.mu.Unlock()
-		if sink != nil {
-			sink.SetNextURI(streamURL)
-		}
+		p.withSink(func(s audioSink) { s.SetNextURI(streamURL) })
 	}()
+}
+
+const defaultLoadTimeout = 45 * time.Second
+
+func (p *Player) trackLoadTimeout() time.Duration {
+	if p.loadTimeout > 0 {
+		return p.loadTimeout
+	}
+	return defaultLoadTimeout
 }
 
 func (p *Player) playTrack(t provider.Track) {
@@ -412,8 +449,9 @@ func (p *Player) playTrack(t provider.Track) {
 	}
 	p.playGen++
 	gen := p.playGen
+	loadTimeout := p.trackLoadTimeout()
 	//nolint:gosec // G118: cancel is stored in p.playCtx and called on track change, Stop, ClearQueue, or Close
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
 	p.playCtx = cancel
 
 	p.state.Track = &t
@@ -451,7 +489,7 @@ func (p *Player) playTrack(t provider.Track) {
 					p.state.Track = &tCopy
 				}
 				p.mu.Unlock()
-			} else if ctx.Err() == nil {
+			} else if !errors.Is(ctx.Err(), context.Canceled) {
 				// Playback goes on with the library ID, which Apple reports
 				// as unavailable; say why so the skip is diagnosable.
 				reason := "no catalog ID"
@@ -491,12 +529,16 @@ func (p *Player) playTrack(t provider.Track) {
 		}
 		streamURL, duration, err := streamer.PrepareTrack(ctx, catalogID, prefer256k)
 		if err != nil {
-			if ctx.Err() != nil {
+			// An explicit cancel means a newer user action (Next, Stop, Pause,
+			// ClearQueue, RemoveFromQueue, Close) superseded this load and
+			// already updated state. A DeadlineExceeded timeout has no superseding
+			// action, so it must clear Loading and report the error.
+			if errors.Is(ctx.Err(), context.Canceled) {
 				return
 			}
 			if errors.Is(err, license.ErrUnauthorized) {
 				p.mu.Lock()
-				if p.closed || p.playGen != gen || ctx.Err() != nil {
+				if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
 					p.mu.Unlock()
 					return
 				}
@@ -517,7 +559,7 @@ func (p *Player) playTrack(t provider.Track) {
 					skippedID = catalogID
 				}
 				p.mu.Lock()
-				if p.closed || p.playGen != gen || ctx.Err() != nil {
+				if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
 					p.mu.Unlock()
 					return
 				}
@@ -534,7 +576,7 @@ func (p *Player) playTrack(t provider.Track) {
 				return
 			}
 			p.mu.Lock()
-			if p.closed || p.playGen != gen || ctx.Err() != nil {
+			if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
 				p.mu.Unlock()
 				return
 			}
@@ -547,7 +589,7 @@ func (p *Player) playTrack(t provider.Track) {
 		}
 
 		p.mu.Lock()
-		if p.closed || p.playGen != gen || ctx.Err() != nil {
+		if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
 			p.mu.Unlock()
 			return
 		}
@@ -564,11 +606,8 @@ func (p *Player) playTrack(t provider.Track) {
 			p.state.Track = &tCopy
 		}
 		s = p.state
-		sink := p.sink
 		p.mu.Unlock()
-		if sink != nil {
-			sink.PlayURI(streamURL)
-		}
+		p.withSink(func(sk audioSink) { sk.PlayURI(streamURL) })
 		p.bcast.Send(s)
 		p.scheduleNextPrefetch()
 	}()
@@ -594,11 +633,8 @@ func (p *Player) Play() error {
 	}
 	p.state.Playing = true
 	s := p.state
-	sink := p.sink
 	p.mu.Unlock()
-	if sink != nil {
-		sink.Play()
-	}
+	p.withSink(func(sk audioSink) { sk.Play() })
 	p.bcast.Send(s)
 	return nil
 }
@@ -619,11 +655,8 @@ func (p *Player) Pause() error {
 	}
 	p.state.Playing = false
 	s := p.state
-	sink := p.sink
 	p.mu.Unlock()
-	if sink != nil {
-		sink.Pause()
-	}
+	p.withSink(func(sk audioSink) { sk.Pause() })
 	p.bcast.Send(s)
 	return nil
 }
@@ -646,11 +679,8 @@ func (p *Player) Stop() error {
 	p.state.Playing = false
 	p.state.Loading = false
 	s := p.state
-	sink := p.sink
 	p.mu.Unlock()
-	if sink != nil {
-		sink.Stop()
-	}
+	p.withSink(func(sk audioSink) { sk.Stop() })
 	p.bcast.Send(s)
 	return nil
 }
@@ -673,17 +703,23 @@ func (p *Player) Next() error {
 			nextIdx = rand.Intn(len(p.queue)) //nolint:gosec // G404: weak random is sufficient for music shuffle
 		}
 	case p.state.RepeatMode == player.RepeatModeOff && p.idx >= len(p.queue)-1:
+		p.playGen++
+		if p.playCtx != nil {
+			p.playCtx()
+			p.playCtx = nil
+		}
 		p.cancelPrefetchLocked()
+		p.stagedPreps = nil
 		p.ended = true
+		p.curStream = ""
 		p.curStreamURL = ""
 		p.seekOffset = 0
+		p.state.Loading = false
 		p.state.Playing = false
 		p.state.Position = 0
 		s := p.state
 		p.mu.Unlock()
-		if p.sink != nil {
-			p.sink.Stop()
-		}
+		p.withSink(func(sk audioSink) { sk.Stop() })
 		p.bcast.Send(s)
 		return nil
 	default:
@@ -694,6 +730,11 @@ func (p *Player) Next() error {
 	t := p.queue[p.idx]
 	prep := p.nextPrep
 	if prep != nil && prep.idx == nextIdx && prep.track.ID == t.ID && prep.streamURL != "" {
+		p.playGen++
+		if p.playCtx != nil {
+			p.playCtx()
+			p.playCtx = nil
+		}
 		p.cancelPrefetchLocked()
 		p.stagedPreps = nil
 		tCopy := prep.track
@@ -712,9 +753,7 @@ func (p *Player) Next() error {
 		p.curStreamURL = prep.streamURL
 		s := p.state
 		p.mu.Unlock()
-		if p.sink != nil {
-			p.sink.PlayURI(prep.streamURL)
-		}
+		p.withSink(func(sk audioSink) { sk.PlayURI(prep.streamURL) })
 		p.bcast.Send(s)
 		p.scheduleNextPrefetch()
 		return nil
@@ -731,10 +770,7 @@ func (p *Player) Previous() error {
 		return nil
 	}
 
-	var sinkPos time.Duration
-	if p.sink != nil {
-		sinkPos = p.sink.Position()
-	}
+	sinkPos, _ := p.sinkPosition()
 	if p.seekOffset+sinkPos > 3*time.Second {
 		p.mu.Unlock()
 		return p.Seek(0)
@@ -762,7 +798,6 @@ func (p *Player) Seek(position time.Duration) error {
 	streamURL := p.curStreamURL
 	wasPlaying := p.state.Playing
 	streamer := p.streamer
-	sink := p.sink
 	if p.state.Track != nil && p.state.Track.Duration > 0 {
 		position = min(position, p.state.Track.Duration)
 	}
@@ -770,9 +805,7 @@ func (p *Player) Seek(position time.Duration) error {
 	p.mu.Unlock()
 
 	if streamID == "" || streamURL == "" || streamer == nil {
-		if sink != nil {
-			sink.Seek(position)
-		}
+		p.withSink(func(sk audioSink) { sk.Seek(position) })
 		return nil
 	}
 
@@ -782,7 +815,7 @@ func (p *Player) Seek(position time.Duration) error {
 	}
 
 	p.mu.Lock()
-	if p.closed {
+	if p.closed || p.curStream != streamID || p.curStreamURL != streamURL {
 		p.mu.Unlock()
 		return nil
 	}
@@ -790,22 +823,24 @@ func (p *Player) Seek(position time.Duration) error {
 	p.ended = false
 	p.state.Position = segOffset
 	s := p.state
-	sink = p.sink
 	p.mu.Unlock()
 
-	if sink != nil {
-		seekURI := fmt.Sprintf("%s?start_seg=%d", streamURL, startSeg)
-		sink.PlayURI(seekURI)
+	seekURI := fmt.Sprintf("%s?start_seg=%d", streamURL, startSeg)
+	p.withSink(func(sk audioSink) {
+		sk.PlayURI(seekURI)
 		if !wasPlaying {
-			sink.Pause()
+			sk.Pause()
 		}
-	}
+	})
 	p.bcast.Send(s)
 	p.scheduleNextPrefetch()
 	return nil
 }
 
 func (p *Player) SetVolume(v float64) error {
+	if math.IsNaN(v) {
+		v = 0
+	}
 	v = min(max(v, 0), 1)
 	p.mu.Lock()
 	if p.closed {
@@ -814,11 +849,8 @@ func (p *Player) SetVolume(v float64) error {
 	}
 	p.state.Volume = v
 	s := p.state
-	sink := p.sink
 	p.mu.Unlock()
-	if sink != nil {
-		sink.SetVolume(v)
-	}
+	p.withSink(func(sk audioSink) { sk.SetVolume(v) })
 	p.bcast.Send(s)
 	return nil
 }
@@ -980,14 +1012,15 @@ func (p *Player) SetShuffle(on bool) error {
 func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	p.mu.RLock()
 	closed := p.closed
-	sink := p.sink
 	p.mu.RUnlock()
-	if !closed && sink != nil {
+	if !closed {
 		gains := make([]float64, len(bands))
 		for i, b := range bands {
-			gains[i] = b.Gain
+			if !math.IsNaN(b.Gain) {
+				gains[i] = b.Gain
+			}
 		}
-		sink.SetEqualizer(gains)
+		p.withSink(func(sk audioSink) { sk.SetEqualizer(gains) })
 	}
 	return nil
 }
@@ -1014,9 +1047,7 @@ func (p *Player) RemoveFromQueue(idx int) error {
 			p.state.Playing = false
 			p.state.Loading = false
 			p.state.Position = 0
-			if p.sink != nil {
-				p.sink.Stop()
-			}
+			p.withSink(func(sk audioSink) { sk.Stop() })
 			if p.idx >= len(p.queue) && len(p.queue) > 0 {
 				p.idx = len(p.queue) - 1
 			}
@@ -1110,9 +1141,7 @@ func (p *Player) ClearQueue() error {
 	p.state.Playing = false
 	p.state.Loading = false
 	p.state.Position = 0
-	if p.sink != nil {
-		p.sink.Stop()
-	}
+	p.withSink(func(sk audioSink) { sk.Stop() })
 	s := p.state
 	p.mu.Unlock()
 	p.bcast.Send(s)
@@ -1148,19 +1177,21 @@ func (p *Player) Close() error {
 		if p.doneCh != nil {
 			close(p.doneCh)
 		}
-		sink := p.sink
 		streamer := p.streamer
 		cdmEngine := p.cdmEngine
 		p.mu.Unlock()
 
-		if sink != nil {
-			sink.Stop()
-		}
+		p.withSink(func(sk audioSink) { sk.Stop() })
 		p.bgWg.Wait()
 		p.bcast.Close()
-		if sink != nil {
-			sink.Destroy()
+		// Take the sink write lock so no concurrent public method can be
+		// inside a sink call while Destroy runs, and none can enter afterwards.
+		p.sinkMu.Lock()
+		if p.sink != nil && !p.sinkDestroyed {
+			p.sink.Destroy()
 		}
+		p.sinkDestroyed = true
+		p.sinkMu.Unlock()
 		if streamer != nil {
 			_ = streamer.Close()
 		}

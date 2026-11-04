@@ -146,8 +146,11 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(keyID) == 0 || len(iv) == 0 || len(input) == 0 {
+	if len(keyID) == 0 || len(iv) == 0 {
 		return nil, errors.New("invalid decrypt input parameters")
+	}
+	if len(input) == 0 {
+		return []byte{}, nil
 	}
 	if c.ctx == nil {
 		return nil, errors.New("cdm context is closed")

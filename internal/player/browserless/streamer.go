@@ -51,7 +51,8 @@ type trackStream struct {
 const (
 	maxHLSPlaylistBytes = 4 << 20  // 4 MiB cap on HLS media playlist
 	maxInitSegmentBytes = 4 << 20  // 4 MiB cap on MP4 init segment
-	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single media segment
+	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single HLS media segment
+	maxRawUploadSize    = 2 << 30  // 2 GiB ceiling on a non-seekable whole-file upload
 )
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
@@ -442,7 +443,7 @@ func (s *StreamServer) register(ctx context.Context, streamID string, st *trackS
 		}
 	}
 	s.streams[streamID] = st
-	shouldWarm := !s.closed && len(st.segments) > 0 && (st.raw || s.cdmEngine != nil)
+	shouldWarm := !s.closed && len(st.segments) > 0 && st.segments[0].length <= maxMediaSegmentSize && (st.raw || s.cdmEngine != nil)
 	baseCtx := ctx
 	if s.closeCtx != nil {
 		baseCtx = s.closeCtx
@@ -669,7 +670,21 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 		segURL = st.baseURI + seg.uri
 	}
 
-	segData, stage, err := fetchSegmentWithRetry(ctx, client, segURL, seg.offset, seg.length)
+	maxBytes := int64(maxMediaSegmentSize)
+	reqClient := client
+	if st.raw && seg.length > 0 {
+		// Non-seekable uploads (e.g. M4A mixes/live sets) go out as a single
+		// segment the size of the file; cap at the HEAD-reported length (up to
+		// maxRawUploadSize) rather than the 64 MiB per-HLS-segment bound.
+		maxBytes = min(seg.length, int64(maxRawUploadSize))
+		if seg.length > maxMediaSegmentSize && client != nil && client.Timeout > 0 {
+			cCopy := *client
+			cCopy.Timeout = 0
+			reqClient = &cCopy
+		}
+	}
+
+	segData, stage, err := fetchSegmentWithRetryMax(ctx, reqClient, segURL, seg.offset, seg.length, maxBytes)
 	if err != nil {
 		return nil, stage, err
 	}
@@ -699,9 +714,17 @@ var segmentRetryBackoffs = []time.Duration{
 	500 * time.Millisecond,
 }
 
-// fetchSegmentWithRetry downloads one HLS byte-range or segment URL, retrying
-// transient network/read errors and HTTP 429/5xx responses before giving up.
+// fetchSegmentWithRetry downloads one HLS byte-range or segment URL bounded by
+// maxMediaSegmentSize, retrying transient network/read errors and HTTP 429/5xx
+// responses before giving up.
 func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL string, offset, length int64) ([]byte, string, error) {
+	return fetchSegmentWithRetryMax(ctx, client, segURL, offset, length, maxMediaSegmentSize)
+}
+
+func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL string, offset, length, maxBytes int64) ([]byte, string, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxMediaSegmentSize
+	}
 	var lastStage string
 	var lastErr error
 
@@ -747,7 +770,7 @@ func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL stri
 			continue
 		}
 
-		segData, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaSegmentSize+1))
+		segData, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 		_ = resp.Body.Close()
 		if err != nil {
 			lastStage = "read"
@@ -757,8 +780,8 @@ func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL stri
 			}
 			continue
 		}
-		if len(segData) > maxMediaSegmentSize {
-			return nil, "read", fmt.Errorf("segment exceeds maximum size (%d bytes)", maxMediaSegmentSize)
+		if int64(len(segData)) > maxBytes {
+			return nil, "read", fmt.Errorf("segment exceeds maximum size (%d bytes)", maxBytes)
 		}
 		return segData, "", nil
 	}

@@ -937,6 +937,7 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -960,6 +961,7 @@ type Player struct {
 	onError       func(error)
 	onStreamStart func(string)
 	stop          chan struct{}
+	destroyOnce   sync.Once
 	wg            sync.WaitGroup
 }
 
@@ -1053,51 +1055,69 @@ func (p *Player) PlayURI(uri string) {
 	cs := C.CString(uri)
 	defer C.free(unsafe.Pointer(cs))
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pipeline == nil {
+		return
+	}
 	if p.st != nil {
 		C.vibez_gst_state_set_next_uri(p.st, nil)
 	}
 	p.committedURI = ""
 	C.vibez_gst_set_uri(p.pipeline, p.st, cs)
 	C.vibez_gst_play(p.pipeline)
-	p.mu.Unlock()
 }
 
 // Play resumes a paused pipeline.
 func (p *Player) Play() {
 	p.mu.Lock()
-	C.vibez_gst_play(p.pipeline)
+	if p.pipeline != nil {
+		C.vibez_gst_play(p.pipeline)
+	}
 	p.mu.Unlock()
 }
 
 // Pause pauses the pipeline.
 func (p *Player) Pause() {
 	p.mu.Lock()
-	C.vibez_gst_pause(p.pipeline)
+	if p.pipeline != nil {
+		C.vibez_gst_pause(p.pipeline)
+	}
 	p.mu.Unlock()
 }
 
 // Stop resets the pipeline to NULL state, releasing network connections.
 func (p *Player) Stop() {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pipeline == nil {
+		return
+	}
 	if p.st != nil {
 		C.vibez_gst_state_set_next_uri(p.st, nil)
 	}
 	p.committedURI = ""
 	C.vibez_gst_stop(p.pipeline)
-	p.mu.Unlock()
 }
 
 // Seek seeks to the given position within the current stream.
 func (p *Player) Seek(pos time.Duration) {
 	p.mu.Lock()
-	C.vibez_gst_seek(p.pipeline, C.gint64(pos.Nanoseconds()))
+	if p.pipeline != nil {
+		C.vibez_gst_seek(p.pipeline, C.gint64(pos.Nanoseconds()))
+	}
 	p.mu.Unlock()
 }
 
 // SetVolume sets playback volume in [0.0, 1.0].
 func (p *Player) SetVolume(v float64) {
+	if math.IsNaN(v) {
+		v = 0
+	}
+	v = min(max(v, 0), 1)
 	p.mu.Lock()
-	C.vibez_gst_set_volume(p.pipeline, C.gdouble(v))
+	if p.pipeline != nil {
+		C.vibez_gst_set_volume(p.pipeline, C.gdouble(v))
+	}
 	p.mu.Unlock()
 }
 
@@ -1106,9 +1126,12 @@ func (p *Player) SetVolume(v float64) {
 func (p *Player) SetEqualizer(gains []float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.pipeline == nil {
+		return
+	}
 	for i := range 10 {
 		gain := 0.0
-		if i < len(gains) {
+		if i < len(gains) && !math.IsNaN(gains[i]) {
 			gain = gains[i]
 		}
 		C.vibez_gst_set_eq_band(p.eq, p.st, C.gint(i), C.gdouble(gain))
@@ -1118,6 +1141,10 @@ func (p *Player) SetEqualizer(gains []float64) {
 // Position returns the current playback position (0 if unknown).
 func (p *Player) Position() time.Duration {
 	p.mu.Lock()
+	if p.pipeline == nil {
+		p.mu.Unlock()
+		return 0
+	}
 	ns := int64(C.vibez_gst_position(p.pipeline))
 	p.mu.Unlock()
 	if ns < 0 {
@@ -1129,6 +1156,10 @@ func (p *Player) Position() time.Duration {
 // Duration returns total stream duration (0 if unknown or live).
 func (p *Player) Duration() time.Duration {
 	p.mu.Lock()
+	if p.pipeline == nil {
+		p.mu.Unlock()
+		return 0
+	}
 	ns := int64(C.vibez_gst_duration(p.pipeline))
 	p.mu.Unlock()
 	if ns < 0 {
@@ -1139,14 +1170,21 @@ func (p *Player) Duration() time.Duration {
 
 // Destroy shuts down the bus poller and frees the GStreamer pipeline.
 func (p *Player) Destroy() {
-	close(p.stop)
-	p.wg.Wait()
-	p.mu.Lock()
-	C.vibez_gst_destroy(p.pipeline)
-	p.pipeline = nil
-	C.vibez_gst_state_free(p.st)
-	p.st = nil
-	p.mu.Unlock()
+	p.destroyOnce.Do(func() {
+		close(p.stop)
+		p.wg.Wait()
+		p.mu.Lock()
+		if p.pipeline != nil {
+			C.vibez_gst_destroy(p.pipeline)
+			p.pipeline = nil
+		}
+		p.eq = nil
+		if p.st != nil {
+			C.vibez_gst_state_free(p.st)
+			p.st = nil
+		}
+		p.mu.Unlock()
+	})
 }
 
 func (p *Player) busLoop() {

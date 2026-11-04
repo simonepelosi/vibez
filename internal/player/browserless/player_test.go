@@ -4,6 +4,7 @@ package browserless
 
 import (
 	"bytes"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -575,6 +576,25 @@ func (s *lifecycleSink) SetVolume(float64) {
 	}
 }
 
+func (s *lifecycleSink) SetEqualizer([]float64) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Seek(time.Duration) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Position() time.Duration {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+	return 0
+}
+
 func (s *lifecycleSink) Destroy() {
 	s.destroyed.Store(true)
 }
@@ -683,7 +703,15 @@ func TestClearQueueAndRemoveFromQueue_CancelInFlightPlayTrack(t *testing.T) {
 
 	// 1. ClearQueue while loading cancels in-flight playTrack and resets Loading.
 	p.playTrack(p.queue[0])
-	<-reqStarted
+	waitReq := func(step string) {
+		t.Helper()
+		select {
+		case <-reqStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: timed out waiting for upstream request to start", step)
+		}
+	}
+	waitReq("ClearQueue")
 	if err := p.ClearQueue(); err != nil {
 		t.Fatalf("ClearQueue: %v", err)
 	}
@@ -698,7 +726,7 @@ func TestClearQueueAndRemoveFromQueue_CancelInFlightPlayTrack(t *testing.T) {
 	p.idx = 0
 	p.mu.Unlock()
 	p.playTrack(p.queue[0])
-	<-reqStarted
+	waitReq("RemoveFromQueue")
 	if err := p.RemoveFromQueue(0); err != nil {
 		t.Fatalf("RemoveFromQueue(0): %v", err)
 	}
@@ -726,6 +754,114 @@ func TestSetVolume_NilSinkSafeAndClamped(t *testing.T) {
 	st, _ = p.GetState()
 	if st.Volume != 0.0 {
 		t.Errorf("Volume = %v, want 0.0", st.Volume)
+	}
+	if err := p.SetVolume(math.NaN()); err != nil {
+		t.Fatalf("SetVolume(NaN): %v", err)
+	}
+	st, _ = p.GetState()
+	if math.IsNaN(st.Volume) || st.Volume != 0.0 {
+		t.Errorf("Volume after NaN = %v, want 0.0", st.Volume)
+	}
+}
+
+// A load that hits its deadline (no user action superseded it) must clear
+// Loading and surface an error, otherwise Play() bails forever.
+func TestPlayTrack_TimeoutClearsLoadingAndReportsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Delay longer than loadTimeout (50ms) to trigger ctx deadline
+		select {
+		case <-time.After(300 * time.Millisecond):
+			w.WriteHeader(http.StatusGatewayTimeout)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Player{
+		cfg:         cfg,
+		licClient:   lic,
+		streamer:    streamer,
+		sink:        &lifecycleSink{},
+		loadTimeout: 50 * time.Millisecond,
+		queue:       []provider.Track{{ID: "slow", Title: "Slow"}},
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	p.playTrack(p.queue[0])
+	deadline := time.After(3 * time.Second)
+	for {
+		st, _ := p.GetState()
+		if !st.Loading {
+			if st.Playing {
+				t.Fatalf("state after timeout = %+v, want Playing=false", st)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("Loading still true long after the load deadline expired")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// The prefetched Next() fast path must supersede an in-flight playTrack so the
+// older load cannot commit and play A while idx points at B.
+func TestNextPrefetchedPath_SupersedesInFlightPlayTrack(t *testing.T) {
+	sink := &lifecycleSink{}
+	p := &Player{
+		sink:  sink,
+		queue: []provider.Track{{ID: "a"}, {ID: "b"}},
+		idx:   0,
+	}
+	p.state.Playing = true
+	p.playGen = 7
+	cancelled := false
+	p.playCtx = func() { cancelled = true }
+	p.nextPrep = &preparedNext{idx: 1, track: provider.Track{ID: "b"}, streamURL: "http://127.0.0.1:1/stream/b-1/tok.aac"}
+
+	if err := p.Next(); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if p.playGen == 7 {
+		t.Error("Next() prefetched path did not bump playGen")
+	}
+	if !cancelled {
+		t.Error("Next() prefetched path did not cancel the in-flight playCtx")
+	}
+	if p.idx != 1 || p.state.Track == nil || p.state.Track.ID != "b" {
+		t.Errorf("after Next idx=%d track=%v, want idx=1 track=b", p.idx, p.state.Track)
+	}
+}
+
+// Public methods racing Close() must never reach the sink after Destroy.
+func TestPublicMethodsAfterClose_NeverTouchDestroyedSink(t *testing.T) {
+	sink := &lifecycleSink{}
+	p := &Player{sink: sink, queue: []provider.Track{{ID: "a"}}}
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() { _ = p.SetVolume(0.3) })
+		wg.Go(func() { _ = p.Pause() })
+		wg.Go(func() { _ = p.SetEqualizer(nil) })
+	}
+	wg.Go(func() { _ = p.Close() })
+	wg.Wait()
+	_ = p.SetVolume(0.5)
+	_ = p.Pause()
+	_ = p.Stop()
+	if !sink.destroyed.Load() {
+		t.Fatal("expected Destroy")
+	}
+	if sink.useAfterDestroy.Load() {
+		t.Fatal("sink used after Destroy")
 	}
 }
 

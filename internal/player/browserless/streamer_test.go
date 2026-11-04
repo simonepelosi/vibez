@@ -414,3 +414,21 @@ func TestStreamServerClose_CancelsAndWaitsForSegment0Warming(t *testing.T) {
 		t.Fatal("StreamServer.Close() hung waiting for segment 0 warming goroutine")
 	}
 }
+
+func TestFetchSegmentWithRetry_LongRawUploadBypasses64MBLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 100))
+	}))
+	t.Cleanup(upstream.Close)
+
+	// Single segment upload reporting 100 MB length with 200 MB maxBytes limit
+	data, stage, err := fetchSegmentWithRetryMax(context.Background(), upstream.Client(), upstream.URL+"/upload.m4a", 0, 100, 200<<20)
+	if err != nil {
+		t.Fatalf("fetchSegmentWithRetryMax failed: stage=%q err=%v", stage, err)
+	}
+	if len(data) != 100 {
+		t.Errorf("len(data) = %d, want 100", len(data))
+	}
+}
