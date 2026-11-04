@@ -501,6 +501,7 @@ vibez_winsink_t vibez_winsink_create(
 void vibez_winsink_play_uri(vibez_winsink_t handle, const char* uri_utf8) {
     if (!handle || !uri_utf8) return;
     auto sink = static_cast<Handle*>(handle)->sink;
+    if (!sink || sink->closed.load()) return;
     auto ses = std::make_shared<Session>();
     std::shared_ptr<Session> old;
     {
@@ -517,14 +518,14 @@ void vibez_winsink_play_uri(vibez_winsink_t handle, const char* uri_utf8) {
 
 void vibez_winsink_set_next_uri(vibez_winsink_t handle, const char* uri_utf8) {
     Sink* sink = sinkOf(handle);
-    if (!sink) return;
+    if (!sink || sink->closed.load()) return;
     std::lock_guard<std::mutex> lk(sink->mu);
     sink->nextURI = uri_utf8 ? uri_utf8 : "";
 }
 
 void vibez_winsink_play(vibez_winsink_t handle) {
     Sink* sink = sinkOf(handle);
-    if (!sink) return;
+    if (!sink || sink->closed.load()) return;
     std::shared_ptr<Session> ses;
     {
         std::lock_guard<std::mutex> lk(sink->mu);
@@ -538,7 +539,7 @@ void vibez_winsink_play(vibez_winsink_t handle) {
 
 void vibez_winsink_pause(vibez_winsink_t handle) {
     Sink* sink = sinkOf(handle);
-    if (!sink) return;
+    if (!sink || sink->closed.load()) return;
     std::shared_ptr<Session> ses;
     {
         std::lock_guard<std::mutex> lk(sink->mu);
@@ -556,6 +557,7 @@ void vibez_winsink_stop(vibez_winsink_t handle) {
     std::shared_ptr<Session> old;
     {
         std::lock_guard<std::mutex> lk(sink->mu);
+        sink->nextURI.clear();
         old = sink->cur;
         sink->cur.reset();
     }
@@ -564,19 +566,20 @@ void vibez_winsink_stop(vibez_winsink_t handle) {
 
 void vibez_winsink_set_volume(vibez_winsink_t handle, double volume) {
     Sink* sink = sinkOf(handle);
-    if (!sink) return;
-    if (volume < 0.0) volume = 0.0;
+    if (!sink || sink->closed.load()) return;
+    if (std::isnan(volume) || volume < 0.0) volume = 0.0;
     if (volume > 1.0) volume = 1.0;
     sink->volume = volume;
 }
 
 void vibez_winsink_set_eq(vibez_winsink_t handle, const double* gains_db, int count) {
     Sink* sink = sinkOf(handle);
-    if (!sink || !gains_db) return;
+    if (!sink || sink->closed.load() || !gains_db) return;
     {
         std::lock_guard<std::mutex> lk(sink->mu);
         for (int i = 0; i < kBands; ++i) {
             double g = i < count ? gains_db[i] : 0.0;
+            if (std::isnan(g)) g = 0.0;
             if (g > 24.0) g = 24.0;
             if (g < -24.0) g = -24.0;
             sink->eq[i] = g;
@@ -587,7 +590,7 @@ void vibez_winsink_set_eq(vibez_winsink_t handle, const double* gains_db, int co
 
 double vibez_winsink_position(vibez_winsink_t handle) {
     Sink* sink = sinkOf(handle);
-    if (!sink) return 0.0;
+    if (!sink || sink->closed.load()) return 0.0;
     std::shared_ptr<Session> ses;
     {
         std::lock_guard<std::mutex> lk(sink->mu);

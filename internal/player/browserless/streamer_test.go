@@ -359,3 +359,76 @@ func TestSeekTargetRefusesMidFileSeekInMP4Upload(t *testing.T) {
 		t.Errorf("SeekTarget(0) = (%d, %v, %v), want (0, 0, true)", idx, off, ok)
 	}
 }
+
+func TestStreamServerClose_CancelsAndWaitsForSegment0Warming(t *testing.T) {
+	warmEntered := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-warmEntered:
+		default:
+			close(warmEntered)
+		}
+		select {
+		case <-r.Context().Done():
+		case <-releaseHandler:
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { close(releaseHandler) })
+
+	closeCtx, closeCancel := context.WithCancel(context.Background())
+	defer closeCancel()
+	s := &StreamServer{
+		authToken:   "tok",
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
+		streams:     make(map[string]*trackStream),
+	}
+
+	st := &trackStream{
+		trackID:   "i.raw",
+		segments:  []segmentRef{{uri: upstream.URL + "/seg0.mp3", offset: 0, length: 64, duration: 2}},
+		raw:       true,
+		rawFormat: rawFormat{ext: ".mp3", contentType: "audio/mpeg", seekable: true},
+	}
+	_ = s.register(context.Background(), "s1", st, ".mp3")
+
+	select {
+	case <-warmEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment 0 warming goroutine to start")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StreamServer.Close() = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StreamServer.Close() hung waiting for segment 0 warming goroutine")
+	}
+}
+
+func TestFetchSegmentWithRetry_LongRawUploadBypasses64MBLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte("a"), 100))
+	}))
+	t.Cleanup(upstream.Close)
+
+	// Single segment upload reporting 100 MB length with 200 MB maxBytes limit
+	data, stage, err := fetchSegmentWithRetryMax(context.Background(), upstream.Client(), upstream.URL+"/upload.m4a", 0, 100, 200<<20)
+	if err != nil {
+		t.Fatalf("fetchSegmentWithRetryMax failed: stage=%q err=%v", stage, err)
+	}
+	if len(data) != 100 {
+		t.Errorf("len(data) = %d, want 100", len(data))
+	}
+}

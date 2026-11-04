@@ -91,6 +91,7 @@ public:
     std::string sessionId;
     std::vector<uint8_t> sessionMessage;
     bool hasMessage = false;
+    bool sessionFailed = false;
     bool updateResolved = false;
     bool updateFailed = false;
     bool certResolved = false;
@@ -136,6 +137,9 @@ public:
         if (promise_id == 1) {
             certFailed = true;
             cert_cv.notify_all();
+        } else if (promise_id == 2) {
+            sessionFailed = true;
+            msg_cv.notify_all();
         } else if (promise_id == 3) {
             updateFailed = true;
             update_cv.notify_all();
@@ -276,6 +280,7 @@ int cdm_context_generate_challenge(
         ctx->host.sessionId.clear();
         ctx->host.sessionMessage.clear();
         ctx->host.hasMessage = false;
+        ctx->host.sessionFailed = false;
     }
 
     // Widevine PSSH header box (52 bytes) matching MusicKit v3 generatePSSH:
@@ -308,9 +313,9 @@ int cdm_context_generate_challenge(
     {
         std::unique_lock<std::mutex> lk(ctx->host.cv_m);
         bool ok = ctx->host.msg_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host.hasMessage && !ctx->host.sessionId.empty();
+            return (ctx->host.hasMessage && !ctx->host.sessionId.empty()) || ctx->host.sessionFailed;
         });
-        if (!ok) {
+        if (!ok || ctx->host.sessionFailed) {
             return -2;
         }
     }

@@ -3,6 +3,8 @@
 package browserless
 
 import (
+	"bytes"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -156,19 +158,18 @@ func TestPlayTrack_TriggersOnSessionExpiredOn401(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "expired"}
-	lic := license.NewClient(cfg)
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = rewriteTransport{target: srv.URL, rt: origTransport}
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
 
 	streamer, err := NewStreamServer(nil, lic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = streamer.Close() }()
 
 	var expiredCalls atomic.Int32
 	done := make(chan struct{}, 1)
@@ -185,6 +186,7 @@ func TestPlayTrack_TriggersOnSessionExpiredOn401(t *testing.T) {
 			}
 		},
 	}
+	t.Cleanup(func() { _ = p.Close() })
 
 	p.playTrack(provider.Track{ID: "123", Title: "Song"})
 	select {
@@ -202,19 +204,18 @@ func TestPlayTrack_SkipsUnavailableTrackAndAdvances(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"songList":[]}`))
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
-	lic := license.NewClient(cfg)
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = rewriteTransport{target: srv.URL, rt: origTransport}
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
 
 	streamer, err := NewStreamServer(nil, lic)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = streamer.Close() }()
 
 	p := &Player{
 		cfg:       cfg,
@@ -227,6 +228,7 @@ func TestPlayTrack_SkipsUnavailableTrackAndAdvances(t *testing.T) {
 		},
 		idx: 0,
 	}
+	t.Cleanup(func() { _ = p.Close() })
 	sub := p.Subscribe()
 	p.playTrack(p.queue[0])
 
@@ -496,7 +498,7 @@ func TestPlayLogsLibraryResolveFailure(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":"i.uploaded","type":"library-songs","attributes":{"name":"Home Demo","playParams":{"id":"i.uploaded","kind":"song","isLibrary":true}}}]}`))
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	prov := apple.New(&config.Config{ //nolint:gosec // G101: test credentials, not real secrets
 		AppleDeveloperToken: "test-dev-token",
@@ -506,6 +508,7 @@ func TestPlayLogsLibraryResolveFailure(t *testing.T) {
 	prov.SetBaseURL(srv.URL)
 
 	p := &Player{provider: prov, sink: noopSink{}}
+	t.Cleanup(func() { _ = p.Close() })
 	states := p.bcast.Subscribe()
 	if err := p.SetQueue([]string{"i.uploaded"}); err != nil {
 		t.Fatalf("SetQueue: %v", err)
@@ -525,6 +528,402 @@ func TestPlayLogsLibraryResolveFailure(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("no [resolve] log for a library song without a catalog ID")
+		}
+	}
+}
+
+type lifecycleSink struct {
+	noopSink
+	destroyed       atomic.Bool
+	useAfterDestroy atomic.Bool
+	playURICalls    atomic.Int32
+}
+
+func (s *lifecycleSink) PlayURI(string) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+	s.playURICalls.Add(1)
+}
+
+func (s *lifecycleSink) SetNextURI(string) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Play() {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Pause() {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Stop() {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) SetVolume(float64) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) SetEqualizer([]float64) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Seek(time.Duration) {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+}
+
+func (s *lifecycleSink) Position() time.Duration {
+	if s.destroyed.Load() {
+		s.useAfterDestroy.Store(true)
+	}
+	return 0
+}
+
+func (s *lifecycleSink) Destroy() {
+	s.destroyed.Store(true)
+}
+
+func TestClose_CancelsAndWaitsForInFlightPlayTrackBeforeDestroy(t *testing.T) {
+	reqStarted := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case reqStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-releaseHandler:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(releaseHandler) })
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   10 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &lifecycleSink{}
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      sink,
+		doneCh:    make(chan struct{}),
+		queue:     []provider.Track{{ID: "slow-1", Title: "Slow"}},
+	}
+	p.bgWg.Go(p.pollPosition)
+
+	p.playTrack(p.queue[0])
+	select {
+	case <-reqStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream request to start")
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() { _ = p.Close() })
+	wg.Go(func() { _ = p.Close() }) // idempotent concurrent Close
+	wg.Go(func() { _ = p.Play() })
+	wg.Go(func() { _ = p.SetVolume(0.5) })
+	wg.Wait()
+
+	if !sink.destroyed.Load() {
+		t.Fatal("expected sink.Destroy() to be called")
+	}
+	if sink.useAfterDestroy.Load() {
+		t.Fatal("sink method invoked after Destroy() (Use-After-Free)")
+	}
+	if got := sink.playURICalls.Load(); got != 0 {
+		t.Fatalf("PlayURI called %d times after Close, want 0", got)
+	}
+}
+
+func TestClearQueueAndRemoveFromQueue_CancelInFlightPlayTrack(t *testing.T) {
+	reqStarted := make(chan struct{}, 2)
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case reqStarted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"songList":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &lifecycleSink{}
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      sink,
+		queue:     []provider.Track{{ID: "t1", Title: "One"}, {ID: "t2", Title: "Two"}},
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	// 1. ClearQueue while loading cancels in-flight playTrack and resets Loading.
+	p.playTrack(p.queue[0])
+	waitReq := func(step string) {
+		t.Helper()
+		select {
+		case <-reqStarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: timed out waiting for upstream request to start", step)
+		}
+	}
+	waitReq("ClearQueue")
+	if err := p.ClearQueue(); err != nil {
+		t.Fatalf("ClearQueue: %v", err)
+	}
+	st, _ := p.GetState()
+	if st.Loading || st.Playing || st.Track != nil {
+		t.Fatalf("state after ClearQueue = %+v, want Loading=false Playing=false Track=nil", st)
+	}
+
+	// 2. RemoveFromQueue(0) while loading cancels in-flight playTrack and resets Loading.
+	p.mu.Lock()
+	p.queue = []provider.Track{{ID: "t1", Title: "One"}, {ID: "t2", Title: "Two"}}
+	p.idx = 0
+	p.mu.Unlock()
+	p.playTrack(p.queue[0])
+	waitReq("RemoveFromQueue")
+	if err := p.RemoveFromQueue(0); err != nil {
+		t.Fatalf("RemoveFromQueue(0): %v", err)
+	}
+	st, _ = p.GetState()
+	if st.Loading || st.Playing || st.Track != nil {
+		t.Fatalf("state after RemoveFromQueue(0) = %+v, want Loading=false Playing=false Track=nil", st)
+	}
+	if got := sink.playURICalls.Load(); got != 0 {
+		t.Fatalf("PlayURI called %d times on cleared/removed tracks, want 0", got)
+	}
+}
+
+func TestSetVolume_NilSinkSafeAndClamped(t *testing.T) {
+	p := &Player{}
+	if err := p.SetVolume(1.8); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+	st, _ := p.GetState()
+	if st.Volume != 1.0 {
+		t.Errorf("Volume = %v, want 1.0", st.Volume)
+	}
+	if err := p.SetVolume(-0.5); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+	st, _ = p.GetState()
+	if st.Volume != 0.0 {
+		t.Errorf("Volume = %v, want 0.0", st.Volume)
+	}
+	if err := p.SetVolume(math.NaN()); err != nil {
+		t.Fatalf("SetVolume(NaN): %v", err)
+	}
+	st, _ = p.GetState()
+	if math.IsNaN(st.Volume) || st.Volume != 0.0 {
+		t.Errorf("Volume after NaN = %v, want 0.0", st.Volume)
+	}
+}
+
+// A load that hits its deadline (no user action superseded it) must clear
+// Loading and surface an error, otherwise Play() bails forever.
+func TestPlayTrack_TimeoutClearsLoadingAndReportsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Delay longer than loadTimeout (50ms) to trigger ctx deadline
+		select {
+		case <-time.After(300 * time.Millisecond):
+			w.WriteHeader(http.StatusGatewayTimeout)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Player{
+		cfg:         cfg,
+		licClient:   lic,
+		streamer:    streamer,
+		sink:        &lifecycleSink{},
+		loadTimeout: 50 * time.Millisecond,
+		queue:       []provider.Track{{ID: "slow", Title: "Slow"}},
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	p.playTrack(p.queue[0])
+	deadline := time.After(3 * time.Second)
+	for {
+		st, _ := p.GetState()
+		if !st.Loading {
+			if st.Playing {
+				t.Fatalf("state after timeout = %+v, want Playing=false", st)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("Loading still true long after the load deadline expired")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// The prefetched Next() fast path must supersede an in-flight playTrack so the
+// older load cannot commit and play A while idx points at B.
+func TestNextPrefetchedPath_SupersedesInFlightPlayTrack(t *testing.T) {
+	sink := &lifecycleSink{}
+	p := &Player{
+		sink:  sink,
+		queue: []provider.Track{{ID: "a"}, {ID: "b"}},
+		idx:   0,
+	}
+	p.state.Playing = true
+	p.playGen = 7
+	cancelled := false
+	p.playCtx = func() { cancelled = true }
+	p.nextPrep = &preparedNext{idx: 1, track: provider.Track{ID: "b"}, streamURL: "http://127.0.0.1:1/stream/b-1/tok.aac"}
+
+	if err := p.Next(); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if p.playGen == 7 {
+		t.Error("Next() prefetched path did not bump playGen")
+	}
+	if !cancelled {
+		t.Error("Next() prefetched path did not cancel the in-flight playCtx")
+	}
+	if p.idx != 1 || p.state.Track == nil || p.state.Track.ID != "b" {
+		t.Errorf("after Next idx=%d track=%v, want idx=1 track=b", p.idx, p.state.Track)
+	}
+}
+
+// Public methods racing Close() must never reach the sink after Destroy.
+func TestPublicMethodsAfterClose_NeverTouchDestroyedSink(t *testing.T) {
+	sink := &lifecycleSink{}
+	p := &Player{sink: sink, queue: []provider.Track{{ID: "a"}}}
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() { _ = p.SetVolume(0.3) })
+		wg.Go(func() { _ = p.Pause() })
+		wg.Go(func() { _ = p.SetEqualizer(nil) })
+	}
+	wg.Go(func() { _ = p.Close() })
+	wg.Wait()
+	_ = p.SetVolume(0.5)
+	_ = p.Pause()
+	_ = p.Stop()
+	if !sink.destroyed.Load() {
+		t.Fatal("expected Destroy")
+	}
+	if sink.useAfterDestroy.Load() {
+		t.Fatal("sink used after Destroy")
+	}
+}
+
+func TestPlayTrackAndPrefetch_KeepSegment0WarmupAlive(t *testing.T) {
+	mp3Data := mp3Frame()
+	seg0Warmed := make(chan struct{}, 4)
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songList":[{"assets":[{"flavor":"128:ctrp256","URL":"` + srvURL + `/upload.mp3"}]}]}`))
+			return
+		}
+		// fetchRawHead requests bytes=0-65535; segment-0 warm-up requests bytes=0-63.
+		if r.Header.Get("Range") == "bytes=0-63" {
+			select {
+			case <-time.After(30 * time.Millisecond):
+			case <-r.Context().Done():
+				return
+			}
+			http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(mp3Data))
+			seg0Warmed <- struct{}{}
+			return
+		}
+		http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(mp3Data))
+	}))
+	srvURL = srv.URL
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &lifecycleSink{}
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      sink,
+		queue: []provider.Track{
+			{ID: "i.up1", Title: "Upload 1"},
+			{ID: "i.up2", Title: "Upload 2"},
+		},
+	}
+	t.Cleanup(func() { _ = p.Close() })
+
+	p.playTrack(p.queue[0])
+
+	// Both playTrack (Upload 1) and scheduleNextPrefetch (Upload 2) must keep
+	// their contexts alive long enough for async segment-0 warming to finish.
+	for i := range 2 {
+		select {
+		case <-seg0Warmed:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for segment-0 warm-up #%d (prematurely cancelled?)", i+1)
 		}
 	}
 }

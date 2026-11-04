@@ -41,13 +41,41 @@ type Asset struct {
 	ArtworkURL string `json:"artworkURL"`
 }
 
+const (
+	maxJSONResponseBytes = 4 << 20 // 4 MiB cap on MZPlay / license JSON responses
+	maxCertResponseBytes = 1 << 20 // 1 MiB cap on Widevine server certificate
+	maxErrorBodyBytes    = 4096    // 4 KiB cap on upstream error diagnostic bodies
+)
+
 func NewClient(cfg *config.Config) *Client {
-	return &Client{
-		cfg: cfg,
-		httpClient: &http.Client{
+	return NewClientWithHTTP(cfg, nil)
+}
+
+// NewClientWithHTTP constructs a license Client using a custom *http.Client
+// (or a default 15s-timeout client when httpClient is nil).
+func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{
 			Timeout: 15 * time.Second,
-		},
+		}
 	}
+	return &Client{
+		cfg:        cfg,
+		httpClient: httpClient,
+	}
+}
+
+// HTTPClient returns the underlying *http.Client used for upstream requests.
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil || c.httpClient == nil {
+		return &http.Client{Timeout: 15 * time.Second}
+	}
+	return c.httpClient
+}
+
+func readBoundedErrorBody(r io.Reader) string {
+	raw, _ := io.ReadAll(io.LimitReader(r, maxErrorBodyBytes))
+	return string(raw)
 }
 
 // FetchPlaybackInfo requests playback metadata and HLS stream URLs from Apple MZPlay.
@@ -70,12 +98,10 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -87,7 +113,7 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 		} `json:"songList"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONResponseBytes)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding webPlayback response: %w", err)
 	}
 	if len(result.SongList) == 0 || len(result.SongList[0].Assets) == 0 {
@@ -149,12 +175,10 @@ func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (st
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		raw, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+		return "", fmt.Errorf("%w: webPlayback HTTP %d: %s", ErrUnauthorized, resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, string(raw))
+		return "", fmt.Errorf("webPlayback failed (HTTP %d): %s", resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 
 	var result struct {
@@ -162,7 +186,7 @@ func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (st
 			Assets []Asset `json:"assets"`
 		} `json:"songList"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONResponseBytes)).Decode(&result); err != nil {
 		return "", fmt.Errorf("decoding webPlayback response: %w", err)
 	}
 	if len(result.SongList) == 0 || len(result.SongList[0].Assets) == 0 || result.SongList[0].Assets[0].URL == "" {
@@ -192,7 +216,14 @@ func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]
 		return nil, fmt.Errorf("fetching widevine certificate failed (HTTP %d)", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	certBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxCertResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(certBytes) == 0 || len(certBytes) > maxCertResponseBytes {
+		return nil, fmt.Errorf("invalid widevine certificate size (%d bytes)", len(certBytes))
+	}
+	return certBytes, nil
 }
 
 // AcquireLicense exchanges a Widevine license challenge with Apple's license server.
@@ -226,12 +257,10 @@ func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challeng
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("%w: acquire license HTTP %d: %s", ErrUnauthorized, resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("%w: acquire license HTTP %d: %s", ErrUnauthorized, resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("acquire license failed (HTTP %d): %s", resp.StatusCode, string(raw))
+		return nil, fmt.Errorf("acquire license failed (HTTP %d): %s", resp.StatusCode, readBoundedErrorBody(resp.Body))
 	}
 
 	var respJSON struct {
@@ -240,7 +269,7 @@ func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challeng
 		Status    int    `json:"status"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxJSONResponseBytes)).Decode(&respJSON); err != nil {
 		return nil, fmt.Errorf("decoding license JSON: %w", err)
 	}
 
