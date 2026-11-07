@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.7] — 2026-11-07
+
+### Added
+- **WAV and AIFF playback on Linux** — adds `.wav`, `.aiff`, and `.aif` support to `--local` on Linux via GStreamer (`wavparse` in `gst-plugins-good`, `aiffparse` in `gst-plugins-bad`, and 16-bit AIFF fallback via `gst-libav`'s `avdemux_aiff` with helpful missing-plugin hints). Refs #209.
+
 ### Fixed
 - **Browserless shutdown UAF prevention, ghost-playback cancellation, and stream/CDM boundary hardening** — synchronizes `pollPosition`, `playTrack`, `scheduleNextPrefetch`, and `StreamServer` workers via `sync.WaitGroup` and lifecycle contexts (while keeping async segment-0 warm-up alive across `PrepareTrack`) so `Close()` drains all goroutines before destroying the native sink (`SinkHandle` `std::shared_ptr` on macOS) and Widevine CDM, cancels in-flight track loads via monotonic `playGen` on `ClearQueue`/`RemoveFromQueue` and fast-path `Next()`, handles load timeout without permanent loading hang, clamps `SetVolume` against `NaN`, bypasses 64 MiB segment cap for non-seekable M4A uploads, uses constant-time loopback token comparison, and bounds upstream HTTP timeouts, body sizes, and CGo/CDM slices. Closes #213, refs #214.
 - **Vibe Agent word-boundary matching, negation handling, and input sanitization** — replaces raw substring matching in `KeywordAgent.Parse` with clause-aware token, multi-word phrase, and conservative plural/derivational stem scoring (so `"workout"` no longer matches `"work"` while `"late nights"`, `"relaxation"`, and `"danceable"` retain their moods), handles negations without leaking across clauses, fixes `ToSearchQuery` returning literal `"unknown"` and `morning` vs `party` collisions in `ToSearchQueries`, clones rule slices, and sanitizes ANSI/control/BiDi characters and Unicode spaces within bounded input limits. Closes #212, refs #208.
@@ -807,7 +812,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.6...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.7...HEAD
+[2.0.7]: https://github.com/simonepelosi/vibez/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/simonepelosi/vibez/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/simonepelosi/vibez/compare/v2.0.4...v2.0.5
 [2.0.4]: https://github.com/simonepelosi/vibez/compare/v2.0.3...v2.0.4
