@@ -1769,12 +1769,19 @@ type ratingAttributes struct {
 	Value int `json:"value"` // 1 = love, -1 = dislike, 0 = neutral
 }
 
-// LoveSong adds the song to the user's Apple Music library and marks it as
-// Loved (rating value = 1). Pass loved=false to remove the rating. If
-// catalogID is a library ID ("i.XXXX"), it resolves the catalog ID first and
-// falls back to the library song ratings endpoint if the track has no catalog
-// equivalent.
-func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bool) error {
+// SetSongRating sets the user's rating for a song. RatingLoved adds the song
+// to the user's Apple Music library and marks it as Loved (value = 1),
+// RatingDisliked marks it as "Suggest Less" (value = -1), and RatingNone
+// removes the rating. If catalogID is a library ID ("i.XXXX"), it resolves the
+// catalog ID first and falls back to the library song ratings endpoint if the
+// track has no catalog equivalent.
+func (a *AppleProvider) SetSongRating(ctx context.Context, catalogID string, rating provider.Rating) error {
+	switch rating {
+	case provider.RatingNone, provider.RatingLoved, provider.RatingDisliked:
+	default:
+		return fmt.Errorf("SetSongRating: invalid rating %d", rating)
+	}
+
 	ratingEndpoint := "/me/ratings/songs/" + url.PathEscape(catalogID)
 	if strings.HasPrefix(catalogID, "i.") {
 		if resolved, err := a.resolveCatalogSongID(ctx, catalogID); err == nil && resolved != "" {
@@ -1785,11 +1792,13 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 		}
 	}
 
-	// Add to library first (idempotent — safe to call even if already in library).
-	if loved && !strings.HasPrefix(catalogID, "i.") {
+	// Add to library first when loving (idempotent — safe to call even if
+	// already in library). "Suggest Less" never adds to the library, matching
+	// the Apple Music web player.
+	if rating == provider.RatingLoved && !strings.HasPrefix(catalogID, "i.") {
 		addReq, err := a.newRequest(ctx, http.MethodPost, "/me/library?ids[songs]="+url.QueryEscape(catalogID))
 		if err != nil {
-			return fmt.Errorf("LoveSong: add to library: %w", err)
+			return fmt.Errorf("SetSongRating: add to library: %w", err)
 		}
 		if err := a.do(addReq, nil); err != nil {
 			// Non-fatal: song may already be in library.
@@ -1797,10 +1806,10 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 		}
 	}
 
-	if !loved {
+	if rating == provider.RatingNone {
 		delReq, err := a.newRequest(ctx, http.MethodDelete, ratingEndpoint)
 		if err != nil {
-			return fmt.Errorf("LoveSong: delete rating: %w", err)
+			return fmt.Errorf("SetSongRating: delete rating: %w", err)
 		}
 		if err := a.do(delReq, nil); err != nil {
 			// Deleting a rating that wasn't set returns 404; treat as success.
@@ -1814,15 +1823,15 @@ func (a *AppleProvider) LoveSong(ctx context.Context, catalogID string, loved bo
 
 	body := ratingRequest{
 		Type:       "ratings",
-		Attributes: ratingAttributes{Value: 1},
+		Attributes: ratingAttributes{Value: int(rating)},
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("LoveSong: marshal: %w", err)
+		return fmt.Errorf("SetSongRating: marshal: %w", err)
 	}
 	putReq, err := a.newRequestWithBody(ctx, http.MethodPut, ratingEndpoint, "application/json", raw)
 	if err != nil {
-		return fmt.Errorf("LoveSong: %w", err)
+		return fmt.Errorf("SetSongRating: %w", err)
 	}
 	return a.do(putReq, nil)
 }
@@ -1836,10 +1845,11 @@ type ratingResponse struct {
 	} `json:"data"`
 }
 
-// GetSongRating returns true when the given song is marked as Loved in the
-// user's Apple Music account. If catalogID is a library ID ("i.XXXX"), it
-// resolves the catalog ID first and falls back to /me/ratings/library-songs/{id}.
-func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bool, error) {
+// GetSongRating returns the user's rating for the given song: RatingLoved,
+// RatingDisliked ("Suggest Less"), or RatingNone. If catalogID is a library ID
+// ("i.XXXX"), it resolves the catalog ID first and falls back to
+// /me/ratings/library-songs/{id}.
+func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (provider.Rating, error) {
 	ep := "/me/ratings/songs/" + url.PathEscape(catalogID)
 	if strings.HasPrefix(catalogID, "i.") {
 		if resolved, err := a.resolveCatalogSongID(ctx, catalogID); err == nil && resolved != "" {
@@ -1851,26 +1861,33 @@ func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (bo
 	}
 	req, err := a.newRequest(ctx, http.MethodGet, ep)
 	if err != nil {
-		return false, fmt.Errorf("GetSongRating: %w", err)
+		return provider.RatingNone, fmt.Errorf("GetSongRating: %w", err)
 	}
 	// Use the raw client so we can distinguish 404 (not rated) from real errors.
 	resp, err := a.client.Do(req) //nolint:gosec // G704: URL is constructed from config, not user input
 	if err != nil {
-		return false, fmt.Errorf("GetSongRating: http: %w", err)
+		return provider.RatingNone, fmt.Errorf("GetSongRating: http: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent {
-		return false, nil
+		return provider.RatingNone, nil
 	}
 	if resp.StatusCode >= 400 {
-		return false, nil // treat all errors as "not rated" — non-fatal
+		return provider.RatingNone, nil // treat all errors as "not rated" — non-fatal
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 	var rating ratingResponse
-	if err := json.Unmarshal(body, &rating); err != nil {
-		return false, nil
+	if err := json.Unmarshal(body, &rating); err != nil || len(rating.Data) == 0 {
+		return provider.RatingNone, nil
 	}
-	return len(rating.Data) > 0 && rating.Data[0].Attributes.Value == 1, nil
+	switch rating.Data[0].Attributes.Value {
+	case 1:
+		return provider.RatingLoved, nil
+	case -1:
+		return provider.RatingDisliked, nil
+	default:
+		return provider.RatingNone, nil
+	}
 }
 
 // ── Recommendations ────────────────────────────────────────────────────────

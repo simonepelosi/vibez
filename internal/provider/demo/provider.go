@@ -145,9 +145,11 @@ func (Provider) CreatePlaylist(_ context.Context, name string, _ []string) (prov
 	return provider.Playlist{ID: "dp-new-" + name, Name: name}, nil
 }
 
-func (Provider) LoveSong(_ context.Context, _ string, _ bool) error { return nil }
+func (Provider) SetSongRating(_ context.Context, _ string, _ provider.Rating) error { return nil }
 
-func (Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
+func (Provider) GetSongRating(_ context.Context, _ string) (provider.Rating, error) {
+	return provider.RatingNone, nil
+}
 
 func (Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
 

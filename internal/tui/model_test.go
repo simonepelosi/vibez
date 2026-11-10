@@ -125,10 +125,14 @@ func (m *mockProvider) GetArtistAlbums(_ context.Context, _ string) ([]provider.
 func (m *mockProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{}, nil
 }
-func (m *mockProvider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
-func (m *mockProvider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
-func (m *mockProvider) IsAuthenticated() bool                                   { return true }
-func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
+func (m *mockProvider) SetSongRating(_ context.Context, _ string, _ provider.Rating) error {
+	return nil
+}
+func (m *mockProvider) GetSongRating(_ context.Context, _ string) (provider.Rating, error) {
+	return provider.RatingNone, nil
+}
+func (m *mockProvider) IsAuthenticated() bool                              { return true }
+func (m *mockProvider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
 func (m *mockProvider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	return nil, nil
 }
@@ -1401,46 +1405,79 @@ func TestModel_Update_VibeResultMsg_Radio_SearchError(t *testing.T) {
 	}
 }
 
-func TestModel_Update_LoveSongMsg_Success(t *testing.T) {
+func TestModel_Update_RateSongMsg_Success(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(loveSongMsg{title: "Song", loved: true})
+	_, cmd := m.Update(rateSongMsg{title: "Song", rating: provider.RatingLoved})
 	_ = cmd
 	// appendLog should record the love action.
 	if len(m.debugLog) == 0 {
-		t.Error("loveSongMsg should append a log entry")
+		t.Error("rateSongMsg should append a log entry")
 	}
 }
 
-func TestModel_Update_LoveSongMsg_ErrorRevertsOptimisticFavorite(t *testing.T) {
+func TestModel_Update_RateSongMsg_ErrorRevertsOptimisticFavorite(t *testing.T) {
 	m := newModel(nil)
-	m.favorites["i.1"] = true
-	m.favorites["cat1"] = true
-	_, cmd := m.Update(loveSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", loved: true, err: errors.New("api error")})
+	m.ratings["i.1"] = provider.RatingLoved
+	m.ratings["cat1"] = provider.RatingLoved
+	_, cmd := m.Update(rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", rating: provider.RatingLoved, prev: provider.RatingNone, err: errors.New("api error")})
 	_ = cmd
-	if m.favorites["i.1"] || m.favorites["cat1"] {
-		t.Errorf("favorites = %v, want optimistic toggle reverted on LoveSong error", m.favorites)
+	if m.ratings["i.1"] != provider.RatingNone || m.ratings["cat1"] != provider.RatingNone {
+		t.Errorf("ratings = %v, want optimistic love reverted on SetSongRating error", m.ratings)
 	}
 }
 
-func TestModel_Update_LoveSongMsg_Unlove(t *testing.T) {
+func TestModel_Update_RateSongMsg_ErrorRestoresPreviousDislike(t *testing.T) {
+	// Loving a disliked track that then fails to sync must restore the
+	// dislike, not drop to "no rating".
 	m := newModel(nil)
-	_, cmd := m.Update(loveSongMsg{title: "Song", loved: false})
+	m.ratings["i.1"] = provider.RatingLoved
+	_, _ = m.Update(rateSongMsg{trackID: "i.1", title: "Song", rating: provider.RatingLoved, prev: provider.RatingDisliked, err: errors.New("api error")})
+	if got := m.ratings["i.1"]; got != provider.RatingDisliked {
+		t.Errorf("rating = %d, want RatingDisliked restored on error", got)
+	}
+	if !strings.Contains(m.errMsg, "suggest less") {
+		t.Errorf("errMsg = %q, want it to mention suggest less", m.errMsg)
+	}
+}
+
+func TestModel_Update_RateSongMsg_Unlove(t *testing.T) {
+	m := newModel(nil)
+	m.ratings["i.1"] = provider.RatingLoved
+	_, cmd := m.Update(rateSongMsg{trackID: "i.1", title: "Song", rating: provider.RatingNone, prev: provider.RatingLoved})
 	_ = cmd
+	if _, ok := m.ratings["i.1"]; ok {
+		t.Errorf("ratings = %v, want entry cleared after unlove", m.ratings)
+	}
 }
 
 func TestModel_Update_SongRatingMsg(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(songRatingMsg{trackID: "i.1", catalogID: "track123", loved: true})
+	_, cmd := m.Update(songRatingMsg{trackID: "i.1", catalogID: "track123", rating: provider.RatingLoved})
 	_ = cmd
-	if !m.favorites["i.1"] || !m.favorites["track123"] {
-		t.Errorf("songRatingMsg should set both trackID and catalogID in favorites: %v", m.favorites)
+	if m.ratings["i.1"] != provider.RatingLoved || m.ratings["track123"] != provider.RatingLoved {
+		t.Errorf("songRatingMsg should set both trackID and catalogID in ratings: %v", m.ratings)
+	}
+}
+
+func TestModel_Update_SongRatingMsg_Disliked(t *testing.T) {
+	m := newModel(nil)
+	track := &provider.Track{ID: "i.1", CatalogID: "track123"}
+	_, _ = m.Update(songRatingMsg{trackID: "i.1", catalogID: "track123", rating: provider.RatingDisliked})
+	if got := m.trackRating(track); got != provider.RatingDisliked {
+		t.Errorf("trackRating = %d, want RatingDisliked", got)
+	}
+	if m.isTrackFavorite(track) {
+		t.Error("a disliked track must not read as favorite")
 	}
 }
 
 func TestModel_Update_SongRatingMsg_EmptyID(t *testing.T) {
 	m := newModel(nil)
-	_, cmd := m.Update(songRatingMsg{trackID: "", loved: true})
+	_, cmd := m.Update(songRatingMsg{trackID: "", rating: provider.RatingLoved})
 	_ = cmd // empty ID → no-op
+	if len(m.ratings) != 0 {
+		t.Errorf("ratings = %v, want empty for empty IDs", m.ratings)
+	}
 }
 
 func TestModel_Update_PlayTracksMsg_WithPlaylistID(t *testing.T) {
@@ -1761,8 +1798,94 @@ func TestHandleNormalKey_F_LoveSong(t *testing.T) {
 	m.playerState.Track = track
 	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'f', Text: "f"}, "f")
 	_ = cmd
-	if !m.favorites["fav-id"] {
+	if m.ratings["fav-id"] != provider.RatingLoved {
 		t.Error("f key should toggle favorite on")
+	}
+}
+
+// pressRatingKey presses k and runs the resulting command, returning the
+// rateSongMsg it produced.
+func pressRatingKey(t *testing.T, m *Model, k string) rateSongMsg {
+	t.Helper()
+	cmd := m.handleNormalKey(tea.KeyPressMsg{Code: rune(k[0]), Text: k}, k)
+	if cmd == nil {
+		t.Fatalf("%s key returned nil cmd, want a rating sync", k)
+	}
+	msg, ok := cmd().(rateSongMsg)
+	if !ok {
+		t.Fatalf("%s key cmd returned %T, want rateSongMsg", k, msg)
+	}
+	return msg
+}
+
+func TestHandleNormalKey_X_SuggestLessToggle(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := &provider.Track{Title: "Song", Artist: "Artist", ID: "i.1", CatalogID: "cat1"}
+	m.playerState.Track = track
+
+	msg := pressRatingKey(t, m, "x")
+	if msg.rating != provider.RatingDisliked || msg.prev != provider.RatingNone {
+		t.Errorf("first x: rating=%d prev=%d, want Disliked from None", msg.rating, msg.prev)
+	}
+	if msg.catalogID != "cat1" {
+		t.Errorf("first x: catalogID=%q, want cat1", msg.catalogID)
+	}
+	if got := m.trackRating(track); got != provider.RatingDisliked {
+		t.Errorf("after first x: trackRating=%d, want RatingDisliked (optimistic)", got)
+	}
+
+	msg = pressRatingKey(t, m, "x")
+	if msg.rating != provider.RatingNone || msg.prev != provider.RatingDisliked {
+		t.Errorf("second x: rating=%d prev=%d, want None from Disliked", msg.rating, msg.prev)
+	}
+	if got := m.trackRating(track); got != provider.RatingNone {
+		t.Errorf("after second x: trackRating=%d, want RatingNone", got)
+	}
+}
+
+func TestHandleNormalKey_LoveAndSuggestLessReplaceEachOther(t *testing.T) {
+	m := newModel(newMockPlayer())
+	track := &provider.Track{Title: "Song", Artist: "Artist", ID: "i.1"}
+	m.playerState.Track = track
+
+	// A disliked track: f must love it (replacing the dislike), not toggle
+	// it to "no rating" as if it had been unloved.
+	m.ratings["i.1"] = provider.RatingDisliked
+	msg := pressRatingKey(t, m, "f")
+	if msg.rating != provider.RatingLoved || msg.prev != provider.RatingDisliked {
+		t.Errorf("f on disliked: rating=%d prev=%d, want Loved from Disliked", msg.rating, msg.prev)
+	}
+
+	// And x on a loved track replaces the love with a dislike.
+	msg = pressRatingKey(t, m, "x")
+	if msg.rating != provider.RatingDisliked || msg.prev != provider.RatingLoved {
+		t.Errorf("x on loved: rating=%d prev=%d, want Disliked from Loved", msg.rating, msg.prev)
+	}
+	if m.isTrackFavorite(track) {
+		t.Error("track should no longer be a favorite after x")
+	}
+}
+
+func TestHandleNormalKey_X_NoTrack_NoOp(t *testing.T) {
+	m := newModel(newMockPlayer())
+	m.playerState.Track = nil
+	if cmd := m.handleNormalKey(tea.KeyPressMsg{Code: 'x', Text: "x"}, "x"); cmd != nil {
+		t.Error("x with no track should be a no-op")
+	}
+	if len(m.ratings) != 0 {
+		t.Errorf("ratings = %v, want empty", m.ratings)
+	}
+}
+
+func TestRatingIcon(t *testing.T) {
+	for r, want := range map[provider.Rating]string{
+		provider.RatingNone:     "♡",
+		provider.RatingLoved:    "♥",
+		provider.RatingDisliked: "⊘",
+	} {
+		if got := ratingIcon(r); got != want {
+			t.Errorf("ratingIcon(%d) = %q, want %q", r, got, want)
+		}
 	}
 }
 
@@ -3002,10 +3125,27 @@ func TestNowPlayingLines_Favorite(t *testing.T) {
 	m := newModel(nil)
 	track := &provider.Track{Title: "Fav Song", Artist: "Artist", Album: "Album", ID: "fav1", Duration: time.Minute}
 	m.playerState.Track = track
-	m.favorites["fav1"] = true
+	m.ratings["fav1"] = provider.RatingLoved
 	lines := m.nowPlayingLines(76, 12)
 	if len(lines) != 12 {
 		t.Errorf("nowPlayingLines(favorite) returned %d lines, want 12", len(lines))
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "♥") {
+		t.Error("nowPlayingLines(favorite) should show the filled heart")
+	}
+}
+
+func TestNowPlayingLines_SuggestLess(t *testing.T) {
+	m := newModel(nil)
+	track := &provider.Track{Title: "Meh Song", Artist: "Artist", Album: "Album", ID: "meh1", Duration: time.Minute}
+	m.playerState.Track = track
+	m.ratings["meh1"] = provider.RatingDisliked
+	out := strings.Join(m.nowPlayingLines(76, 12), "\n")
+	if !strings.Contains(out, "⊘") {
+		t.Error("nowPlayingLines(disliked) should show the suggest-less indicator")
+	}
+	if strings.Contains(out, "♥") {
+		t.Error("nowPlayingLines(disliked) must not show the filled heart")
 	}
 }
 

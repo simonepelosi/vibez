@@ -112,6 +112,17 @@ type SearchResult struct {
 	Warnings []string
 }
 
+// Rating is the user's rating for a song. Apple Music stores love and
+// dislike ("Suggest Less") as a single value, so a song is in exactly one of
+// these states at a time. The numeric values match the Apple Music API.
+type Rating int
+
+const (
+	RatingNone     Rating = 0
+	RatingLoved    Rating = 1
+	RatingDisliked Rating = -1
+)
+
 type Provider interface {
 	Name() string
 	Search(ctx context.Context, query string) (*SearchResult, error)
@@ -134,14 +145,15 @@ type Provider interface {
 	// name and the supplied track IDs (library or catalog IDs). It returns the
 	// newly created Playlist on success.
 	CreatePlaylist(ctx context.Context, name string, trackIDs []string) (Playlist, error)
-	// LoveSong adds the song to the user's Apple Music library and marks it as
-	// "Loved". catalogID must be the catalog ID (not a library "i." ID).
-	// Passing loved=false removes the rating (un-loves the song).
-	LoveSong(ctx context.Context, catalogID string, loved bool) error
-	// GetSongRating returns true when the given catalog song is marked as Loved
-	// in the user's Apple Music account. Returns false (no error) when the song
-	// is not rated or the provider does not support ratings.
-	GetSongRating(ctx context.Context, catalogID string) (bool, error)
+	// SetSongRating sets the user's rating for a song. RatingLoved adds the
+	// song to the user's library and marks it as "Loved"; RatingDisliked marks
+	// it as "Suggest Less"; RatingNone clears any rating. Love and dislike share
+	// a single rating, so setting one replaces the other.
+	SetSongRating(ctx context.Context, catalogID string, rating Rating) error
+	// GetSongRating returns the user's rating for the given song. Returns
+	// RatingNone (no error) when the song is not rated or the provider does
+	// not support ratings.
+	GetSongRating(ctx context.Context, catalogID string) (Rating, error)
 	// GetRecommendations returns personalised recommendation groups (albums and
 	// playlists) from Apple Music based on the user's library and history.
 	GetRecommendations(ctx context.Context) ([]RecommendationGroup, error)
