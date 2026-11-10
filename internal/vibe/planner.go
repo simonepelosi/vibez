@@ -25,6 +25,7 @@ const (
 
 	defaultOllamaBaseURL   = "http://127.0.0.1:11434"
 	defaultLMStudioBaseURL = "http://127.0.0.1:1234"
+	defaultLlamaCppBaseURL = "http://127.0.0.1:8080"
 	defaultProbeTimeout    = 300 * time.Millisecond
 	defaultPlanTimeout     = 10 * time.Second
 	maxHTTPResponseBytes   = 256 * 1024
@@ -505,7 +506,11 @@ type OpenAICompatPlanner struct {
 func (p *OpenAICompatPlanner) baseURL() string {
 	b := p.BaseURL
 	if b == "" {
-		b = defaultLMStudioBaseURL
+		if p.prefix() == "llamacpp" {
+			b = defaultLlamaCppBaseURL
+		} else {
+			b = defaultLMStudioBaseURL
+		}
 	}
 	b = strings.TrimRight(b, "/")
 	b = strings.TrimSuffix(b, "/v1")
@@ -513,10 +518,14 @@ func (p *OpenAICompatPlanner) baseURL() string {
 }
 
 func (p *OpenAICompatPlanner) prefix() string {
-	if p.BackendName != "" {
+	switch strings.ToLower(strings.TrimSpace(p.BackendName)) {
+	case "llamacpp", "llama.cpp", "llama-server", "llama-cpp":
+		return "llamacpp"
+	case "":
+		return "lmstudio"
+	default:
 		return p.BackendName
 	}
-	return "lmstudio"
 }
 
 func (p *OpenAICompatPlanner) client(timeout time.Duration) *http.Client {
@@ -678,15 +687,17 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 // ── Auto-Detection & Fallback Planner ───────────────────────────────────────
 
 // DetectOptions configures local runtime discovery. Note that port 8080 is
-// intentionally never probed automatically to avoid hitting unrelated dev
-// servers; users running llama-server or another OpenAI-compatible runtime on
-// a custom port can set Endpoint explicitly.
+// intentionally never probed automatically in "auto" mode to avoid hitting
+// unrelated dev servers; users running llama.cpp (`llama-server`) can set
+// Backend to "llamacpp" / "llama.cpp" / "llama-server" (which defaults to
+// 127.0.0.1:8080) or set Endpoint explicitly.
 type DetectOptions struct {
-	Backend       string // "auto" (default), "ollama", "lmstudio", "openai", "keyword"
+	Backend       string // "auto" (default), "ollama", "lmstudio", "llamacpp", "openai", "keyword"
 	Model         string
 	Endpoint      string
 	OllamaBaseURL string // optional override for testing
 	LMStudioURL   string // optional override for testing
+	LlamaCppURL   string // optional override for testing
 	Client        *http.Client
 }
 
@@ -702,6 +713,13 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	if lmURL == "" && (backend == "lmstudio" || backend == "openai") && opts.Endpoint != "" {
 		lmURL = opts.Endpoint
 	}
+	llamaURL := opts.LlamaCppURL
+	if llamaURL == "" && opts.Endpoint != "" {
+		llamaURL = opts.Endpoint
+	}
+	if llamaURL == "" {
+		llamaURL = defaultLlamaCppBaseURL
+	}
 
 	switch backend {
 	case "keyword":
@@ -715,6 +733,11 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 		name := backend
 		if m, err := ProbeOpenAICompat(ctx, lmURL, opts.Model, opts.Client); err == nil {
 			return &OpenAICompatPlanner{BackendName: name, BaseURL: lmURL, Model: m, Client: opts.Client}
+		}
+		return &KeywordAgent{}
+	case "llamacpp", "llama.cpp", "llama-server", "llama-cpp":
+		if m, err := ProbeOpenAICompat(ctx, llamaURL, opts.Model, opts.Client); err == nil {
+			return &OpenAICompatPlanner{BackendName: "llamacpp", BaseURL: llamaURL, Model: m, Client: opts.Client}
 		}
 		return &KeywordAgent{}
 	}

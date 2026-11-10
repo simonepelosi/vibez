@@ -53,8 +53,8 @@ type Config struct {
 	// DiscordClientID overrides the default Discord application client ID.
 	DiscordClientID string `json:"discord_client_id,omitempty"`
 	// VibeBackend selects the Vibe Mode planner backend ("auto", "ollama",
-	// "lmstudio", "openai", or "keyword"). Defaults to "auto" (prefers local
-	// on-device HTTP runtimes and falls back to KeywordAgent).
+	// "lmstudio", "llamacpp", "openai", or "keyword"). Defaults to "auto"
+	// (prefers local on-device HTTP runtimes and falls back to KeywordAgent).
 	VibeBackend string `json:"vibe_backend,omitempty"`
 	// VibePrivacy controls whether "auto" stays strictly on-device
 	// ("local-only", default) or may use external/cloud backends ("auto").

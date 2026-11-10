@@ -54,9 +54,11 @@ func (s *stubSearchProvider) GetArtistAlbums(_ context.Context, _ string) ([]pro
 func (s *stubSearchProvider) CreatePlaylist(_ context.Context, _ string, _ []string) (provider.Playlist, error) {
 	return provider.Playlist{}, nil
 }
-func (s *stubSearchProvider) LoveSong(_ context.Context, _ string, _ bool) error { return nil }
-func (s *stubSearchProvider) GetSongRating(_ context.Context, _ string) (bool, error) {
-	return false, nil
+func (s *stubSearchProvider) SetSongRating(_ context.Context, _ string, _ provider.Rating) error {
+	return nil
+}
+func (s *stubSearchProvider) GetSongRating(_ context.Context, _ string) (provider.Rating, error) {
+	return provider.RatingNone, nil
 }
 func (s *stubSearchProvider) IsAuthenticated() bool                              { return true }
 func (s *stubSearchProvider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
@@ -225,6 +227,60 @@ func TestOpenAICompatPlanner_ProbeAndPlan(t *testing.T) {
 	}
 	if plan.Action != ActionQueueAppend || len(plan.SeedTracks) != 1 {
 		t.Errorf("unexpected plan: %+v", plan)
+	}
+}
+
+func TestLlamaCppPlanner_ExplicitBackendAlias(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"},
+				},
+			})
+		case "/v1/chat/completions":
+			plan := VibePlan{
+				Action:        ActionPlayNow,
+				Explanation:   "Acoustic folk evening",
+				Mood:          "chill",
+				Energy:        0.25,
+				Ordered:       false,
+				SeedTracks:    []SeedTrack{{Artist: "Nick Drake", Title: "Pink Moon"}},
+				SearchQueries: []string{"70s acoustic folk"},
+			}
+			rawPlan, _ := json.Marshal(plan)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"content": string(rawPlan)}},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	for _, alias := range []string{"llamacpp", "llama.cpp", "llama-server"} {
+		planner := DetectPlanner(context.Background(), DetectOptions{
+			Backend:     alias,
+			LlamaCppURL: srv.URL,
+			Client:      srv.Client(),
+		})
+		wantName := "llamacpp:Meta-Llama-3.1-8B-Instruct.Q4_K_M.gguf"
+		if planner.Name() != wantName {
+			t.Fatalf("DetectPlanner(%q).Name() = %q, want %q", alias, planner.Name(), wantName)
+		}
+		plan, err := planner.Plan(context.Background(), PlanRequest{
+			Prompt:     "nick drake style folk",
+			PlayerIdle: true,
+		})
+		if err != nil {
+			t.Fatalf("Plan(%q): %v", alias, err)
+		}
+		if plan.Backend != wantName {
+			t.Errorf("plan.Backend = %q, want %q", plan.Backend, wantName)
+		}
 	}
 }
 

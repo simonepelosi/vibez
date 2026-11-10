@@ -372,3 +372,25 @@ func TestVibe_Update_PasteOnlyControlChars_Ignored(t *testing.T) {
 		t.Errorf("expected nil cmd on Enter with empty sanitized input")
 	}
 }
+
+func TestVibe_Lines_BackendEmojiBadge(t *testing.T) {
+	cases := []struct {
+		backend   string
+		wantEmoji string
+	}{
+		{"ollama:qwen3:8b", "🦙"},
+		{"llamacpp:llama-3.2", "🦙"},
+		{"lmstudio:mistral", "🧪"},
+		{"claude:haiku", "🧠"},
+		{"gemini:flash", "✨"},
+		{"codex:mini", "🤖"},
+	}
+	for _, tc := range cases {
+		v := NewVibe()
+		v.SetBackend(tc.backend)
+		out := strings.Join(v.Lines(60, 10, 0), "\n")
+		if !strings.Contains(out, tc.wantEmoji) || !strings.Contains(out, tc.backend) {
+			t.Errorf("Lines with backend %q should contain %q and backend name, got:\n%s", tc.backend, tc.wantEmoji, out)
+		}
+	}
+}

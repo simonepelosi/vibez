@@ -138,6 +138,36 @@ func (v *VibeModel) SetSearching() {
 	v.input.Blur()
 }
 
+// backendEmoji returns a playful icon for the given planner backend identifier.
+func backendEmoji(backend string) string {
+	b := strings.ToLower(strings.TrimSpace(backend))
+	if idx := strings.IndexByte(b, ':'); idx >= 0 {
+		b = b[:idx]
+	}
+	switch b {
+	case "ollama", "llamacpp", "llama.cpp", "llama-server", "llama-cpp":
+		return "🦙"
+	case "lmstudio":
+		return "🧪"
+	case "apple-fm", "foundationmodels":
+		return "🍎"
+	case "claude":
+		return "🧠"
+	case "gemini":
+		return "✨"
+	case "codex", "openai":
+		return "🤖"
+	case "copilot":
+		return "✈️"
+	case "opencode", "local":
+		return "⚡"
+	case "keyword":
+		return "🔑"
+	default:
+		return "✨"
+	}
+}
+
 // SetBackend sets the planner backend badge displayed in the Vibe header.
 func (v *VibeModel) SetBackend(backend string) {
 	v.backend = string(SanitizeSingleLineInput(backend, 32, true))
@@ -317,7 +347,8 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	}
 	label := styles.TabActive.Render(labelTitle)
 	if labelTitle == "Vibe" && v.backend != "" && v.backend != "keyword" {
-		label += " " + muted.Render("["+clip(v.backend, 24)+"]")
+		icon := backendEmoji(v.backend)
+		label += " " + muted.Render("["+icon+" "+clip(v.backend, 24)+"]")
 	}
 	sep := muted.Render(strings.Repeat("─", 5))
 
