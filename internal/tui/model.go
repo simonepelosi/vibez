@@ -159,13 +159,19 @@ type searchDebounceMsg struct {
 	gen   int
 }
 type vibeResultMsg struct {
-	query     string
-	tracks    []provider.Track
-	err       error
-	warnings  []string // non-fatal provider failures behind an incomplete result
-	discovery bool     // true when result is from a discovery auto-refill
-	radio     bool     // true when result is from a radio auto-refill
-	radioGen  int      // radio generation that produced this result
+	query       string
+	tracks      []provider.Track
+	action      string // vibe.ActionPlayNow, ActionQueueAppend, ActionPlayNext, ActionStartRadio
+	explanation string // curator explanation from VibePlan
+	backend     string // planner backend that produced the plan
+	err         error
+	warnings    []string // non-fatal provider failures behind an incomplete result
+	discovery   bool     // true when result is from a discovery auto-refill
+	radio       bool     // true when result is from a radio auto-refill
+	radioGen    int      // radio generation that produced this result
+}
+type vibePlannerDetectedMsg struct {
+	planner vibe.Planner
 }
 type rateSongMsg struct {
 	trackID   string
@@ -396,6 +402,9 @@ type Model struct {
 	playlistPickerLoading    bool
 	playlistPickerReturnMode viewMode
 	playlistPickerGen        int
+
+	// Vibe planner (auto-detected on-device runtime or KeywordAgent fallback).
+	vibePlanner vibe.Planner
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
@@ -945,6 +954,48 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, t := range tracks {
 			ids[i] = views.PlaybackID(t)
 		}
+		if msg.backend != "" {
+			m.vibe.SetBackend(msg.backend)
+		}
+		playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
+		isVibePrompt := !msg.discovery && !msg.radio
+		action := msg.action
+		if isVibePrompt && action == "" && playerIdle {
+			action = vibe.ActionPlayNow
+		}
+
+		if isVibePrompt && action == vibe.ActionStartRadio {
+			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
+			m.appendLog(fmt.Sprintf("[vibe] starting radio from %s — %s for %q", tracks[0].Artist, tracks[0].Title, msg.query))
+			seed := tracks[0]
+			cmds = append(cmds, m.startRadioFrom(&seed))
+			break
+		}
+		if isVibePrompt && action == vibe.ActionPlayNext && !playerIdle {
+			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
+			cmds = append(cmds, m.playNextCmd(msg.query, tracks, ids))
+			break
+		}
+		if isVibePrompt && (action == vibe.ActionPlayNow || playerIdle) {
+			if m.player != nil {
+				if err := m.player.SetQueue(ids); err != nil {
+					m.vibe.SetResult(0, err)
+					break
+				}
+			}
+			first := tracks[0]
+			m.queueTracks = tracks
+			m.queueIDs = ids
+			m.playerState.Track = &first
+			m.playerState.Loading = true
+			m.playerState.Playing = false
+			m.playerState.Position = 0
+			m.queue.SetTracks(m.queueTracks)
+			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
+			m.appendLog(fmt.Sprintf("[vibe] playing %d tracks for %q", len(tracks), msg.query))
+			break
+		}
+
 		if m.player != nil {
 			if err := m.player.AppendQueue(ids); err != nil {
 				if !msg.discovery && !msg.radio {
@@ -972,7 +1023,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.radio.retries = 0 // successful refill — reset circuit breaker
 			m.appendLog(fmt.Sprintf("[radio] refilled %d tracks", len(tracks)))
 		default:
-			m.vibe.SetResult(len(tracks), nil)
+			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
 			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(tracks), msg.query))
 		}
 
@@ -1130,10 +1181,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.scheduleSearch(m.searchQuery))
 		}
 		m.appendLog("[engine] backend: " + msg.Backend)
-		cmds = append(cmds, waitForState(m.stateCh), m.library.Init())
+		cmds = append(cmds, waitForState(m.stateCh), m.library.Init(), m.detectVibePlannerCmd())
 		cmds = append(cmds, m.restoreAudioSettings()...)
 		if m.memProfiling {
 			cmds = append(cmds, memTick())
+		}
+
+	case vibePlannerDetectedMsg:
+		if msg.planner != nil {
+			m.vibePlanner = msg.planner
+			m.vibe.SetBackend(msg.planner.Name())
+			m.appendLog("[vibe] planner: " + msg.planner.Name())
 		}
 
 	case memTickMsg:
@@ -2500,95 +2558,94 @@ func (m *Model) scheduleSearch(query string) tea.Cmd {
 	}
 }
 
-// runVibeSearch uses the KeywordAgent to interpret the user's vibe description.
-// It fires multiple parallel searches using different query variants from the
-// agent, merges results, deduplicates, shuffles, and returns up to 15 tracks.
+// detectVibePlannerCmd asynchronously probes configured on-device runtimes
+// (Ollama / LM Studio / custom endpoint) and falls back to KeywordAgent.
+func (m *Model) detectVibePlannerCmd() tea.Cmd {
+	var opts vibe.DetectOptions
+	if m.cfg != nil {
+		opts.Backend = m.cfg.VibeBackend
+		opts.Model = m.cfg.VibeModel
+		opts.Endpoint = m.cfg.VibeEndpoint
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+		defer cancel()
+		return vibePlannerDetectedMsg{planner: vibe.DetectPlanner(ctx, opts)}
+	}
+}
+
+// runVibeSearch plans and resolves the user's vibe description using the active
+// Planner (on-device Ollama / LM Studio runtime when available, transparently
+// falling back to KeywordAgent) and grounds the resulting VibePlan against the
+// provider in parallel.
 func (m *Model) runVibeSearch(query string) tea.Cmd {
-	agent := &vibe.KeywordAgent{}
-	v := agent.Parse(query)
-	// Get diverse query variants. Pick up to 3 randomly (already shuffled by the agent).
-	allQueries := agent.ToSearchQueries(v)
-	const maxQueries = 3
-	if len(allQueries) > maxQueries {
-		allQueries = allQueries[:maxQueries]
-	}
-	if len(allQueries) == 0 {
-		allQueries = []string{query}
-	}
-	m.appendLog(fmt.Sprintf("[vibe] %q → queries: %v", query, allQueries))
 	prov := m.provider
+	planner := m.vibePlanner
+	var detectOpts vibe.DetectOptions
+	if m.cfg != nil {
+		detectOpts.Backend = m.cfg.VibeBackend
+		detectOpts.Model = m.cfg.VibeModel
+		detectOpts.Endpoint = m.cfg.VibeEndpoint
+	}
+
+	playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
+	var nowPlaying string
+	if t := m.playerState.Track; t != nil {
+		nowPlaying = t.Artist + " — " + t.Title
+	}
+	queueSummary := make([]string, 0, min(10, len(m.queueTracks)))
+	for i := 0; i < len(m.queueTracks) && i < 10; i++ {
+		qt := m.queueTracks[i]
+		queueSummary = append(queueSummary, qt.Artist+" — "+qt.Title)
+	}
+	req := vibe.PlanRequest{
+		Prompt:       query,
+		PlayerIdle:   playerIdle,
+		NowPlaying:   nowPlaying,
+		QueueSummary: queueSummary,
+	}
+
+	m.appendLog(fmt.Sprintf("[vibe] planning %q…", query))
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		type searchOut struct {
-			tracks   []provider.Track
-			warnings []string
-			err      error
-		}
-		chs := make([]chan searchOut, len(allQueries))
-		for i, q := range allQueries {
-			ch := make(chan searchOut, 1)
-			chs[i] = ch
-			go func(term string, out chan searchOut) {
-				res, err := prov.Search(ctx, term)
-				if err != nil || res == nil {
-					out <- searchOut{err: err}
-					return
-				}
-				out <- searchOut{tracks: res.Tracks, warnings: res.Warnings}
-			}(q, ch)
-		}
-
-		// Merge results and deduplicate by (artist, title). Failures and
-		// partial-result warnings are collected rather than dropped: when the
-		// merge comes back empty they are the only explanation available.
-		seen := map[string]bool{}
-		var merged []provider.Track
-		var reasons []string
-		for _, ch := range chs {
-			r := <-ch
-			if r.err != nil {
-				reasons = append(reasons, r.err.Error())
-			}
-			reasons = append(reasons, r.warnings...)
-			for _, t := range r.tracks {
-				key := strings.ToLower(t.Artist + "||" + t.Title)
-				if !seen[key] {
-					seen[key] = true
-					merged = append(merged, t)
-				}
+		if prov != nil && strings.EqualFold(prov.Name(), "Local Files") {
+			if localTracks, err := prov.GetLibraryTracks(ctx); err == nil {
+				req.LocalIndex = vibe.BuildLocalLibraryIndex(localTracks)
 			}
 		}
 
-		if len(merged) == 0 {
-			// Fallback to raw input.
-			res, err := prov.Search(ctx, query)
-			if err != nil {
-				reasons = append(reasons, err.Error())
-			}
-			if res != nil {
-				reasons = append(reasons, res.Warnings...)
-			}
-			if err != nil || res == nil || len(res.Tracks) == 0 {
-				return vibeResultMsg{
-					query:    query,
-					err:      noResultsError(query, reasons),
-					warnings: dedupeStrings(reasons),
-				}
-			}
-			merged = res.Tracks
+		activePlanner := planner
+		if activePlanner == nil {
+			probeCtx, probeCancel := context.WithTimeout(ctx, 400*time.Millisecond)
+			activePlanner = vibe.DetectPlanner(probeCtx, detectOpts)
+			probeCancel()
 		}
 
-		rand.Shuffle(len(merged), func(i, j int) { //nolint:gosec // music shuffle
-			merged[i], merged[j] = merged[j], merged[i]
-		})
-		const cap = 15
-		if len(merged) > cap {
-			merged = merged[:cap]
+		plan, err := vibe.PlanWithFallback(ctx, activePlanner, req)
+		if err != nil {
+			return vibeResultMsg{query: query, err: err}
 		}
-		return vibeResultMsg{query: query, tracks: merged, warnings: dedupeStrings(reasons)}
+
+		out, err := vibe.ResolvePlan(ctx, prov, plan, query, 15)
+		if err != nil {
+			return vibeResultMsg{
+				query:    query,
+				backend:  plan.Backend,
+				err:      err,
+				warnings: out.Warnings,
+			}
+		}
+		return vibeResultMsg{
+			query:       query,
+			tracks:      out.Tracks,
+			action:      plan.Action,
+			explanation: plan.Explanation,
+			backend:     plan.Backend,
+			warnings:    out.Warnings,
+		}
 	}
 }
 

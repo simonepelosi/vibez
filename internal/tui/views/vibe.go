@@ -75,13 +75,15 @@ func closestOptionIdx(similarity float64) int {
 
 // VibeModel drives the interactive vibe panel (right split of the bottom area).
 type VibeModel struct {
-	state     vibeState
-	input     textinput.Model
-	lastQ     string // last submitted query
-	added     int    // tracks added on last successful search
-	errStr    string // error message from last search
-	discovery DiscoveryInfo
-	pickerIdx int // selected row in the metric picker
+	state       vibeState
+	input       textinput.Model
+	lastQ       string // last submitted query
+	added       int    // tracks added on last successful search
+	explanation string // optional curator explanation from VibePlan
+	backend     string // active planner backend badge (e.g. "ollama:qwen3" or "")
+	errStr      string // error message from last search
+	discovery   DiscoveryInfo
+	pickerIdx   int // selected row in the metric picker
 }
 
 const vibeMaxRunes = 80
@@ -136,12 +138,27 @@ func (v *VibeModel) SetSearching() {
 	v.input.Blur()
 }
 
+// SetBackend sets the planner backend badge displayed in the Vibe header.
+func (v *VibeModel) SetBackend(backend string) {
+	v.backend = string(SanitizeSingleLineInput(backend, 32, true))
+}
+
+// Backend returns the currently configured planner backend badge.
+func (v *VibeModel) Backend() string { return v.backend }
+
 // SetResult transitions to done or error.
 // Called by the model after the provider search completes.
 func (v *VibeModel) SetResult(n int, err error) {
+	v.SetResultWithSummary(n, "", err)
+}
+
+// SetResultWithSummary transitions to done or error and stores an optional
+// curator explanation from the VibePlan.
+func (v *VibeModel) SetResultWithSummary(n int, explanation string, err error) {
 	if err != nil {
 		v.state = vibeError
 		v.errStr = err.Error()
+		v.explanation = ""
 	} else {
 		if v.discovery.Active {
 			v.state = vibeDiscovery
@@ -149,6 +166,7 @@ func (v *VibeModel) SetResult(n int, err error) {
 			v.state = vibeDone
 		}
 		v.added = n
+		v.explanation = string(SanitizeSingleLineInput(explanation, vibeMaxRunes, true))
 	}
 }
 
@@ -298,6 +316,9 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		labelTitle = "Discovery"
 	}
 	label := styles.TabActive.Render(labelTitle)
+	if labelTitle == "Vibe" && v.backend != "" && v.backend != "keyword" {
+		label += " " + muted.Render("["+clip(v.backend, 24)+"]")
+	}
 	sep := muted.Render(strings.Repeat("─", 5))
 
 	var lines []string
@@ -401,10 +422,14 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		if v.added == 1 {
 			suffix = ""
 		}
+		summaryLine := ""
+		if v.explanation != "" && !strings.EqualFold(v.explanation, v.lastQ) {
+			summaryLine = muted.Render(clip(v.explanation, 0))
+		}
 		lines = []string{
 			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
-			"",
+			summaryLine,
 			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
 			"",
 			accent.Render("v") + muted.Render(" new vibe") +
