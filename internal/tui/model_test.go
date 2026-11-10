@@ -1006,6 +1006,30 @@ func TestHandleSearchKey_Right_ClampAtEnd(t *testing.T) {
 	}
 }
 
+func TestHandleSearchKey_SectionJump_RoutesToSearchView(t *testing.T) {
+	m := newModel(nil)
+	m.mode = modeSearch
+	m.search.SetResults(&provider.SearchResult{
+		Tracks: []provider.Track{
+			{Title: "Track 1", CatalogID: "t1"},
+			{Title: "Track 2", CatalogID: "t2"},
+		},
+		Albums: []provider.Album{
+			{ID: "a1", Title: "Album 1"},
+		},
+	}, false, nil)
+
+	m.handleSearchKey("ctrl+down", tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl})
+	if al := m.search.SelectedAlbum(); al == nil || al.Title != "Album 1" {
+		t.Fatalf("after ctrl+down: SelectedAlbum = %+v, want Album 1", al)
+	}
+
+	m.handleSearchKey("shift+up", tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	if tr := m.search.SelectedTrack(); tr == nil || tr.Title != "Track 1" {
+		t.Fatalf("after shift+up: SelectedTrack = %+v, want Track 1", tr)
+	}
+}
+
 func TestHandleSearchKey_Home_MovesCursorToStart(t *testing.T) {
 	m := newModel(nil)
 	m.mode = modeSearch

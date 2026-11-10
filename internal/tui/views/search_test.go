@@ -990,3 +990,127 @@ func TestSearch_ArtistAlbumsErrorShown(t *testing.T) {
 		t.Errorf("error should be shown, got:\n%s", v)
 	}
 }
+
+// --- section jumping (#203) ---
+
+func multiSectionSearch() *SearchModel {
+	s := NewSearch(nil)
+	s.SetSize(80, 10)
+	s.SetResults(&provider.SearchResult{
+		Tracks: []provider.Track{
+			{Title: "Track 1", CatalogID: "t1"},
+			{Title: "Track 2", CatalogID: "t2"},
+			{Title: "Track 3", CatalogID: "t3"},
+			{Title: "Track 4", CatalogID: "t4"},
+		},
+		Albums: []provider.Album{
+			{ID: "a1", Title: "Album 1"},
+			{ID: "a2", Title: "Album 2"},
+		},
+		Artists: []provider.Artist{
+			{ID: "ar1", Name: "Artist 1"},
+		},
+		Playlists: []provider.Playlist{
+			{ID: "pl1", Name: "Playlist 1"},
+		},
+	}, false, nil)
+	return s
+}
+
+func TestSearch_SectionCount(t *testing.T) {
+	s := NewSearch(nil)
+	if got := s.SectionCount(); got != 0 {
+		t.Errorf("empty search SectionCount() = %d, want 0", got)
+	}
+
+	s.SetResults(&provider.SearchResult{
+		Tracks: []provider.Track{{Title: "T1"}},
+	}, false, nil)
+	if got := s.SectionCount(); got != 1 {
+		t.Errorf("single-section SectionCount() = %d, want 1", got)
+	}
+
+	s = multiSectionSearch()
+	if got := s.SectionCount(); got != 4 {
+		t.Errorf("multi-section SectionCount() = %d, want 4", got)
+	}
+}
+
+func TestSearch_JumpSection_ForwardAndWrap(t *testing.T) {
+	s := multiSectionSearch()
+
+	// Move down inside Tracks first so we verify JumpSection jumps from the
+	// middle of a section to the first item of the next section.
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if tr := s.SelectedTrack(); tr == nil || tr.Title != "Track 2" {
+		t.Fatalf("expected Track 2 selected before jump, got %+v", tr)
+	}
+
+	// 1st ctrl+down → Albums (first album)
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl})
+	if al := s.SelectedAlbum(); al == nil || al.Title != "Album 1" {
+		t.Fatalf("after 1st ctrl+down: SelectedAlbum = %+v, want Album 1", al)
+	}
+	firstLine, _, _ := strings.Cut(s.View(), "\n")
+	if !strings.Contains(firstLine, "Albums") {
+		t.Errorf("after jumping to Albums, Albums header should be on first line of view, got %q:\n%s", firstLine, s.View())
+	}
+
+	// 2nd shift+down → Artists
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift})
+	if ar := s.SelectedArtist(); ar == nil || ar.Name != "Artist 1" {
+		t.Fatalf("after 2nd jump (shift+down): SelectedArtist = %+v, want Artist 1", ar)
+	}
+
+	// 3rd ctrl+down → Playlists
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl})
+	if pl := s.SelectedPlaylist(); pl == nil || pl.Name != "Playlist 1" {
+		t.Fatalf("after 3rd jump: SelectedPlaylist = %+v, want Playlist 1", pl)
+	}
+
+	// 4th ctrl+down → wraps back to Tracks (Track 1) and scrolls header to top.
+	s.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModCtrl})
+	if tr := s.SelectedTrack(); tr == nil || tr.Title != "Track 1" {
+		t.Fatalf("after wrap jump: SelectedTrack = %+v, want Track 1", tr)
+	}
+	if s.scroll != 0 {
+		t.Errorf("after wrapping to Tracks, scroll = %d, want 0", s.scroll)
+	}
+}
+
+func TestSearch_JumpSection_BackwardAndWrap(t *testing.T) {
+	s := multiSectionSearch()
+
+	// From Tracks (first item), ctrl+up wraps to Playlists.
+	s.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl})
+	if pl := s.SelectedPlaylist(); pl == nil || pl.Name != "Playlist 1" {
+		t.Fatalf("after ctrl+up wrap: SelectedPlaylist = %+v, want Playlist 1", pl)
+	}
+
+	// shift+up → Artists
+	s.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift})
+	if ar := s.SelectedArtist(); ar == nil || ar.Name != "Artist 1" {
+		t.Fatalf("after shift+up: SelectedArtist = %+v, want Artist 1", ar)
+	}
+
+	// ctrl+up → Albums
+	s.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl})
+	if al := s.SelectedAlbum(); al == nil || al.Title != "Album 1" {
+		t.Fatalf("after ctrl+up to Albums: SelectedAlbum = %+v, want Album 1", al)
+	}
+
+	// ctrl+up → Tracks
+	s.Update(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModCtrl})
+	if tr := s.SelectedTrack(); tr == nil || tr.Title != "Track 1" {
+		t.Fatalf("after ctrl+up to Tracks: SelectedTrack = %+v, want Track 1", tr)
+	}
+}
+
+func TestSearch_JumpSection_EmptyNoPanic(t *testing.T) {
+	s := NewSearch(nil)
+	s.JumpSection(1)
+	s.JumpSection(-1)
+	if s.SelectedTrack() != nil {
+		t.Error("expected nil track on empty search after JumpSection")
+	}
+}
