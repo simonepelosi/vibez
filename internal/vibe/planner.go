@@ -706,18 +706,28 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 // Backend to "llamacpp" / "llama.cpp" / "llama-server" (which defaults to
 // 127.0.0.1:8080) or set Endpoint explicitly.
 type DetectOptions struct {
-	Backend       string // "auto" (default), "ollama", "lmstudio", "llamacpp", "openai", "keyword"
+	Backend       string // "auto" (default), "omp", "ollama", "lmstudio", "llamacpp", "claude", "gemini", "codex", "copilot", "opencode", "llm", "openai", "keyword"
+	Privacy       string // "auto" (default: HTTP + CLI agents) or "local-only" / "http-only" (strictly local HTTP servers only)
 	Model         string
 	Endpoint      string
 	PlanTimeout   time.Duration // optional per-request timeout override (defaults to DefaultPlanTimeout)
 	OllamaBaseURL string        // optional override for testing
 	LMStudioURL   string        // optional override for testing
 	LlamaCppURL   string        // optional override for testing
+	CLILookup     func(agent string) (string, error)
 	Client        *http.Client
 }
 
+func (opts DetectOptions) cliLookup() func(string) (string, error) {
+	if opts.CLILookup != nil {
+		return opts.CLILookup
+	}
+	return LookPathCLI
+}
+
 // DetectPlanner probes the configured or default on-device runtimes and
-// returns the highest-priority available Planner, falling back to KeywordAgent.
+// installed CLI agents, returning the highest-priority available Planner and
+// falling back to KeywordAgent.
 func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	backend := strings.ToLower(strings.TrimSpace(opts.Backend))
 	ollamaURL := opts.OllamaBaseURL
@@ -734,6 +744,14 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	}
 	if llamaURL == "" {
 		llamaURL = defaultLlamaCppBaseURL
+	}
+	lookup := opts.cliLookup()
+
+	if cliAgent := NormalizeCLIAgent(backend); cliAgent != "" {
+		if bin, err := lookup(cliAgent); err == nil && bin != "" {
+			return &CLIPlanner{Agent: cliAgent, BinaryPath: bin, Model: opts.Model}
+		}
+		return &KeywordAgent{}
 	}
 
 	switch backend {
@@ -774,7 +792,38 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	if m, err := ProbeOpenAICompat(ctx, lmURL, opts.Model, opts.Client); err == nil {
 		return &OpenAICompatPlanner{BackendName: "lmstudio", BaseURL: lmURL, Model: m, Timeout: opts.PlanTimeout, Client: opts.Client}
 	}
+
+	// Probe Tier 2 installed CLI agents (omp, claude, gemini, codex, copilot, opencode, llm)
+	// unless Privacy is restricted to strictly local HTTP servers ("local-only" / "http-only").
+	privacy := strings.ToLower(strings.TrimSpace(opts.Privacy))
+	if privacy != "local-only" && privacy != "http-only" {
+		for _, agent := range SupportedCLIAgents {
+			if bin, err := lookup(agent); err == nil && bin != "" {
+				return &CLIPlanner{Agent: agent, BinaryPath: bin, Model: opts.Model}
+			}
+		}
+	}
 	return &KeywordAgent{}
+}
+
+// AvailableBackends returns the list of currently reachable local HTTP runtimes
+// and installed CLI agents on the machine (always ending with "keyword").
+func AvailableBackends(ctx context.Context, opts DetectOptions) []string {
+	var out []string
+	if _, err := ProbeOllama(ctx, opts.OllamaBaseURL, "", opts.Client); err == nil {
+		out = append(out, "ollama")
+	}
+	if _, err := ProbeOpenAICompat(ctx, opts.LMStudioURL, "", opts.Client); err == nil {
+		out = append(out, "lmstudio")
+	}
+	lookup := opts.cliLookup()
+	for _, agent := range SupportedCLIAgents {
+		if bin, err := lookup(agent); err == nil && bin != "" {
+			out = append(out, agent)
+		}
+	}
+	out = append(out, "keyword")
+	return out
 }
 
 // PlanWithFallback runs primary.Plan(ctx, req) and transparently falls back to
