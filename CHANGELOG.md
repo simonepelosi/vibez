@@ -9,10 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.8] — 2026-11-12
+
 ### Added
-- **On-device local LLM planner, catalog grounding resolver, and immediate playback for Vibe Mode** — introduces `vibe.Planner`, `vibe.VibePlan`, and `vibe.ResolvePlan` with automatic detection of local on-device HTTP runtimes (`Ollama` on `127.0.0.1:11434`, `LM Studio` on `127.0.0.1:1234`, or a custom `vibe_endpoint` in `config.json`) and zero-latency fallback to `KeywordAgent`. Grounds `(Artist, Title)` seed tracks against the active provider in parallel (filtering out unwanted karaoke/tribute covers and excluded artists), passes a compact local library index in `--local` mode, and starts playback immediately via `SetQueue` when the player is idle or when `action == "play_now"`. Refs #215.
-- **Jump between search result sections** — in Search (`/`), `ctrl+↓` / `ctrl+↑` (or `shift+↓` / `shift+↑`) move the cursor to the first item of the next / previous section (Tracks, Albums, Artists, Playlists), wrapping around, and scroll that section's header to the top. Reaching Albums no longer means scrolling past every track; the single-list layout and the Enter-plays-top-result flow are unchanged. Refs #203.
-- **"Suggest Less" on the current track** — press `x` to tell Apple Music to recommend the playing track less (the web player's *Suggest Less*, rating `-1`), or press it again to clear it. The now-playing indicator is now three-state (`♡` none, `♥` loved, `⊘` suggest less) and reflects the rating stored on Apple Music, so a disliked track no longer reads as merely "not loved". `provider.Provider` replaces `LoveSong(bool)` with `SetSongRating(provider.Rating)`, and `GetSongRating` returns a `provider.Rating`. Closes #216.
+- **On-device local LLM planner, catalog grounding resolver, and immediate playback for Vibe Mode** — introduces `vibe.Planner`, `vibe.VibePlan`, and `vibe.ResolvePlan` with automatic detection of local on-device HTTP runtimes (`Ollama` on `127.0.0.1:11434`, `LM Studio` on `127.0.0.1:1234`, `llama.cpp` on `127.0.0.1:8080`, or a custom `vibe_endpoint` in `config.json`), provider emoji badges (`🦙 Ollama`, `🧪 LM Studio`, `⚡ llama.cpp`, `🤖 Local AI`, `🔑 Keyword`), and zero-latency fallback to `KeywordAgent`. Grounds `(Artist, Title)` seed tracks against the active provider in parallel (filtering out unwanted karaoke/tribute covers and excluded artists), passes a compact local library index in `--local` mode, and starts playback immediately via `SetQueue` when the player is idle or when `action == "play_now"`. Refs #215, #220.
+- **Jump between search result sections** — in Search (`/`), `ctrl+↓` / `ctrl+↑` (or `shift+↓` / `shift+↑`) move the cursor to the first item of the next / previous section (Tracks, Albums, Artists, Playlists), wrapping around, and scroll that section's header to the top. Reaching Albums no longer means scrolling past every track; the single-list layout and the Enter-plays-top-result flow are unchanged. Refs #203, #219.
+- **"Suggest Less" on the current track** — press `x` to tell Apple Music to recommend the playing track less (the web player's *Suggest Less*, rating `-1`), or press it again to clear it. The now-playing indicator is now three-state (`♡` none, `♥` loved, `⊘` suggest less) and reflects the rating stored on Apple Music, so a disliked track no longer reads as merely "not loved". `provider.Provider` replaces `LoveSong(bool)` with `SetSongRating(provider.Rating)`, and `GetSongRating` returns a `provider.Rating`. Closes #216, refs #218.
 
 ## [2.0.7] — 2026-11-07
 
@@ -817,7 +819,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.7...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.8...HEAD
+[2.0.8]: https://github.com/simonepelosi/vibez/compare/v2.0.7...v2.0.8
 [2.0.7]: https://github.com/simonepelosi/vibez/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/simonepelosi/vibez/compare/v2.0.5...v2.0.6
 [2.0.5]: https://github.com/simonepelosi/vibez/compare/v2.0.4...v2.0.5
