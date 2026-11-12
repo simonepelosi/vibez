@@ -265,6 +265,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 | `r` | Cycle repeat (off → all → one) |
 | `s` | Toggle shuffle |
 | `f` | Heart / favourite current track |
+| `x` | Suggest Less — ask Apple Music to recommend the current track less (press again to clear) |
 | `v` | Open vibe input (mood-driven search) |
 | `e` | Toggle equalizer panel |
 | `d` | Toggle discovery mode |

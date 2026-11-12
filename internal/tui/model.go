@@ -167,17 +167,18 @@ type vibeResultMsg struct {
 	radio     bool     // true when result is from a radio auto-refill
 	radioGen  int      // radio generation that produced this result
 }
-type loveSongMsg struct {
+type rateSongMsg struct {
 	trackID   string
 	catalogID string
 	title     string
-	loved     bool
+	rating    provider.Rating // rating that was requested
+	prev      provider.Rating // rating before the optimistic update, restored on error
 	err       error
 }
 type songRatingMsg struct {
 	trackID   string
 	catalogID string
-	loved     bool
+	rating    provider.Rating
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -371,8 +372,9 @@ type Model struct {
 	debugView   bool
 	debugScroll int // lines scrolled up from tail (0 = show latest)
 
-	// Favorites: track IDs that the user has hearted this session.
-	favorites map[string]bool
+	// Ratings: love / "Suggest Less" state per track ID (library and catalog),
+	// kept in sync with Apple Music. Missing entries mean RatingNone.
+	ratings map[string]provider.Rating
 
 	// Animation
 	glowStep   int
@@ -427,7 +429,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.eqP = &eqPanel{m: views.NewEqualizer(eqBands)}
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
-	m.favorites = make(map[string]bool)
+	m.ratings = make(map[string]provider.Rating)
 	m.aboutP = &aboutPanel{m: views.NewAbout()}
 	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
 	for _, line := range opts.InitialLogs {
@@ -690,7 +692,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				pp += " catalogId=" + s.Track.CatalogID
 			}
 			m.appendLog(pp)
-			// Check whether the new track is already loved on Apple Music.
+			// Check whether the new track is already loved or disliked on Apple Music.
 			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
 			// visible, otherwise mark stale so the fetch is deferred until
 			// the user opens the panel (lazy loading).
@@ -768,13 +770,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.artwork.rendered = map[art.Size][]string{}
 
 	case songRatingMsg:
-		// Update favorite state to match what Apple Music reports.
-		if msg.trackID != "" {
-			m.favorites[msg.trackID] = msg.loved
-		}
-		if msg.catalogID != "" {
-			m.favorites[msg.catalogID] = msg.loved
-		}
+		// Update rating state to match what Apple Music reports.
+		m.setRating(msg.trackID, msg.catalogID, msg.rating)
 	case DebugLogMsg:
 		m.appendLog(string(msg))
 
@@ -979,31 +976,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(tracks), msg.query))
 		}
 
-	case loveSongMsg:
+	case rateSongMsg:
 		if msg.err != nil {
-			// Revert optimistic toggle on failure.
-			if msg.trackID != "" {
-				m.favorites[msg.trackID] = !msg.loved
+			// Revert optimistic update on failure.
+			m.setRating(msg.trackID, msg.catalogID, msg.prev)
+			action := "favorite"
+			if msg.rating == provider.RatingDisliked || msg.prev == provider.RatingDisliked {
+				action = "suggest less"
 			}
-			if msg.catalogID != "" {
-				m.favorites[msg.catalogID] = !msg.loved
-			}
-			m.errMsg = fmt.Sprintf("favorite failed: %v", msg.err)
+			m.errMsg = fmt.Sprintf("%s failed: %v", action, msg.err)
 			m.errExpiry = time.Now().Add(4 * time.Second)
-			m.appendLog(fmt.Sprintf("[fav] ✗ %s: %v", msg.title, msg.err))
+			m.appendLog(fmt.Sprintf("[rating] ✗ %s: %v", msg.title, msg.err))
 		} else {
-			if msg.trackID != "" {
-				m.favorites[msg.trackID] = msg.loved
-			}
-			if msg.catalogID != "" {
-				m.favorites[msg.catalogID] = msg.loved
-			}
+			m.setRating(msg.trackID, msg.catalogID, msg.rating)
 			m.library.m.InvalidateTracksCache()
-			state := "♡"
-			if msg.loved {
-				state = "♥"
-			}
-			m.appendLog(fmt.Sprintf("[fav] %s %s synced to Apple Music", state, msg.title))
+			m.appendLog(fmt.Sprintf("[rating] %s %s synced to Apple Music", ratingIcon(msg.rating), msg.title))
 		}
 	case searchDebounceMsg:
 		// Drop stale debounce ticks — only the latest keystroke wins.
@@ -2358,19 +2345,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 	case "f":
 		m.lastKey = ""
-		if m.playerState.Track != nil {
-			t := m.playerState.Track
-			if t.CatalogID == "" {
-				if idx := playingQueueIdx(m.queueTracks, t); idx >= 0 && idx < len(m.queueTracks) {
-					t.CatalogID = m.queueTracks[idx].CatalogID
-				}
-			}
-			loved := !m.isTrackFavorite(t)
-			m.setTrackFavorite(t, loved)
-			m.appendLog(fmt.Sprintf("[fav] %s → %v", t.Title, loved))
-			// Sync to Apple Music asynchronously.
-			return m.loveSongCmd(t, loved)
-		}
+		return m.toggleCurrentTrackRating(provider.RatingLoved)
+	case "x":
+		// "Suggest Less" — Apple Music's dislike rating.
+		m.lastKey = ""
+		return m.toggleCurrentTrackRating(provider.RatingDisliked)
 	case "d":
 		m.lastKey = ""
 		if m.discovery.enabled {
@@ -2642,34 +2621,91 @@ func dedupeStrings(s []string) []string {
 	return out
 }
 
-// loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
-func (m *Model) isTrackFavorite(t *provider.Track) bool {
+// trackRating returns the known rating of t, looking it up by both its
+// library ID and its catalog ID.
+func (m *Model) trackRating(t *provider.Track) provider.Rating {
 	if t == nil {
-		return false
+		return provider.RatingNone
 	}
-	if t.ID != "" && m.favorites[t.ID] {
-		return true
+	if t.ID != "" {
+		if r := m.ratings[t.ID]; r != provider.RatingNone {
+			return r
+		}
 	}
-	if t.CatalogID != "" && m.favorites[t.CatalogID] {
-		return true
+	if t.CatalogID != "" {
+		if r := m.ratings[t.CatalogID]; r != provider.RatingNone {
+			return r
+		}
 	}
-	return false
+	return provider.RatingNone
 }
 
-func (m *Model) setTrackFavorite(t *provider.Track, loved bool) {
+// isTrackFavorite reports whether t is marked as Loved.
+func (m *Model) isTrackFavorite(t *provider.Track) bool {
+	return m.trackRating(t) == provider.RatingLoved
+}
+
+// setRating records r under both the library and catalog IDs (empty IDs are
+// skipped).
+func (m *Model) setRating(trackID, catalogID string, r provider.Rating) {
+	for _, id := range []string{trackID, catalogID} {
+		if id == "" {
+			continue
+		}
+		if r == provider.RatingNone {
+			delete(m.ratings, id)
+		} else {
+			m.ratings[id] = r
+		}
+	}
+}
+
+func (m *Model) setTrackRating(t *provider.Track, r provider.Rating) {
 	if t == nil {
 		return
 	}
-	if t.ID != "" {
-		m.favorites[t.ID] = loved
+	m.setRating(t.ID, t.CatalogID, r)
+}
+
+// toggleCurrentTrackRating toggles the current track between target and
+// RatingNone. Love and "Suggest Less" share one rating on Apple Music, so
+// applying one to a track carrying the other replaces it. The UI updates
+// optimistically and the change is synced to the provider asynchronously.
+func (m *Model) toggleCurrentTrackRating(target provider.Rating) tea.Cmd {
+	t := m.playerState.Track
+	if t == nil {
+		return nil
 	}
-	if t.CatalogID != "" {
-		m.favorites[t.CatalogID] = loved
+	if t.CatalogID == "" {
+		if idx := playingQueueIdx(m.queueTracks, t); idx >= 0 && idx < len(m.queueTracks) {
+			t.CatalogID = m.queueTracks[idx].CatalogID
+		}
+	}
+	prev := m.trackRating(t)
+	next := target
+	if prev == target {
+		next = provider.RatingNone
+	}
+	m.setTrackRating(t, next)
+	m.appendLog(fmt.Sprintf("[rating] %s %s → %s", t.Title, ratingIcon(prev), ratingIcon(next)))
+	return m.rateSongCmd(t, next, prev)
+}
+
+// ratingIcon returns the now-playing indicator glyph for r.
+func ratingIcon(r provider.Rating) string {
+	switch r {
+	case provider.RatingLoved:
+		return "♥"
+	case provider.RatingDisliked:
+		return "⊘"
+	default:
+		return "♡"
 	}
 }
 
-// loveSongCmd calls provider.LoveSong asynchronously and returns a loveSongMsg.
-func (m *Model) loveSongCmd(t *provider.Track, loved bool) tea.Cmd {
+// rateSongCmd calls provider.SetSongRating asynchronously and returns a
+// rateSongMsg. prev is carried along so a failure can restore it.
+func (m *Model) rateSongCmd(t *provider.Track, rating, prev provider.Rating) tea.Cmd {
 	if m.provider == nil || t == nil {
 		return nil
 	}
@@ -2683,13 +2719,14 @@ func (m *Model) loveSongCmd(t *provider.Track, loved bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		err := prov.LoveSong(ctx, catalogID, loved)
-		return loveSongMsg{trackID: trackID, catalogID: catalogID, title: title, loved: loved, err: err}
+		err := prov.SetSongRating(ctx, catalogID, rating)
+		return rateSongMsg{trackID: trackID, catalogID: catalogID, title: title, rating: rating, prev: prev, err: err}
 	}
 }
 
-// checkSongRatingCmd checks whether the track is already Loved on Apple Music
-// and returns a songRatingMsg so the model can update m.favorites accordingly.
+// checkSongRatingCmd fetches the track's rating (loved / disliked / none)
+// from Apple Music and returns a songRatingMsg so the model can update
+// m.ratings accordingly.
 func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 	if m.provider == nil || t == nil {
 		return nil
@@ -2703,8 +2740,8 @@ func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		loved, _ := prov.GetSongRating(ctx, catalogID)
-		return songRatingMsg{trackID: trackID, catalogID: catalogID, loved: loved}
+		rating, _ := prov.GetSongRating(ctx, catalogID)
+		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating}
 	}
 }
 
@@ -3756,9 +3793,13 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 		shuffleStyle = styles.ControlActive
 	}
 
-	heartIcon, heartStyle := "♡", muted
-	if m.isTrackFavorite(t) {
-		heartIcon, heartStyle = "♥", styles.FavoriteActive
+	rating := m.trackRating(t)
+	heartIcon, heartStyle := ratingIcon(rating), muted
+	switch rating {
+	case provider.RatingLoved:
+		heartStyle = styles.FavoriteActive
+	case provider.RatingDisliked:
+		heartStyle = styles.DislikeActive
 	}
 
 	controls := centerStr(
@@ -4060,6 +4101,7 @@ func (m *Model) statusPlayLines(w int) []string {
 		accent.Render("n/p") + muted.Render(" next/prev"),
 		accent.Render("←/→") + muted.Render(" seek ±10s"),
 		accent.Render("f") + muted.Render(" fav"),
+		accent.Render("x") + muted.Render(" suggest less"),
 		accent.Render("s") + muted.Render(" shuffle"),
 		accent.Render("r") + muted.Render(" repeat"),
 		discoverHint,

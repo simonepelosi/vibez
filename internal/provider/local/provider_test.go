@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/local"
 )
 
@@ -181,24 +182,24 @@ func TestProvider_CreatePlaylist_ReturnsEmptyPlaylist(t *testing.T) {
 	}
 }
 
-// --- LoveSong ---
+// --- SetSongRating ---
 
-func TestProvider_LoveSong_NoError(t *testing.T) {
+func TestProvider_SetSongRating_NoError(t *testing.T) {
 	p := newTestProvider(t)
-	if err := p.LoveSong(context.Background(), "local:test", true); err != nil {
-		t.Errorf("LoveSong: %v", err)
+	if err := p.SetSongRating(context.Background(), "local:test", provider.RatingLoved); err != nil {
+		t.Errorf("SetSongRating: %v", err)
 	}
 }
 
 // --- GetSongRating ---
 
-func TestProvider_GetSongRating_ReturnsFalse(t *testing.T) {
+func TestProvider_GetSongRating_ReturnsNone(t *testing.T) {
 	p := newTestProvider(t)
-	loved, err := p.GetSongRating(context.Background(), "local:test")
+	rating, err := p.GetSongRating(context.Background(), "local:test")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating() = true, want false")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating() = %d, want RatingNone", rating)
 	}
 }

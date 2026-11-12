@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 )
 
@@ -1352,9 +1353,9 @@ func TestGetStationTracks_LibraryNoCatalog(t *testing.T) {
 	}
 }
 
-// --- LoveSong ---
+// --- SetSongRating ---
 
-func TestLoveSong_LoveSuccess(t *testing.T) {
+func TestSetSongRating_LoveSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			// Add to library request.
@@ -1375,12 +1376,12 @@ func TestLoveSong_LoveSuccess(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	if err := p.LoveSong(context.Background(), "123456", true); err != nil {
-		t.Fatalf("LoveSong(loved=true): %v", err)
+	if err := p.SetSongRating(context.Background(), "123456", provider.RatingLoved); err != nil {
+		t.Fatalf("SetSongRating(RatingLoved): %v", err)
 	}
 }
 
-func TestLoveSong_UnloveSuccess(t *testing.T) {
+func TestSetSongRating_ClearSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
@@ -1391,12 +1392,12 @@ func TestLoveSong_UnloveSuccess(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	if err := p.LoveSong(context.Background(), "123456", false); err != nil {
-		t.Fatalf("LoveSong(loved=false): %v", err)
+	if err := p.SetSongRating(context.Background(), "123456", provider.RatingNone); err != nil {
+		t.Fatalf("SetSongRating(RatingNone): %v", err)
 	}
 }
 
-func TestLoveSong_ContinuesAfterAddFailure(t *testing.T) {
+func TestSetSongRating_ContinuesAfterAddFailure(t *testing.T) {
 	// Even if add-to-library fails (non-fatal), the rating PUT should proceed.
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1413,15 +1414,15 @@ func TestLoveSong_ContinuesAfterAddFailure(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	if err := p.LoveSong(context.Background(), "abc", true); err != nil {
-		t.Fatalf("LoveSong: %v", err)
+	if err := p.SetSongRating(context.Background(), "abc", provider.RatingLoved); err != nil {
+		t.Fatalf("SetSongRating: %v", err)
 	}
 	if callCount < 2 {
 		t.Errorf("expected >= 2 HTTP calls (add+rate), got %d", callCount)
 	}
 }
 
-func TestLoveSong_ResolvesLibraryIDToCatalogID(t *testing.T) {
+func TestSetSongRating_ResolvesLibraryIDToCatalogID(t *testing.T) {
 	var putPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1442,8 +1443,8 @@ func TestLoveSong_ResolvesLibraryIDToCatalogID(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	if err := p.LoveSong(context.Background(), "i.LIB1", true); err != nil {
-		t.Fatalf("LoveSong(i.LIB1): %v", err)
+	if err := p.SetSongRating(context.Background(), "i.LIB1", provider.RatingLoved); err != nil {
+		t.Fatalf("SetSongRating(i.LIB1): %v", err)
 	}
 	if putPath != "/me/ratings/songs/617154366" {
 		t.Errorf("PUT path = %q, want /me/ratings/songs/617154366", putPath)
@@ -1468,12 +1469,12 @@ func TestGetSongRating_ResolvesLibraryIDToCatalogID(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "i.LIB1")
+	rating, err := p.GetSongRating(context.Background(), "i.LIB1")
 	if err != nil {
 		t.Fatalf("GetSongRating(i.LIB1): %v", err)
 	}
-	if !loved {
-		t.Error("GetSongRating(i.LIB1) = false, want true")
+	if rating != provider.RatingLoved {
+		t.Errorf("GetSongRating(i.LIB1) = %d, want RatingLoved", rating)
 	}
 }
 
@@ -1496,12 +1497,12 @@ func TestGetSongRating_Loved(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "123")
+	rating, err := p.GetSongRating(context.Background(), "123")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if !loved {
-		t.Error("GetSongRating = false, want true (value=1)")
+	if rating != provider.RatingLoved {
+		t.Errorf("GetSongRating = %d, want RatingLoved (value=1)", rating)
 	}
 }
 
@@ -1512,12 +1513,12 @@ func TestGetSongRating_NotRated_404(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "123")
+	rating, err := p.GetSongRating(context.Background(), "123")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating = true for 404, want false")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating = %d for 404, want RatingNone", rating)
 	}
 }
 
@@ -1528,16 +1529,16 @@ func TestGetSongRating_NoContent_204(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "123")
+	rating, err := p.GetSongRating(context.Background(), "123")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating = true for 204 NoContent, want false")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating = %d for 204 NoContent, want RatingNone", rating)
 	}
 }
 
-func TestGetSongRating_ServerError_ReturnsFalse(t *testing.T) {
+func TestGetSongRating_ServerError_ReturnsNone(t *testing.T) {
 	// 500 errors are treated as "not rated" — non-fatal.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1545,16 +1546,16 @@ func TestGetSongRating_ServerError_ReturnsFalse(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "123")
+	rating, err := p.GetSongRating(context.Background(), "123")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating = true for 500, want false")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating = %d for 500, want RatingNone", rating)
 	}
 }
 
-func TestGetSongRating_InvalidJSON_ReturnsFalse(t *testing.T) {
+func TestGetSongRating_InvalidJSON_ReturnsNone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("not-json"))
@@ -1562,12 +1563,97 @@ func TestGetSongRating_InvalidJSON_ReturnsFalse(t *testing.T) {
 	defer srv.Close()
 
 	p := newTestProvider(t, srv)
-	loved, err := p.GetSongRating(context.Background(), "123")
+	rating, err := p.GetSongRating(context.Background(), "123")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating = true for invalid JSON, want false")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating = %d for invalid JSON, want RatingNone", rating)
+	}
+}
+
+func TestGetSongRating_Disliked(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{
+			"data": []any{map[string]any{"attributes": map[string]any{"value": -1}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	rating, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if rating != provider.RatingDisliked {
+		t.Errorf("GetSongRating = %d, want RatingDisliked (value=-1)", rating)
+	}
+}
+
+func TestGetSongRating_EmptyData_ReturnsNone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"data": []any{}})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	rating, err := p.GetSongRating(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetSongRating: %v", err)
+	}
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating = %d for empty data, want RatingNone", rating)
+	}
+}
+
+func TestSetSongRating_DislikePutsMinusOneWithoutAddingToLibrary(t *testing.T) {
+	var putBody []byte
+	var putPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			putPath = r.URL.Path
+			putBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+			writeJSON(t, w, map[string]any{})
+		default:
+			// Suggest Less must not add the song to the library (POST
+			// /me/library) or delete the rating.
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.SetSongRating(context.Background(), "123456", provider.RatingDisliked); err != nil {
+		t.Fatalf("SetSongRating(RatingDisliked): %v", err)
+	}
+	if putPath != "/me/ratings/songs/123456" {
+		t.Errorf("PUT path = %q, want /me/ratings/songs/123456", putPath)
+	}
+	var body struct {
+		Type       string `json:"type"`
+		Attributes struct {
+			Value int `json:"value"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(putBody, &body); err != nil {
+		t.Fatalf("PUT body %q: %v", putBody, err)
+	}
+	if body.Type != "ratings" || body.Attributes.Value != -1 {
+		t.Errorf("PUT body = %+v, want type=ratings value=-1", body)
+	}
+}
+
+func TestSetSongRating_InvalidRating(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s %s for invalid rating", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	if err := p.SetSongRating(context.Background(), "123456", provider.Rating(5)); err == nil {
+		t.Error("SetSongRating(5) = nil, want error")
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 func TestResolveURL(t *testing.T) {
@@ -408,7 +409,7 @@ func TestStorefront_ConcurrentSearchRaceFree(t *testing.T) {
 	}
 }
 
-func TestLoveSong_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
+func TestSetSongRating_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
 	var putCalls atomic.Int32
 	var bodies []string
 	var mu sync.Mutex
@@ -445,8 +446,8 @@ func TestLoveSong_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
 	p.SetBaseURL(srv.URL)
 	p.retryBaseDelay = time.Millisecond
 
-	if err := p.LoveSong(context.Background(), "12345", true); err != nil {
-		t.Fatalf("LoveSong(true) failed across 429+503 retries: %v", err)
+	if err := p.SetSongRating(context.Background(), "12345", provider.RatingLoved); err != nil {
+		t.Fatalf("SetSongRating(RatingLoved) failed across 429+503 retries: %v", err)
 	}
 	if got := putCalls.Load(); got != 3 {
 		t.Fatalf("PUT attempts = %d, want 3", got)

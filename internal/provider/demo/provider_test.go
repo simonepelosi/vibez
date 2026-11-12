@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/demo"
 )
 
@@ -272,27 +273,26 @@ func TestProvider_CreatePlaylist_ReturnsPlaylist(t *testing.T) {
 	}
 }
 
-// --- LoveSong ---
+// --- SetSongRating ---
 
-func TestProvider_LoveSong_NoError(t *testing.T) {
+func TestProvider_SetSongRating_NoError(t *testing.T) {
 	p := newProvider()
-	if err := p.LoveSong(context.Background(), "d1", true); err != nil {
-		t.Errorf("LoveSong: %v", err)
-	}
-	if err := p.LoveSong(context.Background(), "d1", false); err != nil {
-		t.Errorf("LoveSong(unlike): %v", err)
+	for _, r := range []provider.Rating{provider.RatingLoved, provider.RatingDisliked, provider.RatingNone} {
+		if err := p.SetSongRating(context.Background(), "d1", r); err != nil {
+			t.Errorf("SetSongRating(%d): %v", r, err)
+		}
 	}
 }
 
 // --- GetSongRating ---
 
-func TestProvider_GetSongRating_ReturnsFalse(t *testing.T) {
+func TestProvider_GetSongRating_ReturnsNone(t *testing.T) {
 	p := newProvider()
-	loved, err := p.GetSongRating(context.Background(), "d1")
+	rating, err := p.GetSongRating(context.Background(), "d1")
 	if err != nil {
 		t.Fatalf("GetSongRating: %v", err)
 	}
-	if loved {
-		t.Error("GetSongRating() = true, want false (demo always returns false)")
+	if rating != provider.RatingNone {
+		t.Errorf("GetSongRating() = %d, want RatingNone (demo is never rated)", rating)
 	}
 }

@@ -156,6 +156,7 @@ var (
 	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
 
 	FavoriteActive = lipgloss.NewStyle().Foreground(ColorLove)
+	DislikeActive  = lipgloss.NewStyle().Foreground(ColorError)
 
 	// Bear mascot styles — updated by Apply().
 	BearStyle  = lipgloss.NewStyle().Foreground(ColorBear)
@@ -254,6 +255,7 @@ func Apply(t Theme) {
 	TimeStyle = lipgloss.NewStyle().Foreground(ColorMuted)
 	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
 	FavoriteActive = lipgloss.NewStyle().Foreground(ColorLove)
+	DislikeActive = lipgloss.NewStyle().Foreground(ColorError)
 	BearStyle = lipgloss.NewStyle().Foreground(ColorBear)
 	NoteStyle = lipgloss.NewStyle().Foreground(ColorAccentWarm)
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)

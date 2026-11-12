@@ -270,9 +270,11 @@ func (p *Provider) CreatePlaylist(_ context.Context, _ string, _ []string) (prov
 	return provider.Playlist{}, nil
 }
 
-func (p *Provider) LoveSong(_ context.Context, _ string, _ bool) error      { return nil }
-func (p *Provider) GetSongRating(_ context.Context, _ string) (bool, error) { return false, nil }
-func (p *Provider) AddToPlaylist(_ context.Context, _, _ string) error      { return nil }
+func (p *Provider) SetSongRating(_ context.Context, _ string, _ provider.Rating) error { return nil }
+func (p *Provider) GetSongRating(_ context.Context, _ string) (provider.Rating, error) {
+	return provider.RatingNone, nil
+}
+func (p *Provider) AddToPlaylist(_ context.Context, _, _ string) error { return nil }
 
 func (p *Provider) GetRecommendations(_ context.Context) ([]provider.RecommendationGroup, error) {
 	// Group tracks by genre using their metadata tags.
