@@ -33,17 +33,17 @@ func writeSyntheticFLAC(t *testing.T, path string, d time.Duration, comments map
 	// VORBIS_COMMENT block (type 4, last=true -> 0x84).
 	var vc bytes.Buffer
 	vendor := "vibez-test"
-	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(vendor)))
+	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(vendor))) //nolint:gosec
 	vc.WriteString(vendor)
-	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(comments)))
+	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(comments))) //nolint:gosec
 	for k, v := range comments {
 		entry := k + "=" + v
-		_ = binary.Write(&vc, binary.LittleEndian, uint32(len(entry)))
+		_ = binary.Write(&vc, binary.LittleEndian, uint32(len(entry))) //nolint:gosec
 		vc.WriteString(entry)
 	}
 	vcBytes := vc.Bytes()
 	l := len(vcBytes)
-	buf.Write([]byte{0x84, byte(l >> 16), byte(l >> 8), byte(l)})
+	buf.Write([]byte{0x84, byte(l >> 16), byte(l >> 8), byte(l)}) //nolint:gosec
 	buf.Write(vcBytes)
 
 	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
@@ -58,7 +58,7 @@ func writeSyntheticM4A(t *testing.T, path, codec string, d time.Duration, title,
 	t.Helper()
 	box := func(typ string, body []byte) []byte {
 		var b bytes.Buffer
-		_ = binary.Write(&b, binary.BigEndian, uint32(8+len(body)))
+		_ = binary.Write(&b, binary.BigEndian, uint32(8+len(body))) //nolint:gosec
 		b.WriteString(typ)
 		b.Write(body)
 		return b.Bytes()

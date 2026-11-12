@@ -50,9 +50,9 @@ type preparedNext struct {
 // Player implements player.Player without a web browser, using an in-process
 // Widevine CDM and audio streaming pipeline.
 type Player struct {
-	cfg       *config.Config
-	provider  *apple.AppleProvider
-	cdmEngine *cdm.CDM
+	cfg          *config.Config
+	provider     *apple.AppleProvider
+	cdmEngine    *cdm.CDM
 	licClient    *license.Client
 	streamer     *StreamServer
 	sink         audioSink
