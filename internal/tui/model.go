@@ -1366,7 +1366,8 @@ func (m *Model) handleSearchKey(k string, msg tea.KeyPressMsg) tea.Cmd {
 			return m.startRadioFrom(t)
 		}
 		return nil
-	case "up", "down", "pgup", "pgdown":
+	case "up", "down", "pgup", "pgdown",
+		"ctrl+up", "ctrl+down", "shift+up", "shift+down":
 		_, cmd := m.search.Update(msg)
 		return cmd
 	case "left":
@@ -3953,12 +3954,14 @@ func (m *Model) searchLines(contentW, h int) []string {
 	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
 		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
 		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
-		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist") +
-		"  ·  " + accent.Render("Esc") + muted.Render(esc)
+		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist")
 	if m.search.SelectedArtist() != nil {
-		footer = "  " + accent.Render("Enter") + muted.Render(" open artist") +
-			"  ·  " + accent.Render("Esc") + muted.Render(esc)
+		footer = "  " + accent.Render("Enter") + muted.Render(" open artist")
 	}
+	if m.search.SectionCount() > 1 {
+		footer += "  ·  " + accent.Render("ctrl+↑/↓") + muted.Render(" section")
+	}
+	footer += "  ·  " + accent.Render("Esc") + muted.Render(esc)
 
 	result := append([]string{inputLine, sep}, listLines...)
 	result = append(result, footerSep, footer)

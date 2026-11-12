@@ -281,6 +281,7 @@ Then set `"theme": "<name>"` in `config.json` and restart vibez.
 |-----|--------|
 | *(type)* | Filter results in real time |
 | `↑` / `↓` | Navigate results |
+| `ctrl+↑` / `ctrl+↓` (or `shift+↑` / `shift+↓`) | Jump to the previous / next section (Tracks, Albums, Artists, Playlists) |
 | `enter` | Play now |
 | `tab` | Add to queue |
 | `shift+tab` | Play next (insert after current track) |

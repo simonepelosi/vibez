@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Jump between search result sections** — in Search (`/`), `ctrl+↓` / `ctrl+↑` (or `shift+↓` / `shift+↑`) move the cursor to the first item of the next / previous section (Tracks, Albums, Artists, Playlists), wrapping around, and scroll that section's header to the top. Reaching Albums no longer means scrolling past every track; the single-list layout and the Enter-plays-top-result flow are unchanged. Refs #203.
 - **"Suggest Less" on the current track** — press `x` to tell Apple Music to recommend the playing track less (the web player's *Suggest Less*, rating `-1`), or press it again to clear it. The now-playing indicator is now three-state (`♡` none, `♥` loved, `⊘` suggest less) and reflects the rating stored on Apple Music, so a disliked track no longer reads as merely "not loved". `provider.Provider` replaces `LoveSong(bool)` with `SetSongRating(provider.Rating)`, and `GetSongRating` returns a `provider.Rating`. Closes #216.
 
 ## [2.0.7] — 2026-11-07

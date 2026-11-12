@@ -320,9 +320,69 @@ func (m *SearchModel) SelectedIndex() int {
 	return count
 }
 
-// Update handles key navigation (↑ ↓ PgUp PgDn).
+// sectionStarts returns the row index of the first item of every section,
+// in display order. Headers without items are skipped.
+func (m *SearchModel) sectionStarts() []int {
+	var starts []int
+	for i, r := range m.rows {
+		if r.header && i+1 < len(m.rows) && m.rows[i+1].isItem() {
+			starts = append(starts, i+1)
+		}
+	}
+	return starts
+}
+
+// SectionCount returns the number of non-empty sections in the result list.
+func (m *SearchModel) SectionCount() int { return len(m.sectionStarts()) }
+
+// JumpSection moves the cursor to the first item of the next (dir > 0) or
+// previous (dir < 0) section, wrapping around at either end, and scrolls so
+// that section's header sits at the top of the list. It saves scrolling
+// through a long Tracks section to reach Albums, Artists or Playlists.
+func (m *SearchModel) JumpSection(dir int) {
+	starts := m.sectionStarts()
+	n := len(starts)
+	if n == 0 {
+		return
+	}
+	cur := 0
+	for i, start := range starts {
+		if start <= m.cursor {
+			cur = i
+		}
+	}
+	step := 1
+	if dir < 0 {
+		step = -1
+	}
+	m.cursor = starts[((cur+step)%n+n)%n]
+	m.scrollToSection()
+}
+
+// scrollToSection scrolls so the cursor's section header is the first
+// rendered row, then backs up only as far as needed to keep the list full
+// when the section is too short to fill the height on its own.
+func (m *SearchModel) scrollToSection() {
+	m.scroll = max(0, m.cursor-1)
+	h := max(1, m.height)
+	lines := 0
+	for i := m.scroll; i < len(m.rows); i++ {
+		lines += rowLines(m.rows[i])
+	}
+	for m.scroll > 0 && lines+rowLines(m.rows[m.scroll-1]) <= h {
+		m.scroll--
+		lines += rowLines(m.rows[m.scroll])
+	}
+}
+
+// Update handles key navigation (↑ ↓ PgUp PgDn, and ctrl/shift+↑ ↓ to jump
+// between sections).
 func (m *SearchModel) Update(msg tea.KeyPressMsg) (*SearchModel, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+down", "shift+down":
+		m.JumpSection(1)
+	case "ctrl+up", "shift+up":
+		m.JumpSection(-1)
 	case "up":
 		if prev := m.advance(m.cursor, -1); prev != m.cursor {
 			m.cursor = prev
