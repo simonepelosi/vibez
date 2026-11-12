@@ -23,8 +23,7 @@
 <p align="center">
   If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br><br>
   <img src="https://progress-bar.xyz/22/?title=Apple%20Dev%20Key%20Goal%20%28%2422%2F%24100%29&color=ff5e5b&width=400" alt="Apple Developer Key Progress"><br><br>
-  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
-  &nbsp;
+  <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a><br><br>
   <a href="https://matrix.to/#/#vibez-player:matrix.org"><img src="https://img.shields.io/badge/💬_matrix_chat-%23vibez--player%3Amatrix.org-0DBD8B?style=for-the-badge&logo=matrix&logoColor=white" alt="Join Matrix Chat"></a>
 </p>
 
