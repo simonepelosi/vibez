@@ -27,7 +27,7 @@ func noticeDir(t *testing.T, names ...string) (*local.Provider, string) {
 }
 
 func TestScanNotice_SilentWhenEverythingIndexed(t *testing.T) {
-	p, _ := noticeDir(t, "a.mp3", "b.flac", "c.m4a")
+	p, _ := noticeDir(t, "a.mp3", "b.flac", "c.m4a", "d.wav")
 	if got := p.ScanNotice(); got != "" {
 		t.Errorf("ScanNotice() = %q, want empty when nothing was left out", got)
 	}
