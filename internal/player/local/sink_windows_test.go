@@ -91,9 +91,10 @@ func TestNativeSinkPlaysHiResWAV(t *testing.T) {
 		t.Errorf("PCM24 duration = %v, want %v", s.Track.Duration, wantDur)
 	}
 
-	// Wait for PCM24 to reach EOS and advance to FLT32.
+	// Wait for PCM24 to reach EOS and FLT32 to finish loading.
 	waitFor(t, "advance from 24-bit WAV to 32-bit float WAV", func() bool {
-		return nowPlaying(t, p) == "FLT32"
+		st, _ := p.GetState()
+		return st.Track != nil && st.Track.Title == "FLT32" && !st.Loading
 	})
 
 	s, _ = p.GetState()
