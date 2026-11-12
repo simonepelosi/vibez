@@ -1313,9 +1313,61 @@ func TestModel_Update_VibeResultMsg_Success(t *testing.T) {
 	}
 	_, cmd := m.Update(vibeResultMsg{tracks: tracks, query: "chill"})
 	_ = cmd
-	// Tracks should be appended to queue.
+	// When the player is idle, Vibe starts playback immediately via SetQueue.
+	if len(mp.setQueueIDs) != 1 || mp.setQueueIDs[0] != "cat111" {
+		t.Errorf("vibeResultMsg while idle: setQueueIDs = %v, want [cat111]", mp.setQueueIDs)
+	}
+	if m.playerState.Track == nil || m.playerState.Track.Title != "Song A" || !m.playerState.Loading {
+		t.Errorf("playerState = %+v, want Track=Song A and Loading=true", m.playerState)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_AppendsWhenPlaying(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	playing := provider.Track{Title: "Current", Artist: "Artist", ID: "cur", CatalogID: "catCur"}
+	m.playerState.Track = &playing
+	m.playerState.Playing = true
+	m.queueTracks = []provider.Track{playing}
+	m.queueIDs = []string{"catCur"}
+
+	tracks := []provider.Track{
+		{Title: "Song A", Artist: "Artist A", ID: "111", CatalogID: "cat111"},
+	}
+	_, cmd := m.Update(vibeResultMsg{tracks: tracks, query: "chill"})
+	_ = cmd
 	if len(mp.appendQueueIDs) == 0 {
-		t.Error("vibeResultMsg should call AppendQueue")
+		t.Error("vibeResultMsg while playing should call AppendQueue by default")
+	}
+	if len(mp.setQueueIDs) != 0 {
+		t.Errorf("setQueueIDs = %v, want empty when appending", mp.setQueueIDs)
+	}
+}
+
+func TestModel_Update_VibeResultMsg_PlayNowOverridesPlayingQueue(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	playing := provider.Track{Title: "Current", Artist: "Artist", ID: "cur", CatalogID: "catCur"}
+	m.playerState.Track = &playing
+	m.playerState.Playing = true
+	m.queueTracks = []provider.Track{playing}
+	m.queueIDs = []string{"catCur"}
+
+	tracks := []provider.Track{
+		{Title: "New Vibe", Artist: "Artist B", ID: "222", CatalogID: "cat222"},
+	}
+	_, _ = m.Update(vibeResultMsg{
+		tracks:      tracks,
+		query:       "play now upbeat",
+		action:      "play_now",
+		explanation: "Upbeat funk & disco",
+		backend:     "ollama:qwen3",
+	})
+	if len(mp.setQueueIDs) != 1 || mp.setQueueIDs[0] != "cat222" {
+		t.Errorf("setQueueIDs = %v, want [cat222]", mp.setQueueIDs)
+	}
+	if m.vibe.Backend() != "ollama:qwen3" {
+		t.Errorf("vibe.Backend() = %q, want ollama:qwen3", m.vibe.Backend())
 	}
 }
 

@@ -52,6 +52,18 @@ type Config struct {
 	DiscordRPC *bool `json:"discord_rpc,omitempty"`
 	// DiscordClientID overrides the default Discord application client ID.
 	DiscordClientID string `json:"discord_client_id,omitempty"`
+	// VibeBackend selects the Vibe Mode planner backend ("auto", "ollama",
+	// "lmstudio", "llamacpp", "openai", or "keyword"). Defaults to "auto"
+	// (prefers local on-device HTTP runtimes and falls back to KeywordAgent).
+	VibeBackend string `json:"vibe_backend,omitempty"`
+	// VibePrivacy controls whether "auto" stays strictly on-device
+	// ("local-only", default) or may use external/cloud backends ("auto").
+	VibePrivacy string `json:"vibe_privacy,omitempty"`
+	// VibeModel optionally pins the model name used by the Vibe planner.
+	VibeModel string `json:"vibe_model,omitempty"`
+	// VibeEndpoint optionally overrides the local HTTP runtime base URL
+	// (e.g. "http://127.0.0.1:11434" or "http://127.0.0.1:8080/v1").
+	VibeEndpoint string `json:"vibe_endpoint,omitempty"`
 }
 
 type EQBand struct {
