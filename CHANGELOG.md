@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Hybrid local lossless playback in Apple Music queues (`--hybrid` / `hybrid_playback`)** — indexes lossless files (`.flac`, ALAC `.m4a`, `.wav`, `.aiff`/`.aif`) from `music_dir`, extracts ISRCs from Apple Music catalog responses and local file tags (with an unambiguous fallback on normalized artist + album + title + track number + ±2s duration tolerance), and transparently routes matched tracks in Apple Music queues to local lossless playback across Linux (GStreamer), macOS (Core Audio `ExtAudioFile` 32-bit float), and Windows (Media Foundation 32-bit float) while preserving catalog IDs, artwork, lyrics, Last.fm scrobbling, Discord RPC, and the active Now Playing format badge. Closes #217, refs #185.
+- **32-bit float PCM pipeline and WAV playback on Windows** — upgrades the Windows local Media Foundation + `waveOut` sink (`sink_windows.cpp`) from hardcoded 16-bit integer PCM to negotiate 32-bit IEEE float (`MFAudioFormat_Float`) first, then native integer PCM (`16`/`24`/`32`-bit), then 16-bit PCM fallback at the file's native sample rate through the 10-band biquad equalizer, and adds `.wav` support to `--local` on Windows. Refs #185.
 
 ### Changed
 - **Dependencies** — updates Go module dependencies (`bubbletea/v2` `v2.1.1`, `bubbles/v2` `v2.2.1`, `lipgloss/v2` `v2.1.0`, `x/sys` `v0.50.0`, `godbus/dbus/v5` `v5.2.4`, `go-winio` `v0.6.4`, and indirect modules). Refs #224.
