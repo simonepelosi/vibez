@@ -28,6 +28,7 @@ var memProfiling bool
 var demo bool
 var noUpdate bool
 var local bool
+var hybrid bool
 var musicDir string
 var noDiscord bool
 
@@ -52,6 +53,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&demo, "demo", false, "run with built-in fake data — no Apple account or internet required")
 	rootCmd.PersistentFlags().BoolVar(&noUpdate, "no-update", false, "skip automatic update check on startup")
 	rootCmd.PersistentFlags().BoolVar(&local, "local", false, "run with local music files (no Apple account required)")
+	rootCmd.PersistentFlags().BoolVar(&hybrid, "hybrid", false, "play matching local lossless files from music_dir in Apple Music queues")
 	rootCmd.PersistentFlags().StringVar(&musicDir, "music-dir", "", "path to your music directory (saved to config)")
 	rootCmd.PersistentFlags().BoolVar(&noDiscord, "no-discord", false, "disable Discord Rich Presence")
 }
@@ -79,6 +81,16 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "debug: theme: %v (falling back to default)\n", themeErr)
 	}
 	styles.Apply(theme)
+
+	if !local && musicDir != "" {
+		cfg.MusicDir = musicDir
+		if saveErr := cfg.Save(cfgFile); saveErr != nil && debug {
+			fmt.Fprintf(os.Stderr, "debug: saving music dir: %v\n", saveErr)
+		}
+	}
+	if hybrid {
+		cfg.HybridPlayback = true
+	}
 
 	if local {
 		// if --music-dir was passed, it will save to config.

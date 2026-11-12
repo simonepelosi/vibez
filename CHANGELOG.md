@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hybrid local lossless playback in Apple Music queues (`--hybrid` / `hybrid_playback`)** — indexes lossless files (`.flac`, ALAC `.m4a`, `.wav`, `.aiff`/`.aif`) from `music_dir`, extracts ISRCs from Apple Music catalog responses and local file tags (with an unambiguous fallback on normalized artist + album + title + track number + ±2s duration tolerance), and transparently routes matched tracks in Apple Music queues to local lossless playback across Linux (GStreamer), macOS (Core Audio `ExtAudioFile` 32-bit float), and Windows (Media Foundation 32-bit float) while preserving catalog IDs, artwork, lyrics, Last.fm scrobbling, Discord RPC, and the active Now Playing format badge. Closes #217, refs #185.
+
 ### Fixed
 - **"Suggest Less" feedback and auto-skip** — pressing `x` (and `f`) now displays an immediate confirmation in the status bar across both standard and `:art` views (`✓ ⊘ Suggest Less`, `✓ ♥ Favorited`), and automatically advances to the next track (`p.Next()`) once Apple Music persists a `RatingDisliked` rating for the currently playing track. Refs #216.
 - **Vibe local LLM planner timeout, prompt budget, and fallback telemetry** — raises `vibe.DefaultPlanTimeout` from 10s to 30s (with customizable `"vibe_timeout"` in `config.json`), keeps `runVibeSearch` aligned at `planTimeout + 15s`, compacts the planner system prompt (`up to 6` `seed_tracks`, `1 to 2` `search_queries`, `3-6 word` explanation) to reduce local token generation latency, and logs planner progress (`[vibe] planning ...`), active backend, and fallback reasons (`[vibe] fallback to keyword (...)`) in `:debug-logs`. Refs #215.

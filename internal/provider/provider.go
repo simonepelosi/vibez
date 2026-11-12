@@ -43,6 +43,44 @@ type Track struct {
 	// "lossless", "hi-res-lossless" or "dolby-atmos". It describes the
 	// catalog, not what vibez outputs: streaming is always AAC.
 	AudioVariants []string
+	// ISRC is the International Standard Recording Code (12 uppercase ASCII
+	// alphanumeric characters, hyphens stripped), when available from the
+	// catalog or embedded file tags.
+	ISRC string
+	// LocalPath is the filesystem path of a local audio file matched for hybrid
+	// playback (or scanned in local mode). When set on an Apple Music track,
+	// playback reads the local lossless file while keeping the Apple Music ID
+	// and metadata intact.
+	LocalPath string
+}
+
+// NormalizeISRC strips hyphens and whitespace from an ISRC and returns the
+// uppercase 12-character alphanumeric code, or "" if s does not look like a
+// valid ISRC.
+func NormalizeISRC(s string) string {
+	var buf [12]byte
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '-' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == 0:
+			continue
+		case c >= 'a' && c <= 'z':
+			c -= 'a' - 'A'
+		case (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'):
+		default:
+			return ""
+		}
+		if n >= len(buf) {
+			return ""
+		}
+		buf[n] = c
+		n++
+	}
+	if n != len(buf) {
+		return ""
+	}
+	return string(buf[:])
 }
 
 // ReleaseYear returns the 4-digit release year from ReleaseDate, or "" if unavailable.

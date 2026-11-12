@@ -3708,6 +3708,12 @@ func (m *Model) enrichTrackFromQueue(t *provider.Track) {
 	if len(t.AudioVariants) == 0 {
 		t.AudioVariants = qt.AudioVariants
 	}
+	if t.ISRC == "" {
+		t.ISRC = qt.ISRC
+	}
+	if t.LocalPath == "" {
+		t.LocalPath = qt.LocalPath
+	}
 }
 
 // enrichQueueIdx locates the queued track matching playing for metadata
@@ -3814,6 +3820,10 @@ func (m *Model) renderAlbumMetaLine(t *provider.Track, contentW int, truncate bo
 func formatBadge(t *provider.Track, bitrateKbps int) (output, catalog string) {
 	if t == nil {
 		return "", ""
+	}
+	if t.LocalPath != "" {
+		ext := strings.TrimPrefix(filepath.Ext(t.LocalPath), ".")
+		return strings.ToUpper(ext), ""
 	}
 	if path, ok := strings.CutPrefix(t.ID, "local:"); ok {
 		ext := strings.TrimPrefix(filepath.Ext(path), ".")

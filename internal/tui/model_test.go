@@ -4802,6 +4802,7 @@ func TestFormatBadge(t *testing.T) {
 		{"bitrate unknown", &provider.Track{ID: "1", AudioVariants: []string{"lossless"}}, 0, "", "Lossless"},
 		{"local flac", &provider.Track{ID: "local:/music/a.flac"}, 0, "FLAC", ""},
 		{"local file ignores variants", &provider.Track{ID: "local:/music/a.mp3", AudioVariants: []string{"lossless"}}, 256, "MP3", ""},
+		{"hybrid matched local flac", &provider.Track{ID: "617154366", LocalPath: "/music/Get Lucky.flac", AudioVariants: []string{"lossless", "hi-res-lossless"}}, 256, "FLAC", ""},
 	} {
 		output, catalog := formatBadge(tc.track, tc.kbps)
 		if output != tc.output || catalog != tc.catalog {

@@ -11,6 +11,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/config"
 	"github.com/simone-vibes/vibez/internal/player/browserless"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
+	localProvider "github.com/simone-vibes/vibez/internal/provider/local"
 	"github.com/simone-vibes/vibez/internal/tui"
 	"github.com/simone-vibes/vibez/internal/updater"
 	"github.com/simone-vibes/vibez/internal/version"
@@ -89,6 +90,14 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			return
 		}
 		_ = blPlayer.SetAudioBitrate(audioBitrateKbps)
+		if cfg.HybridPlayback && cfg.MusicDir != "" {
+			if matcher, mErr := localProvider.NewMatcher(cfg.MusicDir); mErr != nil {
+				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] local scan failed (%s): %v", cfg.MusicDir, mErr)))
+			} else {
+				blPlayer.SetLocalMatcher(matcher)
+				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] indexed %d lossless local track(s) in %s", matcher.Count(), cfg.MusicDir)))
+			}
+		}
 		blPlayer.OnSessionExpired = func() {
 			prog.Send(tui.SessionExpiredMsg{})
 			go func() {

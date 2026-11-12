@@ -51,6 +51,9 @@ type Config struct {
 	// MusicDir is the local directory to scan for audio files
 	// Supports MP3, FLAC, M4A. Scanned recursively.
 	MusicDir string `json:"music_dir,omitempty"`
+	// HybridPlayback substitutes matching lossless files from MusicDir for
+	// tracks in Apple Music queues. Off by default.
+	HybridPlayback bool `json:"hybrid_playback,omitempty"`
 	// DiscordRPC enables Discord Rich Presence (defaults to true).
 	DiscordRPC *bool `json:"discord_rpc,omitempty"`
 	// DiscordClientID overrides the default Discord application client ID.

@@ -11,6 +11,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <mmsystem.h>
+#include <mmreg.h>
+#include <propidl.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -131,6 +133,8 @@ struct Session {
     std::atomic<uint64_t> nullFrames{0};
     std::atomic<uint32_t> baseSamples{0};
     std::atomic<uint32_t> baseBytes{0};
+    std::atomic<double> seekBaseSec{0.0};
+    std::atomic<double> seekTarget{-1.0};
     std::atomic<double> endPosition{-1.0};
 };
 
@@ -138,18 +142,18 @@ double devicePosition(const Session& ses) {
     MMTIME t;
     std::memset(&t, 0, sizeof(t));
     t.wType = TIME_SAMPLES;
-    if (waveOutGetPosition(ses.hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return 0.0;
+    if (waveOutGetPosition(ses.hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return ses.seekBaseSec.load();
     if (t.wType == TIME_SAMPLES && ses.sampleRate > 0) {
         const uint32_t base = ses.baseSamples.load();
         const uint32_t rel = t.u.sample >= base ? (t.u.sample - base) : 0;
-        return static_cast<double>(rel) / static_cast<double>(ses.sampleRate);
+        return ses.seekBaseSec.load() + static_cast<double>(rel) / static_cast<double>(ses.sampleRate);
     }
     if (t.wType == TIME_BYTES && ses.bytesPerSec > 0) {
         const uint32_t base = ses.baseBytes.load();
         const uint32_t rel = t.u.cb >= base ? (t.u.cb - base) : 0;
-        return static_cast<double>(rel) / static_cast<double>(ses.bytesPerSec);
+        return ses.seekBaseSec.load() + static_cast<double>(rel) / static_cast<double>(ses.bytesPerSec);
     }
-    return 0.0;
+    return ses.seekBaseSec.load();
 }
 
 struct Sink {
@@ -221,6 +225,44 @@ bool waitFree(Buf& b, HWAVEOUT hwo, HANDLE ev, const Session& ses) {
     return true;
 }
 
+enum class SampleFmt { None, Int16, Float32 };
+
+SampleFmt sampleFmtOf(IMFMediaType* mt, const WAVEFORMATEX* wfx) {
+    if (!mt || !wfx) return SampleFmt::None;
+    GUID sub = {};
+    if (FAILED(mt->GetGUID(MF_MT_SUBTYPE, &sub))) return SampleFmt::None;
+    if (IsEqualGUID(sub, MFAudioFormat_Float) && wfx->wBitsPerSample == 32) {
+        return SampleFmt::Float32;
+    }
+    if (IsEqualGUID(sub, MFAudioFormat_PCM) && wfx->wBitsPerSample == 16) {
+        return SampleFmt::Int16;
+    }
+    return SampleFmt::None;
+}
+
+bool setOutputType(const MfApi& mf, IMFSourceReader* reader, const GUID& subtype, UINT32 bits,
+                   UINT32 nativeCh, UINT32 nativeRate) {
+    Com<IMFMediaType> want;
+    if (FAILED(mf.createMediaType(&want))) return false;
+    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    want->SetGUID(MF_MT_SUBTYPE, subtype);
+    want->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bits);
+    if (nativeCh > 0 && nativeRate > 0) {
+        const UINT32 ch = nativeCh > 2 ? 2 : nativeCh;
+        want->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, ch);
+        want->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, nativeRate);
+        if (SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, want.p))) {
+            return true;
+        }
+    }
+    Com<IMFMediaType> basic;
+    if (FAILED(mf.createMediaType(&basic))) return false;
+    basic->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    basic->SetGUID(MF_MT_SUBTYPE, subtype);
+    basic->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bits);
+    return SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, basic.p));
+}
+
 bool openSourceReader(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
                       const std::wstring& url, Com<IMFSourceReader>& reader) {
     HRESULT hr = mf.createSourceReader(url.c_str(), nullptr, &reader);
@@ -231,17 +273,22 @@ bool openSourceReader(const MfApi& mf, const std::shared_ptr<Sink>& sink, const 
     reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
     reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
 
-    Com<IMFMediaType> want;
-    mf.createMediaType(&want);
-    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    want->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, want.p);
-    if (FAILED(hr)) {
-        reportError(sink, ses, "cannot decode audio stream", hr);
-        return false;
+    UINT32 nativeCh = 0;
+    UINT32 nativeRate = 0;
+    Com<IMFMediaType> nativeType;
+    if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &nativeType)) && nativeType.p) {
+        (void)nativeType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &nativeCh);
+        (void)nativeType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &nativeRate);
     }
-    return true;
+
+    if (setOutputType(mf, reader.p, MFAudioFormat_Float, 32, nativeCh, nativeRate)) {
+        return true;
+    }
+    if (setOutputType(mf, reader.p, MFAudioFormat_PCM, 16, nativeCh, nativeRate)) {
+        return true;
+    }
+    reportError(sink, ses, "cannot decode audio stream", E_FAIL);
+    return false;
 }
 
 void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
@@ -261,7 +308,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
 
     const uint32_t rate = wfx->nSamplesPerSec;
     const int channels = wfx->nChannels;
-    const bool pcm16 = wfx->wBitsPerSample == 16 && wfx->wFormatTag == WAVE_FORMAT_PCM;
+    SampleFmt sampleFmt = sampleFmtOf(got.p, wfx);
     ses->sampleRate = rate;
     ses->bytesPerSec = wfx->nAvgBytesPerSec;
 
@@ -271,6 +318,22 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     CoTaskMemFree(wfx);
     wchar_t nullEnv[8] = {};
     bool nullOut = GetEnvironmentVariableW(L"VIBEZ_NULL_AUDIO", nullEnv, 8) == 1 && nullEnv[0] == L'1';
+    if (mm != MMSYSERR_NOERROR && sampleFmt == SampleFmt::Float32) {
+        UINT32 nativeCh = static_cast<UINT32>(channels > 0 ? channels : 2);
+        if (setOutputType(mf, reader.p, MFAudioFormat_PCM, 16, nativeCh, rate)) {
+            Com<IMFMediaType> got16;
+            WAVEFORMATEX* wfx16 = nullptr;
+            UINT32 wfx16Size = 0;
+            if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
+                SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
+                sampleFmt = sampleFmtOf(got16.p, wfx16);
+                ses->sampleRate = wfx16->nSamplesPerSec;
+                ses->bytesPerSec = wfx16->nAvgBytesPerSec;
+                mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+                CoTaskMemFree(wfx16);
+            }
+        }
+    }
     if (mm != MMSYSERR_NOERROR) {
         if (!nullOut) {
             CloseHandle(ev);
@@ -299,6 +362,39 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     for (;;) {
         if (ses->cancel) break;
 
+        double target = ses->seekTarget.exchange(-1.0);
+        if (target >= 0.0) {
+            if (!nullOut && hwo) {
+                waveOutReset(hwo);
+                for (auto& b : bufs) {
+                    if (b.queued) {
+                        waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+                        b.queued = false;
+                    }
+                }
+                if (ses->paused) waveOutPause(hwo);
+            }
+            PROPVARIANT pos;
+            PropVariantInit(&pos);
+            pos.vt = VT_I8;
+            pos.hVal.QuadPart = static_cast<LONGLONG>(target * 10000000.0);
+            if (SUCCEEDED(reader->SetCurrentPosition(GUID{}, pos))) {
+                for (auto& bq : bank) {
+                    bq.z1[0] = bq.z1[1] = 0;
+                    bq.z2[0] = bq.z2[1] = 0;
+                }
+                ses->baseSamples = 0;
+                ses->baseBytes = 0;
+                ses->seekBaseSec = target;
+                enqueuedSamples = 0;
+                enqueuedBytes = 0;
+                if (nullOut && rate > 0) {
+                    ses->nullFrames = static_cast<uint64_t>(target * static_cast<double>(rate));
+                }
+            }
+            PropVariantClear(&pos);
+        }
+
         DWORD flags = 0;
         Com<IMFSample> sample;
         hr = reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, nullptr, &flags, nullptr, &sample);
@@ -324,6 +420,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                     trimRemaining = isWholeTrackURI(curURI) ? kAACPrimingFrames : 0;
                     ses->baseSamples = enqueuedSamples;
                     ses->baseBytes = enqueuedBytes;
+                    ses->seekBaseSec = 0.0;
                     ses->nullFrames = 0;
                     if (sink->onStreamStart) {
                         std::vector<char> u(curURI.begin(), curURI.end());
@@ -348,9 +445,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             continue;
         }
 
-        const size_t frameBytes = sizeof(int16_t) * static_cast<size_t>(channels > 0 ? channels : 2);
+        const size_t sampleBytes = sampleFmt == SampleFmt::Float32 ? sizeof(float) : sizeof(int16_t);
+        const size_t frameBytes = sampleBytes * static_cast<size_t>(channels > 0 ? channels : 2);
         size_t skipBytes = 0;
-        if (pcm16 && trimRemaining > 0 && frameBytes > 0) {
+        if (sampleFmt != SampleFmt::None && trimRemaining > 0 && frameBytes > 0) {
             const size_t totalFrames = static_cast<size_t>(len) / frameBytes;
             const size_t cut = trimRemaining < totalFrames ? trimRemaining : totalFrames;
             trimRemaining -= cut;
@@ -369,8 +467,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         b.data.assign(reinterpret_cast<char*>(src + skipBytes), reinterpret_cast<char*>(src) + len);
         mb->Unlock();
 
-        if (pcm16) {
-            int16_t* s = reinterpret_cast<int16_t*>(b.data.data());
+        if (sampleFmt != SampleFmt::None && frameBytes > 0) {
             const size_t frames = b.data.size() / frameBytes;
 
             const uint32_t ver = sink->eqVersion.load();
@@ -391,26 +488,44 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             }
             const double vol = sink->volume.load();
             if (eqOn || vol != 1.0) {
-                for (size_t f = 0; f < frames; ++f) {
-                    for (int c = 0; c < channels; ++c) {
-                        double x = s[f * channels + c];
-                        if (eqOn) {
-                            for (int i = 0; i < kBands; ++i) {
-                                if (bank[i].active) x = bank[i].run(x, c);
+                if (sampleFmt == SampleFmt::Float32) {
+                    float* s = reinterpret_cast<float*>(b.data.data());
+                    for (size_t f = 0; f < frames; ++f) {
+                        for (int c = 0; c < channels; ++c) {
+                            double x = s[f * channels + c];
+                            if (eqOn) {
+                                for (int i = 0; i < kBands; ++i) {
+                                    if (bank[i].active) x = bank[i].run(x, c);
+                                }
                             }
+                            x *= vol;
+                            if (x > 1.0) x = 1.0;
+                            if (x < -1.0) x = -1.0;
+                            s[f * channels + c] = static_cast<float>(x);
                         }
-                        x *= vol;
-                        if (x > 32767.0) x = 32767.0;
-                        if (x < -32768.0) x = -32768.0;
-                        s[f * channels + c] = static_cast<int16_t>(x);
+                    }
+                } else {
+                    int16_t* s = reinterpret_cast<int16_t*>(b.data.data());
+                    for (size_t f = 0; f < frames; ++f) {
+                        for (int c = 0; c < channels; ++c) {
+                            double x = s[f * channels + c];
+                            if (eqOn) {
+                                for (int i = 0; i < kBands; ++i) {
+                                    if (bank[i].active) x = bank[i].run(x, c);
+                                }
+                            }
+                            x *= vol;
+                            if (x > 32767.0) x = 32767.0;
+                            if (x < -32768.0) x = -32768.0;
+                            s[f * channels + c] = static_cast<int16_t>(x);
+                        }
                     }
                 }
             }
         }
 
         if (nullOut) {
-            const size_t frameSize = sizeof(int16_t) * static_cast<size_t>(channels > 0 ? channels : 2);
-            const uint64_t frames = frameSize > 0 ? b.data.size() / frameSize : 0;
+            const uint64_t frames = frameBytes > 0 ? b.data.size() / frameBytes : 0;
             ses->nullFrames.fetch_add(frames);
             while (ses->paused && !ses->cancel) {
                 Sleep(20);
@@ -562,6 +677,19 @@ void vibez_winsink_stop(vibez_winsink_t handle) {
         sink->cur.reset();
     }
     cancelSession(old);
+}
+
+void vibez_winsink_seek(vibez_winsink_t handle, double seconds) {
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
+    std::shared_ptr<Session> ses;
+    {
+        std::lock_guard<std::mutex> lk(sink->mu);
+        ses = sink->cur;
+    }
+    if (!ses) return;
+    if (seconds < 0.0) seconds = 0.0;
+    ses->seekTarget.store(seconds);
 }
 
 void vibez_winsink_set_volume(vibez_winsink_t handle, double volume) {
