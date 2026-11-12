@@ -1,7 +1,7 @@
 //go:build linux
 
 // Package gst provides a GStreamer-backed audio player for URI-based streams.
-// It wraps a playbin3 (or playbin fallback) pipeline via CGO, handling HLS
+// It wraps a playbin (or playbin3 fallback) pipeline via CGO, handling HLS
 // manifests, plain HTTPS audio files, and eventual authenticated streams.
 package gst
 
@@ -778,15 +778,54 @@ static GstPadProbeReturn on_filter_buffer(GstPad* pad, GstPadProbeInfo* info, gp
     return GST_PAD_PROBE_OK;
 }
 
-// vibez_gst_new creates a playbin3 pipeline, falling back to playbin, and
+// on_avdemux_aiff_no_more_pads handles GStreamer's demuxer removal race when
+// avdemux_aiff rejects an unsupported (24/32-bit) AIFF stream: avdemux_aiff
+// emits no-more-pads with 0 source pads and races its task thread's EOS error
+// against decodebin/parsebin teardown, which can silently discard the error.
+// Posting the error on the top-level playbin guarantees the pipeline bus
+// receives it deterministically.
+static void on_avdemux_aiff_no_more_pads(GstElement* elem, gpointer user_data) {
+    GstElement* playbin = (GstElement*)user_data;
+    if (!elem || !playbin) return;
+    GST_OBJECT_LOCK(elem);
+    guint16 nsrc = elem->numsrcpads;
+    GST_OBJECT_UNLOCK(elem);
+    if (nsrc == 0) {
+        GError* err = g_error_new_literal(GST_STREAM_ERROR, GST_STREAM_ERROR_DEMUX,
+            "Internal data stream error.");
+        GstMessage* msg = gst_message_new_error(GST_OBJECT(playbin), err,
+            "avdemux_aiff: no supported audio stream");
+        gst_element_post_message(playbin, msg);
+        g_error_free(err);
+    }
+}
+
+static void on_deep_element_added(GstBin* bin, GstBin* sub_bin, GstElement* elem, gpointer user_data) {
+    (void)sub_bin;
+    (void)user_data;
+    if (!elem || !bin) return;
+    gchar* name = gst_element_get_name(elem);
+    if (name) {
+        if (g_str_has_prefix(name, "avdemux_aiff")) {
+            g_signal_connect(elem, "no-more-pads",
+                G_CALLBACK(on_avdemux_aiff_no_more_pads), (gpointer)bin);
+        }
+        g_free(name);
+    }
+}
+
+// vibez_gst_new creates a playbin pipeline (falling back to playbin3), and
 // attaches a 10-band equalizer audio-filter when gstreamer1.0-plugins-good is
 // installed (an identity filter with embedded biquad DSP otherwise, to carry
-// both the priming trim and the 10-band EQ).
+// both the priming trim and the 10-band EQ). playbin is preferred over playbin3
+// because GStreamer's uridecodebin3/decodebin3 can stall READY->PAUSED and miss
+// gapless about-to-finish transitions under single-core contention.
 static GstElement* vibez_gst_new(GstElement** eqOut, VibezGstState* st) {
-    GstElement* p = gst_element_factory_make("playbin3", "vibez-audio");
-    if (!p) p = gst_element_factory_make("playbin", "vibez-audio");
+    GstElement* p = gst_element_factory_make("playbin", "vibez-audio");
+    if (!p) p = gst_element_factory_make("playbin3", "vibez-audio");
     if (p) {
         g_signal_connect(p, "about-to-finish", G_CALLBACK(on_about_to_finish), (gpointer)st);
+        g_signal_connect(p, "deep-element-added", G_CALLBACK(on_deep_element_added), NULL);
         const char* null_env = getenv("VIBEZ_NULL_AUDIO");
         if (null_env && strcmp(null_env, "1") == 0) {
             GstElement* fake = gst_element_factory_make("fakesink", "vibez-nullsink");
@@ -853,8 +892,16 @@ static void vibez_gst_set_uri(GstElement* p, VibezGstState* st, const char* uri)
     // pipeline and its PipeWire/PulseAudio connection alive. Going to NULL
     // would tear down the audio sink and create a new OS-level player entry
     // on every track change, causing dozens of stale entries in notification
-    // centres that track MPRIS/PipeWire streams.
-    gst_element_set_state(p, GST_STATE_READY);
+    // centres that track MPRIS/PipeWire streams. When the pipeline is still in
+    // NULL (initial load), leave it in NULL until the URI is set so the
+    // pipeline does not enter READY with an empty URI.
+    GST_OBJECT_LOCK(p);
+    GstState cur = GST_STATE(p);
+    GstState pend = GST_STATE_PENDING(p);
+    GST_OBJECT_UNLOCK(p);
+    if (cur > GST_STATE_READY || pend > GST_STATE_READY) {
+        gst_element_set_state(p, GST_STATE_READY);
+    }
     g_mutex_lock(&st->mu);
     st->trim_next = vibez_uri_is_whole_track(uri);
     g_mutex_unlock(&st->mu);
@@ -950,7 +997,7 @@ const aiffParserHelp = "24/32-bit AIFF playback needs aiffparse: install gstream
 
 var once sync.Once
 
-// Player wraps a GStreamer playbin3 pipeline for URI-based audio playback.
+// Player wraps a GStreamer playbin pipeline for URI-based audio playback.
 type Player struct {
 	mu            sync.Mutex
 	pipeline      *C.GstElement
