@@ -11,8 +11,10 @@
 #include <mferror.h>
 #include <propvarutil.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <future>
@@ -123,6 +125,7 @@ struct Session {
     std::atomic<uint32_t> bytesPerSec{0};
     std::atomic<uint64_t> baseSamples{0};
     std::atomic<uint64_t> baseBytes{0};
+    std::atomic<uint64_t> nullFrames{0};
 };
 
 struct Sink {
@@ -231,6 +234,146 @@ void snapshotWaveOutBase(Session& ses, HWAVEOUT hwo) {
     }
 }
 
+// SampleFmt is the PCM layout the reader hands us. Float is preferred so
+// 24-bit and hi-res files reach the EQ and waveOut without being truncated to
+// 16 bits; integer formats are the fallback when no float path exists.
+enum class SampleFmt { None, S16, S24, S32, F32 };
+
+int sampleBytes(SampleFmt f) {
+    switch (f) {
+    case SampleFmt::S16: return 2;
+    case SampleFmt::S24: return 3;
+    case SampleFmt::S32: return 4;
+    case SampleFmt::F32: return 4;
+    default: return 0;
+    }
+}
+
+// sampleFmtOf maps a reader output type to a SampleFmt, or None when the
+// layout is one this sink does not process (e.g. 24-in-32 containers).
+SampleFmt sampleFmtOf(IMFMediaType* t) {
+    GUID sub = GUID_NULL;
+    UINT32 bits = 0, channels = 0, align = 0;
+    if (FAILED(t->GetGUID(MF_MT_SUBTYPE, &sub)) ||
+        FAILED(t->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits)) ||
+        FAILED(t->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels)) || channels == 0) {
+        return SampleFmt::None;
+    }
+    if (SUCCEEDED(t->GetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, &align)) && align != channels * (bits / 8)) {
+        return SampleFmt::None;
+    }
+    if (sub == MFAudioFormat_Float) return bits == 32 ? SampleFmt::F32 : SampleFmt::None;
+    if (sub != MFAudioFormat_PCM) return SampleFmt::None;
+    switch (bits) {
+    case 16: return SampleFmt::S16;
+    case 24: return SampleFmt::S24;
+    case 32: return SampleFmt::S32;
+    default: return SampleFmt::None;
+    }
+}
+
+// readSample and writeSample convert one little-endian sample to and from a
+// double in [-1, 1].
+double readSample(const unsigned char* p, SampleFmt f) {
+    switch (f) {
+    case SampleFmt::S16: {
+        int16_t v;
+        std::memcpy(&v, p, 2);
+        return v / 32768.0;
+    }
+    case SampleFmt::S24: {
+        int32_t v = static_cast<int32_t>(static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+                                         (static_cast<uint32_t>(p[2]) << 16));
+        if (v & 0x800000) v -= 0x1000000;
+        return v / 8388608.0;
+    }
+    case SampleFmt::S32: {
+        int32_t v;
+        std::memcpy(&v, p, 4);
+        return v / 2147483648.0;
+    }
+    case SampleFmt::F32: {
+        float v;
+        std::memcpy(&v, p, 4);
+        return v;
+    }
+    default: return 0.0;
+    }
+}
+
+void writeSample(unsigned char* p, SampleFmt f, double x) {
+    if (x > 1.0) x = 1.0;
+    if (x < -1.0) x = -1.0;
+    switch (f) {
+    case SampleFmt::S16: {
+        const int16_t v = static_cast<int16_t>(std::lround(std::min(x * 32768.0, 32767.0)));
+        std::memcpy(p, &v, 2);
+        break;
+    }
+    case SampleFmt::S24: {
+        const int32_t v = static_cast<int32_t>(std::lround(std::min(x * 8388608.0, 8388607.0)));
+        p[0] = static_cast<unsigned char>(v & 0xff);
+        p[1] = static_cast<unsigned char>((v >> 8) & 0xff);
+        p[2] = static_cast<unsigned char>((v >> 16) & 0xff);
+        break;
+    }
+    case SampleFmt::S32: {
+        const int32_t v = static_cast<int32_t>(std::llround(std::min(x * 2147483648.0, 2147483647.0)));
+        std::memcpy(p, &v, 4);
+        break;
+    }
+    case SampleFmt::F32: {
+        const float v = static_cast<float>(x);
+        std::memcpy(p, &v, 4);
+        break;
+    }
+    default: break;
+    }
+}
+
+// OutputFormat is a negotiated reader output type with its waveOut device.
+struct OutputFormat {
+    SampleFmt fmt = SampleFmt::None;
+    uint32_t rate = 0;
+    int channels = 0;
+    uint32_t bytesPerSec = 0;
+    HWAVEOUT hwo = nullptr;
+};
+
+// openOutput asks the reader for want, then opens waveOut with the format
+// the reader settled on. It fails, leaving nothing open, when either side
+// refuses, so the caller can try the next candidate.
+HRESULT openOutput(const MfApi& mf, IMFSourceReader* reader, IMFMediaType* want, HANDLE ev, bool nullOut, OutputFormat& out) {
+    HRESULT hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, want);
+    if (FAILED(hr)) return hr;
+
+    Com<IMFMediaType> got;
+    hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got);
+    if (FAILED(hr)) return hr;
+    const SampleFmt fmt = sampleFmtOf(got.p);
+    if (fmt == SampleFmt::None) return MF_E_INVALIDMEDIATYPE;
+
+    WAVEFORMATEX* wfx = nullptr;
+    UINT32 wfxSize = 0;
+    hr = mf.createWaveFormat(got.p, &wfx, &wfxSize, MFWaveFormatExConvertFlag_Normal);
+    if (FAILED(hr) || !wfx) return FAILED(hr) ? hr : E_FAIL;
+
+    HWAVEOUT hwo = nullptr;
+    MMRESULT mm = MMSYSERR_NOERROR;
+    if (!nullOut) {
+        mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+    }
+    if (mm == MMSYSERR_NOERROR) {
+        out.fmt = fmt;
+        out.rate = wfx->nSamplesPerSec;
+        out.channels = wfx->nChannels;
+        out.bytesPerSec = wfx->nAvgBytesPerSec;
+        out.hwo = hwo;
+    }
+    CoTaskMemFree(wfx);
+    return mm == MMSYSERR_NOERROR ? S_OK : static_cast<HRESULT>(mm);
+}
+
 void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
               const std::wstring& path, std::promise<OpenResult>& openProm) {
     bool promised = false;
@@ -251,44 +394,66 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     hr = reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
     if (FAILED(hr)) return failOpen(formatHr("no audio stream found", hr));
 
-    Com<IMFMediaType> want;
-    mf.createMediaType(&want);
-    want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-    want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    want->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, want.p);
-    if (FAILED(hr)) return failOpen(formatHr("cannot decode audio stream", hr));
+    // Output candidates, best first. Rate and channel count are left unset so
+    // the decoder keeps the file's own: 32-bit float carries 24-bit and
+    // hi-res sources intact; the file's native integer PCM covers sources
+    // with no float path; 16-bit PCM is the last resort and matches what
+    // every Windows audio device accepts.
+    std::vector<Com<IMFMediaType>> candidates(3);
+    {
+        IMFMediaType* f = nullptr;
+        if (SUCCEEDED(mf.createMediaType(&f))) {
+            f->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            f->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+            f->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
+            candidates[0].p = f;
+        }
+        IMFMediaType* native = nullptr;
+        if (SUCCEEDED(reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &native))) {
+            if (sampleFmtOf(native) != SampleFmt::None) {
+                candidates[1].p = native;
+            } else {
+                native->Release();
+            }
+        }
+        IMFMediaType* s16 = nullptr;
+        if (SUCCEEDED(mf.createMediaType(&s16))) {
+            s16->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            s16->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+            s16->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            candidates[2].p = s16;
+        }
+    }
 
-    Com<IMFMediaType> got;
-    hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got);
-    if (FAILED(hr)) return failOpen(formatHr("cannot read audio format", hr));
+    wchar_t nullEnv[8] = {};
+    const bool nullOut = GetEnvironmentVariableW(L"VIBEZ_NULL_AUDIO", nullEnv, 8) == 1 && nullEnv[0] == L'1';
+    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    OutputFormat out;
+    hr = E_FAIL;
+    for (auto& c : candidates) {
+        if (!c.p) continue;
+        hr = openOutput(mf, reader.p, c.p, ev, nullOut, out);
+        if (SUCCEEDED(hr)) break;
+    }
+    if (FAILED(hr) || (!nullOut && !out.hwo)) {
+        CloseHandle(ev);
+        return failOpen(formatHr("cannot decode audio stream", hr));
+    }
 
-    WAVEFORMATEX* wfx = nullptr;
-    UINT32 wfxSize = 0;
-    hr = mf.createWaveFormat(got.p, &wfx, &wfxSize, MFWaveFormatExConvertFlag_Normal);
-    if (FAILED(hr) || !wfx) return failOpen(formatHr("cannot build wave format", hr));
-
-    const uint32_t rate = wfx->nSamplesPerSec;
-    const int channels = wfx->nChannels;
-    const bool pcm16 = wfx->wBitsPerSample == 16 && wfx->wFormatTag == WAVE_FORMAT_PCM;
+    HWAVEOUT hwo = out.hwo;
+    const uint32_t rate = out.rate;
+    const int channels = out.channels;
+    const SampleFmt fmt = out.fmt;
+    const size_t frameBytes = static_cast<size_t>(sampleBytes(fmt)) * static_cast<size_t>(channels);
     ses->sampleRate = rate;
-    ses->bytesPerSec = wfx->nAvgBytesPerSec;
+    ses->bytesPerSec = out.bytesPerSec;
     const double dur = readDuration(reader.p);
     ses->durationSec = dur;
-
-    HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    HWAVEOUT hwo = nullptr;
-    MMRESULT mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
-    CoTaskMemFree(wfx);
-    if (mm != MMSYSERR_NOERROR) {
-        CloseHandle(ev);
-        return failOpen(formatHr("cannot open audio output device", static_cast<HRESULT>(mm)));
-    }
     {
         std::lock_guard<std::mutex> lk(ses->mu);
         ses->hwo = hwo;
         ses->ev = ev;
-        if (ses->paused) waveOutPause(hwo);
+        if (hwo && ses->paused) waveOutPause(hwo);
     }
 
     promised = true;
@@ -309,16 +474,19 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         if (seekSec >= 0.0) {
             {
                 std::lock_guard<std::mutex> lk(ses->mu);
-                waveOutReset(hwo);
-                for (auto& b : bufs) {
-                    if (b.queued) {
-                        waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
-                        b.queued = false;
+                if (hwo) {
+                    waveOutReset(hwo);
+                    for (auto& b : bufs) {
+                        if (b.queued) {
+                            waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+                            b.queued = false;
+                        }
                     }
+                    snapshotWaveOutBase(*ses, hwo);
+                    if (ses->paused) waveOutPause(hwo);
                 }
-                snapshotWaveOutBase(*ses, hwo);
+                ses->nullFrames = 0;
                 ses->baseSec = seekSec;
-                if (ses->paused) waveOutPause(hwo);
             }
             for (int i = 0; i < kBands; ++i) bank[i].resetState();
             PROPVARIANT posVar;
@@ -333,6 +501,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
 
         if (endOfStream) {
+            if (nullOut) break;
             bool anyQueued = false;
             for (auto& b : bufs) {
                 if (b.queued && !(b.hdr.dwFlags & WHDR_DONE)) {
@@ -369,7 +538,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
 
         Buf& b = bufs[next];
-        if (!waitFree(b, hwo, ev, *ses)) {
+        if (!nullOut && !waitFree(b, hwo, ev, *ses)) {
             mb->Unlock();
             if (ses->cancel) break;
             continue;
@@ -377,9 +546,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         b.data.assign(reinterpret_cast<char*>(src), reinterpret_cast<char*>(src) + len);
         mb->Unlock();
 
-        if (pcm16) {
-            int16_t* s = reinterpret_cast<int16_t*>(b.data.data());
-            const size_t frames = b.data.size() / (sizeof(int16_t) * static_cast<size_t>(channels));
+        {
+            unsigned char* data = reinterpret_cast<unsigned char*>(b.data.data());
+            const size_t frames = frameBytes ? b.data.size() / frameBytes : 0;
+            const int bps = sampleBytes(fmt);
 
             const uint32_t ver = sink->eqVersion.load();
             if (ver != eqSeen) {
@@ -401,19 +571,30 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             if (eqOn || vol != 1.0) {
                 for (size_t f = 0; f < frames; ++f) {
                     for (int c = 0; c < channels; ++c) {
-                        double x = s[f * channels + c];
+                        unsigned char* p = data + f * frameBytes + static_cast<size_t>(c) * static_cast<size_t>(bps);
+                        double x = readSample(p, fmt);
                         if (eqOn) {
                             for (int i = 0; i < kBands; ++i) {
                                 if (bank[i].active) x = bank[i].run(x, c);
                             }
                         }
-                        x *= vol;
-                        if (x > 32767.0) x = 32767.0;
-                        if (x < -32768.0) x = -32768.0;
-                        s[f * channels + c] = static_cast<int16_t>(x);
+                        writeSample(p, fmt, x * vol);
                     }
                 }
             }
+        }
+
+        if (nullOut) {
+            const size_t frames = frameBytes ? b.data.size() / frameBytes : 0;
+            ses->nullFrames.fetch_add(frames);
+            while (ses->paused && !ses->cancel && ses->seekTarget.load() < 0.0) {
+                WaitForSingleObject(ev, 20);
+            }
+            if (rate > 0 && frames > 0 && !ses->cancel && ses->seekTarget.load() < 0.0) {
+                const DWORD ms = static_cast<DWORD>((frames * 1000ULL) / rate);
+                if (ms > 0) WaitForSingleObject(ev, ms);
+            }
+            continue;
         }
 
         b.hdr.lpData = b.data.data();
@@ -433,11 +614,13 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         ses->hwo = nullptr;
         ses->ev = nullptr;
     }
-    waveOutReset(hwo);
-    for (auto& b : bufs) {
-        if (b.queued) waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+    if (hwo) {
+        waveOutReset(hwo);
+        for (auto& b : bufs) {
+            if (b.queued) waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+        }
+        waveOutClose(hwo);
     }
-    waveOutClose(hwo);
     CloseHandle(ev);
 
     if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) {
@@ -519,6 +702,7 @@ void vibez_localsink_play(vibez_localsink_t handle) {
     ses->paused = false;
     std::lock_guard<std::mutex> lk(ses->mu);
     if (ses->hwo) waveOutRestart(ses->hwo);
+    if (ses->ev) SetEvent(ses->ev);
 }
 
 void vibez_localsink_pause(vibez_localsink_t handle) {
@@ -547,6 +731,7 @@ void vibez_localsink_stop(vibez_localsink_t handle) {
     ses->paused = true;
     ses->seekTarget = 0.0;
     ses->baseSec = 0.0;
+    ses->nullFrames = 0;
     std::lock_guard<std::mutex> lk(ses->mu);
     if (ses->hwo) {
         waveOutPause(ses->hwo);
@@ -567,6 +752,7 @@ void vibez_localsink_seek(vibez_localsink_t handle, double seconds) {
     if (seconds < 0.0) seconds = 0.0;
     ses->seekTarget = seconds;
     ses->baseSec = seconds;
+    ses->nullFrames = 0;
     std::lock_guard<std::mutex> lk(ses->mu);
     if (ses->hwo) snapshotWaveOutBase(*ses, ses->hwo);
     if (ses->ev) SetEvent(ses->ev);
@@ -621,7 +807,12 @@ double vibez_localsink_position(vibez_localsink_t handle) {
 
     std::lock_guard<std::mutex> lk(ses->mu);
     const double base = ses->baseSec.load();
-    if (!ses->hwo) return base;
+    if (!ses->hwo) {
+        if (ses->sampleRate > 0) {
+            return base + static_cast<double>(ses->nullFrames.load()) / static_cast<double>(ses->sampleRate);
+        }
+        return base;
+    }
     MMTIME t;
     std::memset(&t, 0, sizeof(t));
     t.wType = TIME_SAMPLES;

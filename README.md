@@ -146,7 +146,7 @@ go build -o vibez.exe .
 .\vibez.exe --local --music-dir "$env:USERPROFILE\Music"
 ```
 
-Both Apple Music streaming and `--local` file playback (MP3, FLAC, M4A) run natively via Windows Media Foundation and `waveOut` with a 10-band equalizer — no browser installation required.
+Both Apple Music streaming and `--local` file playback (MP3, FLAC, M4A, WAV) run natively via Windows Media Foundation and `waveOut` with a 10-band equalizer — no browser installation required.
 
 Configuration lives at `%APPDATA%\vibez\config.json`; the cached Widevine CDM and icon live under `%LOCALAPPDATA%\vibez`. `--config` overrides the configuration file.
 
