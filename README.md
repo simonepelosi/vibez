@@ -17,15 +17,18 @@
   <a href="https://github.com/simonepelosi/vibez/blob/main/LICENSE"><img src="https://img.shields.io/github/license/simonepelosi/vibez?style=flat-square" alt="License"></a>
   <a href="https://github.com/simonepelosi/vibez/releases"><img src="https://img.shields.io/github/downloads/simonepelosi/vibez/total?style=flat-square&label=downloads" alt="Downloads"></a>
   <a href="https://github.com/simonepelosi/vibez/stargazers"><img src="https://img.shields.io/github/stars/simonepelosi/vibez?style=flat-square" alt="Stars"></a>
+  <a href="https://matrix.to/#/#vibez-player:matrix.org"><img src="https://img.shields.io/badge/matrix-%23vibez--player%3Amatrix.org-0DBD8B?style=flat-square&logo=matrix" alt="Matrix Chat"></a>
 </p>
 
 <p align="center">
   If you enjoy vibez, consider supporting its development — it helps keep the project alive! ☕<br><br>
   <img src="https://progress-bar.xyz/22/?title=Apple%20Dev%20Key%20Goal%20%28%2422%2F%24100%29&color=ff5e5b&width=400" alt="Apple Developer Key Progress"><br><br>
   <a href="https://ko-fi.com/pelpsi"><img src="https://img.shields.io/badge/☕_buy_me_a_coffee-donate-ff5e5b?style=for-the-badge" alt="Donate on Ko-fi"></a>
+  &nbsp;
+  <a href="https://matrix.to/#/#vibez-player:matrix.org"><img src="https://img.shields.io/badge/💬_matrix_chat-%23vibez--player%3Amatrix.org-0DBD8B?style=for-the-badge&logo=matrix&logoColor=white" alt="Join Matrix Chat"></a>
 </p>
 
-[Installation](#installation) · [Usage](#usage) · [Features](#features) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap)
+[Installation](#installation) · [Usage](#usage) · [Features](#features) · [Key Bindings](#key-bindings) · [Roadmap](#roadmap) · [Matrix Chat](https://matrix.to/#/#vibez-player:matrix.org)
 
 ---
 
@@ -422,7 +425,7 @@ vibez/
 
 ## Contributing
 
-Open an issue before sending a PR — happy to discuss ideas.
+Open an issue or join the community chat on Matrix at [`#vibez-player:matrix.org`](https://matrix.to/#/#vibez-player:matrix.org) before sending a PR — happy to discuss ideas.
 
 ```bash
 git clone https://github.com/simonepelosi/vibez
