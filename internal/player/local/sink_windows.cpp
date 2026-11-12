@@ -252,7 +252,7 @@ int sampleBytes(SampleFmt f) {
 // sampleFmtOf maps a reader output type to a SampleFmt, or None when the
 // layout is one this sink does not process (e.g. 24-in-32 containers).
 SampleFmt sampleFmtOf(IMFMediaType* t) {
-    GUID sub = GUID_NULL;
+    GUID sub = {};
     UINT32 bits = 0, channels = 0, align = 0;
     if (FAILED(t->GetGUID(MF_MT_SUBTYPE, &sub)) ||
         FAILED(t->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits)) ||
