@@ -145,6 +145,8 @@ func backendEmoji(backend string) string {
 		b = b[:idx]
 	}
 	switch b {
+	case "omp", "oh-my-pi", "ohmypi":
+		return "🥧"
 	case "ollama", "llamacpp", "llama.cpp", "llama-server", "llama-cpp":
 		return "🦙"
 	case "lmstudio":
@@ -161,6 +163,8 @@ func backendEmoji(backend string) string {
 		return "✈️"
 	case "opencode", "local":
 		return "⚡"
+	case "llm":
+		return "🦉"
 	case "keyword":
 		return "🔑"
 	default:

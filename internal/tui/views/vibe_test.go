@@ -378,6 +378,7 @@ func TestVibe_Lines_BackendEmojiBadge(t *testing.T) {
 		backend   string
 		wantEmoji string
 	}{
+		{"omp:smol", "🥧"},
 		{"ollama:qwen3:8b", "🦙"},
 		{"llamacpp:llama-3.2", "🦙"},
 		{"lmstudio:mistral", "🧪"},
