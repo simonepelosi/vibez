@@ -707,7 +707,6 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 // 127.0.0.1:8080) or set Endpoint explicitly.
 type DetectOptions struct {
 	Backend       string // "auto" (default), "omp", "ollama", "lmstudio", "llamacpp", "claude", "gemini", "codex", "copilot", "opencode", "llm", "openai", "keyword"
-	Privacy       string // "auto" (default: HTTP + CLI agents) or "local-only" / "http-only" (strictly local HTTP servers only)
 	Model         string
 	Endpoint      string
 	PlanTimeout   time.Duration // optional per-request timeout override (defaults to DefaultPlanTimeout)
@@ -725,9 +724,9 @@ func (opts DetectOptions) cliLookup() func(string) (string, error) {
 	return LookPathCLI
 }
 
-// DetectPlanner probes the configured or default on-device runtimes and
-// installed CLI agents, returning the highest-priority available Planner and
-// falling back to KeywordAgent.
+// DetectPlanner resolves an explicitly configured planner (local HTTP runtime
+// or opt-in CLI agent) or, in "auto" mode, probes only on-device HTTP runtimes
+// before falling back to KeywordAgent.
 func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	backend := strings.ToLower(strings.TrimSpace(opts.Backend))
 	ollamaURL := opts.OllamaBaseURL
@@ -749,7 +748,7 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 
 	if cliAgent := NormalizeCLIAgent(backend); cliAgent != "" {
 		if bin, err := lookup(cliAgent); err == nil && bin != "" {
-			return &CLIPlanner{Agent: cliAgent, BinaryPath: bin, Model: opts.Model}
+			return &CLIPlanner{Agent: cliAgent, BinaryPath: bin, Model: opts.Model, Timeout: opts.PlanTimeout}
 		}
 		return &KeywordAgent{}
 	}
@@ -785,23 +784,14 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 		}
 	}
 
-	// Probe Tier 1 local runtimes on their dedicated ports (Ollama :11434, LM Studio :1234).
+	// "auto" stays strictly on local HTTP runtimes (Ollama / LM Studio / custom
+	// VibeEndpoint) and falls back to KeywordAgent; CLI agents are explicit opt-in
+	// via Backend or `:vibe <cli>`.
 	if m, err := ProbeOllama(ctx, ollamaURL, opts.Model, opts.Client); err == nil {
 		return &OllamaPlanner{BaseURL: ollamaURL, Model: m, Timeout: opts.PlanTimeout, Client: opts.Client}
 	}
 	if m, err := ProbeOpenAICompat(ctx, lmURL, opts.Model, opts.Client); err == nil {
 		return &OpenAICompatPlanner{BackendName: "lmstudio", BaseURL: lmURL, Model: m, Timeout: opts.PlanTimeout, Client: opts.Client}
-	}
-
-	// Probe Tier 2 installed CLI agents (omp, claude, gemini, codex, copilot, opencode, llm)
-	// unless Privacy is restricted to strictly local HTTP servers ("local-only" / "http-only").
-	privacy := strings.ToLower(strings.TrimSpace(opts.Privacy))
-	if privacy != "local-only" && privacy != "http-only" {
-		for _, agent := range SupportedCLIAgents {
-			if bin, err := lookup(agent); err == nil && bin != "" {
-				return &CLIPlanner{Agent: agent, BinaryPath: bin, Model: opts.Model}
-			}
-		}
 	}
 	return &KeywordAgent{}
 }

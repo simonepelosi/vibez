@@ -1581,7 +1581,7 @@ var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
 	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
-	{"vibe", "vibe [backend] [model]", "Select or inspect the Vibe AI backend (auto, omp, ollama, lmstudio, llamacpp, gemini, copilot, opencode, claude, codex, keyword)"},
+	{"vibe", "vibe [backend] [model]", "Select or inspect the Vibe AI backend (auto, ollama, lmstudio, llamacpp, omp, claude, gemini, codex, copilot, opencode, llm, keyword)"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"art", "art", "Toggle album-art view (cover + track info instead of the bar)"},
@@ -1849,7 +1849,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			if m.vibePlanner != nil {
 				active = m.vibePlanner.Name()
 			}
-			m.errMsg = fmt.Sprintf("vibe backend: %s (use :vibe <auto|omp|ollama|lmstudio|llamacpp|gemini|copilot|opencode|claude|codex|keyword> [model])", active)
+			m.errMsg = fmt.Sprintf("vibe backend: %s (use :vibe <auto|omp|ollama|lmstudio|llamacpp|gemini|copilot|opencode|claude|codex|llm|keyword> [model])", active)
 			m.errExpiry = time.Now().Add(5 * time.Second)
 			return nil
 		}
@@ -2613,7 +2613,6 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 	var opts vibe.DetectOptions
 	if m.cfg != nil {
 		opts.Backend = m.cfg.VibeBackend
-		opts.Privacy = m.cfg.VibePrivacy
 		opts.Model = m.cfg.VibeModel
 		opts.Endpoint = m.cfg.VibeEndpoint
 		opts.PlanTimeout = m.cfg.VibePlanTimeout()
@@ -2626,9 +2625,9 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 }
 
 // runVibeSearch plans and resolves the user's vibe description using the active
-// Planner (on-device Ollama / LM Studio runtime or installed CLI agent when
-// available, transparently falling back to KeywordAgent) and grounds the
-// resulting VibePlan against the provider in parallel.
+// Planner (on-device Ollama / LM Studio / explicit CLI agent, transparently
+// falling back to KeywordAgent) and grounds the resulting VibePlan against the
+// provider in parallel.
 func (m *Model) runVibeSearch(query string) tea.Cmd {
 	prov := m.provider
 	planner := m.vibePlanner
@@ -2636,7 +2635,6 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 	planTimeout := vibe.DefaultPlanTimeout
 	if m.cfg != nil {
 		detectOpts.Backend = m.cfg.VibeBackend
-		detectOpts.Privacy = m.cfg.VibePrivacy
 		detectOpts.Model = m.cfg.VibeModel
 		detectOpts.Endpoint = m.cfg.VibeEndpoint
 		if custom := m.cfg.VibePlanTimeout(); custom > 0 {

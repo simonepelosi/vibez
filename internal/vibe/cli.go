@@ -15,13 +15,10 @@ import (
 	"time"
 )
 
-const (
-	defaultCLIPlanTimeout = 20 * time.Second
-	maxCLIOutputBytes     = 64 << 10 // 64 KiB cap on CLI stdout/stderr
-)
+const maxCLIOutputBytes = 64 << 10 // 64 KiB cap on CLI stdout/stderr
 
-// SupportedCLIAgents lists the local CLI agent names in default auto-detection
-// priority order.
+// SupportedCLIAgents lists the supported CLI agent names that can be selected
+// explicitly via :vibe <agent> or "vibe_backend" in config.json.
 var SupportedCLIAgents = []string{
 	"omp",
 	"claude",
@@ -114,7 +111,7 @@ type CLIPlanner struct {
 	Agent      string        // canonical agent name ("omp", "claude", "gemini", ...)
 	BinaryPath string        // resolved executable path (optional; resolved lazily if empty)
 	Model      string        // optional model override
-	Timeout    time.Duration // per-call timeout (defaults to defaultCLIPlanTimeout)
+	Timeout    time.Duration // per-call timeout (defaults to DefaultPlanTimeout)
 }
 
 func (p *CLIPlanner) agentName() string {
@@ -161,19 +158,19 @@ func (p *CLIPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, erro
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	_ = os.Chmod(tmpDir, 0o700) //nolint:gosec // G302: 0700 is owner-only directory permission
 
-	timeout := p.Timeout
-	if timeout <= 0 {
-		timeout = defaultCLIPlanTimeout
-	}
+	timeout := resolvePlanTimeout(p.Timeout)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	userMsg := buildUserMessage(req)
-	args, stdinData := buildCLIInvocation(agent, tmpDir, p.Model, systemPrompt, userMsg)
+	args, stdinData, extraEnv, err := prepareCLIInvocation(agent, tmpDir, p.Model, systemPrompt, userMsg)
+	if err != nil {
+		return nil, fmt.Errorf("%s prepare invocation: %w", agent, err)
+	}
 
 	cmd := exec.CommandContext(runCtx, bin, args...) //nolint:gosec // G204: bin is resolved via LookPathCLI from an allowlisted agent name
 	cmd.Dir = tmpDir
-	cmd.Env = scrubbedCLIEnv()
+	cmd.Env = scrubbedCLIEnv(extraEnv...)
 	if stdinData != "" {
 		cmd.Stdin = strings.NewReader(stdinData)
 	}
@@ -221,9 +218,22 @@ func (p *CLIPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, erro
 	return sanitized, nil
 }
 
-// buildCLIInvocation returns the hermetic command-line arguments and stdin
-// payload for the given CLI agent.
-func buildCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args []string, stdin string) {
+const geminiDenyPolicyTOML = `[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 999
+
+[[rule]]
+mcpName = "*"
+toolName = "*"
+decision = "deny"
+priority = 999
+`
+
+// prepareCLIInvocation constructs the hermetic command-line arguments, stdin
+// payload, and extra environment variables for the given CLI agent inside
+// tmpDir, disabling tools, MCP servers, hooks, user rules, and session history.
+func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args []string, stdin string, extraEnv []string, err error) {
 	combined := sysPrompt + "\n\n" + userMsg
 	model = sanitizeVibeText(model)
 
@@ -247,42 +257,60 @@ func buildCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args [
 			"--model=" + ompModel,
 			"--system-prompt=" + sysPrompt,
 		}
-		return args, userMsg
+		return args, userMsg, nil, nil
 
 	case "claude":
+		// Keep OAuth/keychain auth intact when ANTHROPIC_API_KEY is unset while
+		// isolating hooks, plugins, MCP, slash commands, and CLAUDE.md files;
+		// add --bare when an explicit API key is present.
 		args = []string{
 			"-p",
 			"--output-format", "text",
 			"--tools", "",
 			"--no-session-persistence",
+			"--strict-mcp-config",
+			"--disable-slash-commands",
+			"--setting-sources", "",
+			"--settings", `{"disableAllHooks":true}`,
 			"--system-prompt", sysPrompt,
+		}
+		if os.Getenv("ANTHROPIC_API_KEY") != "" {
+			args = append(args, "--bare")
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, userMsg
+		return args, userMsg, []string{"CLAUDE_CODE_DISABLE_CLAUDE_MDS=1"}, nil
 
 	case "gemini":
+		policyPath := filepath.Join(tmpDir, "gemini-policy.toml")
+		if err := os.WriteFile(policyPath, []byte(geminiDenyPolicyTOML), 0o600); err != nil {
+			return nil, "", nil, fmt.Errorf("write gemini policy: %w", err)
+		}
 		args = []string{
 			"-p", combined,
 			"--output-format", "text",
+			"--approval-mode", "plan",
+			"--extensions", "none",
+			"--policy", policyPath,
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, ""
+		return args, "", nil, nil
 
 	case "codex":
 		args = []string{
 			"exec",
 			"--ephemeral",
+			"--skip-git-repo-check",
 			"--sandbox", "read-only",
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
 		args = append(args, "-")
-		return args, combined
+		return args, combined, nil, nil
 
 	case "copilot":
 		args = []string{
@@ -294,18 +322,20 @@ func buildCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args [
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, ""
+		return args, "", nil, nil
 
 	case "opencode":
 		args = []string{
 			"run",
 			"--format", "default",
+			"--pure",
+			"--dir", tmpDir,
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
 		args = append(args, combined)
-		return args, ""
+		return args, "", []string{`OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`}, nil
 
 	case "llm":
 		args = []string{
@@ -315,19 +345,26 @@ func buildCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args [
 		if model != "" {
 			args = append(args, "-m", model)
 		}
-		return args, userMsg
+		return args, userMsg, nil, nil
 
 	default:
-		return []string{"-p"}, combined
+		return []string{"-p"}, combined, nil, nil
 	}
 }
 
 // scrubbedCLIEnv returns a copy of os.Environ() with vibez/Apple Music/Last.fm
-// secrets removed and user-local bin directories appended to PATH so bun/node
-// wrappers locate their runtime.
-func scrubbedCLIEnv() []string {
+// secrets removed, user-local bin directories appended to PATH so bun/node
+// wrappers locate their runtime, and any explicit overrides applied cleanly.
+func scrubbedCLIEnv(overrides ...string) []string {
+	overrideKeys := make(map[string]struct{}, len(overrides))
+	for _, kv := range overrides {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			overrideKeys[strings.ToUpper(k)] = struct{}{}
+		}
+	}
+
 	raw := os.Environ()
-	out := make([]string, 0, len(raw)+2)
+	out := make([]string, 0, len(raw)+len(overrides)+2)
 	var pathVal string
 	for _, kv := range raw {
 		k, v, ok := strings.Cut(kv, "=")
@@ -339,6 +376,9 @@ func scrubbedCLIEnv() []string {
 			strings.HasPrefix(upper, "VIBEZ_") ||
 			strings.HasPrefix(upper, "LASTFM_") ||
 			strings.HasPrefix(upper, "DISCORD_") {
+			continue
+		}
+		if _, overridden := overrideKeys[upper]; overridden {
 			continue
 		}
 		if upper == "PATH" {
@@ -366,5 +406,6 @@ func scrubbedCLIEnv() []string {
 		out = append(out, "PATH="+pathVal)
 	}
 	out = append(out, "NO_COLOR=1")
+	out = append(out, overrides...)
 	return out
 }

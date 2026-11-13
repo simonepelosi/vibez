@@ -72,8 +72,8 @@ Full tracks stream natively with an in-process Widevine CDM and platform-native 
 ### 🌀 Vibe Mode
 
 - **Describe music in plain English** — press `v`, type your mood or activity ("late night coding", "Sunday morning chill"), and vibez builds and plays a queue of matching tracks
-- **Auto-detected local AI planners (zero API keys)** — automatically uses local HTTP runtimes (**🦙 Ollama** on `:11434`, **🧪 LM Studio** on `:1234`, **🦙 `llama.cpp`** via `"vibe_backend": "llamacpp"`) or installed CLI agents (**🥧 `omp`**, **🧠 `claude`**, **✨ `gemini`**, **🤖 `codex`**, **✈️ `copilot`**, **⚡ `opencode`**, **🦉 `llm`**) in a hermetic tool-disabled sandbox, with instant fallback to the built-in keyword mood engine (**🔑 Keyword**)
-- **Switch backends anytime** — run `:vibe` to inspect the active planner or `:vibe <auto|omp|ollama|lmstudio|llamacpp|gemini|copilot|opencode|claude|codex|keyword> [model]` (e.g. `:vibe omp` or `:vibe ollama qwen2.5:7b`) to switch on the fly
+- **Local AI planners (auto) & opt-in CLI agents** — `"auto"` uses only local on-device HTTP runtimes (**🦙 Ollama** on `:11434`, **🧪 LM Studio** on `:1234`, or a custom `"vibe_endpoint"`) and falls back instantly to the built-in keyword mood engine (**🔑 Keyword**). Installed CLI agents (**🥧 `omp`**, **🧠 `claude`**, **✨ `gemini`**, **🤖 `codex`**, **✈️ `copilot`**, **⚡ `opencode`**, **🦉 `llm`**) can be opted into explicitly via `:vibe <cli> [model]` or `"vibe_backend": "<cli>"`, running in a hermetic tool-disabled sandbox
+- **Switch backends anytime** — run `:vibe` to inspect the active planner or `:vibe <auto|omp|ollama|lmstudio|llamacpp|gemini|copilot|opencode|claude|codex|llm|keyword> [model]` (e.g. `:vibe omp` or `:vibe ollama qwen2.5:7b`) to switch on the fly
 - **Catalog-grounded results** — resolves `(Artist, Title)` seed tracks and search queries in parallel against your active provider (filtering out karaoke/tribute covers)
 
 ### 🔭 Discovery Mode
