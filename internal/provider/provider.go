@@ -52,6 +52,10 @@ type Track struct {
 	// playback reads the local lossless file while keeping the Apple Music ID
 	// and metadata intact.
 	LocalPath string
+	// LocalFormat caches the human-readable local audio format ("FLAC", "ALAC",
+	// "WAV", "AIFF", "MP3", "OGG") detected while indexing so rendering does not
+	// re-open audio files.
+	LocalFormat string
 }
 
 // NormalizeISRC strips hyphens and whitespace from an ISRC and returns the

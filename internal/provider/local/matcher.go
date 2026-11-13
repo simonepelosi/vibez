@@ -1,6 +1,7 @@
 package local
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,12 +40,24 @@ type Matcher struct {
 // NewMatcher scans dir for playable lossless audio files (.flac, .wav, .aiff,
 // .aif, and ALAC .m4a) and builds an in-memory lookup index.
 func NewMatcher(dir string) (*Matcher, error) {
+	return NewMatcherContext(context.Background(), dir)
+}
+
+// NewMatcherContext behaves like NewMatcher but aborts directory walking when
+// ctx is cancelled.
+func NewMatcherContext(ctx context.Context, dir string) (*Matcher, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	m := &Matcher{
 		dir:    dir,
 		byISRC: make(map[string][]provider.Track),
 		byMeta: make(map[metaKey][]provider.Track),
 	}
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			if os.IsPermission(err) {
 				return filepath.SkipDir
@@ -102,19 +115,10 @@ func (m *Matcher) Match(t provider.Track) (MatchResult, bool) {
 	}
 
 	if code := provider.NormalizeISRC(t.ISRC); code != "" {
-		if cands := m.byISRC[code]; len(cands) > 0 {
-			chosen := cands[0]
-			if t.Duration > 0 {
-				for _, c := range cands {
-					if c.Duration > 0 && absDuration(t.Duration-c.Duration) <= FallbackDurationTolerance {
-						chosen = c
-						break
-					}
-				}
-			}
+		if chosen, ok := chooseISRCCandidate(m.byISRC[code], t.Duration); ok {
 			return MatchResult{
 				Path:   chosen.LocalPath,
-				Format: LosslessFormatLabel(chosen.LocalPath),
+				Format: trackFormat(chosen),
 				ByISRC: true,
 			}, true
 		}
@@ -151,9 +155,46 @@ func (m *Matcher) Match(t provider.Track) (MatchResult, bool) {
 	}
 	return MatchResult{
 		Path:   matched[0].LocalPath,
-		Format: LosslessFormatLabel(matched[0].LocalPath),
+		Format: trackFormat(matched[0]),
 		ByISRC: false,
 	}, true
+}
+
+// chooseISRCCandidate selects a candidate whose duration agrees with wantDur
+// within FallbackDurationTolerance. When wantDur is unknown (<= 0) it returns
+// the first candidate; when wantDur > 0 and all candidates report disagreeing
+// durations (> ±2s), it returns false so clean/live cuts do not silently match.
+func chooseISRCCandidate(cands []provider.Track, wantDur time.Duration) (provider.Track, bool) {
+	if len(cands) == 0 {
+		return provider.Track{}, false
+	}
+	if wantDur <= 0 {
+		return cands[0], true
+	}
+	var unknown *provider.Track
+	for i := range cands {
+		c := &cands[i]
+		if c.Duration <= 0 {
+			if unknown == nil {
+				unknown = c
+			}
+			continue
+		}
+		if absDuration(wantDur-c.Duration) <= FallbackDurationTolerance {
+			return *c, true
+		}
+	}
+	if unknown != nil {
+		return *unknown, true
+	}
+	return provider.Track{}, false
+}
+
+func trackFormat(t provider.Track) string {
+	if t.LocalFormat != "" {
+		return t.LocalFormat
+	}
+	return LosslessFormatLabel(t.LocalPath)
 }
 
 // isLosslessFile reports whether path is a supported lossless audio file on
@@ -189,11 +230,7 @@ func LosslessFormatLabel(path string) string {
 	case ".aiff", ".aif":
 		return "AIFF"
 	default:
-		ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
-		if ext == "" {
-			return "LOCAL"
-		}
-		return ext
+		return formatFromExt(path)
 	}
 }
 

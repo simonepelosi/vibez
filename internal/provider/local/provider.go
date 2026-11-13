@@ -200,7 +200,7 @@ func trackFromFile(path string) (provider.Track, error) {
 		isrc = extractISRC(m.Raw())
 	}
 
-	dur := readFileDuration(f, path)
+	dur, format := readFileInfo(f, path)
 
 	return provider.Track{
 		ID:          fmt.Sprintf("local:%s", path),
@@ -213,6 +213,7 @@ func trackFromFile(path string) (provider.Track, error) {
 		TrackNumber: trackNum,
 		ISRC:        isrc,
 		LocalPath:   path,
+		LocalFormat: format,
 	}, nil
 }
 

@@ -1054,6 +1054,7 @@ func TestHybridPlaybackRoutesMatchedTracksToLocalLosslessFile(t *testing.T) {
 	}
 	p.SetLocalMatcher(matcher)
 	t.Cleanup(func() { _ = p.Close() })
+	eventsCh := p.Subscribe()
 
 	p.playTrack(p.queue[0])
 
@@ -1066,8 +1067,9 @@ func TestHybridPlaybackRoutesMatchedTracksToLocalLosslessFile(t *testing.T) {
 		t.Fatal("timed out waiting for hybrid local PlayURI")
 	}
 
+	var nextURI string
 	select {
-	case nextURI := <-sink.nextCh:
+	case nextURI = <-sink.nextCh:
 		if !strings.HasPrefix(nextURI, "file://") || !strings.HasSuffix(nextURI, ".flac") {
 			t.Fatalf("SetNextURI = %q, want file://...flac", nextURI)
 		}
@@ -1076,8 +1078,8 @@ func TestHybridPlaybackRoutesMatchedTracksToLocalLosslessFile(t *testing.T) {
 	}
 
 	st, _ := p.GetState()
-	if st.Track == nil || st.Track.LocalPath != track1Path {
-		t.Fatalf("state.Track.LocalPath = %v, want %q", st.Track, track1Path)
+	if st.Track == nil || st.Track.LocalPath != track1Path || st.Track.LocalFormat != "FLAC" {
+		t.Fatalf("state.Track = %+v, want LocalPath=%q LocalFormat=FLAC", st.Track, track1Path)
 	}
 	if st.Track.ID != "1097861387" {
 		t.Errorf("state.Track.ID = %q, want catalog ID preserved", st.Track.ID)
@@ -1091,5 +1093,40 @@ func TestHybridPlaybackRoutesMatchedTracksToLocalLosslessFile(t *testing.T) {
 	sink.mu.Unlock()
 	if seeked != 42*time.Second {
 		t.Errorf("sink.Seek = %v, want 42s", seeked)
+	}
+
+	// Simulate gapless transition to the prefetched local track and verify
+	// LocalPath, LocalFormat, and the [hybrid] playing local log are emitted.
+	p.handleStreamStart(nextURI)
+	st, _ = p.GetState()
+	if st.Track == nil || st.Track.LocalPath != track2Path || st.Track.LocalFormat != "FLAC" {
+		t.Fatalf("gapless state.Track = %+v, want LocalPath=%q LocalFormat=FLAC", st.Track, track2Path)
+	}
+	var sawPlayLog, sawGaplessLog bool
+	deadline := time.After(2 * time.Second)
+	for !sawPlayLog || !sawGaplessLog {
+		select {
+		case ev, ok := <-eventsCh:
+			if !ok {
+				goto checkedLogs
+			}
+			for _, line := range ev.Logs {
+				if strings.Contains(line, "[hybrid] playing local FLAC: 01 - Airbag.flac") {
+					sawPlayLog = true
+				}
+				if strings.Contains(line, "[hybrid] playing local FLAC: 02 - Paranoid Android.flac") {
+					sawGaplessLog = true
+				}
+			}
+		case <-deadline:
+			goto checkedLogs
+		}
+	}
+checkedLogs:
+	if !sawPlayLog {
+		t.Error("expected [hybrid] playing local FLAC log on initial playTrack")
+	}
+	if !sawGaplessLog {
+		t.Error("expected [hybrid] playing local FLAC log on gapless handleStreamStart")
 	}
 }

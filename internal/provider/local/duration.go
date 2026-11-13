@@ -10,29 +10,41 @@ import (
 	"time"
 )
 
-// readFileDuration returns the audio duration of path by inspecting container
-// headers. It returns 0 if the format is unrecognized or truncated.
-func readFileDuration(f *os.File, path string) time.Duration {
+// readFileInfo inspects container headers of f and returns the audio duration
+// (or 0 when unrecognized/truncated) along with the human-readable format badge
+// ("FLAC", "ALAC", "WAV", "AIFF", "MP3", "OGG", or uppercase extension).
+func readFileInfo(f *os.File, path string) (time.Duration, string) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return 0
+		return 0, formatFromExt(path)
 	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".flac":
-		return readFLACDuration(f)
+		return readFLACDuration(f), "FLAC"
 	case ".wav":
-		return readWAVDuration(f)
+		return readWAVDuration(f), "WAV"
 	case ".aiff", ".aif":
-		return readAIFFDuration(f)
+		return readAIFFDuration(f), "AIFF"
 	case ".m4a":
-		d, _ := readMP4Info(f)
-		return d
+		d, codec := readMP4Info(f)
+		if codec == "alac" {
+			return d, "ALAC"
+		}
+		return d, "M4A"
 	case ".mp3":
-		return readMP3Duration(f)
+		return readMP3Duration(f), "MP3"
 	case ".ogg":
-		return readOGGDuration(f)
+		return readOGGDuration(f), "OGG"
 	default:
-		return 0
+		return 0, formatFromExt(path)
 	}
+}
+
+func formatFromExt(path string) string {
+	ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), "."))
+	if ext == "" {
+		return "LOCAL"
+	}
+	return ext
 }
 
 // isLosslessM4A reports whether an .m4a file contains an Apple Lossless (alac)

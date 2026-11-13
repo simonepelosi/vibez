@@ -381,7 +381,19 @@ func (p *Player) handleStreamStart(uri string) {
 	s := p.state
 	p.mu.Unlock()
 	p.bcast.Send(s)
+	p.logHybridTrack(s, tCopy)
 	p.scheduleNextPrefetch()
+}
+
+func (p *Player) logHybridTrack(s player.State, t provider.Track) {
+	if t.LocalPath == "" {
+		return
+	}
+	format := t.LocalFormat
+	if format == "" {
+		format = local.LosslessFormatLabel(t.LocalPath)
+	}
+	p.bcast.SendLog(s, fmt.Sprintf("[hybrid] playing local %s: %s", format, filepath.Base(t.LocalPath)))
 }
 
 func (p *Player) scheduleNextPrefetch() {
@@ -436,6 +448,7 @@ func (p *Player) scheduleNextPrefetch() {
 			}
 			if matched {
 				nextTrack.LocalPath = match.Path
+				nextTrack.LocalFormat = match.Format
 				localURI := localFileURI(match.Path)
 				p.mu.Lock()
 				if p.closed || p.prefetchGen != gen || ctx.Err() != nil {
@@ -444,6 +457,7 @@ func (p *Player) scheduleNextPrefetch() {
 				}
 				if nextIdx >= 0 && nextIdx < len(p.queue) && p.queue[nextIdx].ID == nextTrack.ID {
 					p.queue[nextIdx].LocalPath = match.Path
+					p.queue[nextIdx].LocalFormat = match.Format
 				}
 				prep := &preparedNext{
 					idx:       nextIdx,
@@ -598,6 +612,7 @@ func (p *Player) playTrack(t provider.Track) {
 			}
 			if matched {
 				t.LocalPath = match.Path
+				t.LocalFormat = match.Format
 				localURI := localFileURI(match.Path)
 				p.mu.Lock()
 				if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
@@ -606,6 +621,7 @@ func (p *Player) playTrack(t provider.Track) {
 				}
 				if p.idx >= 0 && p.idx < len(p.queue) && p.queue[p.idx].ID == t.ID {
 					p.queue[p.idx].LocalPath = match.Path
+					p.queue[p.idx].LocalFormat = match.Format
 				}
 				p.curStream = ""
 				p.curStreamURL = localURI
@@ -619,7 +635,7 @@ func (p *Player) playTrack(t provider.Track) {
 				s = p.state
 				p.mu.Unlock()
 				p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
-				p.bcast.SendLog(s, fmt.Sprintf("[hybrid] playing local %s: %s", match.Format, filepath.Base(match.Path)))
+				p.logHybridTrack(s, tCopy)
 				p.scheduleNextPrefetch()
 				return
 			}

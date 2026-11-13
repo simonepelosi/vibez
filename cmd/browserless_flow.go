@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -21,6 +22,8 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)
 	restartExe := make(chan string, 1)
+	scanCtx, cancelScan := context.WithCancel(context.Background())
+	defer cancelScan()
 	var stopRPC func()
 
 	go func() {
@@ -90,14 +93,6 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			return
 		}
 		_ = blPlayer.SetAudioBitrate(audioBitrateKbps)
-		if cfg.HybridPlayback && cfg.MusicDir != "" {
-			if matcher, mErr := localProvider.NewMatcher(cfg.MusicDir); mErr != nil {
-				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] local scan failed (%s): %v", cfg.MusicDir, mErr)))
-			} else {
-				blPlayer.SetLocalMatcher(matcher)
-				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] indexed %d lossless local track(s) in %s", matcher.Count(), cfg.MusicDir)))
-			}
-		}
 		blPlayer.OnSessionExpired = func() {
 			prog.Send(tui.SessionExpiredMsg{})
 			go func() {
@@ -131,9 +126,25 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			Provider: prov,
 			Backend:  backendLabel,
 		})
+
+		if cfg.HybridPlayback && cfg.MusicDir != "" {
+			go func() {
+				matcher, mErr := localProvider.NewMatcherContext(scanCtx, cfg.MusicDir)
+				if scanCtx.Err() != nil {
+					return
+				}
+				if mErr != nil {
+					prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] local scan failed (%s): %v", cfg.MusicDir, mErr)))
+					return
+				}
+				blPlayer.SetLocalMatcher(matcher)
+				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] indexed %d lossless local track(s) in %s", matcher.Count(), cfg.MusicDir)))
+			}()
+		}
 	}()
 
 	_, err := prog.Run()
+	cancelScan()
 	if stopRPC != nil {
 		stopRPC()
 	}

@@ -2,7 +2,9 @@ package local_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -301,5 +303,122 @@ func TestMatcher_IndexesALACButIgnoresLossyAACAndMP3(t *testing.T) {
 		Duration:    3*time.Minute + 50*time.Second,
 	}); ok {
 		t.Error("expected lossy AAC .m4a to be ignored by lossless matcher")
+	}
+}
+
+func TestMatcher_ISRCDurationAgreementAndRejection(t *testing.T) {
+	t.Run("rejects ISRC candidate with disagreeing duration", func(t *testing.T) {
+		dir := t.TempDir()
+		livePath := filepath.Join(dir, "live.flac")
+		writeSyntheticFLAC(t, livePath, 6*time.Minute+30*time.Second, map[string]string{
+			"TITLE":       "Track",
+			"ARTIST":      "Artist",
+			"ALBUM":       "Live Album",
+			"TRACKNUMBER": "1",
+			"ISRC":        "USRC11111111",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		if res, ok := m.Match(provider.Track{
+			ID:       "1",
+			Title:    "Track",
+			Artist:   "Artist",
+			Album:    "Studio Album",
+			Duration: 3 * time.Minute,
+			ISRC:     "USRC11111111",
+		}); ok {
+			t.Errorf("expected ISRC mismatch (>2s) to be rejected, matched %+v", res)
+		}
+	})
+
+	t.Run("picks duration-matching ISRC candidate over mismatched one", func(t *testing.T) {
+		dir := t.TempDir()
+		subA := filepath.Join(dir, "a")
+		subB := filepath.Join(dir, "b")
+		_ = os.MkdirAll(subA, 0o750)
+		_ = os.MkdirAll(subB, 0o750)
+		wrongPath := filepath.Join(subA, "clean.flac")
+		rightPath := filepath.Join(subB, "album.flac")
+		writeSyntheticFLAC(t, wrongPath, 2*time.Minute+40*time.Second, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ALBUM": "Single", "ISRC": "USRC22222222",
+		})
+		writeSyntheticFLAC(t, rightPath, 4*time.Minute+5*time.Second, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ALBUM": "LP", "ISRC": "USRC22222222",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		res, ok := m.Match(provider.Track{
+			ID:       "2",
+			Title:    "Track",
+			Artist:   "Artist",
+			Duration: 4*time.Minute + 6*time.Second,
+			ISRC:     "USRC22222222",
+		})
+		if !ok || res.Path != rightPath || !res.ByISRC {
+			t.Fatalf("Match = (%+v, %v), want rightPath via ISRC", res, ok)
+		}
+	})
+
+	t.Run("falls back to metadata when ISRC candidate duration disagrees", func(t *testing.T) {
+		dir := t.TempDir()
+		wrongISRC := filepath.Join(dir, "01 - mistagged.flac")
+		rightMeta := filepath.Join(dir, "02 - studio.flac")
+		writeSyntheticFLAC(t, wrongISRC, 7*time.Minute, map[string]string{
+			"TITLE": "Live Bonus", "ARTIST": "Band", "ALBUM": "Live", "TRACKNUMBER": "1", "ISRC": "USRC33333333",
+		})
+		writeSyntheticFLAC(t, rightMeta, 3*time.Minute+20*time.Second, map[string]string{
+			"TITLE": "Song", "ARTIST": "Band", "ALBUM": "Record", "TRACKNUMBER": "2",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		res, ok := m.Match(provider.Track{
+			ID:          "3",
+			Title:       "Song",
+			Artist:      "Band",
+			Album:       "Record",
+			TrackNumber: 2,
+			Duration:    3*time.Minute + 20*time.Second,
+			ISRC:        "USRC33333333",
+		})
+		if !ok || res.Path != rightMeta || res.ByISRC {
+			t.Fatalf("Match = (%+v, %v), want fallback metadata match to rightMeta", res, ok)
+		}
+	})
+
+	t.Run("accepts ISRC candidate with unknown duration", func(t *testing.T) {
+		dir := t.TempDir()
+		unknownPath := filepath.Join(dir, "unknown.flac")
+		writeSyntheticFLAC(t, unknownPath, 0, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ISRC": "USRC44444444",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		res, ok := m.Match(provider.Track{
+			ID:       "4",
+			Title:    "Track",
+			Artist:   "Artist",
+			Duration: 3 * time.Minute,
+			ISRC:     "USRC44444444",
+		})
+		if !ok || !res.ByISRC || res.Path != unknownPath {
+			t.Fatalf("Match = (%+v, %v), want unknown-duration ISRC candidate accepted", res, ok)
+		}
+	})
+}
+
+func TestMatcher_NewMatcherContextCancelled(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := local.NewMatcherContext(ctx, dir); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewMatcherContext(cancelled) = %v, want context.Canceled", err)
 	}
 }
