@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **"Suggest Less" feedback and auto-skip** — pressing `x` (and `f`) now displays an immediate confirmation in the status bar across both standard and `:art` views (`✓ ⊘ Suggest Less`, `✓ ♥ Favorited`), and automatically advances to the next track (`p.Next()`) once Apple Music persists a `RatingDisliked` rating for the currently playing track. Refs #216.
+- **Vibe local LLM planner timeout, prompt budget, and fallback telemetry** — raises `vibe.DefaultPlanTimeout` from 10s to 30s (with customizable `"vibe_timeout"` in `config.json`), keeps `runVibeSearch` aligned at `planTimeout + 15s`, compacts the planner system prompt (`up to 6` `seed_tracks`, `1 to 2` `search_queries`, `3-6 word` explanation) to reduce local token generation latency, and logs planner progress (`[vibe] planning ...`), active backend, and fallback reasons (`[vibe] fallback to keyword (...)`) in `:debug-logs`. Refs #215.
+
 ## [2.0.8] — 2026-11-12
 
 ### Added

@@ -159,16 +159,17 @@ type searchDebounceMsg struct {
 	gen   int
 }
 type vibeResultMsg struct {
-	query       string
-	tracks      []provider.Track
-	action      string // vibe.ActionPlayNow, ActionQueueAppend, ActionPlayNext, ActionStartRadio
-	explanation string // curator explanation from VibePlan
-	backend     string // planner backend that produced the plan
-	err         error
-	warnings    []string // non-fatal provider failures behind an incomplete result
-	discovery   bool     // true when result is from a discovery auto-refill
-	radio       bool     // true when result is from a radio auto-refill
-	radioGen    int      // radio generation that produced this result
+	query          string
+	tracks         []provider.Track
+	action         string // vibe.ActionPlayNow, ActionQueueAppend, ActionPlayNext, ActionStartRadio
+	explanation    string // curator explanation from VibePlan
+	backend        string // planner backend that produced the plan
+	fallbackReason string // non-empty when primary planner fell back to keyword
+	err            error
+	warnings       []string // non-fatal provider failures behind an incomplete result
+	discovery      bool     // true when result is from a discovery auto-refill
+	radio          bool     // true when result is from a radio auto-refill
+	radioGen       int      // radio generation that produced this result
 }
 type vibePlannerDetectedMsg struct {
 	planner vibe.Planner
@@ -873,6 +874,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.radio && (!m.radio.enabled || msg.radioGen != m.radio.generation) {
 			break
 		}
+		if msg.fallbackReason != "" && !msg.discovery && !msg.radio {
+			m.appendLog(fmt.Sprintf("[vibe] fallback to keyword (%s)", msg.fallbackReason))
+		}
 		if msg.err != nil {
 			if msg.radio {
 				m.appendLog(fmt.Sprintf("[radio] search error: %v", msg.err))
@@ -966,7 +970,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if isVibePrompt && action == vibe.ActionStartRadio {
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] starting radio from %s — %s for %q", tracks[0].Artist, tracks[0].Title, msg.query))
+			m.appendLog(fmt.Sprintf("[vibe] starting radio from %s — %s for %q%s", tracks[0].Artist, tracks[0].Title, msg.query, vibeBackendTag(msg.backend)))
 			seed := tracks[0]
 			cmds = append(cmds, m.startRadioFrom(&seed))
 			break
@@ -992,7 +996,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] playing %d tracks for %q", len(tracks), msg.query))
+			m.appendLog(fmt.Sprintf("[vibe] playing %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend)))
 			break
 		}
 
@@ -1024,7 +1028,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[radio] refilled %d tracks", len(tracks)))
 		default:
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q", len(tracks), msg.query))
+			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend)))
 		}
 
 	case rateSongMsg:
@@ -1042,6 +1046,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setRating(msg.trackID, msg.catalogID, msg.rating)
 			m.library.m.InvalidateTracksCache()
 			m.appendLog(fmt.Sprintf("[rating] %s %s synced to Apple Music", ratingIcon(msg.rating), msg.title))
+			m.errMsg = ratingStatusMessage(msg.rating, msg.prev, msg.title)
+			m.errExpiry = time.Now().Add(3 * time.Second)
+			if msg.rating == provider.RatingDisliked && m.player != nil && m.isPlayingRatedTrack(msg.trackID, msg.catalogID) {
+				cmds = append(cmds, m.playerCmd(func(p player.Player) error { return p.Next() }))
+			}
 		}
 	case searchDebounceMsg:
 		// Drop stale debounce ticks — only the latest keystroke wins.
@@ -2566,6 +2575,7 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 		opts.Backend = m.cfg.VibeBackend
 		opts.Model = m.cfg.VibeModel
 		opts.Endpoint = m.cfg.VibeEndpoint
+		opts.PlanTimeout = m.cfg.VibePlanTimeout()
 	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
@@ -2582,10 +2592,15 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 	prov := m.provider
 	planner := m.vibePlanner
 	var detectOpts vibe.DetectOptions
+	planTimeout := vibe.DefaultPlanTimeout
 	if m.cfg != nil {
 		detectOpts.Backend = m.cfg.VibeBackend
 		detectOpts.Model = m.cfg.VibeModel
 		detectOpts.Endpoint = m.cfg.VibeEndpoint
+		if custom := m.cfg.VibePlanTimeout(); custom > 0 {
+			planTimeout = custom
+		}
+		detectOpts.PlanTimeout = planTimeout
 	}
 
 	playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
@@ -2605,10 +2620,14 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 		QueueSummary: queueSummary,
 	}
 
-	m.appendLog(fmt.Sprintf("[vibe] planning %q…", query))
+	if planner != nil {
+		m.appendLog(fmt.Sprintf("[vibe] planning %q via %s…", query, planner.Name()))
+	} else {
+		m.appendLog(fmt.Sprintf("[vibe] planning %q…", query))
+	}
 
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), planTimeout+15*time.Second)
 		defer cancel()
 
 		if prov != nil && strings.EqualFold(prov.Name(), "Local Files") {
@@ -2632,19 +2651,21 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 		out, err := vibe.ResolvePlan(ctx, prov, plan, query, 15)
 		if err != nil {
 			return vibeResultMsg{
-				query:    query,
-				backend:  plan.Backend,
-				err:      err,
-				warnings: out.Warnings,
+				query:          query,
+				backend:        plan.Backend,
+				fallbackReason: plan.FallbackReason,
+				err:            err,
+				warnings:       out.Warnings,
 			}
 		}
 		return vibeResultMsg{
-			query:       query,
-			tracks:      out.Tracks,
-			action:      plan.Action,
-			explanation: plan.Explanation,
-			backend:     plan.Backend,
-			warnings:    out.Warnings,
+			query:          query,
+			tracks:         out.Tracks,
+			action:         plan.Action,
+			explanation:    plan.Explanation,
+			backend:        plan.Backend,
+			fallbackReason: plan.FallbackReason,
+			warnings:       out.Warnings,
 		}
 	}
 }
@@ -2745,8 +2766,51 @@ func (m *Model) toggleCurrentTrackRating(target provider.Rating) tea.Cmd {
 		next = provider.RatingNone
 	}
 	m.setTrackRating(t, next)
+	m.errMsg = ratingStatusMessage(next, prev, t.Title)
+	m.errExpiry = time.Now().Add(3 * time.Second)
 	m.appendLog(fmt.Sprintf("[rating] %s %s → %s", t.Title, ratingIcon(prev), ratingIcon(next)))
 	return m.rateSongCmd(t, next, prev)
+}
+
+func (m *Model) isPlayingRatedTrack(trackID, catalogID string) bool {
+	cur := m.playerState.Track
+	if cur == nil {
+		return false
+	}
+	if trackID != "" && cur.ID == trackID {
+		return true
+	}
+	if catalogID != "" && (cur.CatalogID == catalogID || cur.ID == catalogID) {
+		return true
+	}
+	return trackID == "" && catalogID == ""
+}
+
+func vibeBackendTag(backend string) string {
+	if backend == "" {
+		return ""
+	}
+	return " (" + backend + ")"
+}
+
+func ratingStatusMessage(rating, prev provider.Rating, title string) string {
+	var label string
+	switch rating {
+	case provider.RatingLoved:
+		label = "✓ ♥ Favorited"
+	case provider.RatingDisliked:
+		label = "✓ ⊘ Suggest Less"
+	default:
+		if prev == provider.RatingDisliked {
+			label = "✓ ♡ Cleared Suggest Less"
+		} else {
+			label = "✓ ♡ Removed favorite"
+		}
+	}
+	if title == "" {
+		return label
+	}
+	return label + " — " + title
 }
 
 // ratingIcon returns the now-playing indicator glyph for r.

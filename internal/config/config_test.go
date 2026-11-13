@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
 )
@@ -485,5 +486,33 @@ func TestSave_PreservesSymlink(t *testing.T) {
 	}
 	if loaded.StoreFront != "it" {
 		t.Errorf("target StoreFront = %q, want it", loaded.StoreFront)
+	}
+}
+
+func TestConfig_VibePlanTimeout(t *testing.T) {
+	var nilCfg *config.Config
+	if got := nilCfg.VibePlanTimeout(); got != 0 {
+		t.Fatalf("nil.VibePlanTimeout() = %v, want 0", got)
+	}
+
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 0},
+		{"   ", 0},
+		{"45s", 45 * time.Second},
+		{" 1m ", time.Minute},
+		{"35", 35 * time.Second},
+		{"0", 0},
+		{"-10s", 0},
+		{"-5", 0},
+		{"not-a-duration", 0},
+	}
+	for _, tc := range cases {
+		c := &config.Config{VibeTimeout: tc.raw}
+		if got := c.VibePlanTimeout(); got != tc.want {
+			t.Errorf("VibePlanTimeout(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
 	}
 }

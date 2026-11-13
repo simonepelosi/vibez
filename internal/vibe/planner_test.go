@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/simone-vibes/vibez/internal/provider"
 )
@@ -285,6 +286,9 @@ func TestLlamaCppPlanner_ExplicitBackendAlias(t *testing.T) {
 }
 
 func TestPlanWithFallback_FallsBackToKeywordOnError(t *testing.T) {
+	if DefaultPlanTimeout < 30*time.Second {
+		t.Fatalf("DefaultPlanTimeout = %v, want >= 30s for local models", DefaultPlanTimeout)
+	}
 	badPlanner := &OllamaPlanner{BaseURL: "http://127.0.0.1:1"}
 	plan, err := PlanWithFallback(context.Background(), badPlanner, PlanRequest{
 		Prompt:     "rainy chill evening",
@@ -296,8 +300,50 @@ func TestPlanWithFallback_FallsBackToKeywordOnError(t *testing.T) {
 	if plan.Backend != "keyword" {
 		t.Errorf("plan.Backend = %q, want keyword fallback", plan.Backend)
 	}
+	if !strings.HasPrefix(plan.FallbackReason, "ollama:") {
+		t.Errorf("plan.FallbackReason = %q, want ollama: cause recorded", plan.FallbackReason)
+	}
 	if plan.Action != ActionPlayNow {
 		t.Errorf("plan.Action = %q, want %q", plan.Action, ActionPlayNow)
+	}
+}
+
+func TestDetectPlanner_PropagatesPlanTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"models": []map[string]any{{"name": "qwen2.5:3b"}},
+			})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{{"id": "local-model"}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	want := 42 * time.Second
+	op, ok := DetectPlanner(context.Background(), DetectOptions{
+		Backend:       "ollama",
+		OllamaBaseURL: srv.URL,
+		PlanTimeout:   want,
+		Client:        srv.Client(),
+	}).(*OllamaPlanner)
+	if !ok || op.Timeout != want {
+		t.Fatalf("ollama planner = %#v, want Timeout=%v", op, want)
+	}
+
+	lm, ok := DetectPlanner(context.Background(), DetectOptions{
+		Backend:     "lmstudio",
+		LMStudioURL: srv.URL,
+		PlanTimeout: want,
+		Client:      srv.Client(),
+	}).(*OpenAICompatPlanner)
+	if !ok || lm.Timeout != want {
+		t.Fatalf("lmstudio planner = %#v, want Timeout=%v", lm, want)
 	}
 }
 

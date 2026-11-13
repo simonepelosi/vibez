@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/simone-vibes/vibez/internal/audioquality"
 )
@@ -64,6 +67,29 @@ type Config struct {
 	// VibeEndpoint optionally overrides the local HTTP runtime base URL
 	// (e.g. "http://127.0.0.1:11434" or "http://127.0.0.1:8080/v1").
 	VibeEndpoint string `json:"vibe_endpoint,omitempty"`
+	// VibeTimeout optionally overrides how long Vibe Mode waits for the AI
+	// planner to return a plan (e.g. "30s", "1m", or "45" for seconds).
+	// Unset or invalid values fall back to the planner default (30s).
+	VibeTimeout string `json:"vibe_timeout,omitempty"`
+}
+
+// VibePlanTimeout parses VibeTimeout as a Go duration or a positive number of
+// seconds, returning 0 when unset or invalid so callers fall back to default.
+func (c *Config) VibePlanTimeout() time.Duration {
+	if c == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(c.VibeTimeout)
+	if raw == "" {
+		return 0
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
 }
 
 type EQBand struct {

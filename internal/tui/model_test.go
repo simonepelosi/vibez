@@ -1482,12 +1482,98 @@ func TestModel_Update_VibeResultMsg_Radio_SearchError(t *testing.T) {
 }
 
 func TestModel_Update_RateSongMsg_Success(t *testing.T) {
-	m := newModel(nil)
-	_, cmd := m.Update(rateSongMsg{title: "Song", rating: provider.RatingLoved})
-	_ = cmd
-	// appendLog should record the love action.
+	mp := newMockPlayer()
+	m := newModel(mp)
+	track := &provider.Track{ID: "i.1", CatalogID: "cat1", Title: "Song"}
+	m.playerState.Track = track
+
+	_, cmd := m.Update(rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", rating: provider.RatingLoved})
+	if cmd != nil {
+		cmd()
+	}
+	// appendLog should record the love action and update status confirmation.
 	if len(m.debugLog) == 0 {
 		t.Error("rateSongMsg should append a log entry")
+	}
+	if !strings.HasPrefix(m.errMsg, "✓ ♥ Favorited") {
+		t.Errorf("errMsg = %q, want ✓ ♥ Favorited prefix", m.errMsg)
+	}
+	if mp.nextCalled {
+		t.Error("loving a track must not auto-skip")
+	}
+}
+
+func TestModel_Update_RateSongMsg_DislikeAutoSkips(t *testing.T) {
+	t.Run("skips when rated track is still playing", func(t *testing.T) {
+		mp := newMockPlayer()
+		m := newModel(mp)
+		m.playerState.Track = &provider.Track{ID: "i.1", CatalogID: "cat1", Title: "Skip Me"}
+
+		_, cmd := m.Update(rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Skip Me", rating: provider.RatingDisliked})
+		if cmd == nil {
+			t.Fatal("expected player.Next cmd after dislike sync")
+		}
+		cmd()
+		if !mp.nextCalled {
+			t.Error("Next() should have been called after RatingDisliked sync")
+		}
+		if !strings.HasPrefix(m.errMsg, "✓ ⊘ Suggest Less") {
+			t.Errorf("errMsg = %q, want ✓ ⊘ Suggest Less status", m.errMsg)
+		}
+	})
+
+	t.Run("does not skip on error, clear, or track change", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			now  *provider.Track
+			msg  rateSongMsg
+		}{
+			{
+				name: "sync error",
+				now:  &provider.Track{ID: "i.1", CatalogID: "cat1"},
+				msg:  rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", rating: provider.RatingDisliked, err: errors.New("api fail")},
+			},
+			{
+				name: "clearing suggest less",
+				now:  &provider.Track{ID: "i.1", CatalogID: "cat1"},
+				msg:  rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Song", rating: provider.RatingNone, prev: provider.RatingDisliked},
+			},
+			{
+				name: "different track already playing",
+				now:  &provider.Track{ID: "i.2", CatalogID: "cat2"},
+				msg:  rateSongMsg{trackID: "i.1", catalogID: "cat1", title: "Old Song", rating: provider.RatingDisliked},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				mp := newMockPlayer()
+				m := newModel(mp)
+				m.playerState.Track = tc.now
+				_, cmd := m.Update(tc.msg)
+				if cmd != nil {
+					cmd()
+				}
+				if mp.nextCalled {
+					t.Errorf("%s: Next() must not be called", tc.name)
+				}
+			})
+		}
+	})
+}
+
+func TestModel_Update_VibeResultMsg_LogsFallbackReason(t *testing.T) {
+	m := newModel(newMockPlayer())
+	_, _ = m.Update(vibeResultMsg{
+		query:          "late night coding",
+		backend:        "keyword",
+		fallbackReason: "ollama:qwen2.5:3b: context deadline exceeded",
+		tracks:         []provider.Track{{ID: "t1", Title: "Midnight", Artist: "Artist"}},
+	})
+	joined := strings.Join(m.debugLog, "\n")
+	if !strings.Contains(joined, "[vibe] fallback to keyword (ollama:qwen2.5:3b: context deadline exceeded)") {
+		t.Errorf("debugLog missing fallback reason: %v", m.debugLog)
+	}
+	if !strings.Contains(joined, "[vibe] playing 1 tracks for \"late night coding\" (keyword)") {
+		t.Errorf("debugLog missing backend tag: %v", m.debugLog)
 	}
 }
 
@@ -1909,6 +1995,22 @@ func TestHandleNormalKey_X_SuggestLessToggle(t *testing.T) {
 	if got := m.trackRating(track); got != provider.RatingDisliked {
 		t.Errorf("after first x: trackRating=%d, want RatingDisliked (optimistic)", got)
 	}
+	if !strings.HasPrefix(m.errMsg, "✓ ⊘ Suggest Less") {
+		t.Errorf("after first x: errMsg=%q, want ✓ ⊘ Suggest Less confirmation", m.errMsg)
+	}
+
+	// Render status confirmation in both normal and :art views.
+	for _, artMode := range []bool{false, true} {
+		m.artMode = artMode
+		out := strings.Join(m.nowPlayingLines(76, 12), "\n")
+		if !strings.Contains(out, "✓ ⊘ Suggest Less") {
+			t.Errorf("nowPlayingLines(artMode=%v) missing confirmation %q", artMode, m.errMsg)
+		}
+		if strings.Contains(out, "⚠") {
+			t.Errorf("nowPlayingLines(artMode=%v) rendered ✓ confirmation as warning", artMode)
+		}
+	}
+	m.artMode = false
 
 	msg = pressRatingKey(t, m, "x")
 	if msg.rating != provider.RatingNone || msg.prev != provider.RatingDisliked {
@@ -1916,6 +2018,9 @@ func TestHandleNormalKey_X_SuggestLessToggle(t *testing.T) {
 	}
 	if got := m.trackRating(track); got != provider.RatingNone {
 		t.Errorf("after second x: trackRating=%d, want RatingNone", got)
+	}
+	if !strings.HasPrefix(m.errMsg, "✓ ♡ Cleared Suggest Less") {
+		t.Errorf("after second x: errMsg=%q, want ✓ ♡ Cleared Suggest Less confirmation", m.errMsg)
 	}
 }
 
