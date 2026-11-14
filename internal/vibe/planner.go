@@ -801,6 +801,7 @@ type DetectOptions struct {
 	Model         string
 	Endpoint      string
 	AllowRemote   bool          // when false (default), only loopback runtime URLs are permitted
+	DisableCLI    bool          // when true, never auto-detect or invoke external CLI agents
 	PlanTimeout   time.Duration // optional per-request timeout override (defaults to DefaultPlanTimeout)
 	OllamaBaseURL string        // optional override for testing
 	LMStudioURL   string        // optional override for testing
@@ -838,11 +839,13 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 	}
 	lookup := opts.cliLookup()
 
-	if cliAgent := NormalizeCLIAgent(backend); cliAgent != "" {
-		if bin, err := lookup(cliAgent); err == nil && bin != "" {
-			return &CLIPlanner{Agent: cliAgent, BinaryPath: bin, Model: opts.Model, Timeout: opts.PlanTimeout}
+	if !opts.DisableCLI {
+		if cliAgent := NormalizeCLIAgent(backend); cliAgent != "" {
+			if bin, err := lookup(cliAgent); err == nil && bin != "" {
+				return &CLIPlanner{Agent: cliAgent, BinaryPath: bin, Model: opts.Model, Timeout: opts.PlanTimeout}
+			}
+			return &KeywordAgent{}
 		}
-		return &KeywordAgent{}
 	}
 
 	switch backend {
@@ -892,16 +895,18 @@ func DetectPlanner(ctx context.Context, opts DetectOptions) Planner {
 // and installed CLI agents on the machine (always ending with "keyword").
 func AvailableBackends(ctx context.Context, opts DetectOptions) []string {
 	var out []string
-	if _, err := ProbeOllama(ctx, opts.OllamaBaseURL, "", opts.Client); err == nil {
+	if _, err := probeOllamaWithPolicy(ctx, opts.OllamaBaseURL, "", opts.Client, opts.AllowRemote); err == nil {
 		out = append(out, "ollama")
 	}
-	if _, err := ProbeOpenAICompat(ctx, opts.LMStudioURL, "", opts.Client); err == nil {
+	if _, err := probeOpenAICompatWithPolicy(ctx, opts.LMStudioURL, "", opts.Client, opts.AllowRemote); err == nil {
 		out = append(out, "lmstudio")
 	}
-	lookup := opts.cliLookup()
-	for _, agent := range SupportedCLIAgents {
-		if bin, err := lookup(agent); err == nil && bin != "" {
-			out = append(out, agent)
+	if !opts.DisableCLI {
+		lookup := opts.cliLookup()
+		for _, agent := range SupportedCLIAgents {
+			if bin, err := lookup(agent); err == nil && bin != "" {
+				out = append(out, agent)
+			}
 		}
 	}
 	out = append(out, "keyword")

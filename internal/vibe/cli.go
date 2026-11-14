@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,79 @@ import (
 )
 
 const maxCLIOutputBytes = 64 << 10 // 64 KiB cap on CLI stdout/stderr
+
+// limitedBuffer buffers up to max bytes and silently discards excess writes
+// so concurrent child stdout/stderr draining cannot deadlock or exhaust memory.
+type limitedBuffer struct {
+	max int
+	buf bytes.Buffer
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.max > 0 {
+		if rem := b.max - b.buf.Len(); rem > 0 {
+			if len(p) > rem {
+				b.buf.Write(p[:rem])
+			} else {
+				b.buf.Write(p)
+			}
+		}
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
+// ValidateCLIModelName rejects leading '-' flags, control characters, and
+// characters outside [a-zA-Z0-9._:/@-] so caller-supplied model names cannot
+// inject CLI flags or shell metacharacters across vibe planners or TUI :vibe.
+func ValidateCLIModelName(model string) (string, error) {
+	for i := 0; i < len(model); i++ {
+		if model[i] < 0x20 || model[i] == 0x7f {
+			return "", fmt.Errorf("invalid model name: contains control character")
+		}
+	}
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return "", nil
+	}
+	if len(trimmed) > 128 {
+		return "", fmt.Errorf("invalid model name: exceeds 128 characters")
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return "", fmt.Errorf("invalid model name %q: must not start with '-'", trimmed)
+	}
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		isValid := (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == ':' || c == '/' || c == '@' || c == '-'
+		if !isValid {
+			return "", fmt.Errorf("invalid model name %q: unsupported character %q", trimmed, c)
+		}
+	}
+	return trimmed, nil
+}
+
+func isWindowsBatchShim(bin string) bool {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(bin)))
+	return ext == ".cmd" || ext == ".bat"
+}
+
+func validateBatchArgs(args []string) error {
+	for _, a := range args {
+		for i := 0; i < len(a); i++ {
+			c := a[i]
+			if c < 0x20 || c == 0x7f || strings.ContainsRune("&|<>^%!\"()", rune(c)) {
+				return fmt.Errorf("unsafe character in Windows batch wrapper argument")
+			}
+		}
+	}
+	return nil
+}
 
 // SupportedCLIAgents lists the supported CLI agent names that can be selected
 // explicitly via :vibe <agent> or "vibe_backend" in config.json.
@@ -167,6 +239,11 @@ func (p *CLIPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, erro
 	if err != nil {
 		return nil, fmt.Errorf("%s prepare invocation: %w", agent, err)
 	}
+	if isWindowsBatchShim(bin) {
+		if err := validateBatchArgs(args); err != nil {
+			return nil, fmt.Errorf("%s: %w", agent, err)
+		}
+	}
 
 	cmd := exec.CommandContext(runCtx, bin, args...) //nolint:gosec // G204: bin is resolved via LookPathCLI from an allowlisted agent name
 	cmd.Dir = tmpDir
@@ -174,25 +251,17 @@ func (p *CLIPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, erro
 	if stdinData != "" {
 		cmd.Stdin = strings.NewReader(stdinData)
 	}
+	var stdoutBuf, stderrBuf limitedBuffer
+	stdoutBuf.max = maxCLIOutputBytes
+	stderrBuf.max = maxCLIOutputBytes
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	cmd.WaitDelay = 500 * time.Millisecond
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, err
-	}
+	waitErr := cmd.Run()
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("%s start: %w", agent, err)
-	}
-
-	outBytes, _ := io.ReadAll(io.LimitReader(stdoutPipe, maxCLIOutputBytes))
-	errBytes, _ := io.ReadAll(io.LimitReader(stderrPipe, maxCLIOutputBytes))
-	waitErr := cmd.Wait()
-
-	rawOut := strings.TrimSpace(string(outBytes))
+	errBytes := stderrBuf.buf.Bytes()
+	rawOut := strings.TrimSpace(stdoutBuf.String())
 	if rawOut == "" && waitErr != nil {
 		return nil, fmt.Errorf("%s failed: %w (%s)", agent, waitErr, sanitizeVibeText(string(errBytes)))
 	}
@@ -235,7 +304,10 @@ priority = 999
 // tmpDir, disabling tools, MCP servers, hooks, user rules, and session history.
 func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args []string, stdin string, extraEnv []string, err error) {
 	combined := sysPrompt + "\n\n" + userMsg
-	model = sanitizeVibeText(model)
+	model, err = ValidateCLIModelName(model)
+	if err != nil {
+		return nil, "", nil, err
+	}
 
 	switch agent {
 	case "omp":
@@ -333,7 +405,7 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		args = append(args, combined)
+		args = append(args, "--", combined)
 		return args, "", []string{`OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`}, nil
 
 	case "llm":

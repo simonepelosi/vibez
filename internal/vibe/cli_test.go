@@ -314,3 +314,135 @@ func TestCLIPlanner_LiveOMP(t *testing.T) {
 	t.Logf("Live omp plan: backend=%s mood=%s explanation=%q seeds=%d queries=%v",
 		plan.Backend, plan.Mood, plan.Explanation, len(plan.SeedTracks), plan.SearchQueries)
 }
+
+func TestValidateCLIModelName_AndOpencodeDelimiter(t *testing.T) {
+	valid := []string{
+		"",
+		"   ",
+		"qwen2.5:7b-instruct",
+		"hf.co/user/model:Q4_K_M",
+		"anthropic/claude-sonnet-4-5",
+		"openai/gpt-4.1@2025-04-14",
+	}
+	for _, m := range valid {
+		if _, err := ValidateCLIModelName(m); err != nil {
+			t.Errorf("ValidateCLIModelName(%q) unexpected error: %v", m, err)
+		}
+	}
+
+	invalid := []string{
+		"--tools=bash",
+		"-p",
+		"model\x1b[31m",
+		"model name",
+		"model;id",
+		"model$(id)",
+		strings.Repeat("a", 129),
+	}
+	for _, m := range invalid {
+		if _, err := ValidateCLIModelName(m); err == nil {
+			t.Errorf("ValidateCLIModelName(%q) expected error, got nil", m)
+		}
+		if _, _, _, err := prepareCLIInvocation("omp", t.TempDir(), m, "sys", "usr"); err == nil {
+			t.Errorf("prepareCLIInvocation(omp, model=%q) expected error, got nil", m)
+		}
+	}
+
+	args, _, _, err := prepareCLIInvocation("opencode", t.TempDir(), "anthropic/claude-sonnet-4-5", "sys", "-leading-dash-prompt")
+	if err != nil {
+		t.Fatalf("prepareCLIInvocation(opencode): %v", err)
+	}
+	delimIdx := slices.Index(args, "--")
+	if delimIdx < 0 || delimIdx != len(args)-2 {
+		t.Fatalf("opencode args missing trailing '--' delimiter before prompt: %v", args)
+	}
+	if !strings.HasSuffix(args[delimIdx+1], "-leading-dash-prompt") {
+		t.Fatalf("opencode prompt arg = %q, want suffix -leading-dash-prompt", args[delimIdx+1])
+	}
+}
+
+func TestCLIPlanner_Plan_LargeConcurrentOutputDoesNotDeadlockAndCapsMemory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell script test not applicable on Windows")
+	}
+	binDir := t.TempDir()
+	fakeBin := filepath.Join(binDir, "fake-codex")
+	script := `#!/bin/sh
+line="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+i=0
+while [ "$i" -lt 2048 ]; do
+  printf '%s\n' "$line" >&2
+  i=$((i + 1))
+done
+printf '{"seed_tracks":[],"search_queries":["ambient techno"],"explanation":"ok"}\n'
+i=0
+while [ "$i" -lt 2048 ]; do
+  printf '%s\n' "$line"
+  i=$((i + 1))
+done
+`
+	if err := os.WriteFile(fakeBin, []byte(script), 0o700); err != nil { //nolint:gosec // G306: executable test stub
+		t.Fatalf("write fake script: %v", err)
+	}
+
+	p := &CLIPlanner{
+		Agent:      "codex",
+		BinaryPath: fakeBin,
+		Timeout:    5 * time.Second,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	plan, err := p.Plan(ctx, PlanRequest{Prompt: "chill ambient techno", PlayerIdle: true})
+	if err != nil {
+		t.Fatalf("Plan with >128KiB stderr+stdout failed: %v", err)
+	}
+	if !slices.Contains(plan.SearchQueries, "ambient techno") {
+		t.Fatalf("plan.SearchQueries = %v, want ambient techno", plan.SearchQueries)
+	}
+}
+
+func TestCLIPlanner_Plan_WindowsBatchShimAndDisableCLI(t *testing.T) {
+	if err := validateBatchArgs([]string{"exec", "--sandbox", "read-only", "--model", "qwen2.5:7b"}); err != nil {
+		t.Fatalf("validateBatchArgs safe args unexpected error: %v", err)
+	}
+	for _, unsafe := range [][]string{
+		{"-p", "chill & calc.exe"},
+		{"-p", "line1\nline2"},
+		{"-p", "a|b"},
+		{"-p", `say "hi"`},
+	} {
+		if err := validateBatchArgs(unsafe); err == nil {
+			t.Errorf("validateBatchArgs(%v) expected error, got nil", unsafe)
+		}
+	}
+
+	p := &CLIPlanner{
+		Agent:      "gemini",
+		BinaryPath: filepath.Join(t.TempDir(), "gemini.cmd"),
+	}
+	if _, err := p.Plan(context.Background(), PlanRequest{Prompt: "ambient & calc.exe"}); err == nil {
+		t.Fatal("expected .cmd wrapper execution with unsafe prompt chars to fail before exec")
+	}
+
+	fakeLookup := func(agent string) (string, error) {
+		return filepath.Join("/usr/bin", agent), nil
+	}
+	got := DetectPlanner(context.Background(), DetectOptions{
+		Backend:    "claude",
+		DisableCLI: true,
+		CLILookup:  fakeLookup,
+	})
+	if got.Name() != "keyword" {
+		t.Errorf("DetectPlanner with DisableCLI=true got %q, want keyword", got.Name())
+	}
+	avail := AvailableBackends(context.Background(), DetectOptions{
+		OllamaBaseURL: "http://127.0.0.1:1",
+		LMStudioURL:   "http://127.0.0.1:1",
+		DisableCLI:    true,
+		CLILookup:     fakeLookup,
+	})
+	if slices.Contains(avail, "claude") {
+		t.Errorf("AvailableBackends with DisableCLI=true included claude: %v", avail)
+	}
+}

@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -503,5 +507,112 @@ func TestScan_IncrementalCacheReuseAndInvalidation(t *testing.T) {
 	}
 	if m.Count() != 1 {
 		t.Errorf("matcher count after delete = %d, want 1", m.Count())
+	}
+}
+
+func TestScan_ContinuesWhenSingleFileUnreadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX chmod 0000 does not block file reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0000 file permissions")
+	}
+	cacheDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", cacheDir)
+
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "good.flac")
+	badPath := filepath.Join(dir, "unreadable.flac")
+	writeSyntheticFLAC(t, goodPath, 150*time.Second, map[string]string{"TITLE": "Good Track"})
+	writeSyntheticFLAC(t, badPath, 150*time.Second, map[string]string{"TITLE": "Unreadable Track"})
+	if err := os.Chmod(badPath, 0o000); err != nil {
+		t.Fatalf("chmod 0000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(badPath, 0o600) })
+
+	p, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("local.New failed despite readable sibling: %v", err)
+	}
+	tracks, _ := p.GetLibraryTracks(context.Background())
+	if len(tracks) != 1 || tracks[0].Title != "Good Track" {
+		t.Fatalf("tracks = %+v, want only Good Track", tracks)
+	}
+}
+
+func TestScan_SanitizesTamperedCacheEntries(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("LOCALAPPDATA", cacheDir)
+
+	dir := t.TempDir()
+	trackPath := filepath.Join(dir, "a.flac")
+	writeSyntheticFLAC(t, trackPath, 180*time.Second, map[string]string{"TITLE": "Original Title"})
+
+	if _, err := local.New(dir); err != nil {
+		t.Fatalf("cold local.New: %v", err)
+	}
+
+	var cacheFile string
+	_ = filepath.WalkDir(cacheDir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".json") {
+			cacheFile = path
+		}
+		return nil
+	})
+	if cacheFile == "" {
+		t.Fatalf("expected scan cache JSON under %s", cacheDir)
+	}
+
+	raw, err := os.ReadFile(cacheFile) //nolint:gosec // G304: cache file created inside t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	entries := payload["entries"].(map[string]any)
+	for _, v := range entries {
+		entry := v.(map[string]any)
+		trackMap := entry["track"].(map[string]any)
+		trackMap["ID"] = "local:/etc/passwd"
+		trackMap["LocalPath"] = "/etc/passwd"
+		trackMap["Title"] = "\x1b[31mInjected Title\x1b[0m"
+		trackMap["Genres"] = []any{"\x1b[2JAmbient"}
+	}
+	tampered, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p2, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("warm local.New: %v", err)
+	}
+	tracks, _ := p2.GetLibraryTracks(context.Background())
+	if len(tracks) != 1 {
+		t.Fatalf("tracks len = %d, want 1", len(tracks))
+	}
+	got := tracks[0]
+	canonicalPath := trackPath
+	if resolved, err := filepath.EvalSymlinks(trackPath); err == nil {
+		canonicalPath = resolved
+	}
+	if got.LocalPath != canonicalPath || got.ID != "local:"+canonicalPath {
+		t.Errorf("tampered cache overrode path/ID: id=%q path=%q want=%q", got.ID, got.LocalPath, canonicalPath)
+	}
+	if strings.Contains(got.Title, "\x1b") || got.Title != "Injected Title" {
+		t.Errorf("unsanitized cached title = %q, want Injected Title", got.Title)
+	}
+	if len(got.Genres) != 1 || strings.Contains(got.Genres[0], "\x1b") {
+		t.Errorf("unsanitized cached genres = %v", got.Genres)
 	}
 }
