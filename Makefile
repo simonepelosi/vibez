@@ -1,7 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
-.PHONY: build run test lint clean release build-with-token refresh-token install uninstall check-deps
+.PHONY: build run test bench lint clean release build-with-token refresh-token install uninstall check-deps
 
 check-deps:
 ifeq ($(shell uname -s),Linux)
@@ -115,6 +115,9 @@ run: build
 
 test:
 	go test ./...
+
+bench:
+	go test -run='^$$' -bench=. -benchmem ./...
 
 lint:
 	golangci-lint run
