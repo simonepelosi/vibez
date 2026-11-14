@@ -68,3 +68,38 @@ func TestDialIPC_FindsSocketInXDGRuntimeDir(t *testing.T) {
 	}
 	expectHandshake(t, frames)
 }
+
+func TestSocketDirs_OnlyAbsolutePathsWhenXDGUnset(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	t.Setenv("TMPDIR", "relative-tmp")
+	t.Setenv("TMP", "")
+	t.Setenv("TEMP", "")
+	for _, d := range socketDirs() {
+		if !filepath.IsAbs(d) {
+			t.Errorf("socketDirs() returned relative directory %q", d)
+		}
+	}
+}
+
+func TestDialIPCPath_RejectsNonSocketAndSymlink(t *testing.T) {
+	dir := t.TempDir()
+	reg := filepath.Join(dir, "discord-ipc-0")
+	if err := os.WriteFile(reg, []byte("not-a-socket"), 0o600); err != nil {
+		t.Fatalf("write regular file: %v", err)
+	}
+	if conn, err := dialIPCPath(reg); err == nil {
+		_ = conn.Close()
+		t.Fatal("dialIPCPath succeeded on regular file, expected error")
+	}
+
+	l, sockPath := listenTestIPC(t)
+	defer func() { _ = l.Close() }()
+	link := filepath.Join(dir, "discord-ipc-1")
+	if err := os.Symlink(sockPath, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if conn, err := dialIPCPath(link); err == nil {
+		_ = conn.Close()
+		t.Fatal("dialIPCPath followed symlink, expected error")
+	}
+}

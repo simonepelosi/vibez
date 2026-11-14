@@ -4,11 +4,40 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+const (
+	maxMetadataBlocks = 4096
+	maxMP4BoxDepth    = 32
+)
+
+// safeDuration computes (units * time.Second) / rate without 64-bit integer overflow.
+func safeDuration(units, rate uint64) time.Duration {
+	if units == 0 || rate == 0 {
+		return 0
+	}
+	secs := units / rate
+	rem := units % rate
+	const maxSecs = uint64(math.MaxInt64 / int64(time.Second))
+	if secs > maxSecs {
+		return 0
+	}
+	dur := time.Duration(secs) * time.Second //nolint:gosec // secs capped by maxSecs above
+	if rem > 0 {
+		hi, lo := bits.Mul64(rem, uint64(time.Second))
+		extra, _ := bits.Div64(hi, lo, rate)
+		if uint64(math.MaxInt64)-uint64(dur) < extra { //nolint:gosec // dur >= 0
+			return 0
+		}
+		dur += time.Duration(extra) //nolint:gosec // checked against MaxInt64 above
+	}
+	return dur
+}
 
 // readFileInfo inspects container headers of f and returns the audio duration
 // (or 0 when unrecognized/truncated) along with the human-readable format badge
@@ -50,7 +79,7 @@ func formatFromExt(path string) string {
 // isLosslessM4A reports whether an .m4a file contains an Apple Lossless (alac)
 // audio track rather than lossy AAC (mp4a).
 func isLosslessM4A(path string) bool {
-	f, err := os.Open(path) //nolint:gosec // user-configured music dir
+	f, err := openRegularAudioFile(path)
 	if err != nil {
 		return false
 	}
@@ -88,7 +117,7 @@ func readFLACDuration(r io.ReadSeeker) time.Duration {
 	if _, err := io.ReadFull(r, magic[:]); err != nil || string(magic[:]) != "fLaC" {
 		return 0
 	}
-	for {
+	for range maxMetadataBlocks {
 		var bh [4]byte
 		if _, err := io.ReadFull(r, bh[:]); err != nil {
 			return 0
@@ -96,6 +125,9 @@ func readFLACDuration(r io.ReadSeeker) time.Duration {
 		last := (bh[0] & 0x80) != 0
 		blockType := bh[0] & 0x7f
 		length := int64(bh[1])<<16 | int64(bh[2])<<8 | int64(bh[3])
+		if length < 0 {
+			return 0
+		}
 		if blockType == 0 && length >= 18 {
 			var si [18]byte
 			if _, err := io.ReadFull(r, si[:]); err != nil {
@@ -104,10 +136,7 @@ func readFLACDuration(r io.ReadSeeker) time.Duration {
 			v := binary.BigEndian.Uint64(si[10:18])
 			sampleRate := (v >> 44) & 0xFFFFF
 			totalSamples := v & 0xFFFFFFFFF
-			if sampleRate == 0 || totalSamples == 0 {
-				return 0
-			}
-			return time.Duration(totalSamples) * time.Second / time.Duration(sampleRate)
+			return safeDuration(totalSamples, sampleRate)
 		}
 		if last {
 			return 0
@@ -116,6 +145,7 @@ func readFLACDuration(r io.ReadSeeker) time.Duration {
 			return 0
 		}
 	}
+	return 0
 }
 
 func readWAVDuration(r io.ReadSeeker) time.Duration {
@@ -128,7 +158,7 @@ func readWAVDuration(r io.ReadSeeker) time.Duration {
 	}
 	var byteRate uint32
 	var dataSize uint32
-	for {
+	for range maxMetadataBlocks {
 		var ch [8]byte
 		if _, err := io.ReadFull(r, ch[:]); err != nil {
 			break
@@ -157,7 +187,7 @@ func readWAVDuration(r io.ReadSeeker) time.Duration {
 		case "data":
 			dataSize = sz
 			if byteRate > 0 && dataSize > 0 {
-				return time.Duration(dataSize) * time.Second / time.Duration(byteRate)
+				return safeDuration(uint64(dataSize), uint64(byteRate))
 			}
 		}
 		skip := int64(sz)
@@ -168,10 +198,7 @@ func readWAVDuration(r io.ReadSeeker) time.Duration {
 			break
 		}
 	}
-	if byteRate > 0 && dataSize > 0 {
-		return time.Duration(dataSize) * time.Second / time.Duration(byteRate)
-	}
-	return 0
+	return safeDuration(uint64(dataSize), uint64(byteRate))
 }
 
 func readAIFFDuration(r io.ReadSeeker) time.Duration {
@@ -183,7 +210,7 @@ func readAIFFDuration(r io.ReadSeeker) time.Duration {
 	if string(hdr[0:4]) != "FORM" || (form != "AIFF" && form != "AIFC") {
 		return 0
 	}
-	for {
+	for range maxMetadataBlocks {
 		var ch [8]byte
 		if _, err := io.ReadFull(r, ch[:]); err != nil {
 			return 0
@@ -197,10 +224,14 @@ func readAIFFDuration(r io.ReadSeeker) time.Duration {
 			}
 			frames := binary.BigEndian.Uint32(comm[2:6])
 			sr := parseIEEE80(comm[8:18])
-			if frames == 0 || sr <= 0 {
+			if frames == 0 || sr <= 0 || math.IsNaN(sr) || math.IsInf(sr, 0) {
 				return 0
 			}
-			return time.Duration(float64(frames) / sr * float64(time.Second))
+			secs := float64(frames) / sr
+			if secs*float64(time.Second) > float64(math.MaxInt64) {
+				return 0
+			}
+			return time.Duration(secs * float64(time.Second))
 		}
 		skip := int64(sz)
 		if skip%2 == 1 {
@@ -210,6 +241,7 @@ func readAIFFDuration(r io.ReadSeeker) time.Duration {
 			return 0
 		}
 	}
+	return 0
 }
 
 // parseIEEE80 converts an 80-bit big-endian IEEE 754 extended float (used for
@@ -240,13 +272,16 @@ func readMP4Info(r io.ReadSeeker) (time.Duration, string) {
 	}
 	var dur time.Duration
 	var codec string
-	walkMP4Boxes(r, 0, end, &dur, &codec)
+	walkMP4Boxes(r, 0, end, 0, &dur, &codec)
 	return dur, codec
 }
 
-func walkMP4Boxes(r io.ReadSeeker, start, end int64, dur *time.Duration, codec *string) {
+func walkMP4Boxes(r io.ReadSeeker, start, end int64, depth int, dur *time.Duration, codec *string) {
+	if depth > maxMP4BoxDepth {
+		return
+	}
 	pos := start
-	for pos+8 <= end {
+	for boxes := 0; boxes < maxMetadataBlocks && pos+8 <= end; boxes++ {
 		if _, err := r.Seek(pos, io.SeekStart); err != nil {
 			return
 		}
@@ -254,28 +289,29 @@ func walkMP4Boxes(r io.ReadSeeker, start, end int64, dur *time.Duration, codec *
 		if _, err := io.ReadFull(r, hdr[:8]); err != nil {
 			return
 		}
-		sz := int64(binary.BigEndian.Uint32(hdr[0:4]))
+		rawSz := uint64(binary.BigEndian.Uint32(hdr[0:4]))
 		typ := string(hdr[4:8])
-		hdrLen := int64(8)
-		switch sz {
+		hdrLen := uint64(8)
+		switch rawSz {
 		case 1:
 			if _, err := io.ReadFull(r, hdr[8:16]); err != nil {
 				return
 			}
-			sz = int64(binary.BigEndian.Uint64(hdr[8:16])) //nolint:gosec
+			rawSz = binary.BigEndian.Uint64(hdr[8:16])
 			hdrLen = 16
 		case 0:
-			sz = end - pos
+			rawSz = uint64(end - pos) //nolint:gosec // pos <= end-8 guarantees positive diff
 		}
-		if sz < hdrLen || pos+sz > end {
+		if rawSz < hdrLen || rawSz > uint64(end-pos) { //nolint:gosec // pos <= end guarantees non-negative diff
 			return
 		}
-		bodyStart := pos + hdrLen
+		sz := int64(rawSz) //nolint:gosec // bounded above by end-pos (int64)
+		bodyStart := pos + int64(hdrLen)
 		bodyEnd := pos + sz
 
 		switch typ {
 		case "moov", "trak", "mdia", "minf", "stbl":
-			walkMP4Boxes(r, bodyStart, bodyEnd, dur, codec)
+			walkMP4Boxes(r, bodyStart, bodyEnd, depth+1, dur, codec)
 		case "mvhd":
 			if bodyEnd-bodyStart >= 20 {
 				var buf [32]byte
@@ -283,16 +319,16 @@ func walkMP4Boxes(r io.ReadSeeker, start, end int64, dur *time.Duration, codec *
 				if _, err := io.ReadFull(r, buf[:n]); err == nil {
 					version := buf[0]
 					if version == 0 && n >= 20 {
-						ts := binary.BigEndian.Uint32(buf[12:16])
-						d := binary.BigEndian.Uint32(buf[16:20])
-						if ts > 0 && d > 0 {
-							*dur = time.Duration(d) * time.Second / time.Duration(ts)
+						ts := uint64(binary.BigEndian.Uint32(buf[12:16]))
+						d := uint64(binary.BigEndian.Uint32(buf[16:20]))
+						if parsed := safeDuration(d, ts); parsed > 0 {
+							*dur = parsed
 						}
 					} else if version == 1 && n >= 32 {
-						ts := binary.BigEndian.Uint32(buf[20:24])
+						ts := uint64(binary.BigEndian.Uint32(buf[20:24]))
 						d := binary.BigEndian.Uint64(buf[24:32])
-						if ts > 0 && d > 0 {
-							*dur = time.Duration(d) * time.Second / time.Duration(ts) //nolint:gosec
+						if parsed := safeDuration(d, ts); parsed > 0 {
+							*dur = parsed
 						}
 					}
 				}
@@ -388,14 +424,20 @@ func readMP3Duration(r io.ReadSeeker) time.Duration {
 				if flags&0x01 != 0 {
 					frames := binary.BigEndian.Uint32(buf[xingOff+8 : xingOff+12])
 					if frames > 0 && sr > 0 {
-						return time.Duration(frames) * time.Duration(spf) * time.Second / time.Duration(sr)
+						hi, lo := bits.Mul64(uint64(frames), uint64(spf)) //nolint:gosec // frames and spf are positive
+						if hi == 0 {
+							return safeDuration(lo, uint64(sr)) //nolint:gosec // sr > 0
+						}
 					}
 				}
 			}
 		}
 		if kbps > 0 && fileSize > audioStart {
 			audioBytes := fileSize - audioStart
-			return time.Duration(audioBytes*8) * time.Second / time.Duration(kbps*1000)
+			hi, lo := bits.Mul64(uint64(audioBytes), 8) //nolint:gosec // audioBytes > 0
+			if hi == 0 {
+				return safeDuration(lo, uint64(kbps)*1000) //nolint:gosec // kbps > 0
+			}
 		}
 		return 0
 	}
@@ -432,7 +474,7 @@ func readOGGDuration(r io.ReadSeeker) time.Duration {
 		if string(tail[i:i+4]) == "OggS" {
 			granule := binary.LittleEndian.Uint64(tail[i+6 : i+14])
 			if granule > 0 && granule != math.MaxUint64 {
-				return time.Duration(granule) * time.Second / time.Duration(sampleRate) //nolint:gosec
+				return safeDuration(granule, uint64(sampleRate))
 			}
 		}
 	}

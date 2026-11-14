@@ -9,11 +9,25 @@ import (
 	"strings"
 )
 
+// validXDGDir checks that an XDG base directory entry is non-empty, absolute,
+// and free of ASCII control characters or a leading dash.
+func validXDGDir(d string) bool {
+	if d == "" || strings.HasPrefix(d, "-") || !filepath.IsAbs(d) {
+		return false
+	}
+	for i := 0; i < len(d); i++ {
+		if d[i] < 0x20 || d[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // dataHome is $XDG_DATA_HOME, or ~/.local/share when unset, per the XDG base
 // directory spec. The fallback icon and desktop entry are written under it.
 func dataHome() string {
-	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
-		return d
+	if d := os.Getenv("XDG_DATA_HOME"); validXDGDir(d) {
+		return filepath.Clean(d)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -36,8 +50,8 @@ func dataDirs() []string {
 		sys = "/usr/local/share:/usr/share"
 	}
 	for d := range strings.SplitSeq(sys, ":") {
-		if d != "" {
-			dirs = append(dirs, d)
+		if validXDGDir(d) {
+			dirs = append(dirs, filepath.Clean(d))
 		}
 	}
 	return dirs
@@ -46,10 +60,27 @@ func dataDirs() []string {
 // installedIcon returns the path of an AppID icon already present in the
 // hicolor theme of any data dir, or "" when there is none.
 func installedIcon() string {
+	prefix := AppID + "."
 	for _, d := range dataDirs() {
-		matches, _ := filepath.Glob(filepath.Join(d, "icons", "hicolor", "*", "apps", AppID+".*"))
-		if len(matches) > 0 {
-			return matches[0]
+		hicolor := filepath.Join(d, "icons", "hicolor")
+		sizes, err := os.ReadDir(hicolor)
+		if err != nil {
+			continue
+		}
+		for _, sz := range sizes {
+			if !sz.IsDir() {
+				continue
+			}
+			appsDir := filepath.Join(hicolor, sz.Name(), "apps")
+			entries, err := os.ReadDir(appsDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), prefix) {
+					return filepath.Join(appsDir, e.Name())
+				}
+			}
 		}
 	}
 	return ""
@@ -96,11 +127,11 @@ func InstallIcon() string {
 		return ""
 	}
 	dst := filepath.Join(dir, AppID+".svg")
-	if err := os.WriteFile(dst, Icon, 0o644); err != nil { //nolint:gosec // public icon file
+	if err := writeAtomicFile(dst, Icon, 0o644); err != nil {
 		return ""
 	}
 	hicolor := filepath.Join(base, "icons", "hicolor")
-	_ = exec.Command("gtk-update-icon-cache", "--force", "--ignore-theme-index", hicolor).Run() //nolint:gosec
+	_ = exec.Command("gtk-update-icon-cache", "--force", "--ignore-theme-index", "--", hicolor).Run() //nolint:gosec
 	return dst
 }
 
@@ -124,8 +155,8 @@ func InstallDesktopEntry() {
 	if err := os.MkdirAll(dir, 0o750); err != nil { //nolint:gosec // XDG applications dir
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, AppID+".desktop"), DesktopEntry, 0o644); err != nil { //nolint:gosec // public .desktop file
+	if err := writeAtomicFile(filepath.Join(dir, AppID+".desktop"), DesktopEntry, 0o644); err != nil {
 		return
 	}
-	_ = exec.Command("update-desktop-database", dir).Run() //nolint:gosec
+	_ = exec.Command("update-desktop-database", "--", dir).Run() //nolint:gosec
 }
