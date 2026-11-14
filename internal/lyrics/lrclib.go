@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -51,9 +52,46 @@ type Client struct {
 // NewClient returns a Client ready for use.
 func NewClient() *Client {
 	return &Client{
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http: &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: sameOriginRedirectPolicy,
+		},
 		baseURL: defaultBaseURL,
 	}
+}
+
+func sameOriginRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return fmt.Errorf("lrclib: stopped after 5 redirects")
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	orig := via[0].URL
+	if req.URL.User != nil || !strings.EqualFold(req.URL.Scheme, orig.Scheme) || !strings.EqualFold(req.URL.Host, orig.Host) {
+		return fmt.Errorf("lrclib: refusing cross-origin redirect")
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (c *Client) validatedBaseURL() (string, error) {
+	base := c.base()
+	u, err := url.Parse(base)
+	if err != nil || u.Hostname() == "" || u.User != nil {
+		return "", fmt.Errorf("lrclib: invalid base URL")
+	}
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
+		return "", fmt.Errorf("lrclib: refusing non-https base URL")
+	}
+	return base, nil
 }
 
 type lrclibTrack struct {
@@ -91,7 +129,11 @@ func (c *Client) base() string {
 }
 
 func (c *Client) fetchExact(ctx context.Context, artist, title, album string, duration time.Duration) (*Result, error) {
-	u, err := url.Parse(c.base() + "/api/get")
+	base, err := c.validatedBaseURL()
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(base + "/api/get")
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +181,11 @@ func (c *Client) fetchSearch(ctx context.Context, artist, title string, duration
 		return nil, fmt.Errorf("lyrics not found")
 	}
 
-	u, err := url.Parse(c.base() + "/api/search")
+	base, err := c.validatedBaseURL()
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(base + "/api/search")
 	if err != nil {
 		return nil, err
 	}
@@ -364,34 +410,55 @@ func parseInlineWords(s string, lineStart time.Duration) (string, []Word) {
 
 // parseLRCTimestamp parses "mm:ss.xx" or "mm:ss" into a Duration.
 func parseLRCTimestamp(s string) (time.Duration, error) {
+	const maxLRCMinutes = 100_000
 	parts := strings.SplitN(s, ":", 2)
 	if len(parts) != 2 {
-		return 0, fmt.Errorf("invalid timestamp: %s", s)
+		return 0, fmt.Errorf("invalid timestamp")
 	}
-	mins, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, err
+	mins, ok := parseASCIIDigits(parts[0], maxLRCMinutes)
+	if !ok {
+		return 0, fmt.Errorf("invalid timestamp minutes")
 	}
 	secParts := strings.SplitN(parts[1], ".", 2)
-	secs, err := strconv.Atoi(secParts[0])
-	if err != nil {
-		return 0, err
+	secs, ok := parseASCIIDigits(secParts[0], 59)
+	if !ok {
+		return 0, fmt.Errorf("invalid timestamp seconds")
 	}
 	ms := 0
 	if len(secParts) == 2 {
 		raw := secParts[1]
-		for len(raw) < 3 {
-			raw += "0"
+		if len(raw) == 0 {
+			return 0, fmt.Errorf("invalid timestamp fraction")
 		}
 		if len(raw) > 3 {
 			raw = raw[:3]
 		}
-		ms, err = strconv.Atoi(raw)
-		if err != nil {
-			return 0, err
+		for len(raw) < 3 {
+			raw += "0"
+		}
+		ms, ok = parseASCIIDigits(raw, 999)
+		if !ok {
+			return 0, fmt.Errorf("invalid timestamp fraction")
 		}
 	}
 	return time.Duration(mins)*time.Minute +
 		time.Duration(secs)*time.Second +
 		time.Duration(ms)*time.Millisecond, nil
+}
+
+func parseASCIIDigits(s string, maxVal int) (int, bool) {
+	if s == "" || len(s) > 7 {
+		return 0, false
+	}
+	val := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		val = val*10 + int(s[i]-'0')
+		if val > maxVal {
+			return 0, false
+		}
+	}
+	return val, true
 }

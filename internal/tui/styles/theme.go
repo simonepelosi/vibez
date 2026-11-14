@@ -3,9 +3,11 @@ package styles
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // Theme holds every color used by the UI as hex strings (#RRGGBB or #RGB).
@@ -165,6 +167,23 @@ func BuiltinThemeNames() []string {
 	return []string{"default", "dracula", "gruvbox", "nord"}
 }
 
+const maxThemeFileBytes = 256 * 1024
+
+func validateThemeName(name string) error {
+	if name == "" || name == "." || name == ".." || len(name) > 128 {
+		return fmt.Errorf("invalid theme name")
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid theme name %q", name)
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] <= 0x20 || name[i] >= 0x7f {
+			return fmt.Errorf("invalid character in theme name")
+		}
+	}
+	return nil
+}
+
 // LoadTheme resolves name to a Theme. Resolution order:
 //  1. Built-in theme by name.
 //  2. File at <configDir>/themes/<name>.json.
@@ -179,12 +198,34 @@ func LoadTheme(name, configDir string) (Theme, error) {
 	if fn, ok := builtinThemes[name]; ok {
 		return fn(), nil
 	}
+	if err := validateThemeName(name); err != nil {
+		return DefaultTheme(), fmt.Errorf("theme %q: %w", name, err)
+	}
 
-	// Attempt to load a custom JSON theme file.
+	// Attempt to load a custom JSON theme file safely.
 	path := filepath.Join(configDir, "themes", name+".json")
-	data, err := os.ReadFile(path) //nolint:gosec // path is user-controlled config, not external input
+	linfo, err := os.Lstat(path)
 	if err != nil {
 		return DefaultTheme(), fmt.Errorf("theme %q: %w", name, err)
+	}
+	if !linfo.Mode().IsRegular() {
+		return DefaultTheme(), fmt.Errorf("theme %q: not a regular file", name)
+	}
+	f, err := os.Open(path) //nolint:gosec // theme name validated above; user config dir
+	if err != nil {
+		return DefaultTheme(), fmt.Errorf("theme %q: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	finfo, err := f.Stat()
+	if err != nil || !os.SameFile(linfo, finfo) {
+		return DefaultTheme(), fmt.Errorf("theme %q: file changed while opening", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxThemeFileBytes+1))
+	if err != nil {
+		return DefaultTheme(), fmt.Errorf("theme %q: %w", name, err)
+	}
+	if len(data) > maxThemeFileBytes {
+		return DefaultTheme(), fmt.Errorf("theme %q: exceeds %d bytes", name, maxThemeFileBytes)
 	}
 
 	var t Theme

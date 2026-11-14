@@ -437,7 +437,7 @@ func (m *SearchModel) View() string {
 		return styles.QueueItemMuted.Render("  searching…")
 	}
 	if m.err != nil {
-		return styles.ErrorStyle.Render("⚠  " + m.err.Error())
+		return styles.ErrorStyle.Render("⚠  " + provider.Clean(m.err.Error()))
 	}
 	if m.artist != nil && len(m.artist.albums) == 0 {
 		hs := lipgloss.NewStyle().Foreground(sectionColor("Albums")).Bold(true).Italic(true)
@@ -446,7 +446,7 @@ func (m *SearchModel) View() string {
 		case m.artist.loading:
 			status = styles.QueueItemMuted.Render("loading albums…")
 		case m.artist.err != nil:
-			status = styles.ErrorStyle.Render("⚠  " + m.artist.err.Error())
+			status = styles.ErrorStyle.Render("⚠  " + provider.Clean(m.artist.err.Error()))
 		default:
 			status = styles.QueueItemMuted.Render("no albums")
 		}

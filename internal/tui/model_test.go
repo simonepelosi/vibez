@@ -2897,6 +2897,7 @@ func TestPlayerStateMsg_NoArtworkFetchWhenArtModeOff(t *testing.T) {
 
 	m := newModel(newMockPlayer())
 	m.stateCh = nil
+	m.artHTTP = server.Client()
 	m.supportsArtColor = func() bool { return true }
 	track := &provider.Track{Title: "Quiet Song", Artist: "Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
 	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
@@ -2923,6 +2924,7 @@ func TestNowPlayingArtworkFetchAndResizeUsesCachedImage(t *testing.T) {
 	m := newModel(newMockPlayer())
 	m.stateCh = nil
 	m.artMode = true
+	m.artHTTP = server.Client()
 	m.supportsArtColor = func() bool { return true }
 	track := &provider.Track{Title: "Art Song", Artist: "Art Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
 	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
@@ -2954,6 +2956,7 @@ func TestNowPlayingArtworkDownloadFailureFallsBack(t *testing.T) {
 	m := newModel(newMockPlayer())
 	m.stateCh = nil
 	m.artMode = true
+	m.artHTTP = server.Client()
 	m.supportsArtColor = func() bool { return true }
 	track := &provider.Track{Title: "Fallback Song", Artist: "Fallback Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
 	_, cmd := m.Update(playerStateMsg{Track: track, Playing: true})
@@ -3161,6 +3164,7 @@ func TestExecuteCommand_ArtToggleOnFetchesCurrentCover(t *testing.T) {
 
 	m := newModel(newMockPlayer())
 	m.stateCh = nil
+	m.artHTTP = server.Client()
 	m.supportsArtColor = func() bool { return true }
 	track := &provider.Track{Title: "Late Song", Artist: "Artist", Album: "Album", ArtworkURL: server.URL, Duration: time.Minute}
 	_, _ = m.Update(playerStateMsg{Track: track, Playing: true})
@@ -5104,5 +5108,21 @@ func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
 	}
 	if m.searchQuery != "久石譲 Summer" {
 		t.Fatalf("typed CJK IME space query = %q, want %q", m.searchQuery, "久石譲 Summer")
+	}
+}
+
+func TestModel_SanitizesLogsStatusAndInitStatus(t *testing.T) {
+	m := newModel(nil)
+	m.appendLog("evil\x1b[31m\x1b]0;pwned\x07\u202elog")
+	if len(m.debugLog) == 0 || strings.ContainsAny(m.debugLog[len(m.debugLog)-1], "\x1b\x07\u202e") || strings.Contains(m.debugLog[len(m.debugLog)-1], "pwned") {
+		t.Fatalf("appendLog did not strip unsafe sequences: %q", m.debugLog)
+	}
+	m.Update(InitStatusMsg("loading\x1b[2J\u202e…"))
+	if strings.ContainsAny(m.initStatus, "\x1b\u202e") {
+		t.Fatalf("initStatus leaked control/BiDi runes: %q", m.initStatus)
+	}
+	m.errMsg = "failed\x1b[31m!\x1b[0m\u202e"
+	if got := m.statusLine(80); strings.ContainsAny(ansi.Strip(got), "\x1b\u202e") || !strings.Contains(ansi.Strip(got), "failed!") {
+		t.Fatalf("statusLine leaked or mangled error: %q", got)
 	}
 }

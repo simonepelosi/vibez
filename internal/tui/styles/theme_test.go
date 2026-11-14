@@ -218,3 +218,28 @@ func TestApplyArtworkPalette_SkipsLowContrastAndLeavesSharedArtistUntouched(t *t
 	}
 	styles.ClearArtworkPalette()
 }
+
+func TestLoadTheme_RejectsPathTraversalAndSymlink(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret.json")
+	if err := os.WriteFile(secret, []byte(`{"primary":"#123456"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"../secret", "../../etc/passwd", "a/b", `a\b`, "bad\x00name"} {
+		theme, err := styles.LoadTheme(bad, dir)
+		if err == nil {
+			t.Errorf("LoadTheme(%q) succeeded, expected error", bad)
+		}
+		if theme.Primary != styles.DefaultTheme().Primary {
+			t.Errorf("LoadTheme(%q) leaked primary %q", bad, theme.Primary)
+		}
+	}
+	themesDir := filepath.Join(dir, "themes")
+	_ = os.MkdirAll(themesDir, 0o700)
+	link := filepath.Join(themesDir, "sym.json")
+	if err := os.Symlink(secret, link); err == nil {
+		if _, err := styles.LoadTheme("sym", dir); err == nil {
+			t.Error("LoadTheme(sym) followed symlink, expected error")
+		}
+	}
+}

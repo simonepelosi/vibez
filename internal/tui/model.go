@@ -418,7 +418,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		preMuteVol:   -1,
 		artMode:      cfg.AlbumArt,
 		artwork:      artworkCache{rendered: map[art.Size][]string{}},
-		artHTTP:      &http.Client{Timeout: 5 * time.Second},
+		artHTTP:      art.NewSafeHTTPClient(5 * time.Second),
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		supportsArtColor: art.SupportsColor,
@@ -1169,7 +1169,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activePanel = -1
 
 	case InitStatusMsg:
-		m.initStatus = string(msg)
+		m.initStatus = provider.Clean(string(msg))
 
 	case EngineReadyMsg:
 		m.player = msg.Player
@@ -3871,12 +3871,13 @@ func (m *Model) statusLine(contentW int) string {
 	if m.errMsg == "" {
 		return ""
 	}
-	if strings.HasPrefix(m.errMsg, "✓") {
-		text := truncateStr(m.errMsg, max(10, contentW))
+	cleaned := provider.Clean(m.errMsg)
+	if strings.HasPrefix(cleaned, "✓") {
+		text := truncateStr(cleaned, max(10, contentW))
 		return centerStr(styles.ControlActive.Render(text), contentW)
 	}
 	const prefix = "⚠  "
-	errText := truncateStr(m.errMsg, max(10, contentW-len([]rune(prefix))))
+	errText := truncateStr(cleaned, max(10, contentW-len([]rune(prefix))))
 	return centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
 }
 
@@ -4385,7 +4386,7 @@ func truncateStr(s string, maxW int) string {
 func (m *Model) appendLog(line string) {
 	const maxLines = 500
 	ts := time.Now().Format("15:04:05")
-	m.debugLog = append(m.debugLog, ts+"  "+line)
+	m.debugLog = append(m.debugLog, ts+"  "+provider.Clean(line))
 	if len(m.debugLog) > maxLines {
 		m.debugLog = m.debugLog[len(m.debugLog)-maxLines:]
 	}
