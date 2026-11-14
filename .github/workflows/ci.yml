@@ -103,6 +103,31 @@ jobs:
             done < <(sed -n 's/^func \(Fuzz[A-Za-z0-9_]*\).*/\1/p' "$file")
           done < <(grep -rl '^func Fuzz' . --include='*_test.go')
 
+  bench:
+    name: benchmarks-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: Run Go benchmarks
+        run: |
+          set -o pipefail
+          go test -mod=readonly -run='^$' -bench=. -benchmem -benchtime=50ms ./... | tee bench.txt
+          {
+            echo "## Go Benchmarks"
+            echo '```'
+            grep -E '^(pkg:|Benchmark|PASS|FAIL|ok)' bench.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   test-macos:
     name: build-vet-test-macos
     runs-on: macos-latest
