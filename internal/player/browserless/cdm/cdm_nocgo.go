@@ -33,6 +33,10 @@ func (c *CDM) UpdateSession(_ string, _ []byte) error {
 	return errNoCgo
 }
 
+func (c *CDM) CloseSession(_ string) error {
+	return errNoCgo
+}
+
 func (c *CDM) Decrypt(_, _, _ []byte) ([]byte, error) {
 	return nil, errNoCgo
 }

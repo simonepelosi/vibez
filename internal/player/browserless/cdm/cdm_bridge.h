@@ -40,6 +40,13 @@ int cdm_context_update_session(
     uint32_t license_size
 );
 
+// cdm_context_close_session closes a license session and releases its keys inside the CDM.
+// Returns 0 on success.
+int cdm_context_close_session(
+    cdm_context_t* ctx,
+    const char* session_id
+);
+
 // cdm_context_decrypt decrypts an audio sample buffer using AES-CTR (cenc).
 // If num_subsamples > 0, clear_bytes and cipher_bytes specify the subsample pattern.
 // out_decrypted must have at least in_size bytes allocated.
