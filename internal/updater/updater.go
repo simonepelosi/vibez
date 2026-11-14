@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -678,6 +679,33 @@ func installBinary(exe string, data []byte) error {
 	return nil
 }
 
+const (
+	winSharingViolation = syscall.Errno(32) // ERROR_SHARING_VIOLATION
+	winLockViolation    = syscall.Errno(33) // ERROR_LOCK_VIOLATION
+)
+
+func isSharingViolation(err error) bool {
+	if runtime.GOOS != "windows" || err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	return errors.As(err, &errno) && (errno == winSharingViolation || errno == winLockViolation)
+}
+
+func renameWithSharingRetry(src, dst string) error {
+	var err error
+	for attempt := range 20 {
+		err = rename(src, dst)
+		if err == nil || !isSharingViolation(err) {
+			return err
+		}
+		if attempt < 19 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return err
+}
+
 // replaceRunningExe moves staged to exe while exe may be running. Windows
 // refuses to write, delete or rename over a running executable, but does let it
 // be renamed, so exe first moves aside to a name only this updater uses, and
@@ -685,11 +713,11 @@ func installBinary(exe string, data []byte) error {
 // when nothing runs it, and otherwise by removeAside on a later start.
 func replaceRunningExe(staged, exe string) error {
 	aside := asideName(exe)
-	if err := rename(exe, aside); err != nil {
+	if err := renameWithSharingRetry(exe, aside); err != nil {
 		return fmt.Errorf("moving the running binary aside: %w", err)
 	}
-	if err := rename(staged, exe); err != nil {
-		if restoreErr := rename(aside, exe); restoreErr != nil {
+	if err := renameWithSharingRetry(staged, exe); err != nil {
+		if restoreErr := renameWithSharingRetry(aside, exe); restoreErr != nil {
 			return fmt.Errorf("installing %s: %w; restoring the previous binary also failed, it is at %s: %v", exe, err, aside, restoreErr)
 		}
 		return fmt.Errorf("installing %s: %w", exe, err)
