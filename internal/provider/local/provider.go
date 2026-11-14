@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -48,39 +47,17 @@ func (p *Provider) IsAuthenticated() bool { return true }
 // scan walks dir recursively and indexes all regular supported audio files,
 // skipping symlinks and special filesystem entries such as FIFOs and devices.
 func (p *Provider) scan() error {
-	p.tracks = nil
-	p.skipped = map[string]int{}
-	p.unreadable = 0
-	root := canonicalMusicDir(p.dir)
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if os.IsPermission(err) {
-				if d == nil || d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if !supportedExts[ext] {
-			p.skipped[ext]++
-			return nil
-		}
-		t, err := trackFromFile(path)
-		if err != nil {
-			p.unreadable++
-			return nil // skipping files that have unreadable metadata
-		}
-		p.tracks = append(p.tracks, t)
-		return nil
-	})
+	res, err := scanDirectory(context.Background(), p.dir, false)
+	if err != nil {
+		p.tracks = nil
+		p.skipped = map[string]int{}
+		p.unreadable = 0
+		return err
+	}
+	p.tracks = res.tracks
+	p.skipped = res.skipped
+	p.unreadable = res.unreadable
+	return nil
 }
 
 func canonicalMusicDir(dir string) string {
