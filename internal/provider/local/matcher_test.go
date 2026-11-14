@@ -551,9 +551,15 @@ func TestScan_SanitizesTamperedCacheEntries(t *testing.T) {
 	trackPath := filepath.Join(dir, "a.flac")
 	writeSyntheticFLAC(t, trackPath, 180*time.Second, map[string]string{"TITLE": "Original Title"})
 
-	if _, err := local.New(dir); err != nil {
+	p1, err := local.New(dir)
+	if err != nil {
 		t.Fatalf("cold local.New: %v", err)
 	}
+	coldTracks, _ := p1.GetLibraryTracks(context.Background())
+	if len(coldTracks) != 1 {
+		t.Fatalf("cold tracks len = %d, want 1", len(coldTracks))
+	}
+	expectedPath := coldTracks[0].LocalPath
 
 	var cacheFile string
 	_ = filepath.WalkDir(cacheDir, func(path string, d fs.DirEntry, err error) error {
@@ -602,12 +608,8 @@ func TestScan_SanitizesTamperedCacheEntries(t *testing.T) {
 		t.Fatalf("tracks len = %d, want 1", len(tracks))
 	}
 	got := tracks[0]
-	canonicalPath := trackPath
-	if resolved, err := filepath.EvalSymlinks(trackPath); err == nil {
-		canonicalPath = resolved
-	}
-	if got.LocalPath != canonicalPath || got.ID != "local:"+canonicalPath {
-		t.Errorf("tampered cache overrode path/ID: id=%q path=%q want=%q", got.ID, got.LocalPath, canonicalPath)
+	if got.LocalPath != expectedPath || got.ID != "local:"+expectedPath {
+		t.Errorf("tampered cache overrode path/ID: id=%q path=%q want=%q", got.ID, got.LocalPath, expectedPath)
 	}
 	if strings.Contains(got.Title, "\x1b") || got.Title != "Injected Title" {
 		t.Errorf("unsanitized cached title = %q, want Injected Title", got.Title)
