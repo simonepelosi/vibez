@@ -1,140 +1,182 @@
 # Contributing to vibez
 
-Thanks for your interest in contributing! vibez is a TUI Apple Music player for Linux, macOS, and Windows.
-This guide will help you set up a productive development environment.
+Thanks for your interest in contributing! **vibez** is an open-source terminal Apple Music & local audio player written in Go for **Linux**, **macOS**, and **Windows**.
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
 vibez/
-├── cmd/            # CLI entry-point (cobra, flags)
+├── cmd/                        # Cobra CLI entry-point, flags, platform wiring
 ├── internal/
-│   ├── assets/     # Embedded icon + desktop entry installation
-│   ├── auth/       # Apple Music OAuth / MusicKit token flow
-│   ├── config/     # JSON config (token, storefront, etc.)
+│   ├── assets/                 # Embedded app icon & desktop entry installer
+│   ├── audioquality/           # Audio quality tiers & catalog variants
+│   ├── auth/                   # Localhost MusicKit OAuth callback & token broker client
+│   ├── config/                 # JSON config load/save (atomic writes, defaults)
+│   ├── discord/                # Discord Rich Presence IPC client (Unix socket / named pipe)
+│   ├── lastfm/                 # Optional Last.fm scrobbler & auth flow
+│   ├── lyrics/                 # LRCLIB synced lyrics client & LRC parser
+│   ├── openurl/                # Validated OS browser launcher
 │   ├── player/
-│   │   ├── cdp/    # Chrome DevTools Protocol player (Playwright + Widevine)
-│   │   ├── demo/   # In-memory fake player — no credentials required
-│   │   └── webkit/ # WebKit + GStreamer fallback (30-s previews, Linux)
-│   ├── player/mpris/ # Linux MPRIS D-Bus server
+│   │   ├── browserless/        # In-process Widevine CDM C++ bridge, MP4 decryptor, HLS streamer & native sinks
+│   │   ├── demo/               # In-memory fake player for --demo mode
+│   │   ├── gst/                # Linux GStreamer pipeline wrapper & ADTS parser
+│   │   ├── local/              # Offline audio player (GStreamer / Core Audio / Media Foundation)
+│   │   ├── mpris/              # Linux MPRIS D-Bus server & client
+│   │   └── smtc/               # Windows System Media Transport Controls bridge
 │   ├── provider/
-│   │   ├── apple/  # Apple Music REST API provider
-│   │   └── demo/   # In-memory fake provider — no credentials required
-│   └── tui/        # Bubble Tea TUI: model, views, key bindings
-├── scripts/        # Dev-token generator, helpers
-└── web/            # MusicKit.js bridge (injected into headless Chrome)
+│   │   ├── apple/              # Apple Music REST API provider
+│   │   ├── demo/               # Fake catalog provider for --demo mode
+│   │   └── local/              # Recursive metadata scanner & lossless ISRC/tag matcher
+│   ├── tui/
+│   │   ├── model.go            # Bubble Tea v2 root model, keymaps, command palette
+│   │   ├── art/                # Dithered artwork renderer & bounded image decoder
+│   │   ├── styles/             # Lipgloss palettes & JSON custom theme loader
+│   │   └── views/              # Panels (Library, Queue, Search, Lyrics, Feed, EQ, Vibe, Bear)
+│   ├── updater/                # GitHub Release self-updater with SHA-256 checksum verification
+│   ├── version/                # Build-injected version metadata
+│   └── vibe/                   # Vibe planner (Ollama / LM Studio / llama.cpp / KeywordAgent)
+├── flatpak/                    # Flatpak manifest & desktop files
+├── scripts/
+│   ├── gen-devtoken/           # MusicKit developer JWT generator CLI
+│   └── install.sh              # Linux & macOS release installer
+├── web/
+│   └── login.html              # Browser OAuth page served on 127.0.0.1 during `vibez auth login`
+└── worker/                     # Cloudflare Worker developer token broker & Node tests
 ```
 
 ---
 
-## Running without Apple credentials (demo mode)
+## Running Without Apple Credentials (`--demo` & `--local`)
 
-You **do not need** an Apple Developer account or Apple Music subscription to work on the UI.
-The `--demo` flag loads a built-in fake player and provider with ten realistic tracks:
+You **do not need** an Apple Developer account or Apple Music subscription to work on the TUI, search UX, theming, queue logic, local audio playback, or Lyrics/Vibe integrations:
 
 ```sh
+# Built-in mock provider + mock player (10 sample tracks, simulated playback)
 go run . --demo
-```
 
-All TUI interactions — search, queue, playback, keyboard shortcuts — work exactly as in production.  
-The fake player advances the progress bar in real time and auto-advances to the next track.
+# Real local audio playback without an Apple account
+go run . --local --music-dir ~/Music
+```
 
 ---
 
-## macOS setup
+## Platform Development Setup
 
-Install Google Chrome before testing Apple Music playback on macOS:
+vibez has zero Chromium, Playwright, or WebKit dependencies. Native audio playback and the in-process Widevine CDM bridge use CGo (`CGO_ENABLED=1`), while pure-Go packages and `--demo` can also be verified with `CGO_ENABLED=0` on non-Linux hosts.
+
+### Linux
+
+Install Go 1.26+ plus GStreamer development headers and audio plugins:
 
 ```sh
-brew install --cask google-chrome
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y \
+  pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-libav
 ```
 
-Demo mode does not require Chrome, Apple credentials, or network access.
+On Arch or Fedora, install the corresponding `gstreamer`, `gst-plugins-base`, `gst-plugins-good`, and `gst-libav` (plus `gst-plugins-bad` if testing 24/32-bit AIFF files).
 
-## Windows setup
+### macOS
 
-Use Go 1.26+ and installed Google Chrome. No CGo toolchain or WSL is required:
+Install Go 1.26+ and Xcode Command Line Tools (`clang` + `AudioToolbox`/`CoreAudio` system frameworks):
+
+```sh
+xcode-select --install
+go build ./...
+go test ./...
+```
+
+### Windows
+
+Install Go 1.26+ and **MinGW-w64** (`x86_64-w64-mingw32-gcc` / `g++`) so `CGO_ENABLED=1` compiles the C++ Widevine CDM bridge, Media Foundation / `waveOut` sinks, and SMTC integration:
 
 ```powershell
+# Full native build & tests (with MinGW-w64 on PATH)
+$env:CGO_ENABLED = "1"
 go build -o vibez.exe .
-.\vibez.exe --demo
-.\vibez.exe --local --music-dir "$env:USERPROFILE\Music"
+go test ./...
+
+# Pure-Go checks (works without MinGW)
+$env:CGO_ENABLED = "0"
 go test ./...
 ```
 
-Install Node.js 22+ to run the local-audio JavaScript tests; they are also invoked by `go test`. Chrome is needed for real playback, not the unit tests. Use Windows Terminal for the interactive TUI. Repository text files use LF line endings on every platform.
-
-The Windows config path is `%APPDATA%\vibez\config.json`; the browser driver cache is `%LOCALAPPDATA%\vibez\driver`. `VIBEZ_CHROME_PATH` or `CHROME_PATH` can select a custom Chrome executable. Local startup reports browser setup progress before opening the TUI. Installed Chrome sessions retain Chromium's sandbox on Windows and macOS.
-
-For Apple Music testing without your own MusicKit key, coordinate with a maintainer on a test build. The **Dev Build** workflow generates developer tokens exclusively using trusted scripts from the default branch, and its artifacts embed a temporary developer token for verification; the private signing key is never exposed to PR code. Windows sign-in and full-track playback remain an end-to-end verification requirement even after build, demo, local-audio, and Widevine-capability checks pass.
-
-
-## Full development setup (Apple credentials required)
-
-Full-track streaming requires a valid MusicKit developer token and an Apple Music subscription for the Apple ID you use. Maintainer-built releases embed the developer token; contributors can use a maintainer-built Dev Build or an authorized short-lived token in their config.
-
-Generating your own developer token instead requires Apple Developer Program membership and a MusicKit identifier/private key in your developer account.
-
-### Generate a developer token
-
-```sh
-go run ./scripts/gen-devtoken -write
-```
-
-Set `APPLE_KEY_ID`, `APPLE_TEAM_ID`, and `APPLE_PRIVATE_KEY` in the environment first.
-With `-write`, the token is saved to the platform config path (`~/.config/vibez/config.json`, or `%APPDATA%\vibez\config.json` on Windows). Without `-write`, it is printed to stdout; do not paste signing keys into issue comments or logs.
-
-### First run
-
-```sh
-go run .
-```
-
-On Linux, Chrome (~150 MB, Widevine-enabled) is downloaded on first launch to `~/.cache/vibez/chrome`, and the Playwright driver is stored in `~/.cache/vibez/driver`.
-On macOS and Windows, vibez uses installed Google Chrome; Windows stores the driver in `%LOCALAPPDATA%\vibez\driver`.
-Your Apple ID is authorised in a popup browser window; the user token is cached in the config file.
+Repository text files use **LF** line endings on every platform (enforced by `.pre-commit-config.yaml`).
 
 ---
 
-## Building
+## Testing Full Apple Music Playback
+
+Full-track streaming requires:
+1. An Apple Music subscription on the Apple ID you log in with (`vibez auth login`)
+2. A valid MusicKit developer token (release/Dev Builds fetch short-lived tokens from the Cloudflare token broker in `worker/`, whereas local source builds use your own MusicKit key or an authorized dev token)
+
+Maintainers can also trigger the **Dev Build** GitHub Actions workflow (`dev-build.yml`), which runs exclusively from the default branch and embeds a short-lived developer token without exposing signing keys to PR code.
+
+### Using your own Apple MusicKit key
+
+Export `APPLE_KEY_ID`, `APPLE_TEAM_ID`, and `APPLE_PRIVATE_KEY` (or place them in a gitignored `.env`, optionally pointing `APPLE_PRIVATE_KEY_FILE` at your `.p8` file):
 
 ```sh
-# Standard build (uses embedded developer token if present)
-make build
+# Write a fresh developer JWT to config.json (~30 day lifetime)
+make refresh-token
 
-# Build with your own token baked in (for local testing)
-APPLE_KEY_ID=... APPLE_TEAM_ID=... APPLE_PRIVATE_KEY="$(cat AuthKey.p8)" make build-with-token
+# Or build and install with an embedded developer token
+make build-with-token
+make install
+```
+
+Never commit `.p8` signing keys, tokens, or `.env` files, and never paste secrets into issues or PR comments.
+
+### Widevine CDM discovery
+
+On launch, the browserless player searches `VIBEZ_CDM_PATH` and standard local Chrome/Chromium/Edge/Brave/Firefox directories. If none is found, it downloads the standalone official Widevine CDM component into:
+- Linux: `~/.cache/vibez/cdm`
+- macOS: `~/Library/Caches/vibez/cdm`
+- Windows: `%LOCALAPPDATA%\vibez\cdm`
+
+Live network CDM download tests are skipped unless `VIBEZ_TEST_NETWORK=1` is set.
+
+---
+
+## Running Tests, Linting & Pre-commit
+
+CI runs across Linux, macOS, Windows (`CGO_ENABLED=0` and `CGO_ENABLED=1`), and `pre-commit` on Ubuntu:
+
+```sh
+# Run tests (with race detector on supported hosts)
+go test -race ./...
+
+# Vet and lint (uses .golangci.yml, including gosec & security rules)
+go vet ./...
+golangci-lint run --config=.golangci.yml --fix=false
+
+# Run Worker tests if touching worker/
+node --test worker/test/token.test.mjs
+
+# Run all configured pre-commit checks
+pre-commit run --all-files
 ```
 
 ---
 
-## Running tests
+## Code Style & Security Guidelines
 
-```sh
-go test ./...
-```
-
-Most tests run without credentials. The demo packages provide realistic test fixtures.
-
----
-
-## Code style
-
-- Standard `gofmt` / `goimports` formatting
-- `golangci-lint run` must pass — the CI pipeline enforces this
-- Keep functions small and focused; prefer explicit error propagation over panics
-- Add a comment only when the _why_ is non-obvious; avoid commenting the _what_
+- Standard `gofmt` formatting and clean modular helpers (keep functions concise and avoid duplicated logic)
+- `golangci-lint` (`.golangci.yml`) and `pre-commit` must pass without suppression unless explicitly justified
+- Never trust remote strings in TUI/logs/D-Bus metadata: sanitize with `provider.Clean`, validate upstream URLs (`https://` or loopback HTTP), bound `io.Reader` / image decodes, and avoid leaking `Authorization` or user tokens across HTTP redirects
+- Add or update unit/fuzz tests alongside behavioral or security fixes
+- Comment the non-obvious *why*, not the *what*
 
 ---
 
 ## Submitting a PR
 
-1. Fork the repository and create a feature branch
-2. Write or update tests where appropriate
-3. Run `go build ./...` and `go test ./...` locally
-4. Open a PR — describe **what** you changed and **why**
-5. For large features, open an issue first to discuss the approach
-
-We review PRs as soon as we can. Feel free to ping in the issue thread if you don't hear back within a week.
+1. Fork the repository and branch from `main`
+2. Make focused changes with tests covering new behavior or bug fixes
+3. Run `go vet ./...`, `golangci-lint run`, and `go test -race ./...` locally
+4. Open a pull request describing **what** changed, **why**, and how you verified it
+5. For major features or new music providers, open an issue first to coordinate design

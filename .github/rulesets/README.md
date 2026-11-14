@@ -24,9 +24,14 @@ Targets `refs/heads/main`.
 | Force push | ❌ blocked |
 | Required reviews | 1 approver, stale reviews dismissed on push |
 | Review thread resolution | required before merge |
-| Required status checks | `test` (CI workflow job) |
+| Required status checks | `test` (legacy check context in JSON; current CI jobs in `.github/workflows/ci.yml` are `pre-commit`, `build-vet-test-linux`, `build-vet-test-macos`, and `build-vet-test-windows`) |
 | Linear history | required (no merge commits) |
 
+> **Note:** After importing `protect-main.json`, update the required status checks
+> in **Settings → Rules → Rulesets** to match the active `.github/workflows/ci.yml`
+> check names (`pre-commit`, `build-vet-test-linux`, `build-vet-test-macos`,
+> `build-vet-test-windows`).
+>
 > **bypass_actors**: Repository role "Admin" (`actor_id: 5`) can bypass all
 > rules. Verify or adjust this in the UI after import — the actor ID may differ
 > for organisation-level roles.
