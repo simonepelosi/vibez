@@ -1,59 +1,54 @@
 # Roadmap
 
-This document tracks planned features and integrations for vibez.  
-Items are roughly ordered by expected implementation complexity.
+This document tracks implemented milestones and planned features for **vibez**.
 
 ---
 
-## In progress
+## Shipped Highlights
 
-- **MPRIS icon** — resolve the GIO / GTK icon-theme lookup for the MPRIS notification
-- **Demo mode** — `--demo` flag for credential-free UI development
+- **In-process Widevine CDM & native audio sinks** — zero Chrome/Playwright/Node.js dependencies across Linux (GStreamer), macOS (Core Audio), and Windows (Media Foundation + `waveOut`)
+- **Offline Local Mode (`--local`) & Hybrid Lossless Mode (`--hybrid`)** — recursive library indexing, format support across platforms, and automatic ISRC/metadata lossless substitution inside Apple Music queues
+- **10-band Parametric Equalizer (`e`)** — real-time native biquad / GStreamer filtering persisted to config
+- **Synced Lyrics (`y`)** — LRCLIB integration with line & word highlighting and lyric-to-timestamp seeking
+- **AI-powered Vibe Mode (`v`)** — automatic detection of local LLM runtimes (Ollama, LM Studio, `llama.cpp`) with transparent fallback to the built-in keyword mood planner
+- **Discovery (`d`) & Radio (`R`) Modes** — adjustable similarity engine and track-seeded endless stations
+- **System Integration** — Linux MPRIS D-Bus + desktop icon/entry, Windows SMTC, Discord Rich Presence, Last.fm scrobbling, `--demo` mode, custom JSON themes, and verified SHA-256 self-updater
 
 ---
 
 ## Planned
 
-### Local tracks
+### Spotify provider
 
-Stream audio files from your local filesystem without any external service account.
+Full-track streaming and library browsing via Spotify:
 
-- M4A, FLAC, MP3 support on all platforms; OGG on Linux only (GStreamer)
-- Auto-scan a configured music directory and surface tracks in the Library panel
-- Works offline; no DRM or authentication required
+- OAuth 2.0 PKCE authentication flow (no client secret needed)
+- Search, library, and playlist browsing via Spotify Web API
+- Playback via Spotify Connect or `librespot` integration (Spotify Premium required)
 
-### Spotify
+### YouTube Music provider
 
-Full-track streaming via Spotify's API.
+Catalog search, playlists, and native audio streaming for YouTube Music.
 
-- OAuth 2.0 PKCE flow (no client secret needed)
-- Search, library, playlists via Spotify Web API
-- Playback through Spotify Connect or librespot (open-source client)
-- Requires a Spotify Premium subscription
+### Deezer provider
 
-### Deezer
+Full-track streaming via Deezer's API (OAuth 2.0 flow + search/library/playlists).
 
-Full-track streaming via Deezer's API.
+### Tidal provider
 
-- OAuth 2.0 authorisation code flow
-- Search, library, playlists via Deezer REST API
-- Requires a Deezer Premium subscription
+Catalog search, playlists, and lossless playback tiers via Tidal API.
 
-### Tidal
+### Standalone desktop track-change notifications
 
-Full-track streaming via Tidal's API.
-
-- OAuth 2.0 authorisation code flow
-- HiFi / MQA quality tiers where the subscription supports them
-- Search, library, playlists, mixes via Tidal API v2
+Native OS toast notifications (`org.freedesktop.Notifications` / `NSUserNotification` / Windows Toast) on track transitions, independent of MPRIS/SMTC media widgets.
 
 ---
 
-## Ideas / not yet scoped
+## Ideas / Future Exploration
 
-- **mpd protocol bridge** — let `ncmpcpp` and other mpd clients control vibez
-- **Keyboard macro recorder** — record and replay complex key sequences
+- **`mpd` protocol bridge** — allow `ncmpcpp` and other `mpd` clients to control vibez playback and queues
+- **Keyboard macro recorder** — record and replay custom key sequences
 
 ---
 
-If you'd like to work on any of these, please open an issue first so we can coordinate.
+If you'd like to help build any of these, open an issue first so we can align on the design.
