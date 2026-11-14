@@ -3,6 +3,7 @@
 package browserless
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -137,6 +138,8 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	return s, nil
 }
 
+var defaultUpstreamClient = &http.Client{Timeout: 15 * time.Second}
+
 func (s *StreamServer) upstreamClient() *http.Client {
 	if s.httpClient != nil {
 		return s.httpClient
@@ -144,7 +147,7 @@ func (s *StreamServer) upstreamClient() *http.Client {
 	if s.licClient != nil {
 		return s.licClient.HTTPClient()
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return defaultUpstreamClient
 }
 
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
@@ -610,6 +613,29 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 
+	type segResult struct {
+		aacData []byte
+		stage   string
+		err     error
+	}
+
+	lookCtx, cancelLook := context.WithCancel(ctx)
+	var lookWg sync.WaitGroup
+	defer func() {
+		cancelLook()
+		lookWg.Wait()
+	}()
+
+	fetchSeg := func(fetchCtx context.Context, idx int) segResult {
+		if idx == 0 {
+			data, stage, err := s.getOrFetchSegment0(fetchCtx, client, st)
+			return segResult{aacData: data, stage: stage, err: err}
+		}
+		data, stage, err := s.fetchAndDecryptSegment(fetchCtx, client, st, st.segments[idx])
+		return segResult{aacData: data, stage: stage, err: err}
+	}
+
+	var nextCh <-chan segResult
 	for i := startSeg; i < len(st.segments); i++ {
 		select {
 		case <-ctx.Done():
@@ -617,28 +643,33 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		var aacData []byte
-		if i == 0 {
-			var stage string
-			var err error
-			aacData, stage, err = s.getOrFetchSegment0(ctx, client, st)
-			if err != nil {
-				fail(i, stage, err)
-				return
-			}
+		var res segResult
+		if nextCh != nil {
+			res = <-nextCh
+			nextCh = nil
 		} else {
-			var stage string
-			var err error
-			aacData, stage, err = s.fetchAndDecryptSegment(ctx, client, st, st.segments[i])
-			if err != nil {
-				fail(i, stage, err)
+			res = fetchSeg(ctx, i)
+		}
+		if res.err != nil {
+			if ctx.Err() != nil {
 				return
 			}
+			fail(i, res.stage, res.err)
+			return
+		}
+
+		if i+1 < len(st.segments) && !st.raw {
+			nextIdx := i + 1
+			ch := make(chan segResult, 1)
+			lookWg.Go(func() {
+				ch <- fetchSeg(lookCtx, nextIdx)
+			})
+			nextCh = ch
 		}
 
 		// Write to HTTP client (GStreamer). A failed write means the client
 		// has gone, so there is nobody left to abort for; log it only.
-		if _, err := w.Write(aacData); err != nil {
+		if _, err := w.Write(res.aacData); err != nil {
 			if ctx.Err() == nil && s.onLog != nil {
 				s.onLog(fmt.Sprintf("browserless stream: %s: segment %d/%d: write: %v", st.trackID, i+1, len(st.segments), err))
 			}
@@ -691,15 +722,20 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 	if st.raw {
 		return segData, "", nil
 	}
+	var cdmScratch cdm.DecryptScratch
+	var cdmSubs []cdm.Subsample
 	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
-		cdmSubs := make([]cdm.Subsample, len(subs))
+		if cap(cdmSubs) < len(subs) {
+			cdmSubs = make([]cdm.Subsample, len(subs))
+		}
+		cdmSubs = cdmSubs[:len(subs)]
 		for si, sb := range subs {
 			cdmSubs[si] = cdm.Subsample{
 				ClearBytes:  sb.ClearBytes,
 				CipherBytes: sb.CipherBytes,
 			}
 		}
-		return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
+		return s.cdmEngine.DecryptSubsamplesReuse(&cdmScratch, kid, iv, input, cdmSubs)
 	})
 	if err != nil {
 		return nil, "decrypt", err
@@ -770,7 +806,7 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 			continue
 		}
 
-		segData, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+		segData, err := readBoundedBody(resp.Body, max(resp.ContentLength, length), maxBytes)
 		_ = resp.Body.Close()
 		if err != nil {
 			lastStage = "read"
@@ -787,6 +823,16 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 	}
 
 	return nil, lastStage, lastErr
+}
+
+func readBoundedBody(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
+	hint := min(max(sizeHint, 0), min(maxBytes, maxMediaSegmentSize))
+	var buf bytes.Buffer
+	if hint > 0 {
+		buf.Grow(int(hint))
+	}
+	_, err := buf.ReadFrom(io.LimitReader(r, maxBytes+1))
+	return buf.Bytes(), err
 }
 
 // Close terminates the local HTTP stream server and waits for active stream

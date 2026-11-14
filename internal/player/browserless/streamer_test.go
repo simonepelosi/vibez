@@ -432,3 +432,96 @@ func TestFetchSegmentWithRetry_LongRawUploadBypasses64MBLimit(t *testing.T) {
 		t.Errorf("len(data) = %d, want 100", len(data))
 	}
 }
+
+type blockingSegmentWriter struct {
+	hdr        http.Header
+	code       int
+	buf        bytes.Buffer
+	firstWrite chan struct{}
+	waitFor    <-chan struct{}
+	writes     atomic.Int32
+}
+
+func (w *blockingSegmentWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = make(http.Header)
+	}
+	return w.hdr
+}
+
+func (w *blockingSegmentWriter) WriteHeader(code int) { w.code = code }
+
+func (w *blockingSegmentWriter) Write(p []byte) (int, error) {
+	if w.writes.Add(1) == 1 {
+		close(w.firstWrite)
+		<-w.waitFor
+	}
+	return w.buf.Write(p)
+}
+
+func TestHandleStreamLookaheadFetchesNextSegmentDuringWrite(t *testing.T) {
+	seg1Requested := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "seg1.mp4") {
+			select {
+			case <-seg1Requested:
+			default:
+				close(seg1Requested)
+			}
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(upstream.Close)
+
+	seg0AAC := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0xbf, 0xfc, 0x21}
+	var res streamResult
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID: "123",
+				baseURI: upstream.URL + "/",
+				segments: []segmentRef{
+					{uri: "seg0.mp4", duration: 6.0},
+					{uri: "seg1.mp4", duration: 6.0},
+				},
+				seg0AAC: seg0AAC,
+			},
+		},
+		onFail: func(id string, err error) { res.failID, res.failErr = id, err },
+	}
+
+	bw := &blockingSegmentWriter{
+		firstWrite: make(chan struct{}),
+		waitFor:    seg1Requested,
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/stream/s1/tok.aac", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { res.panicked = recover() }()
+		s.handleStream(bw, req)
+	}()
+
+	select {
+	case <-bw.firstWrite:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment 0 write to begin")
+	}
+
+	// seg1 must be fetched via lookahead BEFORE the blocked segment 0 write finishes.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleStream blocked: segment 1 lookahead did not run concurrently with segment 0 write")
+	}
+
+	if !bytes.Equal(bw.buf.Bytes(), seg0AAC) {
+		t.Errorf("written bytes = %x, want %x", bw.buf.Bytes(), seg0AAC)
+	}
+	if res.failErr == nil || !strings.Contains(res.failErr.Error(), "segment 2/2: fetch: status 403") {
+		t.Errorf("onFail error = %v, want segment 2/2 403 failure after segment 0 flushed", res.failErr)
+	}
+}

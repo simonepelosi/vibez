@@ -136,6 +136,14 @@ type Subsample struct {
 	CipherBytes uint32
 }
 
+// DecryptScratch holds reusable per-segment CGo and output buffers for
+// DecryptSubsamplesReuse, avoiding per-sample heap allocations.
+type DecryptScratch struct {
+	out    []byte
+	clear  []C.uint16_t
+	cipher []C.uint32_t
+}
+
 // Decrypt decrypts an encrypted audio frame using AES-CTR (cenc).
 func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
 	return c.DecryptSubsamples(keyID, iv, ciphertext, nil)
@@ -143,6 +151,17 @@ func (c *CDM) Decrypt(keyID, iv, ciphertext []byte) ([]byte, error) {
 
 // DecryptSubsamples decrypts an audio frame with a subsample table using AES-CTR (cenc).
 func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample) ([]byte, error) {
+	var scratch DecryptScratch
+	if len(input) > 0 {
+		scratch.out = make([]byte, len(input))
+	}
+	return c.DecryptSubsamplesReuse(&scratch, keyID, iv, input, subsamples)
+}
+
+// DecryptSubsamplesReuse decrypts an audio frame into reusable scratch buffers.
+// The returned slice aliases scratch's internal buffer and remains valid until
+// the next DecryptSubsamplesReuse call using the same scratch.
+func (c *CDM) DecryptSubsamplesReuse(scratch *DecryptScratch, keyID, iv, input []byte, subsamples []Subsample) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -156,15 +175,25 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 		return nil, errors.New("cdm context is closed")
 	}
 
-	decrypted := make([]byte, len(input))
+	if scratch == nil {
+		scratch = &DecryptScratch{}
+	}
+	if cap(scratch.out) < len(input) {
+		scratch.out = make([]byte, len(input))
+	}
+	decrypted := scratch.out[:len(input)]
 	var outSize C.uint32_t
 
 	var clearPtr *C.uint16_t
 	var cipherPtr *C.uint32_t
-	numSubs := C.uint32_t(len(subsamples))
+	numSubs := C.uint32_t(len(subsamples)) //nolint:gosec // G115: subsample table fits uint32
 	if len(subsamples) > 0 {
-		clearBytes := make([]C.uint16_t, len(subsamples))
-		cipherBytes := make([]C.uint32_t, len(subsamples))
+		if cap(scratch.clear) < len(subsamples) {
+			scratch.clear = make([]C.uint16_t, len(subsamples))
+			scratch.cipher = make([]C.uint32_t, len(subsamples))
+		}
+		clearBytes := scratch.clear[:len(subsamples)]
+		cipherBytes := scratch.cipher[:len(subsamples)]
 		for i, sub := range subsamples {
 			clearBytes[i] = C.uint16_t(sub.ClearBytes)
 			cipherBytes[i] = C.uint32_t(sub.CipherBytes)

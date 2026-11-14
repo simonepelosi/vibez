@@ -15,6 +15,8 @@ type Subsample struct {
 	CipherBytes uint32
 }
 
+type DecryptScratch struct{}
+
 func New(_ string) (*CDM, error) {
 	return nil, errNoCgo
 }
@@ -36,6 +38,10 @@ func (c *CDM) Decrypt(_, _, _ []byte) ([]byte, error) {
 }
 
 func (c *CDM) DecryptSubsamples(_, _, _ []byte, _ []Subsample) ([]byte, error) {
+	return nil, errNoCgo
+}
+
+func (c *CDM) DecryptSubsamplesReuse(_ *DecryptScratch, _, _, _ []byte, _ []Subsample) ([]byte, error) {
 	return nil, errNoCgo
 }
 
