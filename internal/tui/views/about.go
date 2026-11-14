@@ -15,6 +15,7 @@ import (
 type AboutModel struct {
 	width  int
 	height int
+	sized  bool
 	status string
 }
 
@@ -23,6 +24,10 @@ func NewAbout() *AboutModel {
 }
 
 func (a *AboutModel) SetSize(w, h int) {
+	if a.sized && a.width == w && a.height == h {
+		return
+	}
+	a.sized = true
 	a.width = w
 	a.height = h
 }
