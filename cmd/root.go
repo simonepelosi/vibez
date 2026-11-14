@@ -158,7 +158,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	tokenErr := auth.ResolveDeveloperToken(cfg)
+	_, tokenErr := auth.ResolveDeveloperTokenAsync(cfg)
 	lastfm.ApplyEmbedded(cfg)
 
 	brokerLogs := auth.BrokerLogs()
