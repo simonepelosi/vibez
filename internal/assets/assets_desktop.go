@@ -19,7 +19,7 @@ func InstallIcon() string {
 		return ""
 	}
 	dst := filepath.Join(dir, "vibez.svg")
-	if err := os.WriteFile(dst, Icon, 0o644); err != nil { //nolint:gosec
+	if err := writeAtomicFile(dst, Icon, 0o644); err != nil {
 		return ""
 	}
 	return dst

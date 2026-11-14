@@ -123,3 +123,55 @@ func TestInstallIcon_RemovesLegacyIcon(t *testing.T) {
 		t.Errorf("legacy vibez.svg still present (stat err = %v)", err)
 	}
 }
+
+func TestValidXDGDir(t *testing.T) {
+	for _, bad := range []string{"", "relative/dir", "-dash/dir", "/bad\x00dir", "/bad\ndir"} {
+		if validXDGDir(bad) {
+			t.Errorf("validXDGDir(%q) = true, want false", bad)
+		}
+	}
+	if !validXDGDir("/tmp/xdg-data") {
+		t.Error("validXDGDir(/tmp/xdg-data) = false, want true")
+	}
+}
+
+func TestInstallIcon_HandlesGlobMetacharsInDataDirs(t *testing.T) {
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "xdg-home")
+	sysDir := filepath.Join(root, "share[1]")
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_DATA_DIRS", sysDir)
+	t.Setenv("PATH", "")
+
+	installed := filepath.Join(sysDir, "icons", "hicolor", "256x256", "apps", AppID+".png")
+	writeFile(t, installed, "png")
+	if got := InstallIcon(); got != installed {
+		t.Errorf("InstallIcon() = %q, want %q", got, installed)
+	}
+}
+
+func TestWriteAtomicFile_DoesNotFollowSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "victim.txt")
+	writeFile(t, outside, "untouched")
+
+	dest := filepath.Join(dir, "sub", "target.desktop")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(outside, dest); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := writeAtomicFile(dest, []byte("new-content"), 0o600); err != nil {
+		t.Fatalf("writeAtomicFile: %v", err)
+	}
+	gotOutside, err := os.ReadFile(outside) //nolint:gosec // test fixture path
+	if err != nil || string(gotOutside) != "untouched" {
+		t.Errorf("symlink target was modified: %q (err=%v)", gotOutside, err)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("dest should have replaced symlink cleanly with regular file, mode=%v err=%v", info.Mode(), err)
+	}
+}

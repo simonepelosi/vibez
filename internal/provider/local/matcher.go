@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,17 +55,21 @@ func NewMatcherContext(ctx context.Context, dir string) (*Matcher, error) {
 		byISRC: make(map[string][]provider.Track),
 		byMeta: make(map[metaKey][]provider.Track),
 	}
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	root := canonicalMusicDir(dir)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		if err != nil {
 			if os.IsPermission(err) {
-				return filepath.SkipDir
+				if d == nil || d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 		if !isLosslessFile(path) {

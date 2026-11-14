@@ -8,7 +8,9 @@ package local
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -43,19 +45,27 @@ func New(dir string) (*Provider, error) {
 func (p *Provider) Name() string          { return "Local" }
 func (p *Provider) IsAuthenticated() bool { return true }
 
-// scan walks dir recursively and indexes all supported audio files.
+// scan walks dir recursively and indexes all regular supported audio files,
+// skipping symlinks and special filesystem entries such as FIFOs and devices.
 func (p *Provider) scan() error {
 	p.tracks = nil
 	p.skipped = map[string]int{}
 	p.unreadable = 0
-	return filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
+	root := canonicalMusicDir(p.dir)
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if os.IsPermission(err) {
-				return filepath.SkipDir
+				if d == nil || d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
@@ -71,6 +81,37 @@ func (p *Provider) scan() error {
 		p.tracks = append(p.tracks, t)
 		return nil
 	})
+}
+
+func canonicalMusicDir(dir string) string {
+	cleaned := filepath.Clean(dir)
+	if abs, err := filepath.Abs(cleaned); err == nil {
+		cleaned = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+		return resolved
+	}
+	return cleaned
+}
+
+func openRegularAudioFile(path string) (*os.File, error) {
+	linfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !linfo.Mode().IsRegular() {
+		return nil, errors.New("skipping non-regular file")
+	}
+	f, err := os.Open(path) //nolint:gosec // path is a verified regular file under music dir
+	if err != nil {
+		return nil, err
+	}
+	finfo, err := f.Stat()
+	if err != nil || !finfo.Mode().IsRegular() || !os.SameFile(linfo, finfo) {
+		_ = f.Close()
+		return nil, errors.New("file changed or is not a regular file")
+	}
+	return f, nil
 }
 
 // ScanNotice reports what the last scan left out, or "" when every file in the
@@ -167,7 +208,7 @@ func supportedExtList() string {
 
 // trackFromFile reads metadata from an audio file and returns a Track.
 func trackFromFile(path string) (provider.Track, error) {
-	f, err := os.Open(path) //nolint:gosec // the path comes from user-configured music dir
+	f, err := openRegularAudioFile(path)
 	if err != nil {
 		return provider.Track{}, err
 	}
@@ -193,7 +234,7 @@ func trackFromFile(path string) (provider.Track, error) {
 			album = m.Album()
 		}
 		if m.Genre() != "" {
-			genres = []string{m.Genre()}
+			genres = []string{capTagString(m.Genre())}
 		}
 		trackNum, _ = m.Track()
 		discNum, _ = m.Disc()
@@ -204,9 +245,9 @@ func trackFromFile(path string) (provider.Track, error) {
 
 	return provider.Track{
 		ID:          fmt.Sprintf("local:%s", path),
-		Title:       provider.Clean(title),
-		Artist:      provider.Clean(artist),
-		Album:       provider.Clean(album),
+		Title:       provider.Clean(capTagString(title)),
+		Artist:      provider.Clean(capTagString(artist)),
+		Album:       provider.Clean(capTagString(album)),
 		Duration:    dur,
 		Genres:      provider.CleanAll(genres),
 		DiscNumber:  discNum,
@@ -215,6 +256,15 @@ func trackFromFile(path string) (provider.Track, error) {
 		LocalPath:   path,
 		LocalFormat: format,
 	}, nil
+}
+
+func capTagString(s string) string {
+	const maxTagRunes = 512
+	runes := []rune(s)
+	if len(runes) > maxTagRunes {
+		return string(runes[:maxTagRunes])
+	}
+	return s
 }
 
 // extractISRC inspects raw tag maps (ID3 TSRC/TRC, Vorbis/FLAC ISRC, MP4
