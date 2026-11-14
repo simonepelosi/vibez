@@ -1,10 +1,13 @@
 package auth
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // statusServer serves a fixed status code and records the request it saw.
@@ -214,5 +217,43 @@ func TestFirstResourceID_RejectsUnsafeCharacters(t *testing.T) {
 	dev, _ := statusServer(t, http.StatusOK)
 	if _, sf := checkTokens(srv.URL, dev.URL, "dev", "user"); sf != "" {
 		t.Errorf("storefront = %q, want empty for unsafe ID", sf)
+	}
+}
+
+func makeTestJWT(t *testing.T, exp int64) string {
+	t.Helper()
+	hdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT"}`))
+	claimsBytes, err := json.Marshal(map[string]any{"iss": "TEAM", "exp": exp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := base64.RawURLEncoding.EncodeToString(claimsBytes)
+	return hdr + "." + claims + ".c2lnbmF0dXJl"
+}
+
+func TestCheckTokens_ExpiredJWTFastPathSkipsNetwork(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	now := time.Unix(1700000000, 0)
+	expiredJWT := makeTestJWT(t, now.Add(-time.Minute).Unix())
+
+	if status, sf := checkTokensAt(srv.URL, srv.URL, expiredJWT, "user", now); status != DeveloperTokenRejected || sf != "" {
+		t.Errorf("checkTokensAt(expired) = (%v, %q), want (DeveloperTokenRejected, \"\")", status, sf)
+	}
+	if hits.Load() != 0 {
+		t.Errorf("network probes = %d, want 0 for locally expired JWT", hits.Load())
+	}
+
+	validJWT := makeTestJWT(t, now.Add(time.Hour).Unix())
+	if status, _ := checkTokensAt(srv.URL, srv.URL, validJWT, "user", now); status != TokensValid {
+		t.Errorf("checkTokensAt(valid) = %v, want TokensValid", status)
+	}
+	if hits.Load() == 0 {
+		t.Error("expected network probe for non-expired JWT")
 	}
 }

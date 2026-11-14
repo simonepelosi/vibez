@@ -125,7 +125,7 @@
       return new Promise((resolve, reject) => {
         const win = window.open(popupURL, "apple-music-service-view", features);
         if (!win) {
-          reject(new Error("Popup blocked by browser — allow popups for localhost and try again"));
+          reject(new PopupBlockedError("Popup blocked by browser — allow popups for localhost and try again"));
           return;
         }
         let settled = false;
@@ -187,7 +187,9 @@
       });
     }
 
-    async function connectAppleMusic() {
+    class PopupBlockedError extends Error {}
+
+    async function connectAppleMusic(autoStart = false) {
       const btn = document.getElementById("connectBtn");
       const btnLabel = document.getElementById("btnLabel");
       const status = document.getElementById("status");
@@ -215,6 +217,13 @@
         document.getElementById("successBox").style.display = "block";
         btnLabel.textContent = "Connected ✓";
       } catch (err) {
+        if (autoStart && err instanceof PopupBlockedError) {
+          status.className = "status";
+          status.textContent = "Click below to open Apple Music sign-in";
+          btn.disabled = false;
+          btnLabel.textContent = "Connect Apple Music";
+          return;
+        }
         status.className = "status error";
         status.textContent = "Error: " + (err.message || String(err));
         btn.disabled = false;
@@ -222,7 +231,12 @@
       }
     }
 
-    document.getElementById("connectBtn").addEventListener("click", connectAppleMusic);
+    document.getElementById("connectBtn").addEventListener("click", () => {
+      connectAppleMusic(false);
+    });
+    window.addEventListener("DOMContentLoaded", () => {
+      connectAppleMusic(true);
+    });
   </script>
 </body>
 </html>
