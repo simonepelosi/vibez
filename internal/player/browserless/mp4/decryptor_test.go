@@ -249,3 +249,74 @@ func TestDecryptSegmentSignedDataOffset(t *testing.T) {
 		t.Error("expected error for negative out-of-bounds offset, got nil")
 	}
 }
+
+func TestWriteADTSHeaderMatchesMakeADTSHeader(t *testing.T) {
+	cfg := AudioConfig{ObjectType: 2, FreqIndex: 4, ChanConfig: 2}
+	want := MakeADTSHeader(256, cfg)
+	var got [7]byte
+	WriteADTSHeader(got[:], 256, cfg)
+	if !bytes.Equal(got[:], want) {
+		t.Errorf("WriteADTSHeader = %x, want %x", got[:], want)
+	}
+}
+
+func TestDecryptSegmentMultiSamplePreservesOrder(t *testing.T) {
+	cfg := AudioConfig{ObjectType: 2, FreqIndex: 4, ChanConfig: 2}
+	samples := [][]byte{
+		bytes.Repeat([]byte{0x11}, 12),
+		bytes.Repeat([]byte{0x22}, 16),
+		bytes.Repeat([]byte{0x33}, 8),
+	}
+
+	var sencPayload bytes.Buffer
+	sencPayload.Write([]byte{0x00, 0x00, 0x00, 0x02}) // ver/flags: hasSubsamples
+	sencPayload.Write([]byte{0x00, 0x00, 0x00, 0x03}) // sample_count = 3
+	for i, s := range samples {
+		sencPayload.Write(bytes.Repeat([]byte{byte(i + 1)}, 8))
+		sencPayload.Write([]byte{0x00, 0x01, 0x00, 0x00}) // subCount=1, clear=0
+		var cipherLen [4]byte
+		binary.BigEndian.PutUint32(cipherLen[:], uint32(len(s))) //nolint:gosec // G115: small fixed test sample
+		sencPayload.Write(cipherLen[:])
+	}
+	sencBox := makeBox("senc", sencPayload.Bytes())
+
+	var trunPayload bytes.Buffer
+	trunPayload.Write([]byte{0x00, 0x00, 0x02, 0x01}) // data_offset_present | sample_size_present
+	trunPayload.Write([]byte{0x00, 0x00, 0x00, 0x03})
+	trunOffsetPos := trunPayload.Len()
+	trunPayload.Write([]byte{0x00, 0x00, 0x00, 0x00})
+	for _, s := range samples {
+		var sz [4]byte
+		binary.BigEndian.PutUint32(sz[:], uint32(len(s))) //nolint:gosec // G115: small fixed test sample
+		trunPayload.Write(sz[:])
+	}
+	trunBox := makeBox("trun", trunPayload.Bytes())
+
+	moofBox := makeBox("moof", makeBox("traf", append(append([]byte(nil), trunBox...), sencBox...)))
+	dataOffset := uint32(len(moofBox) + 8) //nolint:gosec // G115: test size fits uint32
+	trunIdx := bytes.Index(moofBox, []byte("trun"))
+	binary.BigEndian.PutUint32(moofBox[trunIdx+4+trunOffsetPos:trunIdx+8+trunOffsetPos], dataOffset)
+
+	var mdatBody []byte
+	for _, s := range samples {
+		mdatBody = append(mdatBody, s...)
+	}
+	seg := append([]byte(nil), moofBox...)
+	seg = append(seg, makeBox("mdat", mdatBody)...)
+
+	var want []byte
+	for _, s := range samples {
+		want = append(want, MakeADTSHeader(len(s), cfg)...)
+		want = append(want, s...)
+	}
+
+	got, err := DecryptSegment(seg, make([]byte, 16), cfg, func(_, _, input []byte, _ []Subsample) ([]byte, error) {
+		return input, nil
+	})
+	if err != nil {
+		t.Fatalf("DecryptSegment: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("multi-sample output mismatch: len=%d, want=%d", len(got), len(want))
+	}
+}
