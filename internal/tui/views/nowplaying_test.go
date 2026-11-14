@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // --- FormatDuration ---
@@ -151,5 +154,32 @@ func TestRenderProgressBar_StaticPattern(t *testing.T) {
 	b := RenderProgressBar(30*time.Second, 60*time.Second, 20)
 	if a != b {
 		t.Error("RenderProgressBar: pattern should be static across calls")
+	}
+}
+
+func TestRenderGlowTitle_VisualWidthAndANSI(t *testing.T) {
+	title := "vibez ♪"
+	for step := range 16 {
+		got := RenderGlowTitle(title, step)
+		if ansi.Strip(got) != title {
+			t.Fatalf("step %d: stripped = %q, want %q", step, ansi.Strip(got), title)
+		}
+		if w := lipgloss.Width(got); w != lipgloss.Width(title) {
+			t.Fatalf("step %d: width = %d, want %d", step, w, lipgloss.Width(title))
+		}
+		if !strings.Contains(got, "\x1b[3;38;2;") {
+			t.Fatalf("step %d: expected italic truecolor SGR in %q", step, got)
+		}
+	}
+}
+
+func TestRenderProgressBar_VisualWidthAndColors(t *testing.T) {
+	for _, w := range []int{1, 10, 35} {
+		for _, pos := range []time.Duration{0, 45 * time.Second, 90 * time.Second} {
+			got := RenderProgressBar(pos, 90*time.Second, w)
+			if lw := lipgloss.Width(got); lw != w {
+				t.Fatalf("w=%d pos=%v: lipgloss.Width = %d, want %d", w, pos, lw, w)
+			}
+		}
 	}
 }

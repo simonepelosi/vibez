@@ -2,6 +2,7 @@ package views
 
 import (
 	"fmt"
+	"image/color"
 	"math"
 	"strings"
 
@@ -80,6 +81,39 @@ func (m *EQModel) barHeight() int {
 	return max(eqMinBarH, min(eqMaxBarH, available))
 }
 
+type eqGlyphSet struct {
+	sep   string
+	knob  string
+	fill  string
+	empty string
+}
+
+type eqRenderStyles struct {
+	colW              int
+	barH              int
+	freqStyle         lipgloss.Style
+	gainStyle         lipgloss.Style
+	selectedFreqStyle lipgloss.Style
+	selectedGainStyle lipgloss.Style
+	colStyle          lipgloss.Style
+	glyphs            map[color.Color]eqGlyphSet
+}
+
+func (s *eqRenderStyles) glyphsFor(c color.Color) eqGlyphSet {
+	if g, ok := s.glyphs[c]; ok {
+		return g
+	}
+	st := lipgloss.NewStyle().Foreground(c)
+	g := eqGlyphSet{
+		sep:   st.Render("─"),
+		knob:  st.Render("█"),
+		fill:  st.Render("│"),
+		empty: st.Render(" "),
+	}
+	s.glyphs[c] = g
+	return g
+}
+
 func (m *EQModel) View() string {
 	if len(m.bands) == 0 {
 		return ""
@@ -97,9 +131,22 @@ func (m *EQModel) View() string {
 	colW := max(7, (m.width-2)/len(m.bands))
 	barH := m.barHeight()
 
-	var cols []string
+	freqStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorMuted)
+	gainStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorFg)
+	rs := &eqRenderStyles{
+		colW:              colW,
+		barH:              barH,
+		freqStyle:         freqStyle,
+		gainStyle:         gainStyle,
+		selectedFreqStyle: freqStyle.Foreground(styles.ColorPrimary).Bold(true),
+		selectedGainStyle: gainStyle.Foreground(styles.ColorPrimary).Bold(true),
+		colStyle:          lipgloss.NewStyle().Width(colW).Align(lipgloss.Center),
+		glyphs:            make(map[color.Color]eqGlyphSet, 4),
+	}
+
+	cols := make([]string, len(m.bands))
 	for i, b := range m.bands {
-		cols = append(cols, m.renderBand(i, b, colW, barH))
+		cols[i] = m.renderBand(i, b, rs)
 	}
 
 	bands := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
@@ -112,7 +159,8 @@ func (m *EQModel) View() string {
 	)
 }
 
-func (m *EQModel) renderBand(idx int, b player.EQBand, colW, barH int) string {
+func (m *EQModel) renderBand(idx int, b player.EQBand, rs *eqRenderStyles) string {
+	barH := rs.barH
 	filled := int(math.Round((b.Gain - eqMinGain) / (eqMaxGain - eqMinGain) * float64(barH)))
 	zeroLine := barH / 2
 
@@ -128,42 +176,43 @@ func (m *EQModel) renderBand(idx int, b player.EQBand, colW, barH int) string {
 		barColor = styles.ColorPrimary
 	}
 
-	var rows []string
+	g := rs.glyphsFor(barColor)
+	var bar strings.Builder
+	bar.Grow((barH + 1) * (len(g.knob) + 1))
 	for row := barH; row >= 0; row-- {
-		var ch string
+		if row < barH {
+			bar.WriteByte('\n')
+		}
 		switch {
 		case row == zeroLine:
-			ch = "─"
+			bar.WriteString(g.sep)
 		case row == filled:
-			ch = "█"
+			bar.WriteString(g.knob)
 		case (b.Gain > 0 && row <= filled && row > zeroLine) ||
 			(b.Gain < 0 && row >= filled && row < zeroLine):
-			ch = "│"
+			bar.WriteString(g.fill)
 		default:
-			ch = " "
+			bar.WriteString(g.empty)
 		}
-		rows = append(rows, lipgloss.NewStyle().Foreground(barColor).Render(ch))
 	}
-
-	bar := strings.Join(rows, "\n")
 
 	freq := formatFreq(b.Frequency)
 	gain := fmt.Sprintf("%+.1f", b.Gain)
 
-	freqStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorMuted)
-	gainStyle := lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Foreground(styles.ColorFg)
+	freqStyle := rs.freqStyle
+	gainStyle := rs.gainStyle
 	if selected {
-		freqStyle = freqStyle.Foreground(styles.ColorPrimary).Bold(true)
-		gainStyle = gainStyle.Foreground(styles.ColorPrimary).Bold(true)
+		freqStyle = rs.selectedFreqStyle
+		gainStyle = rs.selectedGainStyle
 	}
 
 	col := lipgloss.JoinVertical(lipgloss.Center,
 		gainStyle.Render(gain),
-		bar,
+		bar.String(),
 		freqStyle.Render(freq),
 	)
 
-	return lipgloss.NewStyle().Width(colW).Align(lipgloss.Center).Render(col)
+	return rs.colStyle.Render(col)
 }
 
 func formatFreq(f float64) string {

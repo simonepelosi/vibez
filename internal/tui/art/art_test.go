@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -217,4 +218,36 @@ func FuzzDecodeBounded(f *testing.F) {
 	f.Fuzz(func(_ *testing.T, data []byte) {
 		_, _ = decodeBounded(bytes.NewReader(data), 1<<20)
 	})
+}
+
+func TestRenderHalfBlocks_PixelSourcesAndSubImage(t *testing.T) {
+	// *image.RGBA fast path
+	rgba := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	rgba.SetRGBA(0, 0, color.RGBA{R: 200, G: 10, B: 20, A: 255})
+	rgba.SetRGBA(1, 0, color.RGBA{R: 200, G: 10, B: 20, A: 255})
+	rgba.SetRGBA(0, 1, color.RGBA{R: 10, G: 200, B: 30, A: 255})
+	rgba.SetRGBA(1, 1, color.RGBA{R: 10, G: 200, B: 30, A: 255})
+	if lines := RenderHalfBlocks(rgba, Size{Width: 2, Height: 1}); len(lines) != 1 ||
+		!strings.Contains(lines[0], "38;2;200;10;20") ||
+		!strings.Contains(lines[0], "48;2;10;200;30") ||
+		lipgloss.Width(lines[0]) != 2 {
+		t.Fatalf("unexpected RGBA output: %#v", lines)
+	}
+
+	// Translucent *image.NRGBA matches color.NRGBA premultiplication
+	nrgba := image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	nrgba.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 0, B: 0, A: 128})
+	nrgba.SetNRGBA(0, 1, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
+	r16, _, _, _ := nrgba.At(0, 0).RGBA()
+	wantRed := strings.Contains(RenderHalfBlocks(nrgba, Size{Width: 1, Height: 1})[0], "38;2;"+strconv.Itoa(int(r16>>8))+";0;0")
+	if !wantRed {
+		t.Fatalf("translucent NRGBA did not premultiply to %d", r16>>8)
+	}
+
+	// Non-zero Bounds().Min SubImage + upscaling
+	sub := rgba.SubImage(image.Rect(1, 1, 2, 2))
+	up := RenderHalfBlocks(sub, Size{Width: 4, Height: 2})
+	if len(up) != 2 || ansi.Strip(up[0]) != "▀▀▀▀" || !strings.Contains(up[0], "38;2;10;200;30") {
+		t.Fatalf("unexpected SubImage upscale output: %#v", up)
+	}
 }
