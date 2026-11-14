@@ -34,7 +34,7 @@ func TestNormalizeCLIAgent(t *testing.T) {
 }
 
 func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
-	t.Run("omp defaults to smol and isolates workspace", func(t *testing.T) {
+	t.Run("omp isolates workspace and omits --model when unset", func(t *testing.T) {
 		tmp := t.TempDir()
 		args, stdin, env, err := prepareCLIInvocation("omp", tmp, "gemini-3-flash-preview", "SYS", "USER_PROMPT")
 		if err != nil {
@@ -57,8 +57,10 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Contains(defaultArgs, "--model=smol") {
-			t.Errorf("omp default args %v should use --model=smol", defaultArgs)
+		for _, arg := range defaultArgs {
+			if strings.HasPrefix(arg, "--model") {
+				t.Errorf("omp default args %v must omit --model so omp uses its configured default", defaultArgs)
+			}
 		}
 	})
 
@@ -135,15 +137,20 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		}
 	})
 
-	t.Run("opencode sets pure dir and denies permissions", func(t *testing.T) {
+	t.Run("opencode runs with permission deny config and without unsupported flags", func(t *testing.T) {
 		tmp := t.TempDir()
 		args, _, env, err := prepareCLIInvocation("opencode", tmp, "local/model", "SYS", "USER")
 		if err != nil {
 			t.Fatalf("prepareCLIInvocation(opencode): %v", err)
 		}
-		for _, want := range []string{"run", "--format", "default", "--pure", "--dir", tmp, "--model", "local/model"} {
+		for _, want := range []string{"run", "--format", "default", "--model", "local/model"} {
 			if !slices.Contains(args, want) {
 				t.Errorf("opencode args %v missing %q", args, want)
+			}
+		}
+		for _, forbidden := range []string{"--pure", "--dir", tmp} {
+			if slices.Contains(args, forbidden) {
+				t.Errorf("opencode args %v must not contain %q", args, forbidden)
 			}
 		}
 		if !slices.Contains(env, `OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`) {
