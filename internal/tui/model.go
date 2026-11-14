@@ -194,10 +194,11 @@ type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
 
 type artworkCache struct {
-	url      string
-	img      image.Image
-	rendered map[art.Size][]string
-	failed   bool
+	url           string
+	img           image.Image
+	rendered      map[art.Size][]string
+	renderedOrder []art.Size
+	failed        bool
 }
 
 // saveVolumeMsg is returned by volume-change commands to persist the new
@@ -772,12 +773,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.artwork.failed = true
 			m.artwork.img = nil
 			m.artwork.rendered = map[art.Size][]string{}
+			m.artwork.renderedOrder = nil
 			m.appendLog(fmt.Sprintf("[art] artwork unavailable: %v", msg.err))
 			break
 		}
 		m.artwork.img = msg.img
 		m.artwork.failed = false
 		m.artwork.rendered = map[art.Size][]string{}
+		m.artwork.renderedOrder = nil
 
 	case songRatingMsg:
 		// Update rating state to match what Apple Music reports.
@@ -3402,8 +3405,10 @@ func (m *Model) View() tea.View {
 //	└─────────────────────────────────────┘
 func (m *Model) renderBoxLayout() string {
 	inner := m.width - 2 // visual width between the │ border chars
+	contentW := inner - 2
 	npH := m.nowPlayingHeight()
-	panelH := m.panelHeight()
+	status := m.statusLines(contentW)
+	panelH := m.panelHeightWithStatus(len(status))
 
 	splitW := inner / 2          // left column inner width (includes padding)
 	rightW := inner - splitW - 1 // right column inner width (-1 for │ divider)
@@ -3416,97 +3421,116 @@ func (m *Model) renderBoxLayout() string {
 	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
 	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
+	horiz := strings.Repeat("─", inner)
 	var sb strings.Builder
+	sb.Grow(max(512, m.width*m.height*2))
 
 	// ── Top border ──
-	sb.WriteString("┌" + strings.Repeat("─", inner) + "┐\n")
+	sb.WriteString("┌")
+	sb.WriteString(horiz)
+	sb.WriteString("┐\n")
 
 	// ── Header ──
-	sb.WriteString(m.renderBoxHeader(inner) + "\n")
+	sb.WriteString(m.renderBoxHeader(inner))
+	sb.WriteByte('\n')
 
 	// ── Header divider ──
-	sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+	sb.WriteString("├")
+	sb.WriteString(horiz)
+	sb.WriteString("┤\n")
 
 	// ── Now Playing ──
-	for _, line := range m.nowPlayingLines(inner-2, npH) {
-		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+	for _, line := range m.nowPlayingLines(contentW, npH) {
+		writeBoxRow(&sb, line, contentW)
 	}
 
 	// ── Split or full divider ──
 	if fullWidth {
-		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+		sb.WriteString("├")
+		sb.WriteString(horiz)
+		sb.WriteString("┤\n")
 	} else {
-		sb.WriteString("├" + strings.Repeat("─", splitW) + "┬" + strings.Repeat("─", rightW) + "┤\n")
+		sb.WriteString("├")
+		writeRule(&sb, horiz, splitW)
+		sb.WriteString("┬")
+		writeRule(&sb, horiz, rightW)
+		sb.WriteString("┤\n")
 	}
 
 	// ── Panel content ──
 	switch {
 	case m.debugView:
-		for _, line := range m.debugLogLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.debugLogLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case m.mode == modeSearch:
-		for _, line := range m.searchLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.searchLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case m.mode == modeCommand:
-		for _, line := range m.commandLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.commandLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case libraryActive:
-		m.library.SetSize(inner-2, panelH)
+		m.library.SetSize(contentW, panelH)
 		for _, line := range toLines(m.library.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case queueActive:
-		m.queue.m.SetSize(inner-2, panelH)
+		m.queue.m.SetSize(contentW, panelH)
 		for _, line := range toLines(m.queue.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case lyricsActive:
-		m.lyricsP.SetSize(inner-2, panelH)
+		m.lyricsP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.lyricsP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case feedActive:
-		m.feedP.SetSize(inner-2, panelH)
+		m.feedP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.feedP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case eqActive:
-		m.eqP.SetSize(inner-2, panelH)
+		m.eqP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.eqP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case aboutActive:
-		m.aboutP.SetSize(inner-2, panelH)
+		m.aboutP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.aboutP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	default:
 		qLines := m.queuePanelLines(splitW-2, panelH)
 		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep)
 		for i := range panelH {
-			left := safeIdx(qLines, i)
-			right := safeIdx(vLines, i)
-			sb.WriteString("│ " + padRight(left, splitW-2) + " │ " + padRight(right, rightW-2) + " │\n")
+			writeSplitBoxRow(&sb, safeIdx(qLines, i), splitW-2, safeIdx(vLines, i), rightW-2)
 		}
 	}
 
 	// ── Join or full divider ──
 	if fullWidth {
-		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+		sb.WriteString("├")
+		sb.WriteString(horiz)
+		sb.WriteString("┤\n")
 	} else {
-		sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
+		sb.WriteString("├")
+		writeRule(&sb, horiz, splitW)
+		sb.WriteString("┴")
+		writeRule(&sb, horiz, rightW)
+		sb.WriteString("┤\n")
 	}
 
 	// ── Status bar (context/mode then playback, each wrapped as needed) ──
-	for _, line := range m.statusLines(inner - 2) {
-		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+	for _, line := range status {
+		writeBoxRow(&sb, line, contentW)
 	}
 
 	// ── Bottom border ──
-	sb.WriteString("└" + strings.Repeat("─", inner) + "┘")
+	sb.WriteString("└")
+	sb.WriteString(horiz)
+	sb.WriteString("┘")
 
 	return sb.String()
 }
@@ -3576,7 +3600,16 @@ func (m *Model) renderBoxHeader(inner int) string {
 	leftPad := titleStart - bearW
 	rightPad := max(1, contentW-bearW-leftPad-titleW-rightW)
 
-	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + rightStr + " │"
+	var sb strings.Builder
+	sb.Grow(len(bear) + leftPad + len(title) + rightPad + len(rightStr) + 8)
+	sb.WriteString("│ ")
+	sb.WriteString(bear)
+	writeSpaces(&sb, leftPad)
+	sb.WriteString(title)
+	writeSpaces(&sb, rightPad)
+	sb.WriteString(rightStr)
+	sb.WriteString(" │")
+	return sb.String()
 }
 
 // artModeActive reports whether the now-playing panel is currently showing
@@ -3646,10 +3679,17 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 	if artLines == nil && m.artwork.img != nil {
 		const maxRenderedArtworkSizes = 16
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
-			m.artwork.rendered = map[art.Size][]string{}
+			if len(m.artwork.renderedOrder) > 0 {
+				oldest := m.artwork.renderedOrder[0]
+				m.artwork.renderedOrder = m.artwork.renderedOrder[1:]
+				delete(m.artwork.rendered, oldest)
+			} else {
+				m.artwork.rendered = map[art.Size][]string{}
+			}
 		}
 		artLines = m.renderArt(m.artwork.img, size)
 		m.artwork.rendered[size] = artLines
+		m.artwork.renderedOrder = append(m.artwork.renderedOrder, size)
 	}
 
 	lines := make([]string, 0, h)
@@ -4015,37 +4055,42 @@ func (m *Model) queuePanelLines(w, h int) []string {
 	tracks := m.queue.m.Tracks()
 	playingIdx := playingQueueIdx(tracks, m.playerState.Track)
 
-	var trackLines []string
-	for i, t := range tracks {
-		idx := fmt.Sprintf("%*d. ", indexW, i+1)
-		label := t.Artist + " — " + t.Title
-		if i == playingIdx {
-			numStr := styles.ControlActive.Render(idx)
-			line := truncateStr(label, w-2-indexW-2)
-			trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
-		} else {
-			numStr := styles.QueueItemMuted.Render(idx)
-			line := truncateStr(label, w-2-indexW-2)
-			trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
-		}
-	}
-	if len(trackLines) == 0 {
-		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
-	}
-
 	// header + sep occupy 2 lines; remaining rows hold track entries.
 	visibleRows := max(0, h-2)
-	// Clamp offset so we never scroll past the end.
-	maxOffset := max(0, len(trackLines)-visibleRows)
-	if m.queueMiniOffset > maxOffset {
-		m.queueMiniOffset = maxOffset
-	}
-	visible := trackLines[m.queueMiniOffset:]
-	if len(visible) > visibleRows {
-		visible = visible[:visibleRows]
+
+	var trackLines []string
+	if total == 0 {
+		m.queueMiniOffset = 0
+		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
+		if visibleRows == 0 {
+			trackLines = nil
+		}
+	} else {
+		maxOffset := max(0, total-visibleRows)
+		if m.queueMiniOffset > maxOffset {
+			m.queueMiniOffset = maxOffset
+		}
+		end := min(total, m.queueMiniOffset+visibleRows)
+		trackLines = make([]string, 0, end-m.queueMiniOffset)
+		for i := m.queueMiniOffset; i < end; i++ {
+			t := tracks[i]
+			idx := fmt.Sprintf("%*d. ", indexW, i+1)
+			label := t.Artist + " — " + t.Title
+			if i == playingIdx {
+				numStr := styles.ControlActive.Render(idx)
+				line := truncateStr(label, w-2-indexW-2)
+				trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
+			} else {
+				numStr := styles.QueueItemMuted.Render(idx)
+				line := truncateStr(label, w-2-indexW-2)
+				trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
+			}
+		}
 	}
 
-	result := append([]string{headerLabel, sep}, visible...)
+	result := make([]string, 0, max(2, h))
+	result = append(result, headerLabel, sep)
+	result = append(result, trackLines...)
 	for len(result) < h {
 		result = append(result, "")
 	}
@@ -4297,11 +4342,68 @@ func (m *Model) statusLines(w int) []string {
 // which grow as hints wrap on a narrow terminal — so both are measured rather
 // than assumed.
 func (m *Model) panelHeight() int {
-	fixedOverhead := 6 + m.nowPlayingHeight() + len(m.statusLines(m.width-4))
+	return m.panelHeightWithStatus(len(m.statusLines(m.width - 4)))
+}
+
+func (m *Model) panelHeightWithStatus(statusCount int) int {
+	fixedOverhead := 6 + m.nowPlayingHeight() + statusCount
 	return max(3, m.height-fixedOverhead)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+const spaceChunk = "                                                                "
+
+func writeRule(sb *strings.Builder, horiz string, cols int) {
+	if cols <= 0 {
+		return
+	}
+	if n := cols * 3; n <= len(horiz) {
+		sb.WriteString(horiz[:n])
+		return
+	}
+	sb.WriteString(strings.Repeat("─", cols))
+}
+
+func writeSpaces(sb *strings.Builder, n int) {
+	for n >= len(spaceChunk) {
+		sb.WriteString(spaceChunk)
+		n -= len(spaceChunk)
+	}
+	if n > 0 {
+		sb.WriteString(spaceChunk[:n])
+	}
+}
+
+func writePadded(sb *strings.Builder, s string, w int) {
+	if w <= 0 {
+		return
+	}
+	sw := lipgloss.Width(s)
+	switch {
+	case sw > w:
+		sb.WriteString(ansi.Truncate(s, w, "…"))
+	case sw == w:
+		sb.WriteString(s)
+	default:
+		sb.WriteString(s)
+		writeSpaces(sb, w-sw)
+	}
+}
+
+func writeBoxRow(sb *strings.Builder, line string, w int) {
+	sb.WriteString("│ ")
+	writePadded(sb, line, w)
+	sb.WriteString(" │\n")
+}
+
+func writeSplitBoxRow(sb *strings.Builder, left string, lw int, right string, rw int) {
+	sb.WriteString("│ ")
+	writePadded(sb, left, lw)
+	sb.WriteString(" │ ")
+	writePadded(sb, right, rw)
+	sb.WriteString(" │\n")
+}
 
 // padRight pads s on the right with spaces to reach visual width w, and clips
 // it when it is wider. Clipping is the backstop that keeps an over-long line
@@ -4318,7 +4420,11 @@ func padRight(s string, w int) string {
 	case sw == w:
 		return s
 	default:
-		return s + strings.Repeat(" ", w-sw)
+		var sb strings.Builder
+		sb.Grow(len(s) + (w - sw))
+		sb.WriteString(s)
+		writeSpaces(&sb, w-sw)
+		return sb.String()
 	}
 }
 

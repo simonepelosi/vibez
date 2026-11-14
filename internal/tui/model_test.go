@@ -5106,3 +5106,35 @@ func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
 		t.Fatalf("typed CJK IME space query = %q, want %q", m.searchQuery, "久石譲 Summer")
 	}
 }
+
+func TestArtworkCache_FIFOEvictionPreservesRecentSizes(t *testing.T) {
+	m := newModel(nil)
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+	m.playerState.Track = &provider.Track{Title: "Art", ArtworkURL: "https://example.com/art.jpg"}
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	m.artwork = artworkCache{
+		url:      "https://example.com/art.jpg",
+		img:      img,
+		rendered: map[art.Size][]string{},
+	}
+
+	// Render 16 distinct sizes into cache (capacity is 16).
+	for i := range 16 {
+		m.height = 20 + i
+		_ = m.nowPlayingArtLines(80, 10+i)
+	}
+	firstSize := m.artwork.renderedOrder[0]
+	if len(m.artwork.rendered) != 16 {
+		t.Fatalf("cached sizes = %d, want 16", len(m.artwork.rendered))
+	}
+
+	// Adding a 17th size must evict only the oldest entry instead of wiping the cache.
+	_ = m.nowPlayingArtLines(80, 30)
+	if len(m.artwork.rendered) != 16 {
+		t.Fatalf("cached sizes after 17th = %d, want 16", len(m.artwork.rendered))
+	}
+	if _, ok := m.artwork.rendered[firstSize]; ok {
+		t.Fatalf("expected oldest size %+v to be evicted", firstSize)
+	}
+}

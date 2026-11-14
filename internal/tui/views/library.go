@@ -116,6 +116,7 @@ type LibraryModel struct {
 
 	width  int
 	height int
+	sized  bool
 }
 
 func NewLibrary(prov provider.Provider) *LibraryModel {
@@ -179,6 +180,10 @@ func (m *LibraryModel) Back() bool {
 }
 
 func (m *LibraryModel) SetSize(w, h int) {
+	if m.sized && m.width == w && m.height == h {
+		return
+	}
+	m.sized = true
 	m.width = w
 	m.height = h
 	listH := max(0, h-3)

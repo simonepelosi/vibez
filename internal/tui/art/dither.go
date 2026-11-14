@@ -2,12 +2,9 @@ package art
 
 import (
 	"image"
-	"image/draw"
 	"math"
 	"os"
-	"strings"
-
-	"charm.land/lipgloss/v2"
+	"unicode/utf8"
 )
 
 // ditherColors is the palette size the cover is reduced to before
@@ -43,20 +40,30 @@ func RenderDithered(img image.Image, size Size) []string {
 	out := atkinson(px, gw, gh, palette(px, ditherColors))
 
 	lines := make([]string, size.Height)
+	buf := make([]byte, 0, size.Width*44)
 	var sub [6]rgb
 	for row := range size.Height {
-		var sb strings.Builder
+		buf = buf[:0]
+		styled := false
+		var pFR, pFG, pFB, pBR, pBG, pBB uint8
 		for col := range size.Width {
 			for i := range 6 {
 				sub[i] = out[(row*3+i/2)*gw+col*2+i%2]
 			}
 			fg, bg, mask := fitPair(sub[:])
-			sb.WriteString(lipgloss.NewStyle().
-				Foreground(lipgloss.Color(hexOf(fg))).
-				Background(lipgloss.Color(hexOf(bg))).
-				Render(string(sextantRune(mask))))
+			fr, fgG, fb := rgbToUint8(fg)
+			br, bgG, bb := rgbToUint8(bg)
+			if !styled || fr != pFR || fgG != pFG || fb != pFB || br != pBR || bgG != pBG || bb != pBB {
+				buf = appendCellSGR(buf, fr, fgG, fb, br, bgG, bb)
+				pFR, pFG, pFB, pBR, pBG, pBB = fr, fgG, fb, br, bgG, bb
+				styled = true
+			}
+			buf = utf8.AppendRune(buf, sextantRune(mask))
 		}
-		lines[row] = sb.String()
+		if styled {
+			buf = append(buf, "\x1b[m"...)
+		}
+		lines[row] = string(buf)
 	}
 	return lines
 }
@@ -80,35 +87,22 @@ func dist2(a, b rgb) float64 {
 }
 
 // sampleGrid area-averages img into a gw × gh grid (the same box filter as
-// RenderHalfBlocks) so a heavily downscaled cover stays recognisable. The
-// image is converted to RGBA once up front: reading Pix directly is roughly
-// an order of magnitude faster than image.At on a decoded JPEG.
+// RenderHalfBlocks) so a heavily downscaled cover stays recognisable.
 func sampleGrid(img image.Image, gw, gh int) []rgb {
-	b := img.Bounds()
-	src, ok := img.(*image.RGBA)
-	if !ok {
-		src = image.NewRGBA(b)
-		draw.Draw(src, b, img, b.Min, draw.Src)
-	}
-	srcW, srcH := b.Dx(), b.Dy()
+	src := newPixelSource(img)
+	var xRangeBuf [512][2]int
+	xRanges := computeXRanges(xRangeBuf[:], gw, src.srcW)
+
 	out := make([]rgb, gw*gh)
 	for py := range gh {
-		y0 := py * srcH / gh
-		y1 := max((py+1)*srcH/gh, y0+1)
+		y0 := py * src.srcH / gh
+		y1 := max((py+1)*src.srcH/gh, y0+1)
+		rowOut := out[py*gw:]
 		for px := range gw {
-			x0 := px * srcW / gw
-			x1 := max((px+1)*srcW/gw, x0+1)
-			var r, g, bl, n float64
-			for y := y0; y < y1; y++ {
-				row := src.Pix[src.PixOffset(b.Min.X+x0, b.Min.Y+y):]
-				for x := range x1 - x0 {
-					r += float64(row[x*4])
-					g += float64(row[x*4+1])
-					bl += float64(row[x*4+2])
-					n++
-				}
-			}
-			out[py*gw+px] = rgb{r / n, g / n, bl / n}
+			xr := xRanges[px]
+			rs, gs, bs, n := src.sumBox(xr[0], y0, xr[1], y1)
+			fn := float64(n)
+			rowOut[px] = rgb{float64(rs) / fn, float64(gs) / fn, float64(bs) / fn}
 		}
 	}
 	return out
@@ -197,38 +191,38 @@ func nearest(p rgb, pal []rgb) int {
 	return bi
 }
 
-// atkinson maps every pixel to the palette, spreading 1/8 of the error to
-// each of six neighbours. Dropping the remaining 2/8 is what keeps flat
-// areas free of the stray speckles Floyd–Steinberg produces.
+// atkinson maps every pixel in-place to the palette, spreading 1/8 of the error
+// to each of six strictly forward neighbours in scanline order.
 func atkinson(px []rgb, gw, gh int, pal []rgb) []rgb {
-	work := append([]rgb(nil), px...)
-	out := make([]rgb, len(px))
 	taps := [6][2]int{{1, 0}, {2, 0}, {-1, 1}, {0, 1}, {1, 1}, {0, 2}}
 	for y := range gh {
 		for x := range gw {
 			i := y*gw + x
-			q := pal[nearest(work[i], pal)]
-			out[i] = q
+			orig := px[i]
+			q := pal[nearest(orig, pal)]
+			px[i] = q
+			e0, e1, e2 := (orig[0]-q[0])/8, (orig[1]-q[1])/8, (orig[2]-q[2])/8
 			for _, t := range taps {
 				nx, ny := x+t[0], y+t[1]
 				if nx < 0 || nx >= gw || ny >= gh {
 					continue
 				}
 				j := ny*gw + nx
-				for c := range 3 {
-					work[j][c] += (work[i][c] - q[c]) / 8
-				}
+				px[j][0] += e0
+				px[j][1] += e1
+				px[j][2] += e2
 			}
 		}
 	}
-	return out
+	return px
 }
 
 // fitPair picks the fg/bg pair among the cell's sub-pixel colours that
 // represents all of them with the least error, and returns the bitmask of
 // sub-pixels drawn in fg.
 func fitPair(sub []rgb) (fg, bg rgb, mask uint8) {
-	cand := make([]rgb, 0, len(sub))
+	var candBuf [6]rgb
+	cand := candBuf[:0]
 	for _, s := range sub {
 		seen := false
 		for _, c := range cand {
@@ -286,7 +280,8 @@ func sextantRune(mask uint8) rune {
 	return r
 }
 
-func hexOf(c rgb) string {
-	u := func(v float64) uint8 { return uint8(min(255, max(0, math.Round(v)))) }
-	return hexColor(u(c[0]), u(c[1]), u(c[2]))
+func rgbToUint8(c rgb) (uint8, uint8, uint8) {
+	return uint8(min(255, max(0, math.Round(c[0])))),
+		uint8(min(255, max(0, math.Round(c[1])))),
+		uint8(min(255, max(0, math.Round(c[2]))))
 }
