@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -31,6 +32,15 @@ type EQModel struct {
 	cursor int
 	width  int
 	height int
+
+	cachedView    string
+	cachedCursor  int
+	cachedWidth   int
+	cachedHeight  int
+	cachedPrimary color.Color
+	cachedFg      color.Color
+	cachedMuted   color.Color
+	cachedBands   []player.EQBand
 }
 
 func NewEqualizer(bands []player.EQBand) *EQModel {
@@ -119,6 +129,17 @@ func (m *EQModel) View() string {
 		return ""
 	}
 
+	if m.cachedView != "" &&
+		m.cachedCursor == m.cursor &&
+		m.cachedWidth == m.width &&
+		m.cachedHeight == m.height &&
+		m.cachedPrimary == styles.ColorPrimary &&
+		m.cachedFg == styles.ColorFg &&
+		m.cachedMuted == styles.ColorMuted &&
+		slices.Equal(m.bands, m.cachedBands) {
+		return m.cachedView
+	}
+
 	title := lipgloss.NewStyle().
 		Foreground(styles.ColorPrimary).
 		Bold(true).
@@ -151,12 +172,25 @@ func (m *EQModel) View() string {
 
 	bands := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	rendered := lipgloss.JoinVertical(lipgloss.Left,
 		title,
 		"",
 		bands,
 		help,
 	)
+
+	m.cachedView = rendered
+	m.cachedCursor = m.cursor
+	m.cachedWidth = m.width
+	m.cachedHeight = m.height
+	m.cachedPrimary = styles.ColorPrimary
+	m.cachedFg = styles.ColorFg
+	m.cachedMuted = styles.ColorMuted
+	if len(m.cachedBands) != len(m.bands) {
+		m.cachedBands = make([]player.EQBand, len(m.bands))
+	}
+	copy(m.cachedBands, m.bands)
+	return rendered
 }
 
 func (m *EQModel) renderBand(idx int, b player.EQBand, rs *eqRenderStyles) string {

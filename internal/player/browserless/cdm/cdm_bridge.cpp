@@ -492,7 +492,7 @@ int cdm_context_close_session(cdm_context_t* ctx, const char* session_id) {
     return 0;
 }
 
-int cdm_context_decrypt(
+static int decrypt_one_sample(
     cdm_context_t* ctx,
     const uint8_t* key_id,
     uint32_t key_id_size,
@@ -508,7 +508,7 @@ int cdm_context_decrypt(
 ) {
     if (!out_size) return -1;
     *out_size = 0;
-    if (!ctx || !ctx->cdm11 || !key_id || key_id_size == 0 || !iv || iv_size == 0 ||
+    if (!key_id || key_id_size == 0 || !iv || iv_size == 0 ||
         !in_data || in_size == 0 || !out_decrypted) {
         return -1;
     }
@@ -526,7 +526,7 @@ int cdm_context_decrypt(
     input.iv_size = iv_size;
 
     cdm::SubsampleEntry default_subsample = {0, in_size};
-    if (num_subsamples > 0 && clear_bytes && cipher_bytes) {
+    if (num_subsamples > 0) {
         uint64_t total_sub_bytes = 0;
         ctx->scratch_subs.resize(num_subsamples);
         for (uint32_t i = 0; i < num_subsamples; ++i) {
@@ -562,6 +562,108 @@ int cdm_context_decrypt(
 
     *out_size = out_buf->Size();
     std::memcpy(out_decrypted, out_buf->Data(), *out_size);
+
+    return 0;
+}
+
+int cdm_context_decrypt(
+    cdm_context_t* ctx,
+    const uint8_t* key_id,
+    uint32_t key_id_size,
+    const uint8_t* iv,
+    uint32_t iv_size,
+    const uint8_t* in_data,
+    uint32_t in_size,
+    const uint16_t* clear_bytes,
+    const uint32_t* cipher_bytes,
+    uint32_t num_subsamples,
+    uint8_t* out_decrypted,
+    uint32_t* out_size
+) {
+    if (!ctx || !ctx->cdm11) {
+        if (out_size) *out_size = 0;
+        return -1;
+    }
+    return decrypt_one_sample(
+        ctx, key_id, key_id_size, iv, iv_size,
+        in_data, in_size, clear_bytes, cipher_bytes,
+        num_subsamples, out_decrypted, out_size
+    );
+}
+
+int cdm_context_decrypt_batch(
+    cdm_context_t* ctx,
+    const uint8_t* key_id,
+    uint32_t key_id_size,
+    const uint8_t* ivs_data,
+    uint32_t ivs_total_size,
+    const uint32_t* iv_sizes,
+    const uint8_t* in_data,
+    uint32_t in_total_size,
+    const uint32_t* in_sizes,
+    const uint16_t* clear_bytes,
+    const uint32_t* cipher_bytes,
+    const uint32_t* sub_counts,
+    uint32_t total_subsamples,
+    uint32_t num_samples,
+    uint8_t* out_decrypted,
+    uint32_t* out_sizes
+) {
+    if (!ctx || !ctx->cdm11 || !key_id || key_id_size == 0) return -1;
+    if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
+    if (num_samples == 0) return 0;
+    if (num_samples > 65536u || !ivs_data || !iv_sizes || !in_sizes || !out_sizes) return -1;
+    if (in_total_size > 0 && (!in_data || !out_decrypted)) return -1;
+    if (total_subsamples > 0 && (!clear_bytes || !cipher_bytes)) return -1;
+
+    uint64_t iv_pos = 0;
+    uint64_t in_pos = 0;
+    uint64_t sub_pos = 0;
+    uint64_t out_pos = 0;
+
+    for (uint32_t s = 0; s < num_samples; ++s) {
+        uint32_t iv_sz = iv_sizes[s];
+        uint32_t in_sz = in_sizes[s];
+        uint32_t n_sub = sub_counts ? sub_counts[s] : 0;
+
+        if (iv_sz == 0 || iv_pos + iv_sz > ivs_total_size) return -1;
+        if (in_pos + in_sz > in_total_size) return -1;
+        if (n_sub > 65536u || sub_pos + n_sub > total_subsamples) return -1;
+
+        if (in_sz == 0) {
+            out_sizes[s] = 0;
+            iv_pos += iv_sz;
+            sub_pos += n_sub;
+            continue;
+        }
+        if (out_pos + in_sz > in_total_size) return -1;
+
+        uint32_t out_sz = 0;
+        const uint16_t* sub_clr = n_sub > 0 ? (clear_bytes + sub_pos) : nullptr;
+        const uint32_t* sub_cip = n_sub > 0 ? (cipher_bytes + sub_pos) : nullptr;
+        int rc = decrypt_one_sample(
+            ctx,
+            key_id,
+            key_id_size,
+            ivs_data + iv_pos,
+            iv_sz,
+            in_data + in_pos,
+            in_sz,
+            sub_clr,
+            sub_cip,
+            n_sub,
+            out_decrypted + out_pos,
+            &out_sz
+        );
+        if (rc != 0) {
+            return rc;
+        }
+        out_sizes[s] = out_sz;
+        iv_pos += iv_sz;
+        in_pos += in_sz;
+        sub_pos += n_sub;
+        out_pos += out_sz;
+    }
 
     return 0;
 }

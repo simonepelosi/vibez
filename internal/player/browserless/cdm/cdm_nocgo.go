@@ -17,6 +17,12 @@ type Subsample struct {
 
 type DecryptScratch struct{}
 
+type BatchSample struct {
+	IV         []byte
+	Input      []byte
+	Subsamples []Subsample
+}
+
 func New(_ string) (*CDM, error) {
 	return nil, errNoCgo
 }
@@ -46,6 +52,10 @@ func (c *CDM) DecryptSubsamples(_, _, _ []byte, _ []Subsample) ([]byte, error) {
 }
 
 func (c *CDM) DecryptSubsamplesReuse(_ *DecryptScratch, _, _, _ []byte, _ []Subsample) ([]byte, error) {
+	return nil, errNoCgo
+}
+
+func (c *CDM) DecryptBatch(_ *DecryptScratch, _ []byte, _ []BatchSample) ([][]byte, error) {
 	return nil, errNoCgo
 }
 

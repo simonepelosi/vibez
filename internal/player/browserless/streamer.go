@@ -865,19 +865,32 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 		return segData, "", nil
 	}
 	var cdmScratch cdm.DecryptScratch
-	var cdmSubs []cdm.Subsample
-	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
-		if cap(cdmSubs) < len(subs) {
-			cdmSubs = make([]cdm.Subsample, len(subs))
+	aacData, err := mp4.DecryptSegmentBatch(segData, st.kid, st.audioCfg, func(kid []byte, samples []mp4.EncryptedSample) ([][]byte, error) {
+		var totalSubs int
+		for _, sample := range samples {
+			totalSubs += len(sample.Subsamples)
 		}
-		cdmSubs = cdmSubs[:len(subs)]
-		for si, sb := range subs {
-			cdmSubs[si] = cdm.Subsample{
-				ClearBytes:  sb.ClearBytes,
-				CipherBytes: sb.CipherBytes,
+		cdmSubPool := make([]cdm.Subsample, 0, totalSubs)
+		batch := make([]cdm.BatchSample, len(samples))
+		for i, sample := range samples {
+			subStart := len(cdmSubPool)
+			for _, sb := range sample.Subsamples {
+				cdmSubPool = append(cdmSubPool, cdm.Subsample{
+					ClearBytes:  sb.ClearBytes,
+					CipherBytes: sb.CipherBytes,
+				})
+			}
+			var subs []cdm.Subsample
+			if len(sample.Subsamples) > 0 {
+				subs = cdmSubPool[subStart : subStart+len(sample.Subsamples)]
+			}
+			batch[i] = cdm.BatchSample{
+				IV:         sample.IV,
+				Input:      sample.Data,
+				Subsamples: subs,
 			}
 		}
-		return s.cdmEngine.DecryptSubsamplesReuse(&cdmScratch, kid, iv, input, cdmSubs)
+		return s.cdmEngine.DecryptBatch(&cdmScratch, kid, batch)
 	})
 	if err != nil {
 		return nil, "decrypt", err

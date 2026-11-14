@@ -59,3 +59,30 @@ func TestCDM_InputValidationAndClosedGuards(t *testing.T) {
 		t.Fatalf("Close() on uninitialized CDM = %v, want nil", err)
 	}
 }
+
+func TestCDM_DecryptBatchValidationAndClosedGuards(t *testing.T) {
+	var c CDM
+	if _, err := c.DecryptBatch(nil, nil, []BatchSample{{IV: []byte{1}, Input: []byte{1}}}); err == nil {
+		t.Fatal("DecryptBatch with nil keyID = nil, want error")
+	}
+	if _, err := c.DecryptBatch(nil, []byte{1}, []BatchSample{{IV: nil, Input: []byte{1}}}); err == nil {
+		t.Fatal("DecryptBatch with empty sample IV = nil, want error")
+	}
+	if _, err := c.DecryptBatch(nil, []byte{1}, []BatchSample{{
+		IV:         []byte{1},
+		Input:      []byte{1, 2},
+		Subsamples: []Subsample{{ClearBytes: 1, CipherBytes: 5}},
+	}}); err == nil {
+		t.Fatal("DecryptBatch with subsample sum > input size = nil, want error")
+	}
+	if out, err := c.DecryptBatch(nil, []byte{1}, nil); err != nil || len(out) != 0 {
+		t.Fatalf("DecryptBatch empty samples = (%v, %v), want nil, nil", out, err)
+	}
+	if _, err := c.DecryptBatch(nil, []byte{1}, []BatchSample{{IV: []byte{1}, Input: []byte{1}}}); err == nil {
+		t.Fatal("DecryptBatch on closed CDM = nil, want closed error")
+	}
+	var nilCDM *CDM
+	if _, err := nilCDM.DecryptBatch(nil, []byte{1}, []BatchSample{{IV: []byte{1}, Input: []byte{1}}}); err == nil {
+		t.Fatal("(*CDM)(nil).DecryptBatch = nil, want closed error")
+	}
+}

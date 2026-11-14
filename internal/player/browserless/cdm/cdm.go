@@ -21,8 +21,10 @@ import (
 )
 
 const (
-	maxCDMInputBytes = 64 << 20 // 64 MiB defensive CGo ceiling matching BufferImpl
-	maxCDMSubsamples = 65536
+	maxCDMInputBytes      = 64 << 20 // 64 MiB defensive CGo ceiling matching BufferImpl
+	maxCDMSubsamples      = 65536
+	maxCDMBatchSamples    = 65536
+	maxCDMBatchSubsamples = 1 << 20
 )
 
 type CDM struct {
@@ -181,11 +183,25 @@ type Subsample struct {
 }
 
 // DecryptScratch holds reusable per-segment CGo and output buffers for
-// DecryptSubsamplesReuse, avoiding per-sample heap allocations.
+// DecryptSubsamplesReuse and DecryptBatch, avoiding per-sample heap allocations.
 type DecryptScratch struct {
-	out    []byte
-	clear  []C.uint16_t
-	cipher []C.uint32_t
+	out      []byte
+	clear    []C.uint16_t
+	cipher   []C.uint32_t
+	ivs      []byte
+	in       []byte
+	ivSizes  []C.uint32_t
+	inSizes  []C.uint32_t
+	subCnts  []C.uint32_t
+	outSizes []C.uint32_t
+	slices   [][]byte
+}
+
+// BatchSample describes one sample to decrypt in a DecryptBatch call.
+type BatchSample struct {
+	IV         []byte
+	Input      []byte
+	Subsamples []Subsample
 }
 
 // Decrypt decrypts an encrypted audio frame using AES-CTR (cenc).
@@ -279,6 +295,144 @@ func (c *CDM) DecryptSubsamplesReuse(scratch *DecryptScratch, keyID, iv, input [
 	}
 
 	return decrypted[:outSize], nil
+}
+
+// DecryptBatch decrypts all samples in a single lock/CGo round-trip using
+// reusable scratch buffers. Returned slices alias scratch's internal buffer and
+// remain valid until the next Decrypt* call with the same scratch.
+func (c *CDM) DecryptBatch(scratch *DecryptScratch, keyID []byte, samples []BatchSample) ([][]byte, error) {
+	if c == nil {
+		return nil, errors.New("cdm context is closed")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(keyID) == 0 || len(keyID) > maxCDMInputBytes {
+		return nil, errors.New("invalid decrypt input parameters")
+	}
+	if len(samples) > maxCDMBatchSamples {
+		return nil, fmt.Errorf("excessive batch sample count: %d", len(samples))
+	}
+	if len(samples) == 0 {
+		return nil, nil
+	}
+
+	var totalIVs, totalIn, totalSubs uint64
+	for i, s := range samples {
+		if len(s.IV) == 0 || len(s.IV) > maxCDMInputBytes {
+			return nil, errors.New("invalid decrypt input parameters")
+		}
+		if len(s.Input) > maxCDMInputBytes {
+			return nil, fmt.Errorf("decrypt input size %d exceeds maximum (%d)", len(s.Input), maxCDMInputBytes)
+		}
+		if len(s.Subsamples) > maxCDMSubsamples {
+			return nil, fmt.Errorf("excessive subsample count: %d", len(s.Subsamples))
+		}
+		var subTotal uint64
+		for _, sub := range s.Subsamples {
+			subTotal += uint64(sub.ClearBytes) + uint64(sub.CipherBytes)
+			if subTotal > uint64(len(s.Input)) {
+				return nil, fmt.Errorf("subsample byte sum exceeds input size (%d) at sample %d", len(s.Input), i)
+			}
+		}
+		totalIVs += uint64(len(s.IV))
+		totalIn += uint64(len(s.Input))
+		totalSubs += uint64(len(s.Subsamples))
+		if totalIVs > maxCDMInputBytes || totalIn > maxCDMInputBytes {
+			return nil, fmt.Errorf("batch decrypt total bytes exceeds maximum (%d)", maxCDMInputBytes)
+		}
+		if totalSubs > maxCDMBatchSubsamples {
+			return nil, fmt.Errorf("excessive total subsamples: %d", totalSubs)
+		}
+	}
+	if c.ctx == nil {
+		return nil, errors.New("cdm context is closed")
+	}
+
+	if scratch == nil {
+		scratch = &DecryptScratch{}
+	}
+	n := len(samples)
+	if cap(scratch.slices) < n {
+		scratch.slices = make([][]byte, n)
+	}
+	outSlices := scratch.slices[:n]
+	if totalIn == 0 {
+		clear(outSlices)
+		return outSlices, nil
+	}
+
+	scratch.ivs = scratch.ivs[:0]
+	scratch.in = scratch.in[:0]
+	if cap(scratch.ivSizes) < n {
+		scratch.ivSizes = make([]C.uint32_t, n)
+		scratch.inSizes = make([]C.uint32_t, n)
+		scratch.subCnts = make([]C.uint32_t, n)
+		scratch.outSizes = make([]C.uint32_t, n)
+	}
+	ivSizes := scratch.ivSizes[:n]
+	inSizes := scratch.inSizes[:n]
+	subCnts := scratch.subCnts[:n]
+	outSizes := scratch.outSizes[:n]
+
+	scratch.clear = scratch.clear[:0]
+	scratch.cipher = scratch.cipher[:0]
+	if uint64(cap(scratch.out)) < totalIn {
+		scratch.out = make([]byte, totalIn)
+	}
+	outBuf := scratch.out[:totalIn]
+
+	for i, s := range samples {
+		scratch.ivs = append(scratch.ivs, s.IV...)
+		scratch.in = append(scratch.in, s.Input...)
+		ivSizes[i] = C.uint32_t(len(s.IV))         //nolint:gosec // G115: bounded <= maxCDMInputBytes
+		inSizes[i] = C.uint32_t(len(s.Input))      //nolint:gosec // G115: bounded <= maxCDMInputBytes
+		subCnts[i] = C.uint32_t(len(s.Subsamples)) //nolint:gosec // G115: bounded <= maxCDMSubsamples
+		for _, sub := range s.Subsamples {
+			scratch.clear = append(scratch.clear, C.uint16_t(sub.ClearBytes))
+			scratch.cipher = append(scratch.cipher, C.uint32_t(sub.CipherBytes))
+		}
+	}
+
+	var clearPtr *C.uint16_t
+	var cipherPtr *C.uint32_t
+	if len(scratch.clear) > 0 {
+		clearPtr = &scratch.clear[0]
+		cipherPtr = &scratch.cipher[0]
+	}
+
+	ret := C.cdm_context_decrypt_batch(
+		c.ctx,
+		(*C.uint8_t)(unsafe.Pointer(&keyID[0])),
+		C.uint32_t(len(keyID)), //nolint:gosec // G115: bounded <= maxCDMInputBytes
+		(*C.uint8_t)(unsafe.Pointer(&scratch.ivs[0])),
+		C.uint32_t(len(scratch.ivs)), //nolint:gosec // G115: bounded <= maxCDMInputBytes
+		&ivSizes[0],
+		(*C.uint8_t)(unsafe.Pointer(&scratch.in[0])),
+		C.uint32_t(len(scratch.in)), //nolint:gosec // G115: bounded <= maxCDMInputBytes
+		&inSizes[0],
+		clearPtr,
+		cipherPtr,
+		&subCnts[0],
+		C.uint32_t(len(scratch.clear)), //nolint:gosec // G115: bounded <= maxCDMBatchSubsamples
+		C.uint32_t(n),                  //nolint:gosec // G115: bounded <= maxCDMBatchSamples
+		(*C.uint8_t)(unsafe.Pointer(&outBuf[0])),
+		&outSizes[0],
+	)
+	if ret != 0 {
+		return nil, fmt.Errorf("batch decryption failed with status %d", ret)
+	}
+
+	var pos uint64
+	for i := range n {
+		sz := uint64(outSizes[i])
+		if sz > uint64(inSizes[i]) || pos+sz > totalIn {
+			return nil, fmt.Errorf("batch decryption output size %d exceeds buffer at sample %d", sz, i)
+		}
+		outSlices[i] = outBuf[pos : pos+sz]
+		pos += sz
+	}
+	return outSlices, nil
 }
 
 // Close destroys the CDM instance and frees resources.

@@ -319,4 +319,30 @@ func TestDecryptSegmentMultiSamplePreservesOrder(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Errorf("multi-sample output mismatch: len=%d, want=%d", len(got), len(want))
 	}
+
+	gotBatch, err := DecryptSegmentBatch(seg, make([]byte, 16), cfg, func(_ []byte, batch []EncryptedSample) ([][]byte, error) {
+		out := make([][]byte, len(batch))
+		for i, s := range batch {
+			out[i] = s.Data
+		}
+		return out, nil
+	})
+	if err != nil {
+		t.Fatalf("DecryptSegmentBatch: %v", err)
+	}
+	if !bytes.Equal(gotBatch, got) {
+		t.Errorf("batch output differs from per-sample output: batchLen=%d singleLen=%d", len(gotBatch), len(got))
+	}
+
+	// SEC-08: reject decrypted samples larger than 13-bit ADTS frame limit (0x1FFF - 7).
+	if _, err := DecryptSegment(seg, make([]byte, 16), cfg, func(_, _, _ []byte, _ []Subsample) ([]byte, error) {
+		return make([]byte, 0x1FFF-6), nil
+	}); err == nil {
+		t.Fatal("DecryptSegment allowed sample exceeding 13-bit ADTS frame limit")
+	}
+	if _, err := DecryptSegmentBatch(seg, make([]byte, 16), cfg, func(_ []byte, _ []EncryptedSample) ([][]byte, error) {
+		return [][]byte{make([]byte, 0x1FFF-6), make([]byte, 4), make([]byte, 4)}, nil
+	}); err == nil {
+		t.Fatal("DecryptSegmentBatch allowed sample exceeding 13-bit ADTS frame limit")
+	}
 }
