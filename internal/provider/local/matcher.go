@@ -2,8 +2,6 @@ package local
 
 import (
 	"context"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -47,7 +45,8 @@ func NewMatcher(dir string) (*Matcher, error) {
 // NewMatcherContext behaves like NewMatcher but aborts directory walking when
 // ctx is cancelled.
 func NewMatcherContext(ctx context.Context, dir string) (*Matcher, error) {
-	if err := ctx.Err(); err != nil {
+	res, err := scanDirectory(ctx, dir, true)
+	if err != nil {
 		return nil, err
 	}
 	m := &Matcher{
@@ -55,35 +54,8 @@ func NewMatcherContext(ctx context.Context, dir string) (*Matcher, error) {
 		byISRC: make(map[string][]provider.Track),
 		byMeta: make(map[metaKey][]provider.Track),
 	}
-	root := canonicalMusicDir(dir)
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		if err != nil {
-			if os.IsPermission(err) {
-				if d == nil || d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		if !isLosslessFile(path) {
-			return nil
-		}
-		t, err := trackFromFile(path)
-		if err != nil {
-			return nil
-		}
+	for _, t := range res.tracks {
 		m.addTrack(t)
-		return nil
-	})
-	if err != nil {
-		return nil, err
 	}
 	return m, nil
 }
@@ -200,23 +172,6 @@ func trackFormat(t provider.Track) string {
 		return t.LocalFormat
 	}
 	return LosslessFormatLabel(t.LocalPath)
-}
-
-// isLosslessFile reports whether path is a supported lossless audio file on
-// the current platform.
-func isLosslessFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	if !supportedExts[ext] {
-		return false
-	}
-	switch ext {
-	case ".flac", ".wav", ".aiff", ".aif":
-		return true
-	case ".m4a":
-		return isLosslessM4A(path)
-	default:
-		return false
-	}
 }
 
 // LosslessFormatLabel returns the human-readable format badge ("FLAC", "ALAC",
