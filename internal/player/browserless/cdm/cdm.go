@@ -130,6 +130,28 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 	return nil
 }
 
+// CloseSession closes a Widevine session and releases any key state held by the CDM.
+func (c *CDM) CloseSession(sessionID string) error {
+	if c == nil || sessionID == "" {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ctx == nil {
+		return errors.New("cdm context is closed")
+	}
+
+	cSessionID := C.CString(sessionID)
+	defer C.free(unsafe.Pointer(cSessionID))
+
+	if ret := C.cdm_context_close_session(c.ctx, cSessionID); ret != 0 {
+		return fmt.Errorf("failed to close session: %d", ret)
+	}
+	return nil
+}
+
 // Subsample specifies the clear and encrypted byte counts in an audio sample.
 type Subsample struct {
 	ClearBytes  uint16

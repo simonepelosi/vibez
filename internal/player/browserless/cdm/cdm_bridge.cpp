@@ -86,6 +86,7 @@ public:
     std::condition_variable msg_cv;
     std::condition_variable update_cv;
     std::condition_variable cert_cv;
+    std::condition_variable close_cv;
 
     bool initialized = false;
     std::string sessionId;
@@ -96,6 +97,9 @@ public:
     bool updateFailed = false;
     bool certResolved = false;
     bool certFailed = false;
+    std::string closingSessionId;
+    bool closeResolved = false;
+    bool closeFailed = false;
     int usableKeys = 0;
 
     cdm::Buffer* Allocate(uint32_t capacity) override {
@@ -129,6 +133,9 @@ public:
         } else if (promise_id == 3) {
             updateResolved = true;
             update_cv.notify_all();
+        } else if (promise_id == 4) {
+            closeResolved = true;
+            close_cv.notify_all();
         }
     }
 
@@ -143,6 +150,9 @@ public:
         } else if (promise_id == 3) {
             updateFailed = true;
             update_cv.notify_all();
+        } else if (promise_id == 4) {
+            closeFailed = true;
+            close_cv.notify_all();
         }
     }
 
@@ -164,7 +174,15 @@ public:
 
     void OnExpirationChange(const char* session_id, uint32_t session_id_size, cdm::Time new_expiry_time) override {}
 
-    void OnSessionClosed(const char* session_id, uint32_t session_id_size) override {}
+    void OnSessionClosed(const char* session_id, uint32_t session_id_size) override {
+        std::lock_guard<std::mutex> lk(cv_m);
+        if (!closingSessionId.empty() &&
+            closingSessionId.size() == session_id_size &&
+            std::memcmp(closingSessionId.data(), session_id, session_id_size) == 0) {
+            closeResolved = true;
+            close_cv.notify_all();
+        }
+    }
 
     void SendPlatformChallenge(const char* service_id, uint32_t service_id_size, const char* challenge, uint32_t challenge_size) override {}
 
@@ -196,6 +214,8 @@ struct cdm_context {
     void* lib_handle = nullptr;
     cdm::ContentDecryptionModule_11* cdm11 = nullptr;
     Host11Impl host;
+    // Reusable scratch vector for subsample conversion under Go-side CDM.mu lock.
+    std::vector<cdm::SubsampleEntry> scratch_subs;
 };
 
 extern "C" {
@@ -380,6 +400,33 @@ int cdm_context_update_session(
     return 0;
 }
 
+int cdm_context_close_session(cdm_context_t* ctx, const char* session_id) {
+    if (!ctx || !ctx->cdm11 || !session_id || session_id[0] == '\0') return -1;
+
+    {
+        std::lock_guard<std::mutex> lk(ctx->host.cv_m);
+        ctx->host.closeResolved = false;
+        ctx->host.closeFailed = false;
+        ctx->host.closingSessionId = session_id;
+    }
+
+    ctx->cdm11->CloseSession(
+        4,
+        session_id,
+        static_cast<uint32_t>(std::strlen(session_id))
+    );
+
+    std::unique_lock<std::mutex> lk(ctx->host.cv_m);
+    bool ok = ctx->host.close_cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
+        return ctx->host.closeResolved || ctx->host.closeFailed;
+    });
+    ctx->host.closingSessionId.clear();
+    if (!ok || ctx->host.closeFailed) {
+        return -2;
+    }
+    return 0;
+}
+
 int cdm_context_decrypt(
     cdm_context_t* ctx,
     const uint8_t* key_id,
@@ -406,14 +453,13 @@ int cdm_context_decrypt(
     input.iv_size = iv_size;
 
     cdm::SubsampleEntry default_subsample = {0, in_size};
-    std::vector<cdm::SubsampleEntry> subs;
     if (num_subsamples > 0 && clear_bytes && cipher_bytes) {
-        subs.resize(num_subsamples);
+        ctx->scratch_subs.resize(num_subsamples);
         for (uint32_t i = 0; i < num_subsamples; ++i) {
-            subs[i].clear_bytes = clear_bytes[i];
-            subs[i].cipher_bytes = cipher_bytes[i];
+            ctx->scratch_subs[i].clear_bytes = clear_bytes[i];
+            ctx->scratch_subs[i].cipher_bytes = cipher_bytes[i];
         }
-        input.subsamples = subs.data();
+        input.subsamples = ctx->scratch_subs.data();
         input.num_subsamples = num_subsamples;
     } else {
         input.subsamples = &default_subsample;

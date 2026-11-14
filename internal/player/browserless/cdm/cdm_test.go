@@ -44,6 +44,17 @@ func TestCDM_InputValidationAndClosedGuards(t *testing.T) {
 		t.Fatal("Decrypt on closed CDM = nil, want closed error")
 	}
 
+	if err := c.CloseSession(""); err != nil {
+		t.Fatalf("CloseSession empty sessionID = %v, want nil", err)
+	}
+	if err := c.CloseSession("s1"); err == nil {
+		t.Fatal("CloseSession on closed CDM = nil, want closed error")
+	}
+	var nilCDM *CDM
+	if err := nilCDM.CloseSession("s1"); err != nil {
+		t.Fatalf("(*CDM)(nil).CloseSession = %v, want nil", err)
+	}
+
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close() on uninitialized CDM = %v, want nil", err)
 	}
