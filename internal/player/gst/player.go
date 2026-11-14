@@ -381,7 +381,25 @@ static gchar* vibez_http_src_uri_get_uri(GstURIHandler* handler) {
     return r;
 }
 
+static gboolean vibez_uri_is_loopback_http(const gchar* uri) {
+    if (!uri || strncmp(uri, "http://", 7) != 0) return FALSE;
+    const gchar* hp = uri + 7;
+    return (strncmp(hp, "127.0.0.1:", 10) == 0 ||
+            strncmp(hp, "127.0.0.1/", 10) == 0 ||
+            strcmp(hp, "127.0.0.1") == 0 ||
+            strncmp(hp, "localhost:", 10) == 0 ||
+            strncmp(hp, "localhost/", 10) == 0 ||
+            strcmp(hp, "localhost") == 0);
+}
+
 static gboolean vibez_http_src_uri_set_uri(GstURIHandler* handler, const gchar* uri, GError** error) {
+    if (uri && !vibez_uri_is_loopback_http(uri)) {
+        if (error) {
+            g_set_error_literal(error, GST_URI_ERROR, GST_URI_ERROR_BAD_URI,
+                "vibezhttpsrc handles only loopback http URIs");
+        }
+        return FALSE;
+    }
     VibezHttpSrc* self = (VibezHttpSrc*)handler;
     GST_OBJECT_LOCK(self);
     g_free(self->uri);
@@ -668,8 +686,9 @@ static void vibez_gst_init(void) {
     // 23 ms frames at the start of every track. Our stream always comes from
     // our own server as clean ADTS, which vibezaacparse frames exactly.
     gst_element_register(NULL, "vibezaacparse", GST_RANK_PRIMARY + 2, vibez_aac_parse_get_type());
-    // vibezhttpsrc only takes over when souphttpsrc (gst-plugins-good) is absent.
-    gst_element_register(NULL, "vibezhttpsrc", GST_RANK_MARGINAL + 1, vibez_http_src_get_type());
+    // Prefer vibezhttpsrc over souphttpsrc for local loopback streams so GStreamer
+    // does not dlopen libgstsoup/libsoup/libgnutls/libsqlite3 on the loopback path.
+    gst_element_register(NULL, "vibezhttpsrc", GST_RANK_PRIMARY + 1, vibez_http_src_get_type());
 }
 
 static int vibez_gst_has_element(const char* name) {
@@ -824,6 +843,15 @@ static GstElement* vibez_gst_new(GstElement** eqOut, VibezGstState* st) {
     GstElement* p = gst_element_factory_make("playbin", "vibez-audio");
     if (!p) p = gst_element_factory_make("playbin3", "vibez-audio");
     if (p) {
+        // Audio-only playback flags (GST_PLAY_FLAG_AUDIO | GST_PLAY_FLAG_SOFT_VOLUME)
+        // skip video/subtitle/vis/deinterlace bins even when files embed cover art.
+        GObjectClass* klass = G_OBJECT_GET_CLASS(p);
+        if (g_object_class_find_property(klass, "flags") != NULL) {
+            g_object_set(G_OBJECT(p), "flags", (guint)(0x02 | 0x10), NULL);
+        }
+        if (g_object_class_find_property(klass, "buffer-size") != NULL) {
+            g_object_set(G_OBJECT(p), "buffer-size", (gint)(256 * 1024), NULL);
+        }
         g_signal_connect(p, "about-to-finish", G_CALLBACK(on_about_to_finish), (gpointer)st);
         g_signal_connect(p, "deep-element-added", G_CALLBACK(on_deep_element_added), NULL);
         const char* null_env = getenv("VIBEZ_NULL_AUDIO");
@@ -1078,6 +1106,12 @@ func hasElement(name string) bool {
 	cs := C.CString(name)
 	defer C.free(unsafe.Pointer(cs))
 	return C.vibez_gst_has_element(cs) != 0
+}
+
+func uriIsLoopbackHTTP(uri string) bool {
+	cs := C.CString(uri)
+	defer C.free(unsafe.Pointer(cs))
+	return C.vibez_uri_is_loopback_http(cs) != 0
 }
 
 // OnEOS registers a callback fired (in a goroutine) when the stream ends.

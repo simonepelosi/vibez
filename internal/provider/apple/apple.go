@@ -405,18 +405,28 @@ func (a *AppleProvider) do(req *http.Request, dst any) error {
 			}
 			return fmt.Errorf("http request: %w", err)
 		}
-		body, _ = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
-		_ = resp.Body.Close()
-
 		lastStatus = resp.StatusCode
 		lastStatusText = resp.Status
 
 		if resp.StatusCode < 400 {
-			if dst == nil || len(body) == 0 {
+			if dst == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
+				_ = resp.Body.Close()
 				return nil
 			}
-			return json.Unmarshal(body, dst)
+			decErr := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(dst)
+			if decErr == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			}
+			_ = resp.Body.Close()
+			if errors.Is(decErr, io.EOF) {
+				return nil
+			}
+			return decErr
 		}
+
+		body, _ = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+		_ = resp.Body.Close()
 
 		if attempt < defaultMaxRetries && shouldRetryStatus(req.Method, resp.StatusCode) && (req.Body == nil || req.GetBody != nil) {
 			delay := parseRetryAfter(resp.Header.Get("Retry-After"), baseDelay<<attempt)
