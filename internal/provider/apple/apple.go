@@ -462,6 +462,7 @@ type songAttributes struct {
 	ContentRating        string      `json:"contentRating"`
 	IsAppleDigitalMaster bool        `json:"isAppleDigitalMaster"`
 	ReleaseDate          string      `json:"releaseDate"`
+	ISRC                 string      `json:"isrc"`
 	// AudioVariants arrives only when the request asks for
 	// extend=audioVariants. AudioTraits is amp-api's name for the same data.
 	AudioVariants []string `json:"audioVariants"`
@@ -600,6 +601,7 @@ func toTrack(s songResource) provider.Track {
 		ReleaseDate:          strings.TrimSpace(provider.Clean(s.Attributes.ReleaseDate)),
 		ArtworkPalette:       s.Attributes.Artwork.palette(),
 		AudioVariants:        normalizeAudioVariants(s.Attributes.AudioVariants, s.Attributes.AudioTraits),
+		ISRC:                 provider.NormalizeISRC(s.Attributes.ISRC),
 	}
 	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
 		t.CatalogID = s.Attributes.PlayParams.CatalogID

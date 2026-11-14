@@ -154,9 +154,15 @@ func (s *windowsAudioSink) Stop() {
 	}
 }
 
-// Seek is a no-op: the player seeks by restarting the stream at a segment
-// boundary (PlayURI with ?start_seg=N), as the loopback stream is not seekable.
-func (s *windowsAudioSink) Seek(_ time.Duration) {}
+// Seek seeks within the active session when backed by a seekable local file;
+// for loopback AAC streams the player restarts at ?start_seg=N instead.
+func (s *windowsAudioSink) Seek(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handle != nil {
+		C.vibez_winsink_seek(s.handle, C.double(d.Seconds()))
+	}
+}
 
 func (s *windowsAudioSink) SetVolume(v float64) {
 	s.mu.Lock()

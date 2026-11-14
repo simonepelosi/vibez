@@ -114,6 +114,7 @@ struct Session : public std::enable_shared_from_this<Session> {
     std::atomic<bool> nullOut{false};
     std::atomic<uint64_t> nullFrames{0};
     std::atomic<double> baseSampleTime{0.0};
+    std::atomic<double> seekTarget{-1.0};
     uint64_t enqueuedFrames = 0;
     UInt32 trimFramesRemaining = 0;
     int sock = -1;
@@ -539,7 +540,207 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
     return !host.empty() && port > 0 && port <= 65535;
 }
 
+static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& pcm) {
+    if (ses->queue &&
+        (ses->pcmAsbd.mSampleRate != pcm.mSampleRate ||
+         ses->pcmAsbd.mChannelsPerFrame != pcm.mChannelsPerFrame)) {
+        ses->flushCurrentBuffer();
+        {
+            std::unique_lock<std::mutex> lock(ses->bufferMutex);
+            ses->bufferCond.wait(lock, [ses] {
+                return ses->enqueuedCount.load() == 0 || ses->cancelled.load();
+            });
+            ses->freeBuffers.clear();
+        }
+        AudioQueueDispose(ses->queue, true);
+        ses->queue = nullptr;
+        ses->started = false;
+        ses->enqueuedFrames = 0;
+        ses->baseSampleTime = 0.0;
+        ses->eqSeen = 0;
+    }
+    ses->pcmAsbd = pcm;
+    if (!ses->queue && !ses->nullOut.load()) {
+        OSStatus err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
+        if (err == noErr) {
+            std::lock_guard<std::mutex> lock(ses->bufferMutex);
+            for (int i = 0; i < Session::kNumBuffers; ++i) {
+                AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
+                ses->freeBuffers.push_back(ses->buffers[i]);
+            }
+            AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, ses->initialVolume.load());
+            ses->formatReady = true;
+            return true;
+        }
+        const char* nullEnv = std::getenv("VIBEZ_NULL_AUDIO");
+        if (nullEnv && std::strcmp(nullEnv, "1") == 0) {
+            ses->nullOut = true;
+            ses->started = true;
+            ses->formatReady = true;
+            return true;
+        }
+        ses->reportError("Failed to initialize AudioQueue: " + std::to_string(err));
+        return false;
+    }
+    ses->formatReady = true;
+    return true;
+}
+
+static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::string& url) {
+    CFURLRef cfUrl = CFURLCreateWithBytes(
+        kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(url.data()),
+        static_cast<CFIndex>(url.size()),
+        kCFStringEncodingUTF8,
+        nullptr);
+    if (!cfUrl) {
+        ses->reportError("Invalid local file URL");
+        return false;
+    }
+    ExtAudioFileRef extFile = nullptr;
+    OSStatus err = ExtAudioFileOpenURL(cfUrl, &extFile);
+    CFRelease(cfUrl);
+    if (err != noErr || !extFile) {
+        ses->reportError("Failed to open local audio file: " + std::to_string(err));
+        return false;
+    }
+
+    AudioStreamBasicDescription fileFmt{};
+    UInt32 propSize = sizeof(fileFmt);
+    err = ExtAudioFileGetProperty(extFile, kExtAudioFileProperty_FileDataFormat, &propSize, &fileFmt);
+    if (err != noErr) {
+        ExtAudioFileDispose(extFile);
+        ses->reportError("Failed to read local file format: " + std::to_string(err));
+        return false;
+    }
+
+    AudioStreamBasicDescription pcm{};
+    pcm.mSampleRate = fileFmt.mSampleRate > 0 ? fileFmt.mSampleRate : 44100.0;
+    pcm.mFormatID = kAudioFormatLinearPCM;
+    pcm.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
+    pcm.mChannelsPerFrame = fileFmt.mChannelsPerFrame == 1 ? 1 : 2;
+    pcm.mBitsPerChannel = 32;
+    pcm.mBytesPerFrame = pcm.mChannelsPerFrame * sizeof(float);
+    pcm.mFramesPerPacket = 1;
+    pcm.mBytesPerPacket = pcm.mBytesPerFrame;
+
+    err = ExtAudioFileSetProperty(extFile, kExtAudioFileProperty_ClientDataFormat, sizeof(pcm), &pcm);
+    if (err != noErr) {
+        ExtAudioFileDispose(extFile);
+        ses->reportError("Failed to set client PCM format: " + std::to_string(err));
+        return false;
+    }
+
+    if (!ensureOutputQueue(ses.get(), pcm)) {
+        ExtAudioFileDispose(extFile);
+        return false;
+    }
+
+    const int channels = static_cast<int>(pcm.mChannelsPerFrame);
+    const double rate = pcm.mSampleRate;
+    float pcmFrameBuf[4096 * 2];
+
+    while (!ses->cancelled.load()) {
+        double target = ses->seekTarget.exchange(-1.0);
+        if (target >= 0.0 && rate > 0) {
+            SInt64 targetFrame = static_cast<SInt64>(target * rate);
+            ExtAudioFileSeek(extFile, targetFrame);
+            ses->curBufBytes = 0;
+            if (ses->queue) {
+                AudioQueueReset(ses->queue);
+                ses->enqueuedFrames = static_cast<uint64_t>(targetFrame);
+                ses->baseSampleTime = -static_cast<double>(targetFrame);
+                ses->lastPosition = target;
+            } else if (ses->nullOut.load()) {
+                ses->nullFrames = static_cast<uint64_t>(targetFrame);
+                ses->lastPosition = target;
+            }
+        }
+
+        if (auto sink = ses->parentSink.lock(); sink && !sink->closed.load()) {
+            const uint32_t ver = sink->eqVersion.load();
+            if (ver != ses->eqSeen) {
+                double gains[kBands];
+                {
+                    std::lock_guard<std::mutex> lk(sink->mu);
+                    std::memcpy(gains, sink->eq, sizeof(gains));
+                }
+                for (int b = 0; b < kBands; ++b) ses->eqBank[b].design(rate, kBandHz[b], gains[b]);
+                ses->eqSeen = ver;
+            }
+        }
+        bool eqOn = channels > 0 && channels <= 2;
+        if (eqOn) {
+            eqOn = false;
+            for (int b = 0; b < kBands; ++b) eqOn = eqOn || ses->eqBank[b].active;
+        }
+
+        UInt32 ioFrames = 4096;
+        AudioBufferList outAbl{};
+        outAbl.mNumberBuffers = 1;
+        outAbl.mBuffers[0].mNumberChannels = pcm.mChannelsPerFrame;
+        outAbl.mBuffers[0].mDataByteSize = ioFrames * pcm.mBytesPerFrame;
+        outAbl.mBuffers[0].mData = pcmFrameBuf;
+
+        err = ExtAudioFileRead(extFile, &ioFrames, &outAbl);
+        if (err != noErr || ioFrames == 0) {
+            break;
+        }
+
+        if (eqOn) {
+            for (UInt32 f = 0; f < ioFrames; ++f) {
+                for (int c = 0; c < channels; ++c) {
+                    double x = pcmFrameBuf[f * channels + c];
+                    for (int b = 0; b < kBands; ++b) {
+                        if (ses->eqBank[b].active) x = ses->eqBank[b].run(x, c);
+                    }
+                    if (x > 1.0) x = 1.0;
+                    if (x < -1.0) x = -1.0;
+                    pcmFrameBuf[f * channels + c] = static_cast<float>(x);
+                }
+            }
+        }
+
+        if (ses->nullOut.load()) {
+            ses->nullFrames.fetch_add(ioFrames);
+            if (rate > 0) {
+                ses->lastPosition = static_cast<double>(ses->nullFrames.load()) / rate;
+            }
+            while (ses->paused.load() && !ses->cancelled.load()) {
+                usleep(20000);
+            }
+            if (rate > 0 && ioFrames > 0) {
+                useconds_t us = static_cast<useconds_t>((static_cast<double>(ioFrames) / rate) * 250000.0);
+                if (us > 0) usleep(us);
+            }
+            continue;
+        }
+
+        const UInt32 pcmBytes = ioFrames * pcm.mBytesPerFrame;
+        if (!ses->curBuf) {
+            ses->curBuf = ses->getFreeBuffer();
+            if (!ses->curBuf) break;
+            ses->curBufBytes = 0;
+        }
+        if (ses->curBufBytes + pcmBytes > Session::kBufferSize) {
+            ses->flushCurrentBuffer();
+            ses->curBuf = ses->getFreeBuffer();
+            if (!ses->curBuf) break;
+            ses->curBufBytes = 0;
+        }
+        std::memcpy(static_cast<char*>(ses->curBuf->mAudioData) + ses->curBufBytes, pcmFrameBuf, pcmBytes);
+        ses->curBufBytes += pcmBytes;
+        ses->enqueuedFrames += ioFrames;
+    }
+
+    ExtAudioFileDispose(extFile);
+    return !ses->cancelled.load();
+}
+
 static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
+    if (url.rfind("file://", 0) == 0) {
+        return streamLocalFile(ses, url);
+    }
     std::string host, path;
     int port = 80;
     if (!parseURL(url, host, port, path)) {
@@ -835,9 +1036,12 @@ void vibez_darwinsink_stop(vibez_darwinsink_t handle) {
 }
 
 void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds) {
-    // Player seeks by requesting the loopback stream with ?start_seg=N.
-    (void)handle;
-    (void)seconds;
+    Sink* sink = sinkOf(handle);
+    if (!sink || sink->closed.load()) return;
+    auto ses = sink->currentSession();
+    if (!ses) return;
+    if (seconds < 0.0) seconds = 0.0;
+    ses->seekTarget.store(seconds);
 }
 
 void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {

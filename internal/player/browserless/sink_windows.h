@@ -25,6 +25,7 @@ void vibez_winsink_set_next_uri(vibez_winsink_t handle, const char* uri_utf8);
 void vibez_winsink_play(vibez_winsink_t handle);
 void vibez_winsink_pause(vibez_winsink_t handle);
 void vibez_winsink_stop(vibez_winsink_t handle);
+void vibez_winsink_seek(vibez_winsink_t handle, double seconds);
 void vibez_winsink_set_volume(vibez_winsink_t handle, double volume);
 // vibez_winsink_set_eq sets gains in dB for the 10 bands, lowest first.
 void vibez_winsink_set_eq(vibez_winsink_t handle, const double* gains_db, int count);

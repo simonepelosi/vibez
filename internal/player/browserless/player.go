@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
+	"github.com/simone-vibes/vibez/internal/provider/local"
 )
 
 type audioSink interface {
@@ -47,12 +50,13 @@ type preparedNext struct {
 // Player implements player.Player without a web browser, using an in-process
 // Widevine CDM and audio streaming pipeline.
 type Player struct {
-	cfg       *config.Config
-	provider  *apple.AppleProvider
-	cdmEngine *cdm.CDM
-	licClient *license.Client
-	streamer  *StreamServer
-	sink      audioSink
+	cfg          *config.Config
+	provider     *apple.AppleProvider
+	cdmEngine    *cdm.CDM
+	licClient    *license.Client
+	streamer     *StreamServer
+	sink         audioSink
+	localMatcher *local.Matcher
 
 	// OnSessionExpired is invoked at most once per expiry cycle when Apple's
 	// MZPlay endpoint rejects the user token with 401/403. Call
@@ -90,6 +94,26 @@ func (p *Player) ResetSessionExpired() {
 	p.mu.Lock()
 	p.sessionExpiredOnce = sync.Once{}
 	p.mu.Unlock()
+}
+
+// SetLocalMatcher configures a local lossless file matcher for hybrid playback.
+// When a queued track matches a local lossless file in the matcher's index,
+// the player plays the local file instead of the AAC stream.
+func (p *Player) SetLocalMatcher(m *local.Matcher) {
+	p.mu.Lock()
+	p.localMatcher = m
+	p.mu.Unlock()
+}
+
+func localFileURI(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return (&url.URL{Scheme: "file", Path: slashed}).String()
 }
 
 func (p *Player) withSink(fn func(audioSink)) {
@@ -357,13 +381,25 @@ func (p *Player) handleStreamStart(uri string) {
 	s := p.state
 	p.mu.Unlock()
 	p.bcast.Send(s)
+	p.logHybridTrack(s, tCopy)
 	p.scheduleNextPrefetch()
+}
+
+func (p *Player) logHybridTrack(s player.State, t provider.Track) {
+	if t.LocalPath == "" {
+		return
+	}
+	format := t.LocalFormat
+	if format == "" {
+		format = local.LosslessFormatLabel(t.LocalPath)
+	}
+	p.bcast.SendLog(s, fmt.Sprintf("[hybrid] playing local %s: %s", format, filepath.Base(t.LocalPath)))
 }
 
 func (p *Player) scheduleNextPrefetch() {
 	p.mu.Lock()
 	p.cancelPrefetchLocked()
-	if p.closed || p.streamer == nil {
+	if p.closed || (p.streamer == nil && p.localMatcher == nil) {
 		p.mu.Unlock()
 		return
 	}
@@ -379,6 +415,7 @@ func (p *Player) scheduleNextPrefetch() {
 	prefer256k := p.state.Bitrate >= 256
 	streamer := p.streamer
 	prov := p.provider
+	matcher := p.localMatcher
 	p.bgWg.Add(1)
 	p.mu.Unlock()
 	go func() {
@@ -400,6 +437,46 @@ func (p *Player) scheduleNextPrefetch() {
 				meta.CatalogID = catalogID
 				nextTrack = meta
 			}
+		}
+		if matcher != nil {
+			match, matched := matcher.Match(nextTrack)
+			if !matched && nextTrack.ISRC == "" && prov != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
+				if fetched, err := prov.GetCatalogTracks(ctx, []string{catalogID}); err == nil && len(fetched) > 0 && fetched[0].ISRC != "" {
+					nextTrack.ISRC = fetched[0].ISRC
+					match, matched = matcher.Match(nextTrack)
+				}
+			}
+			if matched {
+				nextTrack.LocalPath = match.Path
+				nextTrack.LocalFormat = match.Format
+				localURI := localFileURI(match.Path)
+				p.mu.Lock()
+				if p.closed || p.prefetchGen != gen || ctx.Err() != nil {
+					p.mu.Unlock()
+					return
+				}
+				if nextIdx >= 0 && nextIdx < len(p.queue) && p.queue[nextIdx].ID == nextTrack.ID {
+					p.queue[nextIdx].LocalPath = match.Path
+					p.queue[nextIdx].LocalFormat = match.Format
+				}
+				prep := &preparedNext{
+					idx:       nextIdx,
+					track:     nextTrack,
+					streamURL: localURI,
+					duration:  nextTrack.Duration,
+				}
+				p.nextPrep = prep
+				if p.stagedPreps == nil {
+					p.stagedPreps = make(map[string]*preparedNext)
+				}
+				p.stagedPreps[localURI] = prep
+				p.mu.Unlock()
+				p.withSink(func(s audioSink) { s.SetNextURI(localURI) })
+				return
+			}
+		}
+		if streamer == nil {
+			return
 		}
 		streamURL, duration, err := streamer.PrepareTrack(ctx, catalogID, prefer256k)
 		if err != nil || ctx.Err() != nil {
@@ -467,6 +544,7 @@ func (p *Player) playTrack(t provider.Track) {
 	prefer256k := p.state.Bitrate >= 256
 	streamer := p.streamer
 	prov := p.provider
+	matcher := p.localMatcher
 	p.bgWg.Add(1)
 	p.mu.Unlock()
 	p.bcast.Send(s)
@@ -521,6 +599,45 @@ func (p *Player) playTrack(t provider.Track) {
 					p.state.Track = &tCopy
 				}
 				p.mu.Unlock()
+			}
+		}
+
+		if matcher != nil {
+			match, matched := matcher.Match(t)
+			if !matched && t.ISRC == "" && prov != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
+				if fetched, err := prov.GetCatalogTracks(ctx, []string{catalogID}); err == nil && len(fetched) > 0 && fetched[0].ISRC != "" {
+					t.ISRC = fetched[0].ISRC
+					match, matched = matcher.Match(t)
+				}
+			}
+			if matched {
+				t.LocalPath = match.Path
+				t.LocalFormat = match.Format
+				localURI := localFileURI(match.Path)
+				p.mu.Lock()
+				if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
+					p.mu.Unlock()
+					return
+				}
+				if p.idx >= 0 && p.idx < len(p.queue) && p.queue[p.idx].ID == t.ID {
+					p.queue[p.idx].LocalPath = match.Path
+					p.queue[p.idx].LocalFormat = match.Format
+				}
+				p.curStream = ""
+				p.curStreamURL = localURI
+				p.streamErr = ""
+				p.seekOffset = 0
+				p.ended = false
+				p.state.Loading = false
+				p.state.Playing = true
+				tCopy := t
+				p.state.Track = &tCopy
+				s = p.state
+				p.mu.Unlock()
+				p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
+				p.logHybridTrack(s, tCopy)
+				p.scheduleNextPrefetch()
+				return
 			}
 		}
 
@@ -805,6 +922,20 @@ func (p *Player) Seek(position time.Duration) error {
 	p.mu.Unlock()
 
 	if streamID == "" || streamURL == "" || streamer == nil {
+		if strings.HasPrefix(streamURL, "file://") {
+			p.mu.Lock()
+			if !p.closed && p.curStreamURL == streamURL {
+				p.seekOffset = 0
+				p.ended = false
+				p.state.Position = position
+				s := p.state
+				p.mu.Unlock()
+				p.withSink(func(sk audioSink) { sk.Seek(position) })
+				p.bcast.Send(s)
+				return nil
+			}
+			p.mu.Unlock()
+		}
 		p.withSink(func(sk audioSink) { sk.Seek(position) })
 		return nil
 	}

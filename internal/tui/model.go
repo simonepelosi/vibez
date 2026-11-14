@@ -8,7 +8,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/openurl"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
+	"github.com/simone-vibes/vibez/internal/provider/local"
 	"github.com/simone-vibes/vibez/internal/tui/art"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/tui/views"
@@ -3708,6 +3708,15 @@ func (m *Model) enrichTrackFromQueue(t *provider.Track) {
 	if len(t.AudioVariants) == 0 {
 		t.AudioVariants = qt.AudioVariants
 	}
+	if t.ISRC == "" {
+		t.ISRC = qt.ISRC
+	}
+	if t.LocalPath == "" {
+		t.LocalPath = qt.LocalPath
+	}
+	if t.LocalFormat == "" {
+		t.LocalFormat = qt.LocalFormat
+	}
 }
 
 // enrichQueueIdx locates the queued track matching playing for metadata
@@ -3815,9 +3824,17 @@ func formatBadge(t *provider.Track, bitrateKbps int) (output, catalog string) {
 	if t == nil {
 		return "", ""
 	}
-	if path, ok := strings.CutPrefix(t.ID, "local:"); ok {
-		ext := strings.TrimPrefix(filepath.Ext(path), ".")
-		return strings.ToUpper(ext), ""
+	localPath := t.LocalPath
+	if localPath == "" {
+		if path, ok := strings.CutPrefix(t.ID, "local:"); ok {
+			localPath = path
+		}
+	}
+	if localPath != "" {
+		if t.LocalFormat != "" {
+			return t.LocalFormat, ""
+		}
+		return local.LosslessFormatLabel(localPath), ""
 	}
 	var parts []string
 	switch {

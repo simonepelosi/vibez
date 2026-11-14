@@ -381,6 +381,19 @@ Set `audio_quality` in `~/.config/vibez/config.json`:
 ```
 
 Supported values: `"high"`/`"256"` for 256 kbps AAC (default), `"standard"`/`"64"` for 64 kbps AAC.
+
+### Hybrid local lossless playback (`--hybrid`)
+
+When `hybrid_playback` is enabled alongside `music_dir` (or via `vibez --hybrid --music-dir ~/Music`), vibez scans your local music directory for lossless files (`.flac`, ALAC `.m4a`, `.wav`, `.aiff`) and automatically plays the local lossless file whenever a track in an Apple Music queue matches by ISRC (or by unambiguous artist + album + title + track number + duration within ±2s). Tracks without a local lossless match continue streaming from Apple Music seamlessly.
+
+> **Play history note:** Because matched tracks play directly from your local files without hitting Apple's streaming/reporting endpoint, they won't appear in Apple Music's *Recently Played* history or feed Apple Music recommendations. Last.fm scrobbling and Discord Rich Presence still work normally.
+
+```json
+{
+  "music_dir": "/home/you/Music",
+  "hybrid_playback": true
+}
+```
 ---
 
 ## Architecture

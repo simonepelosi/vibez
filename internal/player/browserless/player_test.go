@@ -4,10 +4,13 @@ package browserless
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +21,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
+	"github.com/simone-vibes/vibez/internal/provider/local"
 )
 
 func TestPlayerQueueIndexAdjustments(t *testing.T) {
@@ -925,5 +929,204 @@ func TestPlayTrackAndPrefetch_KeepSegment0WarmupAlive(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for segment-0 warm-up #%d (prematurely cancelled?)", i+1)
 		}
+	}
+}
+
+type hybridSpySink struct {
+	noopSink
+	mu      sync.Mutex
+	playURI string
+	nextURI string
+	seekPos time.Duration
+	playCh  chan string
+	nextCh  chan string
+}
+
+func (s *hybridSpySink) PlayURI(uri string) {
+	s.mu.Lock()
+	s.playURI = uri
+	s.mu.Unlock()
+	select {
+	case s.playCh <- uri:
+	default:
+	}
+}
+
+func (s *hybridSpySink) SetNextURI(uri string) {
+	s.mu.Lock()
+	s.nextURI = uri
+	s.mu.Unlock()
+	if uri != "" {
+		select {
+		case s.nextCh <- uri:
+		default:
+		}
+	}
+}
+
+func (s *hybridSpySink) Seek(d time.Duration) {
+	s.mu.Lock()
+	s.seekPos = d
+	s.mu.Unlock()
+}
+
+func writeTestFLAC(t *testing.T, path string, d time.Duration, comments map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	buf.WriteString("fLaC")
+	buf.Write([]byte{0x00, 0x00, 0x00, 34})
+	var si [34]byte
+	const sr = 44100
+	totalSamples := uint64(d.Seconds() * sr)
+	packed := (uint64(sr)&0xFFFFF)<<44 | (uint64(1)&0x7)<<41 | (uint64(15)&0x1F)<<36 | (totalSamples & 0xFFFFFFFFF)
+	binary.BigEndian.PutUint64(si[10:18], packed)
+	buf.Write(si[:])
+
+	var vc bytes.Buffer
+	vendor := "vibez-test"
+	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(vendor))) //nolint:gosec
+	vc.WriteString(vendor)
+	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(comments))) //nolint:gosec
+	for k, v := range comments {
+		entry := k + "=" + v
+		_ = binary.Write(&vc, binary.LittleEndian, uint32(len(entry))) //nolint:gosec
+		vc.WriteString(entry)
+	}
+	vcBytes := vc.Bytes()
+	l := len(vcBytes)
+	buf.Write([]byte{0x84, byte(l >> 16), byte(l >> 8), byte(l)}) //nolint:gosec
+	buf.Write(vcBytes)
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHybridPlaybackRoutesMatchedTracksToLocalLosslessFile(t *testing.T) {
+	dir := t.TempDir()
+	track1Path := filepath.Join(dir, "01 - Airbag.flac")
+	track2Path := filepath.Join(dir, "02 - Paranoid Android.flac")
+
+	writeTestFLAC(t, track1Path, 4*time.Minute+44*time.Second, map[string]string{
+		"TITLE":       "Airbag",
+		"ARTIST":      "Radiohead",
+		"ALBUM":       "OK Computer",
+		"TRACKNUMBER": "1",
+		"ISRC":        "GBAYE9701370",
+	})
+	writeTestFLAC(t, track2Path, 6*time.Minute+23*time.Second, map[string]string{
+		"TITLE":       "Paranoid Android",
+		"ARTIST":      "Radiohead",
+		"ALBUM":       "OK Computer",
+		"TRACKNUMBER": "2",
+	})
+
+	matcher, err := local.NewMatcher(dir)
+	if err != nil {
+		t.Fatalf("NewMatcher: %v", err)
+	}
+
+	sink := &hybridSpySink{
+		playCh: make(chan string, 1),
+		nextCh: make(chan string, 1),
+	}
+	p := &Player{
+		sink:   sink,
+		doneCh: make(chan struct{}),
+		queue: []provider.Track{
+			{
+				ID:          "1097861387",
+				Title:       "Airbag",
+				Artist:      "Radiohead",
+				Album:       "OK Computer",
+				TrackNumber: 1,
+				Duration:    4*time.Minute + 44*time.Second,
+				ISRC:        "GBAYE9701370",
+			},
+			{
+				ID:          "1097861388",
+				Title:       "Paranoid Android",
+				Artist:      "Radiohead",
+				Album:       "OK Computer",
+				TrackNumber: 2,
+				Duration:    6*time.Minute + 23*time.Second,
+			},
+		},
+	}
+	p.SetLocalMatcher(matcher)
+	t.Cleanup(func() { _ = p.Close() })
+	eventsCh := p.Subscribe()
+
+	p.playTrack(p.queue[0])
+
+	select {
+	case uri := <-sink.playCh:
+		if !strings.HasPrefix(uri, "file://") || !strings.HasSuffix(uri, ".flac") {
+			t.Fatalf("PlayURI = %q, want file://...flac", uri)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for hybrid local PlayURI")
+	}
+
+	var nextURI string
+	select {
+	case nextURI = <-sink.nextCh:
+		if !strings.HasPrefix(nextURI, "file://") || !strings.HasSuffix(nextURI, ".flac") {
+			t.Fatalf("SetNextURI = %q, want file://...flac", nextURI)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for hybrid local SetNextURI prefetch")
+	}
+
+	st, _ := p.GetState()
+	if st.Track == nil || st.Track.LocalPath != track1Path || st.Track.LocalFormat != "FLAC" {
+		t.Fatalf("state.Track = %+v, want LocalPath=%q LocalFormat=FLAC", st.Track, track1Path)
+	}
+	if st.Track.ID != "1097861387" {
+		t.Errorf("state.Track.ID = %q, want catalog ID preserved", st.Track.ID)
+	}
+
+	if err := p.Seek(42 * time.Second); err != nil {
+		t.Fatalf("Seek: %v", err)
+	}
+	sink.mu.Lock()
+	seeked := sink.seekPos
+	sink.mu.Unlock()
+	if seeked != 42*time.Second {
+		t.Errorf("sink.Seek = %v, want 42s", seeked)
+	}
+
+	// Simulate gapless transition to the prefetched local track and verify
+	// LocalPath, LocalFormat, and the [hybrid] playing local log are emitted.
+	p.handleStreamStart(nextURI)
+	st, _ = p.GetState()
+	if st.Track == nil || st.Track.LocalPath != track2Path || st.Track.LocalFormat != "FLAC" {
+		t.Fatalf("gapless state.Track = %+v, want LocalPath=%q LocalFormat=FLAC", st.Track, track2Path)
+	}
+	var sawPlayLog, sawGaplessLog bool
+	deadline := time.After(2 * time.Second)
+	for !sawPlayLog || !sawGaplessLog {
+		select {
+		case ev, ok := <-eventsCh:
+			if !ok {
+				goto checkedLogs
+			}
+			for _, line := range ev.Logs {
+				if strings.Contains(line, "[hybrid] playing local FLAC: 01 - Airbag.flac") {
+					sawPlayLog = true
+				}
+				if strings.Contains(line, "[hybrid] playing local FLAC: 02 - Paranoid Android.flac") {
+					sawGaplessLog = true
+				}
+			}
+		case <-deadline:
+			goto checkedLogs
+		}
+	}
+checkedLogs:
+	if !sawPlayLog {
+		t.Error("expected [hybrid] playing local FLAC log on initial playTrack")
+	}
+	if !sawGaplessLog {
+		t.Error("expected [hybrid] playing local FLAC log on gapless handleStreamStart")
 	}
 }

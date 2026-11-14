@@ -179,6 +179,8 @@ func trackFromFile(path string) (provider.Track, error) {
 	artist := "Unknown Artist"
 	album := "Unknown Album"
 	var genres []string
+	var trackNum, discNum int
+	var isrc string
 
 	if err == nil {
 		if m.Title() != "" {
@@ -193,15 +195,63 @@ func trackFromFile(path string) (provider.Track, error) {
 		if m.Genre() != "" {
 			genres = []string{m.Genre()}
 		}
+		trackNum, _ = m.Track()
+		discNum, _ = m.Disc()
+		isrc = extractISRC(m.Raw())
 	}
 
+	dur, format := readFileInfo(f, path)
+
 	return provider.Track{
-		ID:     fmt.Sprintf("local:%s", path),
-		Title:  provider.Clean(title),
-		Artist: provider.Clean(artist),
-		Album:  provider.Clean(album),
-		Genres: provider.CleanAll(genres),
+		ID:          fmt.Sprintf("local:%s", path),
+		Title:       provider.Clean(title),
+		Artist:      provider.Clean(artist),
+		Album:       provider.Clean(album),
+		Duration:    dur,
+		Genres:      provider.CleanAll(genres),
+		DiscNumber:  discNum,
+		TrackNumber: trackNum,
+		ISRC:        isrc,
+		LocalPath:   path,
+		LocalFormat: format,
 	}, nil
+}
+
+// extractISRC inspects raw tag maps (ID3 TSRC/TRC, Vorbis/FLAC ISRC, MP4
+// freeform ----:com.apple.iTunes:ISRC) and returns a normalized 12-character
+// ISRC, or "" when absent.
+func extractISRC(raw map[string]any) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	for k, v := range raw {
+		lk := strings.ToLower(strings.TrimSpace(k))
+		if lk != "tsrc" && lk != "trc" && lk != "isrc" && !strings.HasSuffix(lk, ":isrc") {
+			continue
+		}
+		if code := normalizeRawISRC(v); code != "" {
+			return code
+		}
+	}
+	return ""
+}
+
+func normalizeRawISRC(v any) string {
+	switch val := v.(type) {
+	case string:
+		return provider.NormalizeISRC(val)
+	case []string:
+		for _, s := range val {
+			if code := provider.NormalizeISRC(s); code != "" {
+				return code
+			}
+		}
+	case []byte:
+		return provider.NormalizeISRC(string(val))
+	case fmt.Stringer:
+		return provider.NormalizeISRC(val.String())
+	}
+	return ""
 }
 
 func (p *Provider) GetLibraryTracks(_ context.Context) ([]provider.Track, error) {

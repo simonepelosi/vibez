@@ -4802,11 +4802,32 @@ func TestFormatBadge(t *testing.T) {
 		{"bitrate unknown", &provider.Track{ID: "1", AudioVariants: []string{"lossless"}}, 0, "", "Lossless"},
 		{"local flac", &provider.Track{ID: "local:/music/a.flac"}, 0, "FLAC", ""},
 		{"local file ignores variants", &provider.Track{ID: "local:/music/a.mp3", AudioVariants: []string{"lossless"}}, 256, "MP3", ""},
+		{"hybrid matched local flac", &provider.Track{ID: "617154366", LocalPath: "/music/Get Lucky.flac", AudioVariants: []string{"lossless", "hi-res-lossless"}}, 256, "FLAC", ""},
+		{"hybrid matched local alac uses cached LocalFormat", &provider.Track{ID: "617154366", LocalPath: "/music/Get Lucky.m4a", LocalFormat: "ALAC", AudioVariants: []string{"lossless"}}, 256, "ALAC", ""},
+		{"local alac uses cached LocalFormat", &provider.Track{ID: "local:/music/a.m4a", LocalFormat: "ALAC"}, 0, "ALAC", ""},
 	} {
 		output, catalog := formatBadge(tc.track, tc.kbps)
 		if output != tc.output || catalog != tc.catalog {
 			t.Errorf("%s: formatBadge = (%q, %q), want (%q, %q)", tc.name, output, catalog, tc.output, tc.catalog)
 		}
+	}
+}
+
+func TestEnrichTrackFromQueue_CopiesLocalPathAndFormat(t *testing.T) {
+	m := newModel(nil)
+	m.queueTracks = []provider.Track{{
+		ID:          "617154366",
+		Title:       "Get Lucky",
+		LocalPath:   "/music/Get Lucky.m4a",
+		LocalFormat: "ALAC",
+	}}
+	playing := &provider.Track{ID: "617154366", Title: "Get Lucky"}
+	m.enrichTrackFromQueue(playing)
+	if playing.LocalPath != "/music/Get Lucky.m4a" || playing.LocalFormat != "ALAC" {
+		t.Fatalf("enriched = (%q, %q), want (/music/Get Lucky.m4a, ALAC)", playing.LocalPath, playing.LocalFormat)
+	}
+	if out, cat := formatBadge(playing, 256); out != "ALAC" || cat != "" {
+		t.Errorf("formatBadge(enriched) = (%q, %q), want (ALAC, \"\")", out, cat)
 	}
 }
 
