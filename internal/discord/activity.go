@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"net/url"
 	"strings"
 	"time"
 
@@ -90,22 +91,34 @@ func BuildActivity(st player.State) *Activity {
 	return act
 }
 
-// formatArtworkURL ensures {w}x{h} placeholders are resolved and validates HTTP prefix.
+// formatArtworkURL ensures {w}x{h} placeholders are resolved and validates URL structure.
 func formatArtworkURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	url := strings.ReplaceAll(raw, "{w}x{h}", "512x512")
-	url = strings.ReplaceAll(url, "{w}", "512")
-	url = strings.ReplaceAll(url, "{h}", "512")
-	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		return url
+	expanded := strings.ReplaceAll(raw, "{w}x{h}", "512x512")
+	expanded = strings.ReplaceAll(expanded, "{w}", "512")
+	expanded = strings.ReplaceAll(expanded, "{h}", "512")
+	for i := 0; i < len(expanded); i++ {
+		if expanded[i] < 0x20 || expanded[i] == 0x7f {
+			return ""
+		}
 	}
-	return ""
+	u, err := url.Parse(expanded)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return ""
+	}
+	return u.String()
 }
 
-// sanitizeStr trims whitespace, truncates to 128 characters, and ensures minimum length of 2.
+// sanitizeStr strips control characters, trims whitespace, truncates to 128 characters, and ensures minimum length of 2.
 func sanitizeStr(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""

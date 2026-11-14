@@ -1,12 +1,14 @@
 package discord
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -407,4 +409,39 @@ func TestIPCClient_HandshakeTimeout(t *testing.T) {
 	if elapsed > defaultTimeout+2*time.Second {
 		t.Fatalf("Handshake took too long to time out: %v", elapsed)
 	}
+}
+
+func TestReadFrameFrom_RejectsOversizedFrame(t *testing.T) {
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], OpFrame)
+	binary.LittleEndian.PutUint32(hdr[4:8], maxIPCFrameSize+1)
+	if _, _, err := readFrameFrom(bytes.NewReader(hdr[:])); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readFrameFrom error = %v, want oversized frame error", err)
+	}
+}
+
+func TestFormatArtworkURL_Validation(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://is1-ssl.mzstatic.com/image/{w}x{h}.jpg", "https://is1-ssl.mzstatic.com/image/512x512.jpg"},
+		{"javascript:alert(1)", ""},
+		{"https://user:pass@example.com/a.jpg", ""},
+		{"https://example.com/\x00bad.jpg", ""},
+		{"file:///etc/passwd", ""},
+	}
+	for _, tc := range cases {
+		if got := formatArtworkURL(tc.in); got != tc.want {
+			t.Errorf("formatArtworkURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func FuzzReadFrame(f *testing.F) {
+	f.Add([]byte{1, 0, 0, 0, 2, 0, 0, 0, '{', '}'})
+	f.Add([]byte{1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff})
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		_, _, _ = readFrameFrom(bytes.NewReader(data))
+	})
 }

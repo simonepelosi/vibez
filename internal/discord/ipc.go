@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -25,6 +26,13 @@ const (
 
 	// ipcEndpointCount is the number of discord-ipc-N endpoints (N = 0..9) Discord may listen on.
 	ipcEndpointCount = 10
+
+	// maxIPCFrameSize bounds incoming and outgoing Discord IPC frame payloads so a
+	// corrupt or malicious socket header cannot allocate arbitrary memory.
+	maxIPCFrameSize = 4 << 20
+
+	// maxIPCPingPayload caps OpPing payload echoed back in OpPong.
+	maxIPCPingPayload = 64 << 10
 )
 
 var (
@@ -82,10 +90,10 @@ func (c *IPCClient) Handshake(clientID string) error {
 		return err
 	}
 	if op == OpClose {
-		return fmt.Errorf("handshake rejected: %s", string(resp))
+		return fmt.Errorf("handshake rejected: %s", sanitizeIPCPreview(resp))
 	}
 	if op != OpFrame {
-		return fmt.Errorf("unexpected opcode %d: %s", op, string(resp))
+		return fmt.Errorf("unexpected opcode %d: %s", op, sanitizeIPCPreview(resp))
 	}
 
 	c.startReader()
@@ -109,7 +117,9 @@ func (c *IPCClient) startReader() {
 				return
 			}
 			if op == OpPing {
-				_ = c.WriteFrame(OpPong, payload)
+				if len(payload) <= maxIPCPingPayload {
+					_ = c.WriteFrame(OpPong, payload)
+				}
 			} else {
 				c.mu.Lock()
 				fn := c.onFrame
@@ -124,6 +134,9 @@ func (c *IPCClient) startReader() {
 
 // WriteFrame sends an opcode and payload prefixed with an 8-byte little-endian header.
 func (c *IPCClient) WriteFrame(op uint32, payload []byte) error {
+	if len(payload) > maxIPCFrameSize {
+		return fmt.Errorf("discord ipc frame exceeds %d bytes (%d)", maxIPCFrameSize, len(payload))
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -131,9 +144,14 @@ func (c *IPCClient) WriteFrame(op uint32, payload []byte) error {
 		return ErrClosed
 	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(defaultTimeout))
+	defer func() {
+		if c.conn != nil {
+			_ = c.conn.SetWriteDeadline(time.Time{})
+		}
+	}()
 	header := make([]byte, 8)
 	binary.LittleEndian.PutUint32(header[0:4], op)
-	binary.LittleEndian.PutUint32(header[4:8], uint32(len(payload))) //nolint:gosec // payload length fits in uint32
+	binary.LittleEndian.PutUint32(header[4:8], uint32(len(payload))) //nolint:gosec // bounded above by maxIPCFrameSize
 
 	if _, err := c.conn.Write(header); err != nil {
 		return err
@@ -155,20 +173,40 @@ func (c *IPCClient) ReadFrame() (uint32, []byte, error) {
 	if conn == nil {
 		return 0, nil, ErrClosed
 	}
+	return readFrameFrom(conn)
+}
+
+func readFrameFrom(r io.Reader) (uint32, []byte, error) {
 	header := make([]byte, 8)
-	if _, err := io.ReadFull(conn, header); err != nil {
+	if _, err := io.ReadFull(r, header); err != nil {
 		return 0, nil, err
 	}
 	op := binary.LittleEndian.Uint32(header[0:4])
 	length := binary.LittleEndian.Uint32(header[4:8])
+	if length > maxIPCFrameSize {
+		return 0, nil, fmt.Errorf("discord ipc frame exceeds %d bytes (%d)", maxIPCFrameSize, length)
+	}
 
 	payload := make([]byte, length)
 	if length > 0 {
-		if _, err := io.ReadFull(conn, payload); err != nil {
+		if _, err := io.ReadFull(r, payload); err != nil {
 			return 0, nil, err
 		}
 	}
 	return op, payload, nil
+}
+
+func sanitizeIPCPreview(b []byte) string {
+	const maxLen = 256
+	if len(b) > maxLen {
+		b = b[:maxLen]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, string(b))
 }
 
 // Close closes the underlying IPC connection.
