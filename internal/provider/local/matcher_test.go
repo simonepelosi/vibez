@@ -422,3 +422,86 @@ func TestMatcher_NewMatcherContextCancelled(t *testing.T) {
 		t.Fatalf("NewMatcherContext(cancelled) = %v, want context.Canceled", err)
 	}
 }
+
+func TestScan_IncrementalCacheReuseAndInvalidation(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("LOCALAPPDATA", cacheDir)
+
+	dir := t.TempDir()
+	trackA := filepath.Join(dir, "a.flac")
+	trackB := filepath.Join(dir, "b.flac")
+	writeSyntheticFLAC(t, trackA, 180*time.Second, map[string]string{
+		"TITLE": "Title A", "ARTIST": "Artist A", "ISRC": "USRC00000001",
+	})
+	writeSyntheticFLAC(t, trackB, 200*time.Second, map[string]string{
+		"TITLE": "Title B", "ARTIST": "Artist B", "ISRC": "USRC00000002",
+	})
+
+	// 1. Cold scan populates the disk cache.
+	p1, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("cold local.New: %v", err)
+	}
+	tracks1, _ := p1.GetLibraryTracks(context.Background())
+	if len(tracks1) != 2 {
+		t.Fatalf("cold tracks = %d, want 2", len(tracks1))
+	}
+
+	// 2. Corrupt file content of trackB while restoring original size/mtime?
+	// Even better: truncate+re-stat shows invalidation, while keeping mtime+size unchanged proves cache hit:
+	infoB, err := os.Stat(trackB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origBytesB, err := os.ReadFile(trackB) //nolint:gosec // G304: test temp file path created above
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace trackB bytes with zeroes of identical length and identical mtime:
+	// only an incremental cache hit preserves "Title B" without re-parsing the zeroed file.
+	if err := os.WriteFile(trackB, make([]byte, len(origBytesB)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(trackB, infoB.ModTime(), infoB.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify trackA with a longer title & new mtime to prove cache invalidation picks up changes.
+	writeSyntheticFLAC(t, trackA, 185*time.Second, map[string]string{
+		"TITLE": "Updated Title A", "ARTIST": "Artist A", "ISRC": "USRC00000001",
+	})
+	future := infoB.ModTime().Add(2 * time.Second)
+	if err := os.Chtimes(trackA, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	p2, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("warm local.New: %v", err)
+	}
+	tracks2, _ := p2.GetLibraryTracks(context.Background())
+	byPath := map[string]provider.Track{}
+	for _, tr := range tracks2 {
+		byPath[tr.LocalPath] = tr
+	}
+	if got := byPath[trackA].Title; got != "Updated Title A" {
+		t.Errorf("updated file title = %q, want %q", got, "Updated Title A")
+	}
+	if got := byPath[trackB].Title; got != "Title B" {
+		t.Errorf("cached file title = %q, want %q (expected cache hit)", got, "Title B")
+	}
+
+	// 3. Removing a file must prune it from subsequent scans and matcher results.
+	if err := os.Remove(trackB); err != nil {
+		t.Fatal(err)
+	}
+	m, err := local.NewMatcher(dir)
+	if err != nil {
+		t.Fatalf("NewMatcher after delete: %v", err)
+	}
+	if m.Count() != 1 {
+		t.Errorf("matcher count after delete = %d, want 1", m.Count())
+	}
+}
