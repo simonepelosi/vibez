@@ -88,8 +88,10 @@ func canonicalMusicDir(dir string) string {
 	if abs, err := filepath.Abs(cleaned); err == nil {
 		cleaned = abs
 	}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
-		return resolved
+	if info, err := os.Lstat(cleaned); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+			return resolved
+		}
 	}
 	return cleaned
 }
