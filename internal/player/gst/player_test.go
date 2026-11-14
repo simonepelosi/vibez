@@ -380,3 +380,24 @@ func TestStopThenReplayToEOSAndDestroy(t *testing.T) {
 		t.Fatal("Destroy timed out after Stop")
 	}
 }
+
+func TestLoopbackHTTPOnlyMatchesLocalHosts(t *testing.T) {
+	cases := []struct {
+		uri  string
+		want bool
+	}{
+		{"http://127.0.0.1:12345/stream/a/tok.aac", true},
+		{"http://127.0.0.1/a", true},
+		{"http://localhost:8080/stream", true},
+		{"http://localhost", true},
+		{"http://example.com/a.aac", false},
+		{"http://127.0.0.2:8080/a.aac", false},
+		{"http://localhost.evil.com/a.aac", false},
+		{"https://127.0.0.1:8080/a.aac", false},
+	}
+	for _, tc := range cases {
+		if got := uriIsLoopbackHTTP(tc.uri); got != tc.want {
+			t.Errorf("uriIsLoopbackHTTP(%q) = %v, want %v", tc.uri, got, tc.want)
+		}
+	}
+}
