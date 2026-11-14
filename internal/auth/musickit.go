@@ -23,6 +23,8 @@ import (
 //go:embed web/login.html
 var loginHTML []byte
 
+var loginTemplate = template.Must(template.New("login").Parse(string(loginHTML)))
+
 // stateHeader carries the per-login state on the /callback request. A custom
 // header also forces a CORS preflight, so a page on another origin cannot
 // post a token to the callback even if it learns the port.
@@ -41,6 +43,18 @@ type callbackPayload struct {
 // Login starts the MusicKit auth flow: serves a local web page, opens the browser,
 // waits for the user token, then saves it to config.
 func Login(cfg *config.Config) error {
+	return LoginWithLogger(cfg, func(msg string) {
+		fmt.Println(msg)
+	})
+}
+
+// LoginWithLogger behaves like Login but delivers human-readable status and
+// fallback-URL messages to logf instead of writing directly to stdout. Callers
+// running an interactive TUI pass a TUI-safe logger so stdout stays clean.
+func LoginWithLogger(cfg *config.Config, logf func(string)) error {
+	if logf == nil {
+		logf = func(string) {}
+	}
 	if err := ResolveDeveloperToken(cfg); err != nil && cfg.AppleDeveloperToken == "" {
 		return err
 	}
@@ -59,15 +73,10 @@ To get one:
 	tokenCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
-	tmpl, err := template.New("login").Parse(string(loginHTML))
-	if err != nil {
-		return fmt.Errorf("parsing login template: %w", err)
-	}
-
 	// state ties /login and /callback to this login attempt, so another
 	// program or website cannot post a token of its own.
 	state := rand.Text()
-	mux := buildMux(cfg.AppleDeveloperToken, state, tmpl, tokenCh, errCh)
+	mux := buildMux(cfg.AppleDeveloperToken, state, loginTemplate, tokenCh, errCh)
 
 	// Loopback only: the page carries the developer token and /callback
 	// accepts a user token, neither of which belongs on the network.
@@ -90,23 +99,22 @@ To get one:
 		}()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
 	loginURL := fmt.Sprintf("http://localhost:%d/login?state=%s", port, state)
-	fmt.Println("Connecting to Apple Music...")
-	fmt.Println("Your browser will open to complete the login.")
+	logf("Connecting to Apple Music — opening browser for login...")
 
 	_ = openBrowser(loginURL) // intentional best-effort browser open
 
-	// Print the fallback URL after a short delay so users whose browser did
-	// not open automatically can still complete the flow, unless login finished first.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	// Print the fallback URL after a short delay only if Login is still waiting
+	// so fast logins neither leak a goroutine nor emit messages after completion.
+	fallbackTimer := time.NewTimer(4 * time.Second)
+	defer fallbackTimer.Stop()
 	go func() {
-		timer := time.NewTimer(4 * time.Second)
-		defer timer.Stop()
 		select {
-		case <-timer.C:
-			fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", loginURL)
+		case <-fallbackTimer.C:
+			logf(fmt.Sprintf("If your browser did not open, visit: %s", loginURL))
 		case <-ctx.Done():
 		}
 	}()
@@ -124,7 +132,7 @@ To get one:
 		if err := cfg.Save(""); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
-		fmt.Println("✓ Apple Music connected successfully!")
+		logf("Apple Music connected successfully!")
 		return nil
 	case err := <-errCh:
 		shutdownSrv()

@@ -559,3 +559,34 @@ func TestCallbackHandler_RejectsControlCharsAndDoesNotBlock(t *testing.T) {
 		t.Fatalf("valid status on full channel = %d, want 200", w3.Code)
 	}
 }
+
+func TestLoginWithLogger_CapturesStatusMessages(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	port := 17784
+	cfg := &config.Config{ //nolint:gosec // G101: test value, not a real credential
+		AppleDeveloperToken: "logger-test-dev-token",
+		AuthPort:            port,
+	}
+
+	states := captureLoginState(t)
+	go postToken(port, states, "logger-user-token")
+
+	var logs []string
+	err := LoginWithLogger(cfg, func(msg string) {
+		logs = append(logs, msg)
+	})
+	if err != nil {
+		t.Fatalf("LoginWithLogger: %v", err)
+	}
+	if cfg.AppleUserToken != "logger-user-token" {
+		t.Errorf("AppleUserToken = %q, want %q", cfg.AppleUserToken, "logger-user-token")
+	}
+	if len(logs) < 2 {
+		t.Fatalf("expected at least 2 status logs, got %v", logs)
+	}
+	if !containsSubstr(string(loginHTML), "DOMContentLoaded") || !containsSubstr(string(loginHTML), "PopupBlockedError") {
+		t.Error("login.html missing auto-connect DOMContentLoaded fallback handling")
+	}
+}

@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -64,7 +66,11 @@ func CheckTokens(devToken, userToken string) (TokenStatus, string) {
 // checkTokens is the testable core of CheckTokens. It takes both URLs
 // explicitly so tests can point them at an httptest server.
 func checkTokens(userURL, devURL, devToken, userToken string) (TokenStatus, string) {
-	if devToken == "" {
+	return checkTokensAt(userURL, devURL, devToken, userToken, time.Now())
+}
+
+func checkTokensAt(userURL, devURL, devToken, userToken string, now time.Time) (TokenStatus, string) {
+	if devToken == "" || jwtExpired(devToken, now) {
 		return DeveloperTokenRejected, ""
 	}
 	if userToken == "" {
@@ -166,4 +172,28 @@ func firstResourceID(r io.Reader) string {
 		}
 	}
 	return id
+}
+
+// jwtExpired reports whether tok is a 3-segment base64url JWT whose numeric
+// "exp" claim is at or before now. Oversized, non-JWT, or unreadable payloads
+// return false so callers fall back to the network probe without decoding large blobs.
+func jwtExpired(tok string, now time.Time) bool {
+	if tok == "" || len(tok) > maxJWTSize {
+		return false
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 || parts[1] == "" {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp *int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
+		return false
+	}
+	return now.Unix() >= *claims.Exp
 }
