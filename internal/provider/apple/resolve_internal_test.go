@@ -460,3 +460,115 @@ func TestSetSongRating_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
 		}
 	}
 }
+
+func TestAppleProvider_HTTPPoolAndLibraryCache(t *testing.T) {
+	var tracksCalls, playlistsCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/me/library/songs":
+			tracksCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "i.1", "attributes": map[string]any{"name": "Track One", "artistName": "Artist"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/me/library/playlists":
+			playlistsCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "p.1", "attributes": map[string]any{"name": "Favorites"}},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/me/library/playlists":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "p.2", "attributes": map[string]any{"name": "Created"}},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/me/library":
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPut && r.URL.Path == "/me/ratings/songs/123":
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	now := time.Unix(1_700_000_000, 0)
+	var nowMu sync.Mutex
+
+	p := New(&config.Config{
+		AppleDeveloperToken: "dev",
+		AppleUserToken:      "usr",
+		StoreFront:          "us",
+	})
+	p.SetBaseURL(srv.URL)
+	p.nowFn = func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return now
+	}
+
+	if tr, ok := p.client.Transport.(*http.Transport); !ok || tr.MaxIdleConnsPerHost < 16 {
+		t.Fatalf("expected pooled HTTP transport with MaxIdleConnsPerHost >= 16, got %#v", p.client.Transport)
+	}
+
+	// First call fetches from API; second call within TTL hits cache and returns a defensive copy.
+	t1, err := p.GetLibraryTracks(context.Background())
+	if err != nil || len(t1) != 1 {
+		t.Fatalf("GetLibraryTracks #1: %v %v", t1, err)
+	}
+	t1[0].Title = "Mutated By Caller"
+	t2, err := p.GetLibraryTracks(context.Background())
+	if err != nil || len(t2) != 1 || t2[0].Title != "Track One" {
+		t.Fatalf("GetLibraryTracks #2: %v %v", t2, err)
+	}
+	if tracksCalls.Load() != 1 {
+		t.Fatalf("tracks API calls = %d, want 1 (cached)", tracksCalls.Load())
+	}
+
+	// Playlists cache hit then CreatePlaylist invalidation.
+	pl1, err := p.GetLibraryPlaylists(context.Background())
+	if err != nil || len(pl1) != 1 {
+		t.Fatalf("GetLibraryPlaylists #1: %v %v", pl1, err)
+	}
+	if _, err := p.GetLibraryPlaylists(context.Background()); err != nil {
+		t.Fatalf("GetLibraryPlaylists #2: %v", err)
+	}
+	if playlistsCalls.Load() != 1 {
+		t.Fatalf("playlists API calls = %d, want 1 (cached)", playlistsCalls.Load())
+	}
+	if _, err := p.CreatePlaylist(context.Background(), "Created", nil); err != nil {
+		t.Fatalf("CreatePlaylist: %v", err)
+	}
+	if _, err := p.GetLibraryPlaylists(context.Background()); err != nil {
+		t.Fatalf("GetLibraryPlaylists #3: %v", err)
+	}
+	if playlistsCalls.Load() != 2 {
+		t.Fatalf("playlists API calls after CreatePlaylist = %d, want 2", playlistsCalls.Load())
+	}
+
+	// SetSongRating(RatingLoved) adds to library -> invalidates tracks cache.
+	if err := p.SetSongRating(context.Background(), "123", provider.RatingLoved); err != nil {
+		t.Fatalf("SetSongRating: %v", err)
+	}
+	if _, err := p.GetLibraryTracks(context.Background()); err != nil {
+		t.Fatalf("GetLibraryTracks #3: %v", err)
+	}
+	if tracksCalls.Load() != 2 {
+		t.Fatalf("tracks API calls after RatingLoved = %d, want 2", tracksCalls.Load())
+	}
+
+	// Advancing past TTL triggers re-fetch cleanly.
+	nowMu.Lock()
+	now = now.Add(p.cacheTTL + time.Second)
+	nowMu.Unlock()
+	if _, err := p.GetLibraryTracks(context.Background()); err != nil {
+		t.Fatalf("GetLibraryTracks #4: %v", err)
+	}
+	if tracksCalls.Load() != 3 {
+		t.Fatalf("tracks API calls after TTL expiry = %d, want 3", tracksCalls.Load())
+	}
+}

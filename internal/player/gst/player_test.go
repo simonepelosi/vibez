@@ -302,3 +302,102 @@ func TestLocalAIFFMissingParserHint(t *testing.T) {
 		})
 	}
 }
+
+func TestDestroyWakesIdleAndStoppedBus(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	p, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		p.Destroy()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Destroy timed out on idle busLoop")
+	}
+}
+
+func TestStopThenReplayToEOSAndDestroy(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	path := filepath.Join(t.TempDir(), "tone.wav")
+	if err := os.WriteFile(path, pcmWAV(16, 44100, 11025), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+
+	p, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eosCh := make(chan struct{}, 2)
+	errCh := make(chan error, 1)
+	p.OnEOS(func() {
+		eosCh <- struct{}{}
+	})
+	p.OnError(func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+
+	p.PlayURI("file://" + path)
+	time.Sleep(20 * time.Millisecond)
+	p.Stop()
+	time.Sleep(20 * time.Millisecond)
+
+	// Drain any EOS that arrived right before Stop before replaying.
+	for len(eosCh) > 0 {
+		<-eosCh
+	}
+
+	p.PlayURI("file://" + path)
+	select {
+	case <-eosCh:
+	case err := <-errCh:
+		p.Destroy()
+		t.Fatalf("pipeline error after Stop+PlayURI: %v", err)
+	case <-time.After(10 * time.Second):
+		p.Destroy()
+		t.Fatal("timed out waiting for EOS after Stop+PlayURI")
+	}
+
+	p.Stop()
+	time.Sleep(20 * time.Millisecond)
+	done := make(chan struct{})
+	go func() {
+		p.Destroy()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Destroy timed out after Stop")
+	}
+}
+
+func TestLoopbackHTTPOnlyMatchesLocalHosts(t *testing.T) {
+	cases := []struct {
+		uri  string
+		want bool
+	}{
+		{"http://127.0.0.1:12345/stream/a/tok.aac", true},
+		{"http://127.0.0.1/a", true},
+		{"http://localhost:8080/stream", true},
+		{"http://localhost", true},
+		{"http://example.com/a.aac", false},
+		{"http://127.0.0.2:8080/a.aac", false},
+		{"http://localhost.evil.com/a.aac", false},
+		{"https://127.0.0.1:8080/a.aac", false},
+	}
+	for _, tc := range cases {
+		if got := uriIsLoopbackHTTP(tc.uri); got != tc.want {
+			t.Errorf("uriIsLoopbackHTTP(%q) = %v, want %v", tc.uri, got, tc.want)
+		}
+	}
+}

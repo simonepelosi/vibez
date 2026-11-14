@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1079,4 +1080,114 @@ func TestServer_GetAllDuringFlushIsRaceFree(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+func TestApplyPropertiesSignal(t *testing.T) {
+	initial := player.State{
+		Playing: false,
+		Volume:  0.4,
+		Track:   &provider.Track{Title: "Old", Artist: "Old Artist"},
+	}
+
+	// Unrelated path/interface ignored.
+	ignored := &dbus.Signal{
+		Path: "/other/path",
+		Body: []any{mprisInterface, map[string]dbus.Variant{"PlaybackStatus": dbus.MakeVariant("Playing")}},
+	}
+	if _, changed := applyPropertiesSignal(initial, ignored); changed {
+		t.Fatal("expected unrelated path signal to be ignored")
+	}
+
+	// Play status + metadata update arrives instantaneously via signal.
+	sig := &dbus.Signal{
+		Path: mprisPlayerObjectPath,
+		Body: []any{
+			mprisInterface,
+			map[string]dbus.Variant{
+				"PlaybackStatus": dbus.MakeVariant("Playing"),
+				"Volume":         dbus.MakeVariant(0.85),
+				"Metadata": dbus.MakeVariant(map[string]dbus.Variant{
+					"xesam:title":  dbus.MakeVariant("New Track"),
+					"xesam:artist": dbus.MakeVariant([]string{"New Artist"}),
+				}),
+			},
+			[]string{},
+		},
+	}
+	next, changed := applyPropertiesSignal(initial, sig)
+	if !changed {
+		t.Fatal("expected PropertiesChanged signal to trigger state change")
+	}
+	if !next.Playing || next.Volume != 0.85 || next.Track == nil || next.Track.Title != "New Track" || next.Track.Artist != "New Artist" {
+		t.Fatalf("unexpected next state: %+v", next)
+	}
+	if initial.Track.Title != "Old" {
+		t.Fatalf("expected original state track not to be mutated in place")
+	}
+}
+
+type getAllFakeMPRIS struct {
+	fakeMPRIS
+	getCalls    atomic.Int32
+	getAllCalls atomic.Int32
+}
+
+func (g *getAllFakeMPRIS) Get(iface, prop string) (dbus.Variant, *dbus.Error) {
+	g.getCalls.Add(1)
+	return g.fakeMPRIS.Get(iface, prop)
+}
+
+func (g *getAllFakeMPRIS) GetAll(_ string) (map[string]dbus.Variant, *dbus.Error) {
+	g.getAllCalls.Add(1)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return map[string]dbus.Variant{
+		"PlaybackStatus": dbus.MakeVariant(g.playbackStatus),
+		"Volume":         dbus.MakeVariant(g.volume),
+		"Position":       dbus.MakeVariant(g.posUs),
+		"Metadata":       dbus.MakeVariant(g.metadata),
+	}, nil
+}
+
+func TestMPRISPlayer_ReadState_PrefersSingleGetAllRPC(t *testing.T) {
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Skip("D-Bus session bus unavailable")
+	}
+	defer conn.Close() //nolint:errcheck
+
+	busName := "com.vibez.test.getall"
+	if _, err := conn.RequestName(busName, dbus.NameFlagAllowReplacement|dbus.NameFlagReplaceExisting); err != nil {
+		t.Skip("cannot request test D-Bus name:", err)
+	}
+	defer func() { _, _ = conn.ReleaseName(busName) }()
+
+	svc := &getAllFakeMPRIS{
+		fakeMPRIS: fakeMPRIS{
+			playbackStatus: "Playing",
+			volume:         0.75,
+			posUs:          12_000_000,
+			metadata: map[string]dbus.Variant{
+				"xesam:title":  dbus.MakeVariant("Single RPC Song"),
+				"xesam:artist": dbus.MakeVariant([]string{"Batch Artist"}),
+			},
+		},
+	}
+	if err := conn.Export(svc, "/org/mpris/MediaPlayer2", dbusProperties); err != nil {
+		t.Fatal(err)
+	}
+
+	p, clientConn := connectToFake(t, busName)
+	defer clientConn.Close() //nolint:errcheck
+
+	state, err := p.readState()
+	if err != nil {
+		t.Fatalf("readState: %v", err)
+	}
+	if !state.Playing || state.Volume != 0.75 || state.Track == nil || state.Track.Title != "Single RPC Song" {
+		t.Fatalf("unexpected state from GetAll: %+v", state)
+	}
+	if svc.getAllCalls.Load() != 1 || svc.getCalls.Load() != 0 {
+		t.Fatalf("calls: GetAll=%d Get=%d, want 1 and 0", svc.getAllCalls.Load(), svc.getCalls.Load())
+	}
 }
