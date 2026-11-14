@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	mprisInterface = "org.mpris.MediaPlayer2.Player"
-	dbusProperties = "org.freedesktop.DBus.Properties"
-	pollInterval   = 500 * time.Millisecond
+	mprisInterface        = "org.mpris.MediaPlayer2.Player"
+	dbusProperties        = "org.freedesktop.DBus.Properties"
+	mprisPlayerObjectPath = dbus.ObjectPath("/org/mpris/MediaPlayer2")
+	pollInterval          = 500 * time.Millisecond
+	signalPollInterval    = 2 * time.Second
 )
 
 // MPRISPlayer controls an MPRIS-compatible media player over D-Bus.
@@ -179,20 +181,43 @@ func (m *MPRISPlayer) metadata() (map[string]dbus.Variant, error) {
 	return meta, nil
 }
 
+func (m *MPRISPlayer) getAllProperties() (map[string]dbus.Variant, error) {
+	var props map[string]dbus.Variant
+	err := m.obj.Call(dbusProperties+".GetAll", 0, mprisInterface).Store(&props)
+	return props, err
+}
+
 func (m *MPRISPlayer) readState() (*player.State, error) {
-	statusV, err := m.getProperty("PlaybackStatus")
-	if err != nil {
-		return nil, fmt.Errorf("reading PlaybackStatus: %w", err)
+	props, allErr := m.getAllProperties()
+
+	statusV, hasStatus := props["PlaybackStatus"]
+	if allErr != nil || !hasStatus {
+		var err error
+		statusV, err = m.getProperty("PlaybackStatus")
+		if err != nil {
+			return nil, fmt.Errorf("reading PlaybackStatus: %w", err)
+		}
 	}
 	status, _ := statusV.Value().(string)
 
-	posV, _ := m.getProperty("Position")
+	posV, hasPos := props["Position"]
+	if !hasPos {
+		posV, _ = m.getProperty("Position")
+	}
 	posUs, _ := posV.Value().(int64)
 
-	volV, _ := m.getProperty("Volume")
+	volV, hasVol := props["Volume"]
+	if !hasVol {
+		volV, _ = m.getProperty("Volume")
+	}
 	vol, _ := volV.Value().(float64)
 
-	meta, _ := m.metadata()
+	var meta map[string]dbus.Variant
+	if metaV, hasMeta := props["Metadata"]; hasMeta {
+		meta, _ = metaV.Value().(map[string]dbus.Variant)
+	} else {
+		meta, _ = m.metadata()
+	}
 
 	state := &player.State{
 		Playing:  status == "Playing",
@@ -207,8 +232,87 @@ func (m *MPRISPlayer) readState() (*player.State, error) {
 	return state, nil
 }
 
+func (m *MPRISPlayer) subscribePropertiesChanged(ch chan<- *dbus.Signal) bool {
+	if err := m.conn.AddMatchSignal(
+		dbus.WithMatchSender(m.name),
+		dbus.WithMatchObjectPath(mprisPlayerObjectPath),
+		dbus.WithMatchInterface(dbusProperties),
+		dbus.WithMatchMember("PropertiesChanged"),
+		dbus.WithMatchArg(0, mprisInterface),
+	); err != nil {
+		return false
+	}
+	m.conn.Signal(ch)
+	return true
+}
+
+func (m *MPRISPlayer) unsubscribePropertiesChanged(ch chan<- *dbus.Signal) {
+	m.conn.RemoveSignal(ch)
+	_ = m.conn.RemoveMatchSignal(
+		dbus.WithMatchSender(m.name),
+		dbus.WithMatchObjectPath(mprisPlayerObjectPath),
+		dbus.WithMatchInterface(dbusProperties),
+		dbus.WithMatchMember("PropertiesChanged"),
+		dbus.WithMatchArg(0, mprisInterface),
+	)
+}
+
+func applyPropertiesSignal(last player.State, sig *dbus.Signal) (player.State, bool) {
+	if sig == nil || sig.Path != mprisPlayerObjectPath || len(sig.Body) < 2 {
+		return last, false
+	}
+	iface, _ := sig.Body[0].(string)
+	if iface != mprisInterface {
+		return last, false
+	}
+	changed, ok := sig.Body[1].(map[string]dbus.Variant)
+	if !ok || len(changed) == 0 {
+		return last, false
+	}
+
+	next := last
+	if last.Track != nil {
+		tCopy := *last.Track
+		next.Track = &tCopy
+	}
+	if v, ok := changed["PlaybackStatus"]; ok {
+		if s, ok := v.Value().(string); ok {
+			next.Playing = s == "Playing"
+		}
+	}
+	if v, ok := changed["Volume"]; ok {
+		if vol, ok := v.Value().(float64); ok {
+			next.Volume = vol
+		}
+	}
+	if v, ok := changed["Metadata"]; ok {
+		if meta, ok := v.Value().(map[string]dbus.Variant); ok {
+			next.Track = parseMetadataMap(meta)
+		}
+	}
+	return next, stateChanged(last, next)
+}
+
+func (m *MPRISPlayer) emitState(s player.State) {
+	m.mu.Lock()
+	for _, ch := range m.subs {
+		select {
+		case ch <- s:
+		default:
+		}
+	}
+	m.mu.Unlock()
+}
+
 func (m *MPRISPlayer) poll() {
-	ticker := time.NewTicker(pollInterval)
+	sigCh := make(chan *dbus.Signal, 16)
+	interval := pollInterval
+	if m.subscribePropertiesChanged(sigCh) {
+		interval = signalPollInterval
+		defer m.unsubscribePropertiesChanged(sigCh)
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var last player.State
@@ -216,6 +320,14 @@ func (m *MPRISPlayer) poll() {
 		select {
 		case <-m.done:
 			return
+		case sig, ok := <-sigCh:
+			if !ok {
+				return
+			}
+			if next, changed := applyPropertiesSignal(last, sig); changed {
+				last = next
+				m.emitState(next)
+			}
 		case <-ticker.C:
 			s, err := m.readState()
 			if err != nil {
@@ -223,14 +335,7 @@ func (m *MPRISPlayer) poll() {
 			}
 			if stateChanged(last, *s) {
 				last = *s
-				m.mu.Lock()
-				for _, ch := range m.subs {
-					select {
-					case ch <- *s:
-					default:
-					}
-				}
-				m.mu.Unlock()
+				m.emitState(*s)
 			}
 		}
 	}

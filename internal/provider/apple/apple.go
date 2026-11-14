@@ -34,9 +34,10 @@ const (
 	// maxPaginationPages caps sequential "next" cursor hops so a looping cursor terminates.
 	maxPaginationPages = 1000
 	// Retry settings for HTTP 429 and transient 502/503/504 responses.
-	defaultMaxRetries     = 2
-	defaultRetryBaseDelay = 250 * time.Millisecond
-	maxRetryAfter         = 10 * time.Second
+	defaultMaxRetries      = 2
+	defaultRetryBaseDelay  = 250 * time.Millisecond
+	maxRetryAfter          = 10 * time.Second
+	defaultLibraryCacheTTL = 2 * time.Minute
 )
 
 // resolveURL turns an endpoint into the URL to request. A relative endpoint
@@ -127,22 +128,86 @@ type AppleProvider struct {
 	baseURL        string
 	catalogBaseURL string
 	retryBaseDelay time.Duration
+	cacheTTL       time.Duration
+	nowFn          func() time.Time
 
 	sfMu sync.RWMutex
 	sf   string // cached storefront, populated on first use
+
+	libCacheMu          sync.Mutex
+	libCacheGen         uint64
+	tracksCache         []provider.Track
+	tracksCacheValid    bool
+	tracksCachedAt      time.Time
+	playlistsCache      []provider.Playlist
+	playlistsCacheValid bool
+	playlistsCachedAt   time.Time
+}
+
+func newAppleHTTPClient() *http.Client {
+	var transport http.RoundTripper
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		cloned := base.Clone()
+		cloned.MaxIdleConns = 32
+		cloned.MaxIdleConnsPerHost = 16
+		transport = cloned
+	}
+	return &http.Client{
+		Timeout:       15 * time.Second,
+		Transport:     transport,
+		CheckRedirect: sameOriginRedirectPolicy,
+	}
 }
 
 func New(cfg *config.Config) *AppleProvider {
 	return &AppleProvider{
-		cfg: cfg,
-		client: &http.Client{
-			Timeout:       15 * time.Second,
-			CheckRedirect: sameOriginRedirectPolicy,
-		},
+		cfg:            cfg,
+		client:         newAppleHTTPClient(),
 		baseURL:        defaultBaseURL,
 		catalogBaseURL: defaultCatalogURL,
 		retryBaseDelay: defaultRetryBaseDelay,
+		cacheTTL:       defaultLibraryCacheTTL,
+		nowFn:          time.Now,
 	}
+}
+
+func (a *AppleProvider) now() time.Time {
+	if a.nowFn != nil {
+		return a.nowFn()
+	}
+	return time.Now()
+}
+
+// InvalidateLibraryCache clears any cached library tracks and playlists so the
+// next query re-fetches from the Apple Music API.
+func (a *AppleProvider) InvalidateLibraryCache() {
+	a.libCacheMu.Lock()
+	a.libCacheGen++
+	a.tracksCache = nil
+	a.tracksCacheValid = false
+	a.tracksCachedAt = time.Time{}
+	a.playlistsCache = nil
+	a.playlistsCacheValid = false
+	a.playlistsCachedAt = time.Time{}
+	a.libCacheMu.Unlock()
+}
+
+func (a *AppleProvider) invalidateTracksCache() {
+	a.libCacheMu.Lock()
+	a.libCacheGen++
+	a.tracksCache = nil
+	a.tracksCacheValid = false
+	a.tracksCachedAt = time.Time{}
+	a.libCacheMu.Unlock()
+}
+
+func (a *AppleProvider) invalidatePlaylistsCache() {
+	a.libCacheMu.Lock()
+	a.libCacheGen++
+	a.playlistsCache = nil
+	a.playlistsCacheValid = false
+	a.playlistsCachedAt = time.Time{}
+	a.libCacheMu.Unlock()
 }
 
 type storefrontResponse struct {
@@ -1085,14 +1150,32 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 }
 
 func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track, error) {
+	a.libCacheMu.Lock()
+	startGen := a.libCacheGen
+	if a.tracksCacheValid && a.cacheTTL > 0 && a.now().Sub(a.tracksCachedAt) < a.cacheTTL {
+		cached := slices.Clone(a.tracksCache)
+		a.libCacheMu.Unlock()
+		return cached, nil
+	}
+	a.libCacheMu.Unlock()
+
 	endpoint := "/me/library/songs?limit=100"
 	tracks, err := a.fetchSongsPaginated(ctx, endpoint, false)
 	if err != nil {
 		if strings.Contains(err.Error(), "404 Not Found") {
-			return nil, nil
+			tracks = nil
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
+
+	a.libCacheMu.Lock()
+	if a.libCacheGen == startGen && a.cacheTTL > 0 {
+		a.tracksCache = slices.Clone(tracks)
+		a.tracksCacheValid = true
+		a.tracksCachedAt = a.now()
+	}
+	a.libCacheMu.Unlock()
 	return tracks, nil
 }
 
@@ -1267,6 +1350,15 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 }
 
 func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Playlist, error) {
+	a.libCacheMu.Lock()
+	startGen := a.libCacheGen
+	if a.playlistsCacheValid && a.cacheTTL > 0 && a.now().Sub(a.playlistsCachedAt) < a.cacheTTL {
+		cached := slices.Clone(a.playlistsCache)
+		a.libCacheMu.Unlock()
+		return cached, nil
+	}
+	a.libCacheMu.Unlock()
+
 	endpoint := "/me/library/playlists?limit=100"
 	playlists, err := a.fetchPlaylistsPaginated(ctx, endpoint)
 	if err != nil {
@@ -1279,6 +1371,14 @@ func (a *AppleProvider) GetLibraryPlaylists(ctx context.Context) ([]provider.Pla
 	if !hasFavoritesPlaylist(playlists) {
 		playlists = append([]provider.Playlist{{ID: favoritesPlaylistID, Name: favoritesPlaylistName, ReadOnly: true}}, playlists...)
 	}
+
+	a.libCacheMu.Lock()
+	if a.libCacheGen == startGen && a.cacheTTL > 0 {
+		a.playlistsCache = slices.Clone(playlists)
+		a.playlistsCacheValid = true
+		a.playlistsCachedAt = a.now()
+	}
+	a.libCacheMu.Unlock()
 	return playlists, nil
 }
 
@@ -1623,6 +1723,7 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 	if err := a.do(req, &resp); err != nil {
 		return provider.Playlist{}, fmt.Errorf("CreatePlaylist: %w", err)
 	}
+	a.invalidatePlaylistsCache()
 	// Some API versions return 201 with no body — treat as success without data.
 	if len(resp.Data) == 0 {
 		return provider.Playlist{Name: name}, nil
@@ -1805,6 +1906,8 @@ func (a *AppleProvider) SetSongRating(ctx context.Context, catalogID string, rat
 		if err := a.do(addReq, nil); err != nil {
 			// Non-fatal: song may already be in library.
 			_ = err
+		} else {
+			a.invalidateTracksCache()
 		}
 	}
 
