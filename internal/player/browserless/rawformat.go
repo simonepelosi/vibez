@@ -84,22 +84,43 @@ func mp3Duration(head []byte, size int64) (time.Duration, bool) {
 		case version != 3 && mono:
 			side = 9
 		}
-		frames := 0
+		var frames uint64
 		if x := i + 4 + side; x+12 <= len(head) && (bytes.Equal(head[x:x+4], []byte("Xing")) || bytes.Equal(head[x:x+4], []byte("Info"))) {
 			if binary.BigEndian.Uint32(head[x+4:x+8])&1 != 0 {
-				frames = int(binary.BigEndian.Uint32(head[x+8 : x+12]))
+				frames = uint64(binary.BigEndian.Uint32(head[x+8 : x+12]))
 			}
 		} else if v := i + 4 + 32; v+18 <= len(head) && bytes.Equal(head[v:v+4], []byte("VBRI")) {
-			frames = int(binary.BigEndian.Uint32(head[v+14 : v+18]))
+			frames = uint64(binary.BigEndian.Uint32(head[v+14 : v+18]))
 		}
+		const maxDurationSec = 100 * 365 * 24 * 3600 // fits safely within int64 nanoseconds (~292 years max)
+		if rate <= 0 {
+			return 0, false
+		}
+		rateU := uint64(rate)
 		if frames > 0 {
-			return time.Duration(int64(frames) * int64(samplesPerFrame) * int64(time.Second) / int64(rate)), true
+			totalSamples := frames * uint64(samplesPerFrame)
+			sec := totalSamples / rateU
+			rem := totalSamples % rateU
+			if sec > maxDurationSec {
+				return time.Duration(maxDurationSec) * time.Second, true
+			}
+			dur := time.Duration(sec)*time.Second + time.Duration((rem*uint64(time.Second))/rateU) //nolint:gosec // bounded by maxDurationSec
+			return dur, true
 		}
 		audio := size - int64(i)
 		if audio <= 0 {
 			return 0, true
 		}
-		return time.Duration(audio * 8 * int64(time.Second) / int64(kbps*1000)), true
+		bps := int64(kbps * 1000)
+		// Compute (audio * 8 * time.Second) / bps without overflowing int64 for multi-GB files.
+		sec := (audio / bps) * 8
+		if sec > maxDurationSec {
+			return time.Duration(maxDurationSec) * time.Second, true
+		}
+		remBytes := audio % bps
+		remDur := ((remBytes * 8) / bps) * int64(time.Second)
+		remFrac := (((remBytes * 8) % bps) * int64(time.Second)) / bps
+		return time.Duration(sec)*time.Second + time.Duration(remDur+remFrac), true
 	}
 	return 0, false
 }

@@ -73,3 +73,46 @@ func TestSniffRawFormatRejectsUnknown(t *testing.T) {
 		t.Fatalf("sniffRawFormat = %+v, want rejection", f)
 	}
 }
+
+func TestMP3Duration_NoSignedOverflow(t *testing.T) {
+	// Malicious Xing frame count near uint32 max should clamp safely without
+	// overflowing signed int64 duration into negative values.
+	head := mp3Frame()
+	copy(head[4+32:], "Xing")
+	binary.BigEndian.PutUint32(head[4+36:], 1)
+	binary.BigEndian.PutUint32(head[4+40:], 0xffffffff)
+
+	dur, ok := mp3Duration(head, 1<<30)
+	if !ok {
+		t.Fatal("mp3Duration(Xing huge) = false, want true")
+	}
+	if dur <= 0 {
+		t.Errorf("mp3Duration(Xing huge) = %v, want positive bounded duration", dur)
+	}
+
+	// Huge multi-TB CBR size should also clamp safely without signed overflow.
+	durCBR, okCBR := mp3Duration(mp3Frame(), 1<<52)
+	if !okCBR {
+		t.Fatal("mp3Duration(CBR huge) = false, want true")
+	}
+	if durCBR <= 0 {
+		t.Errorf("mp3Duration(CBR huge) = %v, want positive bounded duration", durCBR)
+	}
+}
+
+func FuzzSniffRawFormat(f *testing.F) {
+	f.Add(mp3Frame(), int64(3315200))
+	f.Add([]byte("ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\xb0\x00"), int64(1<<50))
+	f.Add([]byte("fLaC"), int64(1024))
+	f.Fuzz(func(t *testing.T, head []byte, size int64) {
+		fmtInfo, ok := sniffRawFormat(head, size)
+		if ok {
+			if fmtInfo.duration < 0 {
+				t.Errorf("negative duration %v for size=%d", fmtInfo.duration, size)
+			}
+			if fmtInfo.ext == "" || fmtInfo.contentType == "" {
+				t.Errorf("incomplete rawFormat %+v", fmtInfo)
+			}
+		}
+	})
+}

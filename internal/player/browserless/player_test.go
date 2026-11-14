@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
@@ -1128,5 +1129,65 @@ checkedLogs:
 	}
 	if !sawGaplessLog {
 		t.Error("expected [hybrid] playing local FLAC log on gapless handleStreamStart")
+	}
+}
+
+type eqCaptureSink struct {
+	noopSink
+	mu    sync.Mutex
+	gains []float64
+}
+
+func (s *eqCaptureSink) SetEqualizer(gains []float64) {
+	s.mu.Lock()
+	s.gains = append([]float64(nil), gains...)
+	s.mu.Unlock()
+}
+
+func TestPlayer_RepeatModeOneBoundsAndEQClamping(t *testing.T) {
+	sink := &eqCaptureSink{}
+	p := &Player{
+		sink: sink,
+		queue: []provider.Track{
+			{ID: "track-1", Title: "Song 1"},
+		},
+		idx: -1,
+	}
+	p.state.RepeatMode = player.RepeatModeOne
+
+	if err := p.Next(); err != nil {
+		t.Fatalf("Next with out-of-range idx returned error: %v", err)
+	}
+	if p.QueueIndex() != 0 {
+		t.Errorf("QueueIndex after RepeatModeOne Next from -1 = %d, want 0", p.QueueIndex())
+	}
+	p.mu.Lock()
+	if p.playCtx != nil {
+		p.playCtx()
+	}
+	p.mu.Unlock()
+	p.bgWg.Wait()
+
+	bands := []player.EQBand{
+		{Frequency: 32, Gain: math.NaN()},
+		{Frequency: 64, Gain: math.Inf(1)},
+		{Frequency: 125, Gain: 99},
+		{Frequency: 250, Gain: -99},
+		{Frequency: 500, Gain: 3.5},
+	}
+	if err := p.SetEqualizer(bands); err != nil {
+		t.Fatalf("SetEqualizer: %v", err)
+	}
+	sink.mu.Lock()
+	got := sink.gains
+	sink.mu.Unlock()
+	want := []float64{0, 0, 24, -24, 3.5}
+	if len(got) != len(want) {
+		t.Fatalf("gains = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("gains[%d] = %v, want %v", i, got[i], want[i])
+		}
 	}
 }

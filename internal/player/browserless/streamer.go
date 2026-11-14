@@ -8,11 +8,14 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +24,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
 	"github.com/simone-vibes/vibez/internal/player/browserless/mp4"
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 type segmentRef struct {
@@ -53,6 +57,7 @@ const (
 	maxInitSegmentBytes = 4 << 20  // 4 MiB cap on MP4 init segment
 	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single HLS media segment
 	maxRawUploadSize    = 2 << 30  // 2 GiB ceiling on a non-seekable whole-file upload
+	maxHLSSegments      = 20000    // bounded segment count per playlist (~55h at 10s/segment)
 )
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
@@ -93,6 +98,9 @@ func (lw logWriter) Write(b []byte) (int, error) {
 
 // NewStreamServer creates and starts a local loopback HTTP server.
 func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServer, error) {
+	if licClient == nil {
+		return nil, errors.New("license client is required")
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind loopback stream listener: %w", err)
@@ -147,9 +155,67 @@ func (s *StreamServer) upstreamClient() *http.Client {
 	return &http.Client{Timeout: 15 * time.Second}
 }
 
+func resolveUpstreamURL(baseRaw, refRaw string) (string, error) {
+	if refRaw == "" || strings.ContainsAny(refRaw, "\r\n\x00") {
+		return "", errors.New("empty or control-character URI")
+	}
+	refU, err := url.Parse(refRaw)
+	if err != nil {
+		return "", fmt.Errorf("invalid URI: %w", err)
+	}
+	if refU.User != nil {
+		return "", errors.New("URI must not contain userinfo")
+	}
+	resolved := refU
+	if !refU.IsAbs() {
+		if baseRaw == "" {
+			return "", errors.New("relative URI without base URL")
+		}
+		baseU, err := url.Parse(baseRaw)
+		if err != nil {
+			return "", fmt.Errorf("invalid base URL: %w", err)
+		}
+		resolved = baseU.ResolveReference(refU)
+	}
+	resolvedStr := resolved.String()
+	if err := license.ValidateUpstreamURL(resolvedStr); err != nil {
+		return "", err
+	}
+	return resolvedStr, nil
+}
+
+func parseByteRangeAttr(spec string, hasDefaultOffset bool, defaultOffset int64) (length, offset int64, ok bool) {
+	var err error
+	if lStr, oStr, hasAt := strings.Cut(spec, "@"); hasAt {
+		length, err = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
+		if err != nil || length <= 0 || length > maxMediaSegmentSize {
+			return 0, 0, false
+		}
+		offset, err = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
+		if err != nil || offset < 0 || offset > math.MaxInt64-length {
+			return 0, 0, false
+		}
+		return length, offset, true
+	}
+	length, err = strconv.ParseInt(strings.TrimSpace(spec), 10, 64)
+	if err != nil || length <= 0 || length > maxMediaSegmentSize {
+		return 0, 0, false
+	}
+	if !hasDefaultOffset {
+		defaultOffset = 0
+	}
+	if defaultOffset < 0 || defaultOffset > math.MaxInt64-length {
+		return 0, 0, false
+	}
+	return length, defaultOffset, true
+}
+
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
 // parses the HLS manifest, and returns a local HTTP streaming URL and total duration.
 func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer256k bool) (string, time.Duration, error) {
+	if trackID == "" || strings.ContainsAny(trackID, "/\\?#\r\n\x00") {
+		return "", 0, fmt.Errorf("invalid track ID %q", provider.Clean(trackID))
+	}
 	// A library ID reaches here only when it has no catalog song.
 	if strings.HasPrefix(trackID, "i.") {
 		return s.prepareRawTrack(ctx, trackID)
@@ -225,13 +291,12 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 			}
 			if _, rest, ok := strings.Cut(line, "BYTERANGE=\""); ok {
 				if rangeStr, _, ok := strings.Cut(rest, "\""); ok {
-					if lStr, oStr, hasAt := strings.Cut(rangeStr, "@"); hasAt {
-						initLength, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
-						initOffset, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
-					} else {
-						initLength, _ = strconv.ParseInt(strings.TrimSpace(rangeStr), 10, 64)
-						initOffset = 0
+					l, o, valid := parseByteRangeAttr(rangeStr, false, 0)
+					if !valid {
+						return "", 0, fmt.Errorf("invalid #EXT-X-MAP byte range %q", provider.Clean(rangeStr))
 					}
+					initLength = l
+					initOffset = o
 					nextByteRangeEnd = initOffset + initLength
 				}
 			}
@@ -240,23 +305,24 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 			if idx := strings.IndexByte(val, ','); idx != -1 {
 				val = val[:idx]
 			}
-			dur, _ := strconv.ParseFloat(strings.TrimSpace(val), 64)
-			currDuration = dur
+			dur, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+			if err == nil && !math.IsNaN(dur) && !math.IsInf(dur, 0) && dur >= 0 && dur <= 86400 {
+				currDuration = dur
+			}
 		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
 			rangeSpec := strings.TrimSpace(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"))
-			var l, o int64
-			if lStr, oStr, hasAt := strings.Cut(rangeSpec, "@"); hasAt {
-				l, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
-				o, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
-			} else {
-				l, _ = strconv.ParseInt(rangeSpec, 10, 64)
-				o = nextByteRangeEnd
+			l, o, valid := parseByteRangeAttr(rangeSpec, true, nextByteRangeEnd)
+			if !valid {
+				return "", 0, fmt.Errorf("invalid #EXT-X-BYTERANGE %q", provider.Clean(rangeSpec))
 			}
 			nextByteRangeEnd = o + l
 			for i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
 				i++
 			}
 			if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" {
+				if len(segments) >= maxHLSSegments {
+					return "", 0, fmt.Errorf("playlist exceeds max %d segments", maxHLSSegments)
+				}
 				i++
 				segURI := strings.TrimSpace(lines[i])
 				segments = append(segments, segmentRef{
@@ -267,6 +333,9 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 				})
 			}
 		case !strings.HasPrefix(line, "#") && line != "":
+			if len(segments) >= maxHLSSegments {
+				return "", 0, fmt.Errorf("playlist exceeds max %d segments", maxHLSSegments)
+			}
 			segments = append(segments, segmentRef{
 				uri:      line,
 				duration: currDuration,
@@ -277,10 +346,13 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	if keyURI == "" {
 		return "", 0, fmt.Errorf("no key URI found in playlist")
 	}
-	b64KID := strings.TrimPrefix(keyURI, "data:;base64,")
+	b64KID, ok := strings.CutPrefix(keyURI, "data:;base64,")
+	if !ok {
+		return "", 0, fmt.Errorf("unsupported key URI format")
+	}
 	kidBytes, err := base64.StdEncoding.DecodeString(b64KID)
 	if err != nil || len(kidBytes) != 16 {
-		return "", 0, fmt.Errorf("invalid KID (%s): %w", keyURI, err)
+		return "", 0, fmt.Errorf("invalid KID (%s): %w", provider.Clean(keyURI), err)
 	}
 
 	// 5. Generate CDM challenge & acquire license
@@ -298,13 +370,19 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 
 	// 6. Base URI & Init segment
 	baseURI := info.HLSPlaylistURL
+	if err := license.ValidateUpstreamURL(baseURI); err != nil {
+		return "", 0, fmt.Errorf("invalid playlist base URL: %w", err)
+	}
 	if lastSlash := strings.LastIndex(baseURI, "/"); lastSlash != -1 {
 		baseURI = baseURI[:lastSlash+1]
 	}
 
 	var initBytes []byte
 	if initURI != "" {
-		fullInitURL := baseURI + initURI
+		fullInitURL, err := resolveUpstreamURL(baseURI, initURI)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid init segment URL: %w", err)
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullInitURL, nil)
 		if err == nil {
 			if initLength > 0 {
@@ -317,6 +395,13 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 				_ = resp.Body.Close()
 			}
 		}
+	}
+	for i := range segments {
+		resolvedSeg, err := resolveUpstreamURL(baseURI, segments[i].uri)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid segment %d URL: %w", i, err)
+		}
+		segments[i].uri = resolvedSeg
 	}
 	audioCfg, _ := mp4.ParseAudioConfig(initBytes)
 
@@ -353,10 +438,16 @@ func (s *StreamServer) prepareRawTrack(ctx context.Context, libraryID string) (s
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch playback info: %w", err)
 	}
+	if err := license.ValidateUpstreamURL(assetURL); err != nil {
+		return "", 0, fmt.Errorf("invalid library asset URL: %w", err)
+	}
 
 	head, size, err := fetchRawHeadWithClient(ctx, s.upstreamClient(), assetURL)
 	if err != nil {
 		return "", 0, fmt.Errorf("fetch upload: %w", err)
+	}
+	if size > maxRawUploadSize {
+		return "", 0, fmt.Errorf("upload exceeds maximum size (%d bytes)", maxRawUploadSize)
 	}
 	format, ok := sniffRawFormat(head, size)
 	if !ok {
@@ -398,6 +489,9 @@ func fetchRawHead(ctx context.Context, assetURL string) ([]byte, int64, error) {
 }
 
 func fetchRawHeadWithClient(ctx context.Context, client *http.Client, assetURL string) ([]byte, int64, error) {
+	if err := license.ValidateUpstreamURL(assetURL); err != nil {
+		return nil, 0, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
 		return nil, 0, err
@@ -414,15 +508,18 @@ func fetchRawHeadWithClient(ctx context.Context, client *http.Client, assetURL s
 	case http.StatusPartialContent:
 		// Content-Range: bytes 0-65535/<total>
 		if _, total, ok := strings.Cut(resp.Header.Get("Content-Range"), "/"); ok {
-			size, _ = strconv.ParseInt(total, 10, 64)
+			size, err = strconv.ParseInt(strings.TrimSpace(total), 10, 64)
+			if err != nil {
+				size = 0
+			}
 		}
 	case http.StatusOK:
 		size = resp.ContentLength
 	default:
 		return nil, 0, fmt.Errorf("status %s", resp.Status)
 	}
-	if size <= 0 {
-		return nil, 0, fmt.Errorf("unknown size")
+	if size <= 0 || size > maxRawUploadSize {
+		return nil, 0, fmt.Errorf("invalid upload size: %d", size)
 	}
 	head, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	if err != nil {
@@ -507,6 +604,10 @@ func (s *StreamServer) SeekTarget(streamID string, target time.Duration) (int, t
 }
 
 func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	// Verify request is from loopback interface
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -568,7 +669,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			startSeg = val
 		}
 	} else if qTime := r.URL.Query().Get("t"); qTime != "" {
-		if sec, err := strconv.ParseFloat(qTime, 64); err == nil && sec > 0 {
+		if sec, err := strconv.ParseFloat(qTime, 64); err == nil && !math.IsNaN(sec) && !math.IsInf(sec, 0) && sec > 0 {
 			var acc float64
 			for i, seg := range st.segments {
 				if acc+seg.duration > sec {
@@ -586,6 +687,9 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-cache")
+	if r.Method == http.MethodHead {
+		return
+	}
 	flusher, _ := w.(http.Flusher)
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -665,9 +769,9 @@ func (s *StreamServer) getOrFetchSegment0(ctx context.Context, client *http.Clie
 }
 
 func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.Client, st *trackStream, seg segmentRef) ([]byte, string, error) {
-	segURL := seg.uri
-	if !strings.HasPrefix(segURL, "http://") && !strings.HasPrefix(segURL, "https://") {
-		segURL = st.baseURI + seg.uri
+	segURL, err := resolveUpstreamURL(st.baseURI, seg.uri)
+	if err != nil {
+		return nil, "build request", err
 	}
 
 	maxBytes := int64(maxMediaSegmentSize)
@@ -744,6 +848,9 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 			return nil, "build request", err
 		}
 		if length > 0 {
+			if offset < 0 || offset > math.MaxInt64-length {
+				return nil, "build request", errors.New("byte range overflows int64")
+			}
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 		}
 

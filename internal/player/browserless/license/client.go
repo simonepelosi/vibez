@@ -8,10 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 // ErrUnauthorized indicates that Apple Music rejected the credentials (HTTP 401/403).
@@ -51,12 +55,65 @@ func NewClient(cfg *config.Config) *Client {
 	return NewClientWithHTTP(cfg, nil)
 }
 
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// ValidateUpstreamURL ensures an upstream media/license URL has an allowed scheme
+// (HTTPS, or loopback HTTP for local/test playback), a host, and no embedded
+// userinfo or control bytes.
+func ValidateUpstreamURL(rawURL string) error {
+	if rawURL == "" || strings.ContainsAny(rawURL, "\r\n\x00") {
+		return errors.New("empty or control-character upstream URL")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid upstream URL: %w", err)
+	}
+	if u.Host == "" || u.User != nil {
+		return errors.New("upstream URL must include host without userinfo")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("disallowed insecure upstream scheme %q for non-loopback host", u.Scheme)
+	default:
+		return fmt.Errorf("disallowed upstream URL scheme %q", u.Scheme)
+	}
+}
+
+func safeRedirectPolicy(req *http.Request, via []*http.Request) error {
+	if len(via) >= 5 {
+		return errors.New("stopped after 5 redirects")
+	}
+	if err := ValidateUpstreamURL(req.URL.String()); err != nil {
+		return fmt.Errorf("disallowed redirect target: %w", err)
+	}
+	if len(via) > 0 {
+		orig := via[0].URL
+		if req.URL.Scheme != orig.Scheme || !strings.EqualFold(req.URL.Host, orig.Host) {
+			req.Header.Del("Authorization")
+			req.Header.Del("X-Apple-Music-User-Token")
+		}
+	}
+	return nil
+}
+
 // NewClientWithHTTP constructs a license Client using a custom *http.Client
 // (or a default 15s-timeout client when httpClient is nil).
 func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout:       15 * time.Second,
+			CheckRedirect: safeRedirectPolicy,
 		}
 	}
 	return &Client{
@@ -68,18 +125,24 @@ func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
 // HTTPClient returns the underlying *http.Client used for upstream requests.
 func (c *Client) HTTPClient() *http.Client {
 	if c == nil || c.httpClient == nil {
-		return &http.Client{Timeout: 15 * time.Second}
+		return &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: safeRedirectPolicy,
+		}
 	}
 	return c.httpClient
 }
 
 func readBoundedErrorBody(r io.Reader) string {
 	raw, _ := io.ReadAll(io.LimitReader(r, maxErrorBodyBytes))
-	return string(raw)
+	return provider.Clean(string(raw))
 }
 
 // FetchPlaybackInfo requests playback metadata and HLS stream URLs from Apple MZPlay.
 func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256k bool) (*PlaybackInfo, error) {
+	if songID == "" || strings.ContainsAny(songID, "/\\?#\r\n\x00") {
+		return nil, fmt.Errorf("invalid song ID %q", provider.Clean(songID))
+	}
 	u := "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
 	body, _ := json.Marshal(map[string]any{
 		"salableAdamId": songID,
@@ -141,6 +204,19 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 		selectedURL = item.Assets[0].URL
 		selectedFlavor = item.Assets[0].Flavor
 	}
+	if err := ValidateUpstreamURL(selectedURL); err != nil {
+		return nil, fmt.Errorf("invalid HLS playlist URL: %w", err)
+	}
+	if item.HLSKeyServerURL != "" {
+		if err := ValidateUpstreamURL(item.HLSKeyServerURL); err != nil {
+			return nil, fmt.Errorf("invalid HLS key server URL: %w", err)
+		}
+	}
+	if item.WidevineCertURL != "" {
+		if err := ValidateUpstreamURL(item.WidevineCertURL); err != nil {
+			return nil, fmt.Errorf("invalid Widevine cert URL: %w", err)
+		}
+	}
 
 	return &PlaybackInfo{
 		SongID:          fmt.Sprint(item.SongID),
@@ -156,6 +232,9 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 // single flavorless asset: a plain file URL with no DRM, so there is no
 // playlist or license step.
 func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (string, error) {
+	if libraryID == "" || strings.ContainsAny(libraryID, "/\\?#\r\n\x00") {
+		return "", fmt.Errorf("invalid library ID %q", provider.Clean(libraryID))
+	}
 	u := "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback"
 	body, _ := json.Marshal(map[string]any{
 		"universalLibraryId": libraryID,
@@ -190,15 +269,21 @@ func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (st
 		return "", fmt.Errorf("decoding webPlayback response: %w", err)
 	}
 	if len(result.SongList) == 0 || len(result.SongList[0].Assets) == 0 || result.SongList[0].Assets[0].URL == "" {
-		return "", fmt.Errorf("%w (library item %s)", ErrTrackUnavailable, libraryID)
+		return "", fmt.Errorf("%w (library item %s)", ErrTrackUnavailable, provider.Clean(libraryID))
 	}
-	return result.SongList[0].Assets[0].URL, nil
+	assetURL := result.SongList[0].Assets[0].URL
+	if err := ValidateUpstreamURL(assetURL); err != nil {
+		return "", fmt.Errorf("invalid library asset URL: %w", err)
+	}
+	return assetURL, nil
 }
 
 // FetchServerCertificate downloads Apple's Widevine service certificate.
 func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]byte, error) {
 	if certURL == "" {
 		certURL = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/widevineCert"
+	} else if err := ValidateUpstreamURL(certURL); err != nil {
+		return nil, fmt.Errorf("invalid widevine cert URL: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, certURL, nil)
 	if err != nil {
@@ -230,6 +315,8 @@ func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]
 func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challenge []byte, keyURI, songID string) ([]byte, error) {
 	if licenseURL == "" {
 		licenseURL = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
+	} else if err := ValidateUpstreamURL(licenseURL); err != nil {
+		return nil, fmt.Errorf("invalid license server URL: %w", err)
 	}
 
 	challengeB64 := base64.StdEncoding.EncodeToString(challenge)
