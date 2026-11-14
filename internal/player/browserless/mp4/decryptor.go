@@ -123,23 +123,29 @@ func ParseAudioConfig(initData []byte) (AudioConfig, error) {
 	return cfg, nil
 }
 
-// MakeADTSHeader creates a standard 7-byte ADTS packet header for an AAC frame.
-func MakeADTSHeader(aacFrameLen int, cfg AudioConfig) []byte {
+// WriteADTSHeader writes a standard 7-byte ADTS packet header for an AAC
+// frame into dst[:7] without allocating. dst must have length >= 7.
+func WriteADTSHeader(dst []byte, aacFrameLen int, cfg AudioConfig) {
+	_ = dst[6]
 	packetLen := aacFrameLen + 7
-	header := make([]byte, 7)
 
 	// Syncword: 12 bits 0xFFF
-	header[0] = 0xFF
-	header[1] = 0xF1 // MPEG-4, Layer 0, protection absent (no CRC)
+	dst[0] = 0xFF
+	dst[1] = 0xF1 // MPEG-4, Layer 0, protection absent (no CRC)
 
 	// Profile (2 bits), FreqIndex (4 bits), Private (1 bit), ChanConfig (3 bits)
 	profile := (cfg.ObjectType - 1) & 0x03
-	header[2] = byte(((profile << 6) | ((cfg.FreqIndex & 0x0F) << 2) | ((cfg.ChanConfig >> 2) & 0x01)) & 0xFF) //nolint:gosec // G115: bitwise masked to 8 bits
-	header[3] = byte((((cfg.ChanConfig & 0x03) << 6) | ((packetLen >> 11) & 0x03)) & 0xFF)                     //nolint:gosec // G115: bitwise masked to 8 bits
-	header[4] = byte((packetLen >> 3) & 0xFF)
-	header[5] = byte((((packetLen & 0x07) << 5) | 0x1F) & 0xFF) //nolint:gosec // G115: bitwise masked to 8 bits
-	header[6] = 0xFC                                            // Buffer fullness 0x7FF, number of AAC frames = 1 (index 0)
+	dst[2] = byte(((profile << 6) | ((cfg.FreqIndex & 0x0F) << 2) | ((cfg.ChanConfig >> 2) & 0x01)) & 0xFF) //nolint:gosec // G115: bitwise masked to 8 bits
+	dst[3] = byte((((cfg.ChanConfig & 0x03) << 6) | ((packetLen >> 11) & 0x03)) & 0xFF)                     //nolint:gosec // G115: bitwise masked to 8 bits
+	dst[4] = byte((packetLen >> 3) & 0xFF)                                                                  //nolint:gosec // G115: bitwise masked to 8 bits
+	dst[5] = byte((((packetLen & 0x07) << 5) | 0x1F) & 0xFF)                                                //nolint:gosec // G115: bitwise masked to 8 bits
+	dst[6] = 0xFC                                                                                           // Buffer fullness 0x7FF, number of AAC frames = 1 (index 0)
+}
 
+// MakeADTSHeader creates a standard 7-byte ADTS packet header for an AAC frame.
+func MakeADTSHeader(aacFrameLen int, cfg AudioConfig) []byte {
+	header := make([]byte, 7)
+	WriteADTSHeader(header, aacFrameLen, cfg)
 	return header
 }
 
@@ -205,7 +211,16 @@ func DecryptSegment(
 		return nil, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, remainingSencBytes)
 	}
 
-	samplesEnc := make([]SampleEncInfo, sampleCount)
+	type sampleEncSlot struct {
+		iv       []byte
+		subStart int
+		subLen   int
+	}
+	samplesEnc := make([]sampleEncSlot, sampleCount)
+	var subPool []Subsample
+	if hasSubsamples && sampleCount > 0 {
+		subPool = make([]Subsample, 0, sampleCount)
+	}
 	offset := sencStart + 16
 	ivSize := 8
 	if !hasSubsamples && sampleCount > 0 && remainingSencBytes == int(sampleCount)*16 {
@@ -215,11 +230,11 @@ func DecryptSegment(
 		if offset+ivSize > len(moofData) {
 			return nil, fmt.Errorf("unexpected EOF in senc IVs at sample %d", i)
 		}
-		iv := make([]byte, ivSize)
-		copy(iv, moofData[offset:offset+ivSize])
+		iv := moofData[offset : offset+ivSize]
 		offset += ivSize
 
-		var subsamples []Subsample
+		subStart := len(subPool)
+		subLen := 0
 		if hasSubsamples {
 			if offset+2 > len(moofData) {
 				return nil, fmt.Errorf("unexpected EOF in senc subsamples count at sample %d", i)
@@ -230,23 +245,24 @@ func DecryptSegment(
 			if int(subCount) > remainingSubBytes/6 {
 				return nil, fmt.Errorf("invalid subsample count %d at sample %d", subCount, i)
 			}
-			subsamples = make([]Subsample, subCount)
-			for s := range subCount {
+			subLen = int(subCount)
+			for range subCount {
 				if offset+6 > len(moofData) {
 					return nil, fmt.Errorf("unexpected EOF in senc subsample entry")
 				}
 				clearBytes := binary.BigEndian.Uint16(moofData[offset : offset+2])
 				cipherBytes := binary.BigEndian.Uint32(moofData[offset+2 : offset+6])
 				offset += 6
-				subsamples[s] = Subsample{
+				subPool = append(subPool, Subsample{
 					ClearBytes:  clearBytes,
 					CipherBytes: cipherBytes,
-				}
+				})
 			}
 		}
-		samplesEnc[i] = SampleEncInfo{
-			IV:         iv,
-			Subsamples: subsamples,
+		samplesEnc[i] = sampleEncSlot{
+			iv:       iv,
+			subStart: subStart,
+			subLen:   subLen,
 		}
 	}
 
@@ -306,12 +322,17 @@ func DecryptSegment(
 	}
 
 	sampleSizes := make([]int, sampleCount)
+	var totalSampleBytes int
 	for i := range sampleCount {
 		if hasDuration {
 			trunOffset += 4
 		}
 		if hasSize {
-			sampleSizes[i] = int(binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4]))
+			sz := int(binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4]))
+			sampleSizes[i] = sz
+			if sz > 0 && totalSampleBytes < len(segData) {
+				totalSampleBytes += sz
+			}
 			trunOffset += 4
 		}
 		if hasFlags {
@@ -328,7 +349,7 @@ func DecryptSegment(
 		return nil, fmt.Errorf("invalid dataOffset %d: points to %d (seg length %d)", dataOffset, mdatTarget, len(segData))
 	}
 	mdatData := segData[mdatTarget:]
-	var outBuf bytes.Buffer
+	out := make([]byte, 0, min(totalSampleBytes, len(mdatData))+int(sampleCount)*7)
 	currMdatOffset := 0
 
 	for i := 0; i < int(sampleCount); i++ {
@@ -340,16 +361,21 @@ func DecryptSegment(
 		currMdatOffset += sSize
 
 		encInfo := samplesEnc[i]
-		decryptedSample, err := decryptFn(kid, encInfo.IV, sampleBytes, encInfo.Subsamples)
+		var subs []Subsample
+		if encInfo.subLen > 0 {
+			subs = subPool[encInfo.subStart : encInfo.subStart+encInfo.subLen]
+		}
+		decryptedSample, err := decryptFn(kid, encInfo.iv, sampleBytes, subs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt sample %d: %w", i, err)
 		}
 
-		// Prepend ADTS header
-		adtsHeader := MakeADTSHeader(len(decryptedSample), cfg)
-		outBuf.Write(adtsHeader)
-		outBuf.Write(decryptedSample)
+		// Prepend ADTS header directly into the pre-sized output buffer.
+		hdrStart := len(out)
+		out = append(out, 0, 0, 0, 0, 0, 0, 0)
+		WriteADTSHeader(out[hdrStart:hdrStart+7], len(decryptedSample), cfg)
+		out = append(out, decryptedSample...)
 	}
 
-	return outBuf.Bytes(), nil
+	return out, nil
 }

@@ -52,12 +52,10 @@ func NewClient(cfg *config.Config) *Client {
 }
 
 // NewClientWithHTTP constructs a license Client using a custom *http.Client
-// (or a default 15s-timeout client when httpClient is nil).
+// (or a default pooled 15s-timeout client when httpClient is nil).
 func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 15 * time.Second,
-		}
+		httpClient = defaultHTTPClient()
 	}
 	return &Client{
 		cfg:        cfg,
@@ -65,10 +63,23 @@ func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
 	}
 }
 
+func defaultHTTPClient() *http.Client {
+	var rt http.RoundTripper
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr := base.Clone()
+		tr.MaxIdleConnsPerHost = 16
+		rt = tr
+	}
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: rt,
+	}
+}
+
 // HTTPClient returns the underlying *http.Client used for upstream requests.
 func (c *Client) HTTPClient() *http.Client {
 	if c == nil || c.httpClient == nil {
-		return &http.Client{Timeout: 15 * time.Second}
+		return defaultHTTPClient()
 	}
 	return c.httpClient
 }

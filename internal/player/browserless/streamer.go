@@ -3,6 +3,8 @@
 package browserless
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -13,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,12 +35,16 @@ type segmentRef struct {
 
 type trackStream struct {
 	trackID   string
+	sessionID string
 	kid       []byte
 	audioCfg  mp4.AudioConfig
 	baseURI   string
 	segments  []segmentRef
 	totalDur  time.Duration
 	createdAt time.Time
+
+	useSeq        uint64
+	activeReaders int
 
 	// raw marks an unencrypted library upload: segments are byte ranges of
 	// the file itself and pass through without decryption.
@@ -53,6 +60,8 @@ const (
 	maxInitSegmentBytes = 4 << 20  // 4 MiB cap on MP4 init segment
 	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single HLS media segment
 	maxRawUploadSize    = 2 << 30  // 2 GiB ceiling on a non-seekable whole-file upload
+	maxRetainedStreams  = 3
+	maxStreamAge        = 30 * time.Minute
 )
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
@@ -65,14 +74,15 @@ type StreamServer struct {
 	port       int
 	authToken  string
 
-	mu          sync.RWMutex
-	closed      bool
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
-	closeOnce   sync.Once
-	bgWg        sync.WaitGroup
-	streams     map[string]*trackStream
-	serverCert  []byte
+	mu            sync.RWMutex
+	closed        bool
+	closeCtx      context.Context
+	closeCancel   context.CancelFunc
+	closeOnce     sync.Once
+	bgWg          sync.WaitGroup
+	nextStreamSeq uint64
+	streams       map[string]*trackStream
+	serverCert    []byte
 
 	// onFail and onLog are set once, before the first stream is prepared.
 	// The local client cannot be told why a stream stopped once the 200 has
@@ -137,6 +147,8 @@ func NewStreamServer(cdmEngine *cdm.CDM, licClient *license.Client) (*StreamServ
 	return s, nil
 }
 
+var defaultUpstreamClient = &http.Client{Timeout: 15 * time.Second}
+
 func (s *StreamServer) upstreamClient() *http.Client {
 	if s.httpClient != nil {
 		return s.httpClient
@@ -144,7 +156,7 @@ func (s *StreamServer) upstreamClient() *http.Client {
 	if s.licClient != nil {
 		return s.licClient.HTTPClient()
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return defaultUpstreamClient
 }
 
 // PrepareTrack resolves Apple Music playback metadata, acquires the Widevine license,
@@ -201,78 +213,11 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	}
 
 	// 4. Parse HLS playlist
-	lines := strings.Split(string(playlistBytes), "\n")
-	var keyURI string
-	var initURI string
-	var initOffset, initLength int64
-	var nextByteRangeEnd int64
-	var segments []segmentRef
-	var currDuration float64
-	for i := 0; i < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		switch {
-		case strings.HasPrefix(line, "#EXT-X-KEY:"):
-			if _, rest, ok := strings.Cut(line, "URI=\""); ok {
-				if uri, _, ok := strings.Cut(rest, "\""); ok {
-					keyURI = uri
-				}
-			}
-		case strings.HasPrefix(line, "#EXT-X-MAP:"):
-			if _, rest, ok := strings.Cut(line, "URI=\""); ok {
-				if uri, _, ok := strings.Cut(rest, "\""); ok {
-					initURI = uri
-				}
-			}
-			if _, rest, ok := strings.Cut(line, "BYTERANGE=\""); ok {
-				if rangeStr, _, ok := strings.Cut(rest, "\""); ok {
-					if lStr, oStr, hasAt := strings.Cut(rangeStr, "@"); hasAt {
-						initLength, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
-						initOffset, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
-					} else {
-						initLength, _ = strconv.ParseInt(strings.TrimSpace(rangeStr), 10, 64)
-						initOffset = 0
-					}
-					nextByteRangeEnd = initOffset + initLength
-				}
-			}
-		case strings.HasPrefix(line, "#EXTINF:"):
-			val := strings.TrimPrefix(line, "#EXTINF:")
-			if idx := strings.IndexByte(val, ','); idx != -1 {
-				val = val[:idx]
-			}
-			dur, _ := strconv.ParseFloat(strings.TrimSpace(val), 64)
-			currDuration = dur
-		case strings.HasPrefix(line, "#EXT-X-BYTERANGE:"):
-			rangeSpec := strings.TrimSpace(strings.TrimPrefix(line, "#EXT-X-BYTERANGE:"))
-			var l, o int64
-			if lStr, oStr, hasAt := strings.Cut(rangeSpec, "@"); hasAt {
-				l, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
-				o, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
-			} else {
-				l, _ = strconv.ParseInt(rangeSpec, 10, 64)
-				o = nextByteRangeEnd
-			}
-			nextByteRangeEnd = o + l
-			for i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
-				i++
-			}
-			if i+1 < len(lines) && strings.TrimSpace(lines[i+1]) != "" {
-				i++
-				segURI := strings.TrimSpace(lines[i])
-				segments = append(segments, segmentRef{
-					uri:      segURI,
-					offset:   o,
-					length:   l,
-					duration: currDuration,
-				})
-			}
-		case !strings.HasPrefix(line, "#") && line != "":
-			segments = append(segments, segmentRef{
-				uri:      line,
-				duration: currDuration,
-			})
-		}
-	}
+	parsed := parseHLSPlaylist(playlistBytes)
+	keyURI := parsed.keyURI
+	initURI := parsed.initURI
+	initOffset, initLength := parsed.initOffset, parsed.initLength
+	segments := parsed.segments
 
 	if keyURI == "" {
 		return "", 0, fmt.Errorf("no key URI found in playlist")
@@ -288,6 +233,12 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	if err != nil {
 		return "", 0, fmt.Errorf("generate challenge: %w", err)
 	}
+	registered := false
+	defer func() {
+		if !registered && sessionID != "" && s.cdmEngine != nil {
+			_ = s.cdmEngine.CloseSession(sessionID)
+		}
+	}()
 	licBytes, err := s.licClient.AcquireLicense(ctx, info.HLSKeyServerURL, challenge, keyURI, trackID)
 	if err != nil {
 		return "", 0, fmt.Errorf("acquire license: %w", err)
@@ -330,6 +281,7 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 	streamID := fmt.Sprintf("%s-%d", trackID, time.Now().UnixNano())
 	st := &trackStream{
 		trackID:   trackID,
+		sessionID: sessionID,
 		kid:       kidBytes,
 		audioCfg:  audioCfg,
 		baseURI:   baseURI,
@@ -338,6 +290,7 @@ func (s *StreamServer) PrepareTrack(ctx context.Context, trackID string, prefer2
 		createdAt: time.Now(),
 	}
 
+	registered = true
 	return s.register(ctx, streamID, st, ".aac"), totalDur, nil
 }
 
@@ -431,18 +384,94 @@ func fetchRawHeadWithClient(ctx context.Context, client *http.Client, assetURL s
 	return head, size, nil
 }
 
+type evictedStream struct {
+	stream    *trackStream
+	sessionID string
+}
+
+func (s *StreamServer) touchStreamLocked(st *trackStream) {
+	s.nextStreamSeq++
+	st.useSeq = s.nextStreamSeq
+}
+
+// collectEvictableStreamsLocked prunes expired idle streams and trims excess
+// idle streams beyond maxRetainedStreams in LRU order. Streams with active
+// HTTP readers are never evicted. Caller must hold s.mu.
+func (s *StreamServer) collectEvictableStreamsLocked(now time.Time) []evictedStream {
+	var evicted []evictedStream
+
+	type idleEntry struct {
+		id string
+		st *trackStream
+	}
+	var idleEntries []idleEntry
+	for id, stream := range s.streams {
+		if stream.activeReaders > 0 {
+			continue
+		}
+		if !stream.createdAt.IsZero() && now.Sub(stream.createdAt) > maxStreamAge {
+			delete(s.streams, id)
+			evicted = append(evicted, evictedStream{stream: stream, sessionID: stream.sessionID})
+			stream.sessionID = ""
+			continue
+		}
+		idleEntries = append(idleEntries, idleEntry{id: id, st: stream})
+	}
+
+	excess := len(s.streams) - maxRetainedStreams
+	if excess <= 0 || len(idleEntries) == 0 {
+		return evicted
+	}
+
+	slices.SortFunc(idleEntries, func(a, b idleEntry) int {
+		if c := cmp.Compare(a.st.useSeq, b.st.useSeq); c != 0 {
+			return c
+		}
+		return a.st.createdAt.Compare(b.st.createdAt)
+	})
+	for i := 0; i < len(idleEntries) && excess > 0; i++ {
+		entry := idleEntries[i]
+		delete(s.streams, entry.id)
+		evicted = append(evicted, evictedStream{stream: entry.st, sessionID: entry.st.sessionID})
+		entry.st.sessionID = ""
+		excess--
+	}
+	return evicted
+}
+
+func (s *StreamServer) releaseStreams(evicted []evictedStream) {
+	for _, ev := range evicted {
+		if ev.stream != nil {
+			ev.stream.seg0Mu.Lock()
+			ev.stream.seg0AAC = nil
+			ev.stream.seg0Mu.Unlock()
+			ev.stream.segments = nil
+		}
+		if ev.sessionID != "" && s.cdmEngine != nil {
+			_ = s.cdmEngine.CloseSession(ev.sessionID)
+		}
+	}
+}
+
 // register stores a prepared stream and returns its loopback URL. The sinks
 // apply the AAC priming trim only to .aac streams.
 func (s *StreamServer) register(ctx context.Context, streamID string, st *trackStream, ext string) string {
 	s.mu.Lock()
-	// Prune inactive/stale streams older than 2 hours
-	now := time.Now()
-	for id, stream := range s.streams {
-		if now.Sub(stream.createdAt) > 2*time.Hour {
-			delete(s.streams, id)
+	if s.closed {
+		sessionID := st.sessionID
+		st.sessionID = ""
+		s.mu.Unlock()
+		if sessionID != "" && s.cdmEngine != nil {
+			_ = s.cdmEngine.CloseSession(sessionID)
 		}
+		return ""
 	}
+	if s.streams == nil {
+		s.streams = make(map[string]*trackStream)
+	}
+	s.touchStreamLocked(st)
 	s.streams[streamID] = st
+	evicted := s.collectEvictableStreamsLocked(time.Now())
 	shouldWarm := !s.closed && len(st.segments) > 0 && st.segments[0].length <= maxMediaSegmentSize && (st.raw || s.cdmEngine != nil)
 	baseCtx := ctx
 	if s.closeCtx != nil {
@@ -452,6 +481,7 @@ func (s *StreamServer) register(ctx context.Context, streamID string, st *trackS
 		s.bgWg.Add(1)
 	}
 	s.mu.Unlock()
+	s.releaseStreams(evicted)
 
 	// Warm segment 0 asynchronously so both initial playback and
 	// seek-to-start (0:00) can write the first ~10s immediately
@@ -544,22 +574,32 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.RLock()
+	s.mu.Lock()
 	if s.closed {
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	st, ok := s.streams[streamID]
 	if !ok {
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		http.NotFound(w, r)
 		return
 	}
+	st.activeReaders++
+	s.touchStreamLocked(st)
 	closeCtx := s.closeCtx
 	s.bgWg.Add(1)
-	s.mu.RUnlock()
-	defer s.bgWg.Done()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		st.activeReaders--
+		s.touchStreamLocked(st)
+		evicted := s.collectEvictableStreamsLocked(time.Now())
+		s.mu.Unlock()
+		s.releaseStreams(evicted)
+		s.bgWg.Done()
+	}()
 
 	// Support start_seg parameter for instant seeking
 	startSeg := 0
@@ -610,6 +650,29 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 
+	type segResult struct {
+		aacData []byte
+		stage   string
+		err     error
+	}
+
+	lookCtx, cancelLook := context.WithCancel(ctx)
+	var lookWg sync.WaitGroup
+	defer func() {
+		cancelLook()
+		lookWg.Wait()
+	}()
+
+	fetchSeg := func(fetchCtx context.Context, idx int) segResult {
+		if idx == 0 {
+			data, stage, err := s.getOrFetchSegment0(fetchCtx, client, st)
+			return segResult{aacData: data, stage: stage, err: err}
+		}
+		data, stage, err := s.fetchAndDecryptSegment(fetchCtx, client, st, st.segments[idx])
+		return segResult{aacData: data, stage: stage, err: err}
+	}
+
+	var nextCh <-chan segResult
 	for i := startSeg; i < len(st.segments); i++ {
 		select {
 		case <-ctx.Done():
@@ -617,28 +680,33 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		var aacData []byte
-		if i == 0 {
-			var stage string
-			var err error
-			aacData, stage, err = s.getOrFetchSegment0(ctx, client, st)
-			if err != nil {
-				fail(i, stage, err)
-				return
-			}
+		var res segResult
+		if nextCh != nil {
+			res = <-nextCh
+			nextCh = nil
 		} else {
-			var stage string
-			var err error
-			aacData, stage, err = s.fetchAndDecryptSegment(ctx, client, st, st.segments[i])
-			if err != nil {
-				fail(i, stage, err)
+			res = fetchSeg(ctx, i)
+		}
+		if res.err != nil {
+			if ctx.Err() != nil {
 				return
 			}
+			fail(i, res.stage, res.err)
+			return
+		}
+
+		if i+1 < len(st.segments) && !st.raw {
+			nextIdx := i + 1
+			ch := make(chan segResult, 1)
+			lookWg.Go(func() {
+				ch <- fetchSeg(lookCtx, nextIdx)
+			})
+			nextCh = ch
 		}
 
 		// Write to HTTP client (GStreamer). A failed write means the client
 		// has gone, so there is nobody left to abort for; log it only.
-		if _, err := w.Write(aacData); err != nil {
+		if _, err := w.Write(res.aacData); err != nil {
 			if ctx.Err() == nil && s.onLog != nil {
 				s.onLog(fmt.Sprintf("browserless stream: %s: segment %d/%d: write: %v", st.trackID, i+1, len(st.segments), err))
 			}
@@ -647,6 +715,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		if flusher != nil {
 			flusher.Flush()
 		}
+		res.aacData = nil
 	}
 }
 
@@ -691,15 +760,20 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 	if st.raw {
 		return segData, "", nil
 	}
+	var cdmScratch cdm.DecryptScratch
+	var cdmSubs []cdm.Subsample
 	aacData, err := mp4.DecryptSegment(segData, st.kid, st.audioCfg, func(kid, iv, input []byte, subs []mp4.Subsample) ([]byte, error) {
-		cdmSubs := make([]cdm.Subsample, len(subs))
+		if cap(cdmSubs) < len(subs) {
+			cdmSubs = make([]cdm.Subsample, len(subs))
+		}
+		cdmSubs = cdmSubs[:len(subs)]
 		for si, sb := range subs {
 			cdmSubs[si] = cdm.Subsample{
 				ClearBytes:  sb.ClearBytes,
 				CipherBytes: sb.CipherBytes,
 			}
 		}
-		return s.cdmEngine.DecryptSubsamples(kid, iv, input, cdmSubs)
+		return s.cdmEngine.DecryptSubsamplesReuse(&cdmScratch, kid, iv, input, cdmSubs)
 	})
 	if err != nil {
 		return nil, "decrypt", err
@@ -770,7 +844,7 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 			continue
 		}
 
-		segData, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+		segData, err := readBoundedBody(resp.Body, max(resp.ContentLength, length), maxBytes)
 		_ = resp.Body.Close()
 		if err != nil {
 			lastStage = "read"
@@ -789,6 +863,16 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 	return nil, lastStage, lastErr
 }
 
+func readBoundedBody(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
+	hint := min(max(sizeHint, 0), min(maxBytes, maxMediaSegmentSize))
+	var buf bytes.Buffer
+	if hint > 0 {
+		buf.Grow(int(hint))
+	}
+	_, err := buf.ReadFrom(io.LimitReader(r, maxBytes+1))
+	return buf.Bytes(), err
+}
+
 // Close terminates the local HTTP stream server and waits for active stream
 // and prefetch handlers to exit before returning.
 func (s *StreamServer) Close() error {
@@ -799,11 +883,129 @@ func (s *StreamServer) Close() error {
 		if s.closeCancel != nil {
 			s.closeCancel()
 		}
+		var evicted []evictedStream
+		if len(s.streams) > 0 {
+			evicted = make([]evictedStream, 0, len(s.streams))
+			for _, st := range s.streams {
+				evicted = append(evicted, evictedStream{stream: st, sessionID: st.sessionID})
+				st.sessionID = ""
+			}
+			clear(s.streams)
+		}
 		s.mu.Unlock()
 		if s.server != nil {
 			err = s.server.Close()
 		}
 		s.bgWg.Wait()
+		s.releaseStreams(evicted)
 	})
 	return err
+}
+
+type hlsPlaylist struct {
+	keyURI     string
+	initURI    string
+	initOffset int64
+	initLength int64
+	segments   []segmentRef
+}
+
+func nextPlaylistLine(rest []byte) ([]byte, []byte, bool) {
+	if len(rest) == 0 {
+		return nil, nil, false
+	}
+	line, tail, found := bytes.Cut(rest, []byte{'\n'})
+	if !found {
+		return bytes.TrimSpace(line), nil, true
+	}
+	return bytes.TrimSpace(line), tail, true
+}
+
+func parseHLSPlaylist(playlistBytes []byte) hlsPlaylist {
+	var parsed hlsPlaylist
+	var nextByteRangeEnd int64
+	var currDuration float64
+
+	rest := playlistBytes
+	for {
+		lineBytes, tail, ok := nextPlaylistLine(rest)
+		if !ok {
+			break
+		}
+		rest = tail
+		if len(lineBytes) == 0 {
+			continue
+		}
+		switch {
+		case bytes.HasPrefix(lineBytes, []byte("#EXT-X-KEY:")):
+			line := string(lineBytes)
+			if _, after, ok := strings.Cut(line, "URI=\""); ok {
+				if uri, _, ok := strings.Cut(after, "\""); ok {
+					parsed.keyURI = uri
+				}
+			}
+		case bytes.HasPrefix(lineBytes, []byte("#EXT-X-MAP:")):
+			line := string(lineBytes)
+			if _, after, ok := strings.Cut(line, "URI=\""); ok {
+				if uri, _, ok := strings.Cut(after, "\""); ok {
+					parsed.initURI = uri
+				}
+			}
+			if _, after, ok := strings.Cut(line, "BYTERANGE=\""); ok {
+				if rangeStr, _, ok := strings.Cut(after, "\""); ok {
+					if lStr, oStr, hasAt := strings.Cut(rangeStr, "@"); hasAt {
+						parsed.initLength, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
+						parsed.initOffset, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
+					} else {
+						parsed.initLength, _ = strconv.ParseInt(strings.TrimSpace(rangeStr), 10, 64)
+						parsed.initOffset = 0
+					}
+					nextByteRangeEnd = parsed.initOffset + parsed.initLength
+				}
+			}
+		case bytes.HasPrefix(lineBytes, []byte("#EXTINF:")):
+			val := string(bytes.TrimPrefix(lineBytes, []byte("#EXTINF:")))
+			if idx := strings.IndexByte(val, ','); idx != -1 {
+				val = val[:idx]
+			}
+			currDuration, _ = strconv.ParseFloat(strings.TrimSpace(val), 64)
+		case bytes.HasPrefix(lineBytes, []byte("#EXT-X-BYTERANGE:")):
+			rangeSpec := string(bytes.TrimSpace(bytes.TrimPrefix(lineBytes, []byte("#EXT-X-BYTERANGE:"))))
+			var l, o int64
+			if lStr, oStr, hasAt := strings.Cut(rangeSpec, "@"); hasAt {
+				l, _ = strconv.ParseInt(strings.TrimSpace(lStr), 10, 64)
+				o, _ = strconv.ParseInt(strings.TrimSpace(oStr), 10, 64)
+			} else {
+				l, _ = strconv.ParseInt(rangeSpec, 10, 64)
+				o = nextByteRangeEnd
+			}
+			nextByteRangeEnd = o + l
+			for {
+				nextLine, nextTail, ok := nextPlaylistLine(rest)
+				if !ok {
+					break
+				}
+				if bytes.HasPrefix(nextLine, []byte("#")) {
+					rest = nextTail
+					continue
+				}
+				if len(nextLine) > 0 {
+					rest = nextTail
+					parsed.segments = append(parsed.segments, segmentRef{
+						uri:      string(nextLine),
+						offset:   o,
+						length:   l,
+						duration: currDuration,
+					})
+				}
+				break
+			}
+		case lineBytes[0] != '#':
+			parsed.segments = append(parsed.segments, segmentRef{
+				uri:      string(lineBytes),
+				duration: currDuration,
+			})
+		}
+	}
+	return parsed
 }

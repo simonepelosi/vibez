@@ -432,3 +432,193 @@ func TestFetchSegmentWithRetry_LongRawUploadBypasses64MBLimit(t *testing.T) {
 		t.Errorf("len(data) = %d, want 100", len(data))
 	}
 }
+
+type blockingSegmentWriter struct {
+	hdr        http.Header
+	code       int
+	buf        bytes.Buffer
+	firstWrite chan struct{}
+	waitFor    <-chan struct{}
+	writes     atomic.Int32
+}
+
+func (w *blockingSegmentWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = make(http.Header)
+	}
+	return w.hdr
+}
+
+func (w *blockingSegmentWriter) WriteHeader(code int) { w.code = code }
+
+func (w *blockingSegmentWriter) Write(p []byte) (int, error) {
+	if w.writes.Add(1) == 1 {
+		close(w.firstWrite)
+		<-w.waitFor
+	}
+	return w.buf.Write(p)
+}
+
+func TestHandleStreamLookaheadFetchesNextSegmentDuringWrite(t *testing.T) {
+	seg1Requested := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "seg1.mp4") {
+			select {
+			case <-seg1Requested:
+			default:
+				close(seg1Requested)
+			}
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(upstream.Close)
+
+	seg0AAC := []byte{0xff, 0xf1, 0x50, 0x80, 0x01, 0xbf, 0xfc, 0x21}
+	var res streamResult
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID: "123",
+				baseURI: upstream.URL + "/",
+				segments: []segmentRef{
+					{uri: "seg0.mp4", duration: 6.0},
+					{uri: "seg1.mp4", duration: 6.0},
+				},
+				seg0AAC: seg0AAC,
+			},
+		},
+		onFail: func(id string, err error) { res.failID, res.failErr = id, err },
+	}
+
+	bw := &blockingSegmentWriter{
+		firstWrite: make(chan struct{}),
+		waitFor:    seg1Requested,
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/stream/s1/tok.aac", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { res.panicked = recover() }()
+		s.handleStream(bw, req)
+	}()
+
+	select {
+	case <-bw.firstWrite:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for segment 0 write to begin")
+	}
+
+	// seg1 must be fetched via lookahead BEFORE the blocked segment 0 write finishes.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleStream blocked: segment 1 lookahead did not run concurrently with segment 0 write")
+	}
+
+	if !bytes.Equal(bw.buf.Bytes(), seg0AAC) {
+		t.Errorf("written bytes = %x, want %x", bw.buf.Bytes(), seg0AAC)
+	}
+	if res.failErr == nil || !strings.Contains(res.failErr.Error(), "segment 2/2: fetch: status 403") {
+		t.Errorf("onFail error = %v, want segment 2/2 403 failure after segment 0 flushed", res.failErr)
+	}
+}
+
+func TestParseHLSPlaylist(t *testing.T) {
+	raw := strings.Join([]string{
+		"#EXTM3U",
+		"#EXT-X-VERSION:7",
+		`#EXT-X-KEY:METHOD=SAMPLE-AES,URI="data:;base64,AAAAAAAAAAAAAAAAAAAAAA=="`,
+		`#EXT-X-MAP:URI="init.mp4",BYTERANGE="512@64"`,
+		"#EXTINF:6.500,",
+		"#EXT-X-BYTERANGE:1024@576",
+		"#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z",
+		"audio.mp4",
+		"#EXTINF:5.250,title",
+		"#EXT-X-BYTERANGE:768",
+		"audio.mp4",
+		"#EXTINF:4.000,",
+		"standalone.mp4",
+	}, "\r\n")
+
+	parsed := parseHLSPlaylist([]byte(raw))
+	if parsed.keyURI != "data:;base64,AAAAAAAAAAAAAAAAAAAAAA==" {
+		t.Fatalf("keyURI = %q", parsed.keyURI)
+	}
+	if parsed.initURI != "init.mp4" || parsed.initLength != 512 || parsed.initOffset != 64 {
+		t.Fatalf("init = (%q, len=%d, off=%d)", parsed.initURI, parsed.initLength, parsed.initOffset)
+	}
+	if len(parsed.segments) != 3 {
+		t.Fatalf("len(segments) = %d, want 3", len(parsed.segments))
+	}
+	if parsed.segments[0] != (segmentRef{uri: "audio.mp4", offset: 576, length: 1024, duration: 6.5}) {
+		t.Fatalf("seg0 = %+v", parsed.segments[0])
+	}
+	if parsed.segments[1] != (segmentRef{uri: "audio.mp4", offset: 1600, length: 768, duration: 5.25}) {
+		t.Fatalf("seg1 = %+v", parsed.segments[1])
+	}
+	if parsed.segments[2] != (segmentRef{uri: "standalone.mp4", duration: 4.0}) {
+		t.Fatalf("seg2 = %+v", parsed.segments[2])
+	}
+}
+
+func TestStreamServerLRUEvictionPreservesActiveReaders(t *testing.T) {
+	s := &StreamServer{
+		port:      12345,
+		authToken: "tok",
+		streams:   make(map[string]*trackStream),
+	}
+
+	now := time.Now()
+	s1 := &trackStream{trackID: "t1", sessionID: "sess1", createdAt: now, seg0AAC: []byte{1, 2, 3}}
+	s2 := &trackStream{trackID: "t2", sessionID: "sess2", createdAt: now, activeReaders: 1, seg0AAC: []byte{4, 5, 6}}
+	s3 := &trackStream{trackID: "t3", sessionID: "sess3", createdAt: now, seg0AAC: []byte{7, 8, 9}}
+	s4 := &trackStream{trackID: "t4", sessionID: "sess4", createdAt: now, seg0AAC: []byte{10, 11}}
+
+	s.register(context.Background(), "s1", s1, ".aac")
+	s.register(context.Background(), "s2", s2, ".aac")
+	s.register(context.Background(), "s3", s3, ".aac")
+	s.register(context.Background(), "s4", s4, ".aac")
+
+	s.mu.RLock()
+	_, has1 := s.streams["s1"]
+	_, has2 := s.streams["s2"]
+	_, has3 := s.streams["s3"]
+	_, has4 := s.streams["s4"]
+	nAfter4 := len(s.streams)
+	s.mu.RUnlock()
+
+	if nAfter4 != maxRetainedStreams || has1 || !has2 || !has3 || !has4 {
+		t.Fatalf("after 4th stream: len=%d has=[%v %v %v %v], want 3 [false true true true]", nAfter4, has1, has2, has3, has4)
+	}
+	if s1.seg0AAC != nil {
+		t.Errorf("evicted s1.seg0AAC was not cleared")
+	}
+
+	// Register 5th stream while s2 has an active reader: s2 must stay, s3 (oldest idle) must be evicted.
+	s5 := &trackStream{trackID: "t5", sessionID: "sess5", createdAt: now}
+	s.register(context.Background(), "s5", s5, ".aac")
+
+	s.mu.RLock()
+	_, has2 = s.streams["s2"]
+	_, has3 = s.streams["s3"]
+	_, has4 = s.streams["s4"]
+	_, has5 := s.streams["s5"]
+	s.mu.RUnlock()
+
+	if !has2 || has3 || !has4 || !has5 {
+		t.Fatalf("after 5th stream with active s2: has=[s2:%v s3:%v s4:%v s5:%v], want [true false true true]", has2, has3, has4, has5)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+	s.mu.RLock()
+	remaining := len(s.streams)
+	s.mu.RUnlock()
+	if remaining != 0 || s4.seg0AAC != nil || s2.seg0AAC != nil {
+		t.Fatalf("after Close(): remaining=%d s4.seg0AAC=%v s2.seg0AAC=%v", remaining, s4.seg0AAC, s2.seg0AAC)
+	}
+}
