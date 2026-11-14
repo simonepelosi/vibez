@@ -36,12 +36,17 @@ type Client struct {
 // NewClient returns a Last.fm API client. sessionKey may be empty for
 // unauthenticated calls such as auth.getToken and auth.getSession.
 func NewClient(apiKey, apiSecret, sessionKey string) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 8
+	transport.MaxIdleConnsPerHost = 4
+	transport.IdleConnTimeout = 60 * time.Second
 	return &Client{
 		apiKey:     apiKey,
 		apiSecret:  apiSecret,
 		sessionKey: sessionKey,
 		http: &http.Client{
-			Timeout: requestTimeout,
+			Timeout:   requestTimeout,
+			Transport: transport,
 			// Never follow redirects when sending signed API parameters or session keys.
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse

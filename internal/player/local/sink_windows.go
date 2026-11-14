@@ -26,21 +26,23 @@ import (
 )
 
 type nativeEngine struct {
-	mu      sync.Mutex
-	handle  C.vibez_localsink_t
-	cgoH    cgo.Handle
-	player  *Player
-	gen     uint64
-	seq     uint64
-	playing bool
-	dur     float64
-	done    chan struct{}
+	mu         sync.Mutex
+	handle     C.vibez_localsink_t
+	cgoH       cgo.Handle
+	player     *Player
+	gen        uint64
+	seq        uint64
+	playing    bool
+	dur        float64
+	done       chan struct{}
+	pollWakeCh chan struct{}
 }
 
 func openNativeEngine(p *Player) (engine, error) {
 	e := &nativeEngine{
-		player: p,
-		done:   make(chan struct{}),
+		player:     p,
+		done:       make(chan struct{}),
+		pollWakeCh: make(chan struct{}, 1),
 	}
 	h := cgo.NewHandle(e)
 	e.cgoH = h
@@ -83,6 +85,7 @@ func vibezLocalWinOnEOS(userData C.uintptr_t, gen C.uint64_t) {
 		Duration: e.dur,
 	}
 	e.mu.Unlock()
+	e.signalPoll()
 	go e.player.onEvent(snap)
 }
 
@@ -109,18 +112,58 @@ func vibezLocalWinOnError(userData C.uintptr_t, gen C.uint64_t, cErrMsg *C.char)
 		Error:    msg,
 	}
 	e.mu.Unlock()
+	e.signalPoll()
 	go e.player.onEvent(snap)
 }
 
+func (e *nativeEngine) signalPoll() {
+	if e.pollWakeCh == nil {
+		return
+	}
+	select {
+	case e.pollWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (e *nativeEngine) pollLoop() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	stopTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickC = nil
+		}
+	}
+	defer stopTicker()
+
+	syncTicker := func() {
+		e.mu.Lock()
+		active := e.handle != nil && e.playing && e.gen != 0
+		e.mu.Unlock()
+		if active {
+			if ticker == nil {
+				ticker = time.NewTicker(500 * time.Millisecond)
+				tickC = ticker.C
+			}
+		} else {
+			stopTicker()
+		}
+	}
+
+	syncTicker()
 	for {
 		select {
-		case <-ticker.C:
+		case <-e.done:
+			return
+		case <-e.pollWakeCh:
+			syncTicker()
+		case <-tickC:
 			e.mu.Lock()
 			if e.handle == nil || !e.playing || e.gen == 0 {
 				e.mu.Unlock()
+				stopTicker()
 				continue
 			}
 			pos := float64(C.vibez_localsink_position(e.handle))
@@ -135,14 +178,13 @@ func (e *nativeEngine) pollLoop() {
 			}
 			e.mu.Unlock()
 			e.player.onEvent(snap)
-		case <-e.done:
-			return
 		}
 	}
 }
 
 func (e *nativeEngine) call(method string, args ...any) (snapshot, error) {
 	e.mu.Lock()
+	defer e.signalPoll()
 	defer e.mu.Unlock()
 	if e.handle == nil {
 		return snapshot{}, errors.New("audio sink closed")
