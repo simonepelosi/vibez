@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,10 +17,18 @@ import (
 type stubSearchProvider struct {
 	results map[string]*provider.SearchResult
 	err     error
+	mu      sync.Mutex
+	calls   map[string]int
 }
 
 func (s *stubSearchProvider) Name() string { return "stub" }
 func (s *stubSearchProvider) Search(_ context.Context, query string) (*provider.SearchResult, error) {
+	s.mu.Lock()
+	if s.calls == nil {
+		s.calls = make(map[string]int)
+	}
+	s.calls[query]++
+	s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -414,5 +423,39 @@ func TestResolvePlan_ReturnsErrorWhenAllEmpty(t *testing.T) {
 	_, err := ResolvePlan(context.Background(), prov, plan, "ambient", 10)
 	if err == nil || !strings.Contains(err.Error(), "offline") {
 		t.Errorf("ResolvePlan error = %v, want error containing 'offline'", err)
+	}
+}
+
+func TestResolvePlan_DeduplicatesSeedsAndQueriesBeforeSearch(t *testing.T) {
+	prov := &stubSearchProvider{
+		results: map[string]*provider.SearchResult{
+			"Air La Femme d'Argent": {
+				Tracks: []provider.Track{{ID: "a1", Title: "La Femme d'Argent", Artist: "Air"}},
+			},
+			"french dowtempo": {
+				Tracks: []provider.Track{{ID: "d1", Title: "Kelly Watch the Stars", Artist: "Air"}},
+			},
+		},
+	}
+	plan := &VibePlan{
+		Ordered: true,
+		SeedTracks: []SeedTrack{
+			{Artist: "Air", Title: "La Femme d'Argent"},
+			{Artist: " air ", Title: "LA FEMME D'ARGENT"},
+		},
+		SearchQueries: []string{"french dowtempo", " FRENCH DOWTEMPO ", ""},
+	}
+	out, err := ResolvePlan(context.Background(), prov, plan, "air", 5)
+	if err != nil {
+		t.Fatalf("ResolvePlan: %v", err)
+	}
+	if len(out.Tracks) != 2 {
+		t.Fatalf("len(out.Tracks) = %d, want 2", len(out.Tracks))
+	}
+	if got := prov.calls["Air La Femme d'Argent"]; got != 1 {
+		t.Errorf("seed search calls = %d, want 1", got)
+	}
+	if got := prov.calls["french dowtempo"]; got != 1 {
+		t.Errorf("query search calls = %d, want 1", got)
 	}
 }

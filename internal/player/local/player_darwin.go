@@ -333,6 +333,7 @@ type Player struct {
 	audio      *audioRef
 	sampleRate float64
 	done       chan struct{}
+	pollWakeCh chan struct{}
 	eosCh      chan struct{}
 	audioWg    sync.WaitGroup
 	allTracks  []provider.Track
@@ -343,8 +344,9 @@ type Player struct {
 // New creates a local Player backed by CoreAudio
 func New(_ func(string)) (*Player, error) {
 	p := &Player{
-		done:  make(chan struct{}),
-		eosCh: make(chan struct{}, 1),
+		done:       make(chan struct{}),
+		pollWakeCh: make(chan struct{}, 1),
+		eosCh:      make(chan struct{}, 1),
 	}
 	go p.pollState()
 	p.audioWg.Add(1)
@@ -352,17 +354,56 @@ func New(_ func(string)) (*Player, error) {
 	return p, nil
 }
 
+func (p *Player) signalPoll() {
+	if p.pollWakeCh == nil {
+		return
+	}
+	select {
+	case p.pollWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (p *Player) pollState() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	stopTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickC = nil
+		}
+	}
+	defer stopTicker()
+
+	syncTicker := func() {
+		p.mu.RLock()
+		playing := p.state.Playing && p.audio != nil
+		p.mu.RUnlock()
+		if playing {
+			if ticker == nil {
+				ticker = time.NewTicker(500 * time.Millisecond)
+				tickC = ticker.C
+			}
+		} else {
+			stopTicker()
+		}
+	}
+
+	syncTicker()
 	for {
 		select {
-		case <-ticker.C:
+		case <-p.done:
+			return
+		case <-p.pollWakeCh:
+			syncTicker()
+		case <-tickC:
 			p.mu.RLock()
 			playing := p.state.Playing
 			ref := p.audio
 			p.mu.RUnlock()
 			if !playing || ref == nil {
+				stopTicker()
 				continue
 			}
 			if !ref.acquire() {
@@ -379,13 +420,12 @@ func (p *Player) pollState() {
 			s := p.state
 			p.mu.Unlock()
 			p.broadcast(s)
-		case <-p.done:
-			return
 		}
 	}
 }
 
 func (p *Player) broadcast(s player.State) {
+	p.signalPoll()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, ch := range p.subs {

@@ -17,16 +17,17 @@ import (
 
 // Player implements player.Player for local audio files using GStreamer.
 type Player struct {
-	gst       *gst.Player
-	mu        sync.RWMutex
-	state     player.State
-	subs      []chan player.State
-	queue     []provider.Track
-	allTracks []provider.Track
-	idx       int
-	ended     bool
-	done      chan struct{}
-	closeOnce sync.Once
+	gst        *gst.Player
+	mu         sync.RWMutex
+	state      player.State
+	subs       []chan player.State
+	queue      []provider.Track
+	allTracks  []provider.Track
+	idx        int
+	ended      bool
+	done       chan struct{}
+	pollWakeCh chan struct{}
+	closeOnce  sync.Once
 }
 
 // New creates a local Player backed by a GStreamer pipeline.
@@ -35,7 +36,11 @@ func New(_ func(string)) (*Player, error) {
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
 	}
-	p := &Player{gst: gstPlayer, done: make(chan struct{})}
+	p := &Player{
+		gst:        gstPlayer,
+		done:       make(chan struct{}),
+		pollWakeCh: make(chan struct{}, 1),
+	}
 	p.gst.OnEOS(func() {
 		_ = p.Next()
 	})
@@ -50,7 +55,18 @@ func New(_ func(string)) (*Player, error) {
 	return p, nil
 }
 
+func (p *Player) signalPoll() {
+	if p.pollWakeCh == nil {
+		return
+	}
+	select {
+	case p.pollWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (p *Player) broadcast(s player.State) {
+	p.signalPoll()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, ch := range p.subs {
@@ -372,15 +388,44 @@ func tracksForIDs(tracks []provider.Track, ids []string) []provider.Track {
 }
 
 func (p *Player) pollState() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	stopTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickC = nil
+		}
+	}
+	defer stopTicker()
+
+	syncTicker := func() {
+		p.mu.RLock()
+		playing := p.state.Playing
+		p.mu.RUnlock()
+		if playing {
+			if ticker == nil {
+				ticker = time.NewTicker(500 * time.Millisecond)
+				tickC = ticker.C
+			}
+		} else {
+			stopTicker()
+		}
+	}
+
+	syncTicker()
 	for {
 		select {
-		case <-ticker.C:
+		case <-p.done:
+			return
+		case <-p.pollWakeCh:
+			syncTicker()
+		case <-tickC:
 			p.mu.RLock()
 			playing := p.state.Playing
 			p.mu.RUnlock()
 			if !playing {
+				stopTicker()
 				continue
 			}
 			p.mu.Lock()
@@ -388,8 +433,6 @@ func (p *Player) pollState() {
 			s := p.state
 			p.mu.Unlock()
 			p.broadcast(s)
-		case <-p.done:
-			return
 		}
 	}
 }

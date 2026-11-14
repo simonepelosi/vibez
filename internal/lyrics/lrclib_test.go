@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -127,5 +128,71 @@ func TestFetchFallsBackToSearchOn404(t *testing.T) {
 	}
 	if !res.Synced || len(res.Lines) != 1 || res.Lines[0].Text != "Like the legend of the phoenix" {
 		t.Errorf("unexpected result: %+v", res)
+	}
+}
+
+func TestFetchUsesPositiveAndNegativeCache(t *testing.T) {
+	var hits, searchHits, serverErrHits atomic.Int32
+	failMode := atomic.Bool{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			if failMode.Load() {
+				serverErrHits.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			switch r.URL.Query().Get("track_name") {
+			case "Cached Track":
+				hits.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"trackName":"Cached Track","artistName":"Artist","plainLyrics":"hello"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		case "/api/search":
+			if failMode.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			searchHits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient()
+	c.baseURL = srv.URL
+
+	// Positive result cached on second Fetch.
+	res1, err := c.Fetch(context.Background(), "Artist", "Cached Track", "Album", 180*time.Second)
+	if err != nil || res1 == nil {
+		t.Fatalf("first Fetch failed: res=%v err=%v", res1, err)
+	}
+	res2, err := c.Fetch(context.Background(), " artist ", "CACHED TRACK", "album", 180*time.Second)
+	if err != nil || res2 != res1 {
+		t.Fatalf("second Fetch did not return cached pointer: err=%v", err)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("/api/get hits = %d, want 1", hits.Load())
+	}
+
+	// 404 + empty search is negative-cached within TTL.
+	_, err1 := c.Fetch(context.Background(), "Nobody", "Missing Song", "", 100*time.Second)
+	_, err2 := c.Fetch(context.Background(), "Nobody", "Missing Song", "", 100*time.Second)
+	if err1 == nil || err2 == nil {
+		t.Fatalf("expected missing lyrics error, got (%v, %v)", err1, err2)
+	}
+	if searchHits.Load() != 1 {
+		t.Fatalf("search hits on negative-cached miss = %d, want 1", searchHits.Load())
+	}
+
+	// Transient 5xx errors must not be negative-cached.
+	failMode.Store(true)
+	_, _ = c.Fetch(context.Background(), "ErrArtist", "ErrSong", "", 120*time.Second)
+	_, _ = c.Fetch(context.Background(), "ErrArtist", "ErrSong", "", 120*time.Second)
+	if serverErrHits.Load() != 2 {
+		t.Fatalf("5xx error calls = %d, want 2 (never negative-cached)", serverErrHits.Load())
 	}
 }

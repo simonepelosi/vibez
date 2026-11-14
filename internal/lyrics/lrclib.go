@@ -5,19 +5,27 @@ package lyrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
-// maxLyricsResponseBytes bounds how much of an LRCLIB response body is read (1 MiB).
-const maxLyricsResponseBytes = 1 << 20
+const (
+	// maxLyricsResponseBytes bounds how much of an LRCLIB response body is read (1 MiB).
+	maxLyricsResponseBytes = 1 << 20
+	maxLyricsCacheEntries  = 64
+	lyricsNegCacheTTL      = 5 * time.Minute
+)
+
+var errLyricsNotFound = errors.New("lyrics not found")
 
 // Word is a single timed word or syllable span within an enhanced LRC line.
 type Word struct {
@@ -42,17 +50,110 @@ type Result struct {
 
 const defaultBaseURL = "https://lrclib.net"
 
+type lyricsCacheEntry struct {
+	result   *Result
+	notFound bool
+	cachedAt time.Time
+}
+
 // Client is a thin HTTP wrapper around the LRCLIB API.
 type Client struct {
 	http    *http.Client
 	baseURL string
+
+	mu         sync.Mutex
+	cache      map[string]lyricsCacheEntry
+	cacheOrder []string
 }
 
-// NewClient returns a Client ready for use.
+// NewClient returns a Client ready for use with a pooled HTTP transport and
+// bounded in-memory lyrics cache.
 func NewClient() *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 8
+	transport.MaxIdleConnsPerHost = 4
+	transport.IdleConnTimeout = 60 * time.Second
 	return &Client{
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http:    &http.Client{Timeout: 10 * time.Second, Transport: transport},
 		baseURL: defaultBaseURL,
+		cache:   make(map[string]lyricsCacheEntry, maxLyricsCacheEntries),
+	}
+}
+
+func lyricsCacheKey(artist, title, album string, duration time.Duration) string {
+	sec := int64(duration.Seconds() + 0.5)
+	return strings.ToLower(strings.TrimSpace(artist)) + "\x00" +
+		strings.ToLower(strings.TrimSpace(title)) + "\x00" +
+		strings.ToLower(strings.TrimSpace(album)) + "\x00" +
+		strconv.FormatInt(sec, 10)
+}
+
+func (c *Client) cacheGet(key string, now time.Time) (*Result, error, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.cache) == 0 {
+		return nil, nil, false
+	}
+	entry, ok := c.cache[key]
+	if !ok {
+		return nil, nil, false
+	}
+	if entry.notFound && now.Sub(entry.cachedAt) >= lyricsNegCacheTTL {
+		delete(c.cache, key)
+		c.removeCacheKeyLocked(key)
+		return nil, nil, false
+	}
+	c.touchCacheKeyLocked(key)
+	if entry.notFound {
+		return nil, errLyricsNotFound, true
+	}
+	return entry.result, nil, true
+}
+
+func (c *Client) cachePut(key string, res *Result, notFound bool, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]lyricsCacheEntry, maxLyricsCacheEntries)
+	}
+	entry := lyricsCacheEntry{result: res, notFound: notFound, cachedAt: now}
+	if _, exists := c.cache[key]; exists {
+		c.cache[key] = entry
+		c.touchCacheKeyLocked(key)
+		return
+	}
+	for len(c.cacheOrder) >= maxLyricsCacheEntries {
+		oldest := c.cacheOrder[0]
+		copy(c.cacheOrder, c.cacheOrder[1:])
+		c.cacheOrder = c.cacheOrder[:len(c.cacheOrder)-1]
+		delete(c.cache, oldest)
+	}
+	c.cache[key] = entry
+	c.cacheOrder = append(c.cacheOrder, key)
+}
+
+func (c *Client) touchCacheKeyLocked(key string) {
+	n := len(c.cacheOrder)
+	if n > 0 && c.cacheOrder[n-1] == key {
+		return
+	}
+	for i, k := range c.cacheOrder {
+		if k == key {
+			copy(c.cacheOrder[i:], c.cacheOrder[i+1:])
+			c.cacheOrder[n-1] = key
+			return
+		}
+	}
+	c.cacheOrder = append(c.cacheOrder, key)
+}
+
+func (c *Client) removeCacheKeyLocked(key string) {
+	for i, k := range c.cacheOrder {
+		if k == key {
+			copy(c.cacheOrder[i:], c.cacheOrder[i+1:])
+			c.cacheOrder = c.cacheOrder[:len(c.cacheOrder)-1]
+			return
+		}
 	}
 }
 
@@ -72,13 +173,24 @@ type lrclibTrack struct {
 // "(feat. ...)" suffixes), it falls back to /api/search with normalized names.
 // duration is used as a search hint; pass 0 if unknown.
 func (c *Client) Fetch(ctx context.Context, artist, title, album string, duration time.Duration) (*Result, error) {
+	key := lyricsCacheKey(artist, title, album, duration)
+	if res, err, ok := c.cacheGet(key, time.Now()); ok {
+		return res, err
+	}
+
 	res, err := c.fetchExact(ctx, artist, title, album, duration)
 	if err == nil {
+		c.cachePut(key, res, false, time.Now())
 		return res, nil
 	}
 	// Fall back to /api/search when exact match is not found.
-	if searchRes, searchErr := c.fetchSearch(ctx, artist, title, duration); searchErr == nil {
+	searchRes, searchErr := c.fetchSearch(ctx, artist, title, duration)
+	if searchErr == nil {
+		c.cachePut(key, searchRes, false, time.Now())
 		return searchRes, nil
+	}
+	if errors.Is(err, errLyricsNotFound) && errors.Is(searchErr, errLyricsNotFound) {
+		c.cachePut(key, nil, true, time.Now())
 	}
 	return nil, err
 }
@@ -119,9 +231,11 @@ func (c *Client) fetchExact(ctx context.Context, artist, title, album string, du
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("lyrics not found")
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, errLyricsNotFound
 	}
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("lrclib: status %d", resp.StatusCode)
 	}
 
@@ -136,7 +250,7 @@ func (c *Client) fetchSearch(ctx context.Context, artist, title string, duration
 	cleanedTitle := cleanSearchTerm(title)
 	cleanedArtist := cleanSearchTerm(artist)
 	if cleanedTitle == "" && cleanedArtist == "" {
-		return nil, fmt.Errorf("lyrics not found")
+		return nil, errLyricsNotFound
 	}
 
 	u, err := url.Parse(c.base() + "/api/search")
@@ -165,6 +279,7 @@ func (c *Client) fetchSearch(ctx context.Context, artist, title string, duration
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("lrclib search: status %d", resp.StatusCode)
 	}
 
@@ -173,12 +288,12 @@ func (c *Client) fetchSearch(ctx context.Context, artist, title string, duration
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("lyrics not found")
+		return nil, errLyricsNotFound
 	}
 
 	best := pickBestCandidate(candidates, duration)
 	if best == nil {
-		return nil, fmt.Errorf("lyrics not found")
+		return nil, errLyricsNotFound
 	}
 	return buildResult(*best)
 }

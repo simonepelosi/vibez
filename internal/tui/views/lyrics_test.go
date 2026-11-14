@@ -104,3 +104,45 @@ func TestLyricsModel_BottomScrollAndResumeFollow(t *testing.T) {
 		t.Error("expected follow to resume when active line catches up to cursor")
 	}
 }
+
+func TestLyricsModel_BinarySearchAndViewCache(t *testing.T) {
+	lines := make([]lyrics.Line, 50)
+	for i := range lines {
+		lines[i] = lyrics.Line{
+			Start: time.Duration(i*5) * time.Second,
+			Text:  "lyric line",
+			Words: []lyrics.Word{
+				{Start: time.Duration(i*5) * time.Second, Text: "lyric "},
+				{Start: time.Duration(i*5+2) * time.Second, Text: "line"},
+			},
+		}
+	}
+	m := NewLyrics()
+	m.SetSize(50, 12)
+	m.SetLyrics(&lyrics.Result{Synced: true, Lines: lines}, nil)
+
+	// Seek far ahead via binary search, then step back cleanly.
+	m.SetPosition(127 * time.Second)
+	if m.currentIdx != 25 || m.activeWords != 2 {
+		t.Fatalf("after 127s seek: idx=%d words=%d, want 25, 2", m.currentIdx, m.activeWords)
+	}
+	v1 := m.View()
+	if m.viewDirty {
+		t.Fatal("expected viewDirty=false after View()")
+	}
+
+	// Repeating the same word threshold must keep cachedView clean.
+	m.SetPosition(128 * time.Second)
+	if m.viewDirty {
+		t.Fatal("expected SetPosition within same active word not to dirty view cache")
+	}
+	if v2 := m.View(); v2 != v1 {
+		t.Fatal("cached View() output changed unexpectedly")
+	}
+
+	// Moving backward across lines triggers O(log n) search and dirties view.
+	m.SetPosition(11 * time.Second)
+	if m.currentIdx != 2 || m.activeWords != 1 || !m.viewDirty {
+		t.Fatalf("after backward seek 11s: idx=%d words=%d dirty=%v", m.currentIdx, m.activeWords, m.viewDirty)
+	}
+}
