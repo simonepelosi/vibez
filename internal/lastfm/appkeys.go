@@ -16,12 +16,7 @@ var (
 )
 
 // ApplyEmbedded copies the build-time embedded Last.fm API key and secret into
-// cfg when they are present, taking priority over any values in the config file.
+// cfg for runtime use without persisting them to config.json on subsequent saves.
 func ApplyEmbedded(cfg *config.Config) {
-	if apiKey != "" {
-		cfg.LastfmAPIKey = apiKey
-	}
-	if apiSecret != "" {
-		cfg.LastfmAPISecret = apiSecret
-	}
+	cfg.SetRuntimeLastfmCredentials(apiKey, apiSecret)
 }

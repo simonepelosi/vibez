@@ -6,12 +6,15 @@ import "golang.org/x/sys/windows"
 
 // Open delegates directly to the Windows URL association, without a command
 // shell interpreting query strings or other URL characters.
-func Open(url string) error {
+func Open(rawURL string) error {
+	if err := validateURL(rawURL); err != nil {
+		return err
+	}
 	verb, err := windows.UTF16PtrFromString("open")
 	if err != nil {
 		return err
 	}
-	target, err := windows.UTF16PtrFromString(url)
+	target, err := windows.UTF16PtrFromString(rawURL)
 	if err != nil {
 		return err
 	}

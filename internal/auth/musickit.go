@@ -71,47 +71,45 @@ To get one:
 
 	// Loopback only: the page carries the developer token and /callback
 	// accepts a user token, neither of which belongs on the network.
-	// "localhost" may resolve to ::1, so listen there too when available.
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.AuthPort))
-	ln, err := net.Listen("tcp", addr)
+	// "localhost" may resolve to ::1, so bind both families or move to a free
+	// dual-stack port to prevent another local user from squatting ::1.
+	listeners, port, err := bindAuthListeners(cfg.AuthPort)
 	if err != nil {
-		return fmt.Errorf("starting auth server on %s: %w", addr, err)
-	}
-	listeners := []net.Listener{ln}
-	if ln6, err := net.Listen("tcp", net.JoinHostPort("::1", strconv.Itoa(cfg.AuthPort))); err == nil {
-		listeners = append(listeners, ln6)
+		return err
 	}
 
 	srv := &http.Server{
-		Handler:           hostGuard(cfg.AuthPort, mux),
+		Handler:           hostGuard(port, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	for _, l := range listeners {
 		go func() {
 			if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				select {
-				case errCh <- err:
-				default:
-				}
+				sendErr(errCh, err)
 			}
 		}()
 	}
 
-	loginURL := fmt.Sprintf("http://localhost:%d/login?state=%s", cfg.AuthPort, state)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	loginURL := fmt.Sprintf("http://localhost:%d/login?state=%s", port, state)
 	fmt.Println("Connecting to Apple Music...")
 	fmt.Println("Your browser will open to complete the login.")
 
 	_ = openBrowser(loginURL) // intentional best-effort browser open
 
 	// Print the fallback URL after a short delay so users whose browser did
-	// not open automatically can still complete the flow.
+	// not open automatically can still complete the flow, unless login finished first.
 	go func() {
-		time.Sleep(4 * time.Second)
-		fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", loginURL)
+		timer := time.NewTimer(4 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			fmt.Printf("\nIf your browser did not open, visit:\n  %s\n\n", loginURL)
+		case <-ctx.Done():
+		}
 	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 
 	shutdownSrv := func() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -173,16 +171,80 @@ func hostGuard(port int, next http.Handler) http.Handler {
 	})
 }
 
+func sendErr(ch chan<- error, err error) {
+	select {
+	case ch <- err:
+	default:
+	}
+}
+
+func bindAuthListeners(port int) ([]net.Listener, int, error) {
+	if listeners, boundPort, err := tryBindLoopbackPair(port); err == nil {
+		return listeners, boundPort, nil
+	} else if port == 0 {
+		return nil, 0, err
+	} else {
+		// If IPv6 ::1 on the configured port is squatted by another process,
+		// fall back to a fresh ephemeral port bound cleanly on both families.
+		if listeners, boundPort, ephErr := tryBindLoopbackEphemeral(); ephErr == nil {
+			return listeners, boundPort, nil
+		}
+		return nil, 0, err
+	}
+}
+
+func tryBindLoopbackEphemeral() ([]net.Listener, int, error) {
+	var lastErr error
+	for range 8 {
+		listeners, port, err := tryBindLoopbackPair(0)
+		if err == nil {
+			return listeners, port, nil
+		}
+		lastErr = err
+	}
+	return nil, 0, lastErr
+}
+
+func tryBindLoopbackPair(port int) ([]net.Listener, int, error) {
+	var lc net.ListenConfig
+	addr4 := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	ln4, err := lc.Listen(context.Background(), "tcp", addr4)
+	if err != nil {
+		return nil, 0, fmt.Errorf("starting auth server on %s: %w", addr4, err)
+	}
+	tcpAddr, ok := ln4.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln4.Close()
+		return nil, 0, errors.New("unexpected non-TCP listener address")
+	}
+	boundPort := tcpAddr.Port
+	addr6 := net.JoinHostPort("::1", strconv.Itoa(boundPort))
+	ln6, err := lc.Listen(context.Background(), "tcp", addr6)
+	if err != nil {
+		if isIPv6Unavailable(err) {
+			return []net.Listener{ln4}, boundPort, nil
+		}
+		_ = ln4.Close()
+		return nil, 0, fmt.Errorf("binding matching IPv6 loopback %s: %w", addr6, err)
+	}
+	return []net.Listener{ln4, ln6}, boundPort, nil
+}
+
 // buildMux constructs the HTTP mux for the auth flow. Extracted for testability.
 // Both routes require state, which only the page opened by Login knows.
 func buildMux(devToken, state string, tmpl *template.Template, tokenCh chan string, errCh chan error) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		if !stateMatches(state, r.URL.Query().Get("state")) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+		nonce := rand.Text()
 		h := w.Header()
 		h.Set("Content-Type", "text/html; charset=utf-8")
 		h.Set("Cache-Control", "no-store")
@@ -191,9 +253,13 @@ func buildMux(devToken, state string, tmpl *template.Template, tokenCh chan stri
 		// popup's document.referrer check records the caller origin in
 		// sessionStorage["ac"] for postMessage token delivery (see #182).
 		h.Set("Referrer-Policy", "strict-origin")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'nonce-"+nonce+"'; style-src 'nonce-"+nonce+"'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 		if err := tmpl.Execute(w, map[string]string{
 			"DeveloperToken": devToken,
 			"State":          state,
+			"Nonce":          nonce,
 		}); err != nil {
 			http.Error(w, "template error", http.StatusInternalServerError)
 		}
@@ -213,17 +279,32 @@ func buildMux(devToken, state string, tmpl *template.Template, tokenCh chan stri
 		var payload callbackPayload
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxCallbackBody)).Decode(&payload); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
-			errCh <- fmt.Errorf("decoding callback: %w", err)
+			sendErr(errCh, fmt.Errorf("decoding callback: %w", err))
 			return
 		}
-		if payload.UserToken == "" {
+		if !isPlausibleUserToken(payload.UserToken) {
 			http.Error(w, "empty token", http.StatusBadRequest)
-			errCh <- errors.New("received empty user token")
+			sendErr(errCh, errors.New("received empty user token"))
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		tokenCh <- payload.UserToken
+		select {
+		case tokenCh <- payload.UserToken:
+		default:
+		}
 	})
 
 	return mux
+}
+
+func isPlausibleUserToken(tok string) bool {
+	if tok == "" || strings.TrimSpace(tok) == "" {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i] < 0x20 || tok[i] == 0x7f {
+			return false
+		}
+	}
+	return true
 }

@@ -136,12 +136,31 @@ func TestLoginHTML_UsesDirectAppleAuthorizePopupWithoutMusicKitCDN(t *testing.T)
 	if got := w.Header().Get("Referrer-Policy"); got != "strict-origin" {
 		t.Errorf("Referrer-Policy = %q, want %q", got, "strict-origin")
 	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !containsSubstr(csp, "script-src 'nonce-") || containsSubstr(csp, "'unsafe-inline'") {
+		t.Errorf("unexpected Content-Security-Policy = %q", csp)
+	}
 	body := w.Body.String()
 	if containsSubstr(body, "js-cdn.music.apple.com") {
 		t.Error("login.html should not load musickit.js from Apple CDN")
 	}
 	if !containsSubstr(body, "https://authorize.music.apple.com") {
 		t.Error("login.html missing direct Apple authorization popup origin")
+	}
+	if !containsSubstr(body, "event.source !== win") {
+		t.Error("login.html missing postMessage event.source validation")
+	}
+	if !containsSubstr(body, "window.location.origin + window.location.pathname") || !containsSubstr(body, "replaceState") {
+		t.Error("login.html should scrub ?state= from URL and referrer")
+	}
+	if containsSubstr(body, "innerHTML") || containsSubstr(body, "onclick=") {
+		t.Error("login.html should avoid inline onclick and innerHTML")
 	}
 }
 
@@ -479,5 +498,64 @@ func TestLogin_EmbeddedTokenOverridesExplicit(t *testing.T) {
 	// The embedded token must override the stale config token.
 	if cfg.AppleDeveloperToken != "embedded-takes-priority" {
 		t.Errorf("AppleDeveloperToken = %q, want embedded token %q", cfg.AppleDeveloperToken, "embedded-takes-priority")
+	}
+}
+
+func TestBindAuthListeners_RelocatesWhenIPv6Squatted(t *testing.T) {
+	// Occupy only [::1]:port while leaving 127.0.0.1:port free (if IPv6 exists).
+	ln6, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer func() { _ = ln6.Close() }()
+	squattedPort := ln6.Addr().(*net.TCPAddr).Port
+
+	listeners, boundPort, err := bindAuthListeners(squattedPort)
+	if err != nil {
+		t.Fatalf("bindAuthListeners: %v", err)
+	}
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	if boundPort == squattedPort {
+		t.Fatalf("bindAuthListeners kept squatted port %d instead of relocating", squattedPort)
+	}
+	if len(listeners) < 2 {
+		t.Errorf("expected both IPv4 and IPv6 listeners on relocated port %d, got %d", boundPort, len(listeners))
+	}
+}
+
+func TestCallbackHandler_RejectsControlCharsAndDoesNotBlock(t *testing.T) {
+	mux, tokenCh, errCh := newTestMux(t)
+	body, _ := json.Marshal(callbackPayload{UserToken: "bad\rtoken"})
+	req := callbackRequest(bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+
+	// Fill channels to verify extra calls never block HTTP handler goroutines.
+	select {
+	case <-errCh:
+	default:
+	}
+	errCh <- bytes.ErrTooLarge
+	req2 := callbackRequest(bytes.NewReader(body))
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("second invalid status = %d, want 400", w2.Code)
+	}
+
+	tokenCh <- "already-full"
+	okBody, _ := json.Marshal(callbackPayload{UserToken: "good-token"})
+	req3 := callbackRequest(bytes.NewReader(okBody))
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("valid status on full channel = %d, want 200", w3.Code)
 	}
 }
