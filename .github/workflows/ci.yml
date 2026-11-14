@@ -7,6 +7,9 @@ on:
   # on main meant a PR stacked on a feature branch never ran a check at all.
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -15,14 +18,14 @@ jobs:
     name: pre-commit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
 
@@ -30,7 +33,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav
 
       - name: Install pre-commit
-        run: pip install pre-commit
+        run: pip install 'pre-commit==4.7.0'
 
       - name: Run pre-commit
         run: pre-commit run --all-files
@@ -39,51 +42,89 @@ jobs:
     name: build-vet-test-linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav
 
       - name: Build
-        run: go build ./...
+        run: go build -mod=readonly ./...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -mod=readonly ./...
 
       - name: Test
-        run: go test -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -mod=readonly -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Coverage summary
         run: |
-          go tool cover -func=coverage.out | tail -1 | awk '{print "Total coverage: " $3}' >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out | tail -1 | awk '{print "Total coverage: " $3}' >> "$GITHUB_STEP_SUMMARY"
+
+  security:
+    name: security-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: Verify Go modules
+        run: |
+          go mod verify
+          go build -mod=readonly ./...
+
+      - name: Race detector tests
+        run: go test -race -mod=readonly ./...
+
+      - name: Vulnerability scan (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      - name: Workflow lint (actionlint)
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Fuzz smoke tests
+        run: |
+          while IFS= read -r file; do
+            pkg="./$(dirname "$file")"
+            while IFS= read -r fn; do
+              echo "=== Fuzzing $pkg ($fn) ==="
+              go test -mod=readonly -run='^$' -fuzz="^${fn}$" -fuzztime=3s "$pkg"
+            done < <(sed -n 's/^func \(Fuzz[A-Za-z0-9_]*\).*/\1/p' "$file")
+          done < <(grep -rl '^func Fuzz' . --include='*_test.go')
 
   test-macos:
     name: build-vet-test-macos
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
       - name: Build
-        run: CGO_ENABLED=0 go build ./...
+        run: CGO_ENABLED=0 go build -mod=readonly ./...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -mod=readonly ./...
 
       - name: Test
-        run: go test ./...
+        run: go test -mod=readonly ./...
 
       - name: Test release build mode
-        run: CGO_ENABLED=0 go test ./...
+        run: CGO_ENABLED=0 go test -mod=readonly ./...
 
   test-windows:
     name: build-vet-test-windows
@@ -91,11 +132,11 @@ jobs:
     env:
       CGO_ENABLED: '0'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
       - name: Install golangci-lint
@@ -105,13 +146,13 @@ jobs:
         run: golangci-lint run --config=.golangci.yml --fix=false
 
       - name: Build
-        run: go build ./...
+        run: go build -mod=readonly ./...
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -mod=readonly ./...
 
       - name: Test
-        run: go test ./...
+        run: go test -mod=readonly ./...
 
       # The browserless engine on Windows is native code (a C++ CDM bridge and a
       # Media Foundation/waveOut sink), so build and test it the way the release
@@ -122,9 +163,9 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           gcc --version
-          go build ./...
-          go vet ./internal/player/browserless/... ./internal/player/smtc/... ./cmd/...
-          go test -v ./internal/player/browserless/...
+          go build -mod=readonly ./...
+          go vet -mod=readonly ./internal/player/browserless/... ./internal/player/smtc/... ./cmd/...
+          go test -mod=readonly -v ./internal/player/browserless/...
           # The reader-side SMTC test skips itself where the runner cannot
           # host or read media sessions.
-          go test -v ./internal/player/smtc/...
+          go test -mod=readonly -v ./internal/player/smtc/...

@@ -75,7 +75,10 @@ refresh-token:
 	@set -e; \
 	if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
 	if [ -z "$$APPLE_PRIVATE_KEY" ] && [ -n "$$APPLE_PRIVATE_KEY_FILE" ]; then \
-		APPLE_PRIVATE_KEY="$$(cat "$$(eval echo $$APPLE_PRIVATE_KEY_FILE)")"; \
+		case "$$APPLE_PRIVATE_KEY_FILE" in \
+			"~/"*) APPLE_PRIVATE_KEY="$$(cat "$$HOME/$${APPLE_PRIVATE_KEY_FILE#~/}")" ;; \
+			*) APPLE_PRIVATE_KEY="$$(cat "$$APPLE_PRIVATE_KEY_FILE")" ;; \
+		esac; \
 		export APPLE_PRIVATE_KEY; \
 	fi; \
 	test -n "$$APPLE_KEY_ID"      || { echo "APPLE_KEY_ID is not set (env or .env)";      exit 1; }; \
@@ -97,7 +100,10 @@ install:
 	@set -e; \
 	if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
 	if [ -z "$$APPLE_PRIVATE_KEY" ] && [ -n "$$APPLE_PRIVATE_KEY_FILE" ]; then \
-		key_file="$$(eval echo $$APPLE_PRIVATE_KEY_FILE)"; \
+		case "$$APPLE_PRIVATE_KEY_FILE" in \
+			"~/"*) key_file="$$HOME/$${APPLE_PRIVATE_KEY_FILE#~/}" ;; \
+			*) key_file="$$APPLE_PRIVATE_KEY_FILE" ;; \
+		esac; \
 		test -f "$$key_file" || { echo "APPLE_PRIVATE_KEY_FILE not found: $$key_file"; exit 1; }; \
 		APPLE_PRIVATE_KEY="$$(cat "$$key_file")"; \
 	fi; \

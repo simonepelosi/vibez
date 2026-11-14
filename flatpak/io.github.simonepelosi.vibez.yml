@@ -16,8 +16,9 @@ finish-args:
   - --share=network
   # Audio output (PulseAudio; PipeWire uses this socket for compat)
   - --socket=pulseaudio
-  # MPRIS D-Bus interface so the desktop can control playback
-  - --socket=session-bus
+  # MPRIS D-Bus interface so the desktop can control playback.
+  # Do not add --socket=session-bus: filtered talk/own rules below rely on
+  # xdg-dbus-proxy to restrict D-Bus access strictly to MPRIS2.
   - --talk-name=org.mpris.MediaPlayer2.*
   - --own-name=org.mpris.MediaPlayer2.vibez
   # Standalone Widevine CDM is cached here on first run. Flatpak remaps
