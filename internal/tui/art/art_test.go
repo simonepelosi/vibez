@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -167,5 +168,62 @@ func TestDecodeBounded_RejectsOversizedDimensions(t *testing.T) {
 	}
 	if _, err := decodeBounded(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil || !strings.Contains(err.Error(), "exceed max") {
 		t.Fatalf("decodeBounded(oversized) error = %v, want exceed max", err)
+	}
+}
+
+func TestRenderHalfBlocks_PixelSourcesAndSubImage(t *testing.T) {
+	// *image.RGBA fast path
+	rgba := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	rgba.SetRGBA(0, 0, color.RGBA{R: 200, G: 10, B: 20, A: 255})
+	rgba.SetRGBA(1, 0, color.RGBA{R: 200, G: 10, B: 20, A: 255})
+	rgba.SetRGBA(0, 1, color.RGBA{R: 10, G: 200, B: 30, A: 255})
+	rgba.SetRGBA(1, 1, color.RGBA{R: 10, G: 200, B: 30, A: 255})
+	if lines := RenderHalfBlocks(rgba, Size{Width: 2, Height: 1}); len(lines) != 1 ||
+		!strings.Contains(lines[0], "38;2;200;10;20") ||
+		!strings.Contains(lines[0], "48;2;10;200;30") ||
+		lipgloss.Width(lines[0]) != 2 {
+		t.Fatalf("unexpected RGBA output: %#v", lines)
+	}
+
+	// Translucent *image.NRGBA matches color.NRGBA premultiplication
+	nrgba := image.NewNRGBA(image.Rect(0, 0, 1, 2))
+	nrgba.SetNRGBA(0, 0, color.NRGBA{R: 255, G: 0, B: 0, A: 128})
+	nrgba.SetNRGBA(0, 1, color.NRGBA{R: 0, G: 0, B: 255, A: 255})
+	r16, _, _, _ := nrgba.At(0, 0).RGBA()
+	wantRed := strings.Contains(RenderHalfBlocks(nrgba, Size{Width: 1, Height: 1})[0], "38;2;"+strconv.Itoa(int(r16>>8))+";0;0")
+	if !wantRed {
+		t.Fatalf("translucent NRGBA did not premultiply to %d", r16>>8)
+	}
+
+	// Non-zero Bounds().Min SubImage + upscaling
+	sub := rgba.SubImage(image.Rect(1, 1, 2, 2))
+	up := RenderHalfBlocks(sub, Size{Width: 4, Height: 2})
+	if len(up) != 2 || ansi.Strip(up[0]) != "▀▀▀▀" || !strings.Contains(up[0], "38;2;10;200;30") {
+		t.Fatalf("unexpected SubImage upscale output: %#v", up)
+	}
+}
+
+func TestDecodeBounded_DownsamplesOversizedCoverToMaxDecodedDim(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 1024, 512))
+	for y := range 512 {
+		for x := range 1024 {
+			img.SetNRGBA(x, y, color.NRGBA{R: 120, G: 80, B: 40, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := decodeBounded(bytes.NewReader(buf.Bytes()), 10<<20)
+	if err != nil {
+		t.Fatalf("decodeBounded(1024x512) = %v", err)
+	}
+	b := decoded.Bounds()
+	if b.Dx() != MaxDecodedArtworkDim || b.Dy() != MaxDecodedArtworkDim/2 {
+		t.Fatalf("downsampled bounds = %dx%d, want %dx%d", b.Dx(), b.Dy(), MaxDecodedArtworkDim, MaxDecodedArtworkDim/2)
+	}
+	if _, ok := decoded.(*image.RGBA); !ok {
+		t.Fatalf("downsampled type = %T, want *image.RGBA", decoded)
 	}
 }

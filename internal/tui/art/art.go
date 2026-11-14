@@ -15,22 +15,24 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
+	"image/draw"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
 	"net/http"
 	urlpkg "net/url"
 	"os"
+	"strconv"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 )
 
 const (
-	MaxArtworkWidth  = 4096
-	MaxArtworkHeight = 4096
-	MaxArtworkPixels = 16_000_000
+	MaxArtworkWidth      = 4096
+	MaxArtworkHeight     = 4096
+	MaxArtworkPixels     = 16_000_000
+	MaxDecodedArtworkDim = 256
 )
 
 // upperHalfBlock fills the top half of a cell; the bottom half shows through
@@ -153,7 +155,55 @@ func decodeBounded(r io.Reader, maxBytes int64) (image.Image, error) {
 	if cfg.Width > MaxArtworkPixels/cfg.Height {
 		return nil, fmt.Errorf("decode artwork: pixels %dx%d exceed max %d", cfg.Width, cfg.Height, MaxArtworkPixels)
 	}
-	return Decode(bytes.NewReader(buf))
+	img, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	return Downsample(img, MaxDecodedArtworkDim), nil
+}
+
+// Downsample scales img down with box averaging so neither dimension exceeds
+// maxDim, returning an *image.RGBA to avoid retaining multi-megabyte backing
+// pixel buffers in memory. Images already within maxDim on both axes are
+// returned unchanged.
+func Downsample(img image.Image, maxDim int) image.Image {
+	if img == nil || maxDim <= 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 || (w <= maxDim && h <= maxDim) {
+		return img
+	}
+
+	var dstW, dstH int
+	if w >= h {
+		dstW = maxDim
+		dstH = max(1, (h*maxDim+w/2)/w)
+	} else {
+		dstH = maxDim
+		dstW = max(1, (w*maxDim+h/2)/h)
+	}
+
+	src := newPixelSource(img)
+	var xRangeBuf [256][2]int
+	xRanges := computeXRanges(xRangeBuf[:], dstW, src.srcW)
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	for dy := range dstH {
+		y0 := (dy * src.srcH) / dstH
+		y1 := max(((dy+1)*src.srcH)/dstH, y0+1)
+		row := dst.Pix[dy*dst.Stride:]
+		for dx := range dstW {
+			xr := xRanges[dx]
+			r, g, b := src.averageBox(xr[0], y0, xr[1], y1)
+			off := dx * 4
+			row[off] = r
+			row[off+1] = g
+			row[off+2] = b
+			row[off+3] = 0xff
+		}
+	}
+	return dst
 }
 
 // RenderHalfBlocks converts img into exactly size.Height strings, each of
@@ -168,63 +218,166 @@ func RenderHalfBlocks(img image.Image, size Size) []string {
 	if img == nil || size.Width <= 0 || size.Height <= 0 {
 		return nil
 	}
-	b := img.Bounds()
-	srcW, srcH := b.Dx(), b.Dy()
-	if srcW <= 0 || srcH <= 0 {
+	src := newPixelSource(img)
+	if src.srcW <= 0 || src.srcH <= 0 {
 		return nil
 	}
 
 	pxW, pxH := size.Width, size.Height*2
-
-	// sample returns the average 8-bit RGB of every source pixel that maps to
-	// grid cell (px, py) in the pxW × pxH target grid. Area-averaging (a box
-	// filter) is what keeps a heavily downscaled cover smooth and
-	// recognisable; picking a single nearest pixel per cell instead produces
-	// a harsh, aliased result at this size.
-	sample := func(px, py int) (uint8, uint8, uint8) {
-		x0 := b.Min.X + px*srcW/pxW
-		x1 := b.Min.X + (px+1)*srcW/pxW
-		y0 := b.Min.Y + py*srcH/pxH
-		y1 := b.Min.Y + (py+1)*srcH/pxH
-		if x1 <= x0 {
-			x1 = x0 + 1
-		}
-		if y1 <= y0 {
-			y1 = y0 + 1
-		}
-		var rs, gs, bs, n uint64
-		for y := y0; y < y1; y++ {
-			for x := x0; x < x1; x++ {
-				r, g, bl, _ := img.At(x, y).RGBA()
-				rs += uint64(r >> 8)
-				gs += uint64(g >> 8)
-				bs += uint64(bl >> 8)
-				n++
-			}
-		}
-		if n == 0 {
-			n = 1
-		}
-		return uint8(rs / n), uint8(gs / n), uint8(bs / n) //nolint:gosec // averaged 8-bit channels
-	}
+	var xRangeBuf [256][2]int
+	xRanges := computeXRanges(xRangeBuf[:], pxW, src.srcW)
 
 	lines := make([]string, size.Height)
+	buf := make([]byte, 0, size.Width*44)
 	for row := range size.Height {
-		var sb strings.Builder
+		ty0 := (row * 2) * src.srcH / pxH
+		ty1 := max((row*2+1)*src.srcH/pxH, ty0+1)
+		by0 := (row*2 + 1) * src.srcH / pxH
+		by1 := max((row*2+2)*src.srcH/pxH, by0+1)
+
+		buf = buf[:0]
+		styled := false
+		var pTR, pTG, pTB, pBR, pBG, pBB uint8
 		for col := range size.Width {
-			tr, tg, tb := sample(col, row*2)   // top pixel → foreground
-			br, bg, bb := sample(col, row*2+1) // bottom pixel → background
-			cell := lipgloss.NewStyle().
-				Foreground(lipgloss.Color(hexColor(tr, tg, tb))).
-				Background(lipgloss.Color(hexColor(br, bg, bb))).
-				Render(upperHalfBlock)
-			sb.WriteString(cell)
+			xr := xRanges[col]
+			tr, tg, tb := src.averageBox(xr[0], ty0, xr[1], ty1)
+			br, bg, bb := src.averageBox(xr[0], by0, xr[1], by1)
+			if !styled || tr != pTR || tg != pTG || tb != pTB || br != pBR || bg != pBG || bb != pBB {
+				buf = appendCellSGR(buf, tr, tg, tb, br, bg, bb)
+				pTR, pTG, pTB, pBR, pBG, pBB = tr, tg, tb, br, bg, bb
+				styled = true
+			}
+			buf = append(buf, upperHalfBlock...)
 		}
-		lines[row] = sb.String()
+		if styled {
+			buf = append(buf, "\x1b[m"...)
+		}
+		lines[row] = string(buf)
 	}
 	return lines
 }
 
-func hexColor(r, g, b uint8) string {
-	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+func computeXRanges(scratch [][2]int, dstW, srcW int) [][2]int {
+	var out [][2]int
+	if dstW <= len(scratch) {
+		out = scratch[:dstW]
+	} else {
+		out = make([][2]int, dstW)
+	}
+	for px := range dstW {
+		x0 := px * srcW / dstW
+		x1 := max((px+1)*srcW/dstW, x0+1)
+		out[px] = [2]int{x0, x1}
+	}
+	return out
+}
+
+type pixelSource struct {
+	pix     []uint8
+	baseOff int
+	stride  int
+	srcW    int
+	srcH    int
+	nrgba   bool
+}
+
+func newPixelSource(img image.Image) pixelSource {
+	b := img.Bounds()
+	srcW, srcH := b.Dx(), b.Dy()
+	if srcW <= 0 || srcH <= 0 {
+		return pixelSource{srcW: srcW, srcH: srcH}
+	}
+	switch v := img.(type) {
+	case *image.RGBA:
+		return pixelSource{
+			pix:     v.Pix,
+			baseOff: v.PixOffset(b.Min.X, b.Min.Y),
+			stride:  v.Stride,
+			srcW:    srcW,
+			srcH:    srcH,
+		}
+	case *image.NRGBA:
+		return pixelSource{
+			pix:     v.Pix,
+			baseOff: v.PixOffset(b.Min.X, b.Min.Y),
+			stride:  v.Stride,
+			srcW:    srcW,
+			srcH:    srcH,
+			nrgba:   true,
+		}
+	default:
+		dst := image.NewRGBA(b)
+		draw.Draw(dst, b, img, b.Min, draw.Src)
+		return pixelSource{
+			pix:     dst.Pix,
+			baseOff: dst.PixOffset(b.Min.X, b.Min.Y),
+			stride:  dst.Stride,
+			srcW:    srcW,
+			srcH:    srcH,
+		}
+	}
+}
+
+func (s pixelSource) sumBox(x0, y0, x1, y1 int) (rs, gs, bs, n uint64) {
+	dx := x1 - x0
+	if !s.nrgba {
+		for y := y0; y < y1; y++ {
+			row := s.pix[s.baseOff+y*s.stride+x0*4:]
+			for x := range dx {
+				off := x * 4
+				rs += uint64(row[off])
+				gs += uint64(row[off+1])
+				bs += uint64(row[off+2])
+			}
+			n += uint64(dx) //nolint:gosec // dx is positive pixel span within image bounds
+		}
+		return rs, gs, bs, n
+	}
+
+	for y := y0; y < y1; y++ {
+		row := s.pix[s.baseOff+y*s.stride+x0*4:]
+		for x := range dx {
+			off := x * 4
+			a := uint32(row[off+3])
+			if a == 0xff {
+				rs += uint64(row[off])
+				gs += uint64(row[off+1])
+				bs += uint64(row[off+2])
+			} else if a != 0 {
+				// Match color.NRGBA.RGBA()>>8 premultiplication for translucent pixels.
+				r16 := (uint32(row[off]) * 0x101 * a) / 0xff
+				g16 := (uint32(row[off+1]) * 0x101 * a) / 0xff
+				b16 := (uint32(row[off+2]) * 0x101 * a) / 0xff
+				rs += uint64(r16 >> 8)
+				gs += uint64(g16 >> 8)
+				bs += uint64(b16 >> 8)
+			}
+		}
+		n += uint64(dx) //nolint:gosec // dx is positive pixel span within image bounds
+	}
+	return rs, gs, bs, n
+}
+
+func (s pixelSource) averageBox(x0, y0, x1, y1 int) (uint8, uint8, uint8) {
+	rs, gs, bs, n := s.sumBox(x0, y0, x1, y1)
+	if n == 0 {
+		return 0, 0, 0
+	}
+	return uint8(rs / n), uint8(gs / n), uint8(bs / n) //nolint:gosec // averaged 8-bit channels
+}
+
+func appendCellSGR(buf []byte, fgR, fgG, fgB, bgR, bgG, bgB uint8) []byte {
+	buf = append(buf, "\x1b[38;2;"...)
+	buf = strconv.AppendUint(buf, uint64(fgR), 10)
+	buf = append(buf, ';')
+	buf = strconv.AppendUint(buf, uint64(fgG), 10)
+	buf = append(buf, ';')
+	buf = strconv.AppendUint(buf, uint64(fgB), 10)
+	buf = append(buf, ";48;2;"...)
+	buf = strconv.AppendUint(buf, uint64(bgR), 10)
+	buf = append(buf, ';')
+	buf = strconv.AppendUint(buf, uint64(bgG), 10)
+	buf = append(buf, ';')
+	buf = strconv.AppendUint(buf, uint64(bgB), 10)
+	return append(buf, 'm')
 }

@@ -27,6 +27,9 @@ func (q queueItem) FilterValue() string { return q.track.Title }
 type QueueModel struct {
 	list   list.Model
 	tracks []provider.Track
+	width  int
+	height int
+	sized  bool
 }
 
 func NewQueue() *QueueModel {
@@ -66,6 +69,12 @@ func (m *QueueModel) SelectedTrack() (int, *provider.Track) {
 }
 
 func (m *QueueModel) SetSize(w, h int) {
+	if m.sized && m.width == w && m.height == h {
+		return
+	}
+	m.sized = true
+	m.width = w
+	m.height = h
 	m.list.SetSize(w, h)
 }
 

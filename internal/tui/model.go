@@ -146,6 +146,10 @@ type artworkLoadedMsg struct {
 	img image.Image
 	err error
 }
+type artworkPrefetchMsg struct {
+	url string
+	img image.Image
+}
 type searchResultMsg struct {
 	result *provider.SearchResult
 	query  string
@@ -186,6 +190,7 @@ type songRatingMsg struct {
 	trackID   string
 	catalogID string
 	rating    provider.Rating
+	err       error
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -194,15 +199,39 @@ type memTickMsg struct{ stats string }
 type errMsg struct{ err error }
 
 type artworkCache struct {
-	url      string
-	img      image.Image
-	rendered map[art.Size][]string
-	failed   bool
+	url           string
+	img           image.Image
+	rendered      map[art.Size][]string
+	renderedOrder []art.Size
+	failed        bool
+}
+
+func (c *artworkCache) touchSize(s art.Size) {
+	n := len(c.renderedOrder)
+	if n > 0 && c.renderedOrder[n-1] == s {
+		return
+	}
+	for i, existing := range c.renderedOrder {
+		if existing == s {
+			copy(c.renderedOrder[i:], c.renderedOrder[i+1:])
+			c.renderedOrder[n-1] = s
+			return
+		}
+	}
+	c.renderedOrder = append(c.renderedOrder, s)
 }
 
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
+type flushVolumeSaveMsg struct{ gen int }
+
+const (
+	maxArtworkLRUCache = 8
+	maxCheckedRatings  = 1024
+	volumeSaveDebounce = 400 * time.Millisecond
+)
+
 type saveAudioQualityMsg struct {
 	kbps      int
 	savedOnly bool
@@ -321,6 +350,8 @@ type Model struct {
 	renderArt        func(image.Image, art.Size) []string // cover renderer, see artRenderer
 	artwork          artworkCache
 	artworkGen       int
+	artworkLRU       map[string]image.Image
+	artworkLRUOrder  []string
 	artHTTP          *http.Client
 	supportsArtColor func() bool
 	artCellAsp       float64          // terminal cell height/width ratio, for square art
@@ -381,12 +412,17 @@ type Model struct {
 
 	// Ratings: love / "Suggest Less" state per track ID (library and catalog),
 	// kept in sync with Apple Music. Missing entries mean RatingNone.
-	ratings map[string]provider.Rating
+	ratings        map[string]provider.Rating
+	checkedRatings map[string]bool
+
+	volSaveGen   int
+	volSaveDirty bool
 
 	// Animation
-	glowStep   int
-	introStep  int    // introDone (-1) when complete
-	initStatus string // status text shown on the loading screen
+	glowStep    int
+	glowRunning bool
+	introStep   int    // introDone (-1) when complete
+	initStatus  string // status text shown on the loading screen
 
 	// Memory profiling (enabled with --mem-profiling)
 	memProfiling bool
@@ -409,16 +445,23 @@ type Model struct {
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
+	artTransport := http.DefaultTransport.(*http.Transport).Clone()
+	artTransport.MaxIdleConns = 16
+	artTransport.MaxIdleConnsPerHost = 8
+	artTransport.IdleConnTimeout = 60 * time.Second
+
 	m := &Model{
-		cfg:          cfg,
-		provider:     prov,
-		player:       plyr,
-		activePanel:  -1,
-		memProfiling: opts.MemProfiling,
-		preMuteVol:   -1,
-		artMode:      cfg.AlbumArt,
-		artwork:      artworkCache{rendered: map[art.Size][]string{}},
-		artHTTP:      &http.Client{Timeout: 5 * time.Second},
+		cfg:            cfg,
+		provider:       prov,
+		player:         plyr,
+		activePanel:    -1,
+		memProfiling:   opts.MemProfiling,
+		preMuteVol:     -1,
+		artMode:        cfg.AlbumArt,
+		artwork:        artworkCache{rendered: map[art.Size][]string{}},
+		artworkLRU:     make(map[string]image.Image),
+		artHTTP:        &http.Client{Timeout: 5 * time.Second, Transport: artTransport},
+		checkedRatings: make(map[string]bool),
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		supportsArtColor: art.SupportsColor,
@@ -470,9 +513,9 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
-		glowTick(),
 		introTick(),
 	}
+	m.ensureGlow(&cmds)
 	if m.provider != nil {
 		cmds = append(cmds, m.library.Init())
 	}
@@ -512,6 +555,17 @@ func tick() tea.Cmd {
 
 func glowTick() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return glowTickMsg(t) })
+}
+
+func (m *Model) shouldGlow() bool {
+	return m.introStep != introDone || m.playerState.Playing || m.playerState.Loading || m.vibe.IsAnimating()
+}
+
+func (m *Model) ensureGlow(cmds *[]tea.Cmd) {
+	if !m.glowRunning && m.shouldGlow() {
+		m.glowRunning = true
+		*cmds = append(*cmds, glowTick())
+	}
 }
 
 func introTick() tea.Cmd {
@@ -584,7 +638,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case glowTickMsg:
 		m.glowStep++
-		cmds = append(cmds, glowTick())
+		if m.shouldGlow() {
+			m.glowRunning = true
+			cmds = append(cmds, glowTick())
+		} else {
+			m.glowRunning = false
+		}
 
 	case introTickMsg:
 		if m.introStep != introDone {
@@ -680,11 +739,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.artwork = artworkCache{rendered: map[art.Size][]string{}}
 		} else if s.Track.ArtworkURL != m.artwork.url {
 			m.artworkGen++
-			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
-			// Only download covers while the art view is active; toggling
-			// :art on fetches the current track's cover on demand.
+			if cachedImg, ok := m.getCachedArtwork(s.Track.ArtworkURL); ok {
+				m.artwork = artworkCache{
+					url:      s.Track.ArtworkURL,
+					img:      cachedImg,
+					rendered: map[art.Size][]string{},
+				}
+			} else {
+				m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
+				// Only download covers while the art view is active; toggling
+				// :art on fetches the current track's cover on demand.
+				if m.artMode {
+					cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
+				}
+			}
 			if m.artMode {
-				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
+				if cmd := m.prefetchNextArtworkCmd(s.Track); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 		if s.Track != nil && (m.playerState.Track == nil ||
@@ -703,7 +775,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendLog(pp)
 			// Check whether the new track is already loved or disliked on Apple Music.
-			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
+			if cmd := m.checkSongRatingCmd(s.Track); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			// visible, otherwise mark stale so the fetch is deferred until
 			// the user opens the panel (lazy loading).
 			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
@@ -755,6 +829,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.runRadioSearch())
 		}
 		m.playerState = s
+		m.ensureGlow(&cmds)
 		if !wasPlaying && m.playerState.Playing {
 			m.appendLog("[player] playing")
 		} else if wasPlaying && !m.playerState.Playing && !m.playerState.Loading {
@@ -772,16 +847,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.artwork.failed = true
 			m.artwork.img = nil
 			m.artwork.rendered = map[art.Size][]string{}
+			m.artwork.renderedOrder = nil
 			m.appendLog(fmt.Sprintf("[art] artwork unavailable: %v", msg.err))
 			break
 		}
+		m.putCachedArtwork(msg.url, msg.img)
 		m.artwork.img = msg.img
 		m.artwork.failed = false
 		m.artwork.rendered = map[art.Size][]string{}
+		m.artwork.renderedOrder = nil
+
+	case artworkPrefetchMsg:
+		m.putCachedArtwork(msg.url, msg.img)
 
 	case songRatingMsg:
 		// Update rating state to match what Apple Music reports.
 		m.setRating(msg.trackID, msg.catalogID, msg.rating)
+		if msg.err == nil {
+			m.markRatingChecked(msg.trackID, msg.catalogID)
+		}
 	case DebugLogMsg:
 		m.appendLog(string(msg))
 
@@ -859,6 +943,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
 		m.vibe.SetSearching()
+		m.ensureGlow(&cmds)
 		cmds = append(cmds, m.runVibeSearch(msg.Query))
 
 	case views.DiscoveryMetricSelectedMsg:
@@ -1044,6 +1129,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[rating] ✗ %s: %v", msg.title, msg.err))
 		} else {
 			m.setRating(msg.trackID, msg.catalogID, msg.rating)
+			m.markRatingChecked(msg.trackID, msg.catalogID)
 			m.library.m.InvalidateTracksCache()
 			m.appendLog(fmt.Sprintf("[rating] %s %s synced to Apple Music", ratingIcon(msg.rating), msg.title))
 			m.errMsg = ratingStatusMessage(msg.rating, msg.prev, msg.title)
@@ -1217,8 +1303,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case saveVolumeMsg:
 		m.cfg.SetVolume(msg.vol)
-		if err := m.cfg.Save(""); err != nil {
-			m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
+		m.volSaveDirty = true
+		m.volSaveGen++
+		gen := m.volSaveGen
+		cmds = append(cmds, tea.Tick(volumeSaveDebounce, func(time.Time) tea.Msg {
+			return flushVolumeSaveMsg{gen: gen}
+		}))
+
+	case flushVolumeSaveMsg:
+		if msg.gen == m.volSaveGen {
+			m.flushPendingVolumeSave()
 		}
 
 	case saveAudioQualityMsg:
@@ -1287,6 +1381,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(5 * time.Second)
 
 	case RestartMsg:
+		m.flushPendingVolumeSave()
 		return m, tea.Quit
 
 	case tea.PasteMsg:
@@ -1320,6 +1415,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	// ctrl+c always quits
 	if k == "ctrl+c" {
+		m.flushPendingVolumeSave()
 		if m.player != nil {
 			_ = m.player.Close()
 		}
@@ -1675,6 +1771,7 @@ func (m *Model) handleCommandKeyMsg(k string, msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) executeCommand(cmd string) tea.Cmd {
 	switch {
 	case cmd == "q" || cmd == "quit":
+		m.flushPendingVolumeSave()
 		if m.player != nil {
 			_ = m.player.Close()
 		}
@@ -1874,12 +1971,98 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	}
 }
 
+func (m *Model) getCachedArtwork(url string) (image.Image, bool) {
+	if url == "" || len(m.artworkLRU) == 0 {
+		return nil, false
+	}
+	img, ok := m.artworkLRU[url]
+	if !ok {
+		return nil, false
+	}
+	n := len(m.artworkLRUOrder)
+	if n > 0 && m.artworkLRUOrder[n-1] != url {
+		for i, u := range m.artworkLRUOrder {
+			if u == url {
+				copy(m.artworkLRUOrder[i:], m.artworkLRUOrder[i+1:])
+				m.artworkLRUOrder[n-1] = url
+				break
+			}
+		}
+	}
+	return img, true
+}
+
+func (m *Model) putCachedArtwork(url string, img image.Image) {
+	if url == "" || img == nil {
+		return
+	}
+	if m.artworkLRU == nil {
+		m.artworkLRU = make(map[string]image.Image, maxArtworkLRUCache)
+	}
+	if _, exists := m.artworkLRU[url]; exists {
+		m.artworkLRU[url] = img
+		_, _ = m.getCachedArtwork(url)
+		return
+	}
+	for len(m.artworkLRUOrder) >= maxArtworkLRUCache {
+		oldest := m.artworkLRUOrder[0]
+		copy(m.artworkLRUOrder, m.artworkLRUOrder[1:])
+		m.artworkLRUOrder = m.artworkLRUOrder[:len(m.artworkLRUOrder)-1]
+		delete(m.artworkLRU, oldest)
+	}
+	m.artworkLRU[url] = img
+	m.artworkLRUOrder = append(m.artworkLRUOrder, url)
+}
+
+func (m *Model) nextQueuedTrack(current *provider.Track) *provider.Track {
+	if current == nil || len(m.queueTracks) < 2 {
+		return nil
+	}
+	curID := views.PlaybackID(*current)
+	for i, t := range m.queueTracks {
+		if views.PlaybackID(t) == curID && i+1 < len(m.queueTracks) {
+			next := m.queueTracks[i+1]
+			return &next
+		}
+	}
+	return nil
+}
+
+func (m *Model) prefetchNextArtworkCmd(current *provider.Track) tea.Cmd {
+	if current == nil || m.supportsArtColor == nil || !m.supportsArtColor() {
+		return nil
+	}
+	next := m.nextQueuedTrack(current)
+	if next == nil || next.ArtworkURL == "" || next.ArtworkURL == current.ArtworkURL {
+		return nil
+	}
+	if _, ok := m.getCachedArtwork(next.ArtworkURL); ok {
+		return nil
+	}
+	url := next.ArtworkURL
+	client := m.artHTTP
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		img, err := art.FetchAndDecode(ctx, client, url, 5<<20)
+		if err != nil {
+			return nil
+		}
+		return artworkPrefetchMsg{url: url, img: img}
+	}
+}
+
 func (m *Model) fetchArtworkCmd(url string, gen int) tea.Cmd {
 	if url == "" || m.supportsArtColor == nil || !m.supportsArtColor() {
 		return nil
 	}
 	if m.artwork.url == url && gen == m.artworkGen && (m.artwork.img != nil || m.artwork.failed) {
 		return nil
+	}
+	if cachedImg, ok := m.getCachedArtwork(url); ok {
+		return func() tea.Msg {
+			return artworkLoadedMsg{url: url, gen: gen, img: cachedImg}
+		}
 	}
 	client := m.artHTTP
 	return func() tea.Msg {
@@ -2846,9 +3029,44 @@ func (m *Model) rateSongCmd(t *provider.Track, rating, prev provider.Rating) tea
 	}
 }
 
+func (m *Model) flushPendingVolumeSave() {
+	if !m.volSaveDirty || m.cfg == nil {
+		return
+	}
+	m.volSaveDirty = false
+	if err := m.cfg.Save(""); err != nil {
+		m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
+	}
+}
+
+func (m *Model) isRatingChecked(trackID, catalogID string) bool {
+	if len(m.checkedRatings) == 0 {
+		return false
+	}
+	return (trackID != "" && m.checkedRatings[trackID]) || (catalogID != "" && m.checkedRatings[catalogID])
+}
+
+func (m *Model) markRatingChecked(trackID, catalogID string) {
+	if trackID == "" && catalogID == "" {
+		return
+	}
+	if m.checkedRatings == nil {
+		m.checkedRatings = make(map[string]bool)
+	} else if len(m.checkedRatings) >= maxCheckedRatings {
+		clear(m.checkedRatings)
+	}
+	if trackID != "" {
+		m.checkedRatings[trackID] = true
+	}
+	if catalogID != "" {
+		m.checkedRatings[catalogID] = true
+	}
+}
+
 // checkSongRatingCmd fetches the track's rating (loved / disliked / none)
 // from Apple Music and returns a songRatingMsg so the model can update
-// m.ratings accordingly.
+// m.ratings accordingly. Returns nil when the rating is already known for this
+// track in the current session.
 func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 	if m.provider == nil || t == nil {
 		return nil
@@ -2858,12 +3076,15 @@ func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 		catalogID = t.ID
 	}
 	trackID := t.ID
+	if m.trackRating(t) != provider.RatingNone || m.isRatingChecked(trackID, catalogID) {
+		return nil
+	}
 	prov := m.provider
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		rating, _ := prov.GetSongRating(ctx, catalogID)
-		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating}
+		rating, err := prov.GetSongRating(ctx, catalogID)
+		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating, err: err}
 	}
 }
 
@@ -3402,8 +3623,10 @@ func (m *Model) View() tea.View {
 //	└─────────────────────────────────────┘
 func (m *Model) renderBoxLayout() string {
 	inner := m.width - 2 // visual width between the │ border chars
+	contentW := inner - 2
 	npH := m.nowPlayingHeight()
-	panelH := m.panelHeight()
+	status := m.statusLines(contentW)
+	panelH := m.panelHeightWithStatus(len(status))
 
 	splitW := inner / 2          // left column inner width (includes padding)
 	rightW := inner - splitW - 1 // right column inner width (-1 for │ divider)
@@ -3416,97 +3639,116 @@ func (m *Model) renderBoxLayout() string {
 	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
 	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
+	horiz := strings.Repeat("─", inner)
 	var sb strings.Builder
+	sb.Grow(max(512, m.width*m.height*2))
 
 	// ── Top border ──
-	sb.WriteString("┌" + strings.Repeat("─", inner) + "┐\n")
+	sb.WriteString("┌")
+	sb.WriteString(horiz)
+	sb.WriteString("┐\n")
 
 	// ── Header ──
-	sb.WriteString(m.renderBoxHeader(inner) + "\n")
+	sb.WriteString(m.renderBoxHeader(inner))
+	sb.WriteByte('\n')
 
 	// ── Header divider ──
-	sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+	sb.WriteString("├")
+	sb.WriteString(horiz)
+	sb.WriteString("┤\n")
 
 	// ── Now Playing ──
-	for _, line := range m.nowPlayingLines(inner-2, npH) {
-		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+	for _, line := range m.nowPlayingLines(contentW, npH) {
+		writeBoxRow(&sb, line, contentW)
 	}
 
 	// ── Split or full divider ──
 	if fullWidth {
-		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+		sb.WriteString("├")
+		sb.WriteString(horiz)
+		sb.WriteString("┤\n")
 	} else {
-		sb.WriteString("├" + strings.Repeat("─", splitW) + "┬" + strings.Repeat("─", rightW) + "┤\n")
+		sb.WriteString("├")
+		writeRule(&sb, horiz, splitW)
+		sb.WriteString("┬")
+		writeRule(&sb, horiz, rightW)
+		sb.WriteString("┤\n")
 	}
 
 	// ── Panel content ──
 	switch {
 	case m.debugView:
-		for _, line := range m.debugLogLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.debugLogLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case m.mode == modeSearch:
-		for _, line := range m.searchLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.searchLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case m.mode == modeCommand:
-		for _, line := range m.commandLines(inner-2, panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+		for _, line := range m.commandLines(contentW, panelH) {
+			writeBoxRow(&sb, line, contentW)
 		}
 	case libraryActive:
-		m.library.SetSize(inner-2, panelH)
+		m.library.SetSize(contentW, panelH)
 		for _, line := range toLines(m.library.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case queueActive:
-		m.queue.m.SetSize(inner-2, panelH)
+		m.queue.m.SetSize(contentW, panelH)
 		for _, line := range toLines(m.queue.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case lyricsActive:
-		m.lyricsP.SetSize(inner-2, panelH)
+		m.lyricsP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.lyricsP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case feedActive:
-		m.feedP.SetSize(inner-2, panelH)
+		m.feedP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.feedP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case eqActive:
-		m.eqP.SetSize(inner-2, panelH)
+		m.eqP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.eqP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	case aboutActive:
-		m.aboutP.SetSize(inner-2, panelH)
+		m.aboutP.SetSize(contentW, panelH)
 		for _, line := range toLines(m.aboutP.View(), panelH) {
-			sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+			writeBoxRow(&sb, line, contentW)
 		}
 	default:
 		qLines := m.queuePanelLines(splitW-2, panelH)
 		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep)
 		for i := range panelH {
-			left := safeIdx(qLines, i)
-			right := safeIdx(vLines, i)
-			sb.WriteString("│ " + padRight(left, splitW-2) + " │ " + padRight(right, rightW-2) + " │\n")
+			writeSplitBoxRow(&sb, safeIdx(qLines, i), splitW-2, safeIdx(vLines, i), rightW-2)
 		}
 	}
 
 	// ── Join or full divider ──
 	if fullWidth {
-		sb.WriteString("├" + strings.Repeat("─", inner) + "┤\n")
+		sb.WriteString("├")
+		sb.WriteString(horiz)
+		sb.WriteString("┤\n")
 	} else {
-		sb.WriteString("├" + strings.Repeat("─", splitW) + "┴" + strings.Repeat("─", rightW) + "┤\n")
+		sb.WriteString("├")
+		writeRule(&sb, horiz, splitW)
+		sb.WriteString("┴")
+		writeRule(&sb, horiz, rightW)
+		sb.WriteString("┤\n")
 	}
 
 	// ── Status bar (context/mode then playback, each wrapped as needed) ──
-	for _, line := range m.statusLines(inner - 2) {
-		sb.WriteString("│ " + padRight(line, inner-2) + " │\n")
+	for _, line := range status {
+		writeBoxRow(&sb, line, contentW)
 	}
 
 	// ── Bottom border ──
-	sb.WriteString("└" + strings.Repeat("─", inner) + "┘")
+	sb.WriteString("└")
+	sb.WriteString(horiz)
+	sb.WriteString("┘")
 
 	return sb.String()
 }
@@ -3576,7 +3818,16 @@ func (m *Model) renderBoxHeader(inner int) string {
 	leftPad := titleStart - bearW
 	rightPad := max(1, contentW-bearW-leftPad-titleW-rightW)
 
-	return "│ " + bear + strings.Repeat(" ", leftPad) + title + strings.Repeat(" ", rightPad) + rightStr + " │"
+	var sb strings.Builder
+	sb.Grow(len(bear) + leftPad + len(title) + rightPad + len(rightStr) + 8)
+	sb.WriteString("│ ")
+	sb.WriteString(bear)
+	writeSpaces(&sb, leftPad)
+	sb.WriteString(title)
+	writeSpaces(&sb, rightPad)
+	sb.WriteString(rightStr)
+	sb.WriteString(" │")
+	return sb.String()
 }
 
 // artModeActive reports whether the now-playing panel is currently showing
@@ -3643,13 +3894,23 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		m.artwork.rendered = map[art.Size][]string{}
 	}
 	artLines := m.artwork.rendered[size]
-	if artLines == nil && m.artwork.img != nil {
+	if artLines != nil {
+		m.artwork.touchSize(size)
+	} else if m.artwork.img != nil {
 		const maxRenderedArtworkSizes = 16
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
-			m.artwork.rendered = map[art.Size][]string{}
+			if len(m.artwork.renderedOrder) > 0 {
+				oldest := m.artwork.renderedOrder[0]
+				copy(m.artwork.renderedOrder, m.artwork.renderedOrder[1:])
+				m.artwork.renderedOrder = m.artwork.renderedOrder[:len(m.artwork.renderedOrder)-1]
+				delete(m.artwork.rendered, oldest)
+			} else {
+				m.artwork.rendered = map[art.Size][]string{}
+			}
 		}
 		artLines = m.renderArt(m.artwork.img, size)
 		m.artwork.rendered[size] = artLines
+		m.artwork.renderedOrder = append(m.artwork.renderedOrder, size)
 	}
 
 	lines := make([]string, 0, h)
@@ -4015,37 +4276,42 @@ func (m *Model) queuePanelLines(w, h int) []string {
 	tracks := m.queue.m.Tracks()
 	playingIdx := playingQueueIdx(tracks, m.playerState.Track)
 
-	var trackLines []string
-	for i, t := range tracks {
-		idx := fmt.Sprintf("%*d. ", indexW, i+1)
-		label := t.Artist + " — " + t.Title
-		if i == playingIdx {
-			numStr := styles.ControlActive.Render(idx)
-			line := truncateStr(label, w-2-indexW-2)
-			trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
-		} else {
-			numStr := styles.QueueItemMuted.Render(idx)
-			line := truncateStr(label, w-2-indexW-2)
-			trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
-		}
-	}
-	if len(trackLines) == 0 {
-		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
-	}
-
 	// header + sep occupy 2 lines; remaining rows hold track entries.
 	visibleRows := max(0, h-2)
-	// Clamp offset so we never scroll past the end.
-	maxOffset := max(0, len(trackLines)-visibleRows)
-	if m.queueMiniOffset > maxOffset {
-		m.queueMiniOffset = maxOffset
-	}
-	visible := trackLines[m.queueMiniOffset:]
-	if len(visible) > visibleRows {
-		visible = visible[:visibleRows]
+
+	var trackLines []string
+	if total == 0 {
+		m.queueMiniOffset = 0
+		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
+		if visibleRows == 0 {
+			trackLines = nil
+		}
+	} else {
+		maxOffset := max(0, total-visibleRows)
+		if m.queueMiniOffset > maxOffset {
+			m.queueMiniOffset = maxOffset
+		}
+		end := min(total, m.queueMiniOffset+visibleRows)
+		trackLines = make([]string, 0, end-m.queueMiniOffset)
+		for i := m.queueMiniOffset; i < end; i++ {
+			t := tracks[i]
+			idx := fmt.Sprintf("%*d. ", indexW, i+1)
+			label := t.Artist + " — " + t.Title
+			if i == playingIdx {
+				numStr := styles.ControlActive.Render(idx)
+				line := truncateStr(label, w-2-indexW-2)
+				trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
+			} else {
+				numStr := styles.QueueItemMuted.Render(idx)
+				line := truncateStr(label, w-2-indexW-2)
+				trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
+			}
+		}
 	}
 
-	result := append([]string{headerLabel, sep}, visible...)
+	result := make([]string, 0, max(2, h))
+	result = append(result, headerLabel, sep)
+	result = append(result, trackLines...)
 	for len(result) < h {
 		result = append(result, "")
 	}
@@ -4297,11 +4563,68 @@ func (m *Model) statusLines(w int) []string {
 // which grow as hints wrap on a narrow terminal — so both are measured rather
 // than assumed.
 func (m *Model) panelHeight() int {
-	fixedOverhead := 6 + m.nowPlayingHeight() + len(m.statusLines(m.width-4))
+	return m.panelHeightWithStatus(len(m.statusLines(m.width - 4)))
+}
+
+func (m *Model) panelHeightWithStatus(statusCount int) int {
+	fixedOverhead := 6 + m.nowPlayingHeight() + statusCount
 	return max(3, m.height-fixedOverhead)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+const spaceChunk = "                                                                "
+
+func writeRule(sb *strings.Builder, horiz string, cols int) {
+	if cols <= 0 {
+		return
+	}
+	if n := cols * 3; n <= len(horiz) {
+		sb.WriteString(horiz[:n])
+		return
+	}
+	sb.WriteString(strings.Repeat("─", cols))
+}
+
+func writeSpaces(sb *strings.Builder, n int) {
+	for n >= len(spaceChunk) {
+		sb.WriteString(spaceChunk)
+		n -= len(spaceChunk)
+	}
+	if n > 0 {
+		sb.WriteString(spaceChunk[:n])
+	}
+}
+
+func writePadded(sb *strings.Builder, s string, w int) {
+	if w <= 0 {
+		return
+	}
+	sw := lipgloss.Width(s)
+	switch {
+	case sw > w:
+		sb.WriteString(ansi.Truncate(s, w, "…"))
+	case sw == w:
+		sb.WriteString(s)
+	default:
+		sb.WriteString(s)
+		writeSpaces(sb, w-sw)
+	}
+}
+
+func writeBoxRow(sb *strings.Builder, line string, w int) {
+	sb.WriteString("│ ")
+	writePadded(sb, line, w)
+	sb.WriteString(" │\n")
+}
+
+func writeSplitBoxRow(sb *strings.Builder, left string, lw int, right string, rw int) {
+	sb.WriteString("│ ")
+	writePadded(sb, left, lw)
+	sb.WriteString(" │ ")
+	writePadded(sb, right, rw)
+	sb.WriteString(" │\n")
+}
 
 // padRight pads s on the right with spaces to reach visual width w, and clips
 // it when it is wider. Clipping is the backstop that keeps an over-long line
@@ -4318,7 +4641,11 @@ func padRight(s string, w int) string {
 	case sw == w:
 		return s
 	default:
-		return s + strings.Repeat(" ", w-sw)
+		var sb strings.Builder
+		sb.Grow(len(s) + (w - sw))
+		sb.WriteString(s)
+		writeSpaces(&sb, w-sw)
+		return sb.String()
 	}
 }
 
