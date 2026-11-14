@@ -9,10 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-11-14
+
 ### Added
 - **Hybrid local lossless playback in Apple Music queues (`--hybrid` / `hybrid_playback`)** — indexes lossless files (`.flac`, ALAC `.m4a`, `.wav`, `.aiff`/`.aif`) from `music_dir`, extracts ISRCs from Apple Music catalog responses and local file tags (with an unambiguous fallback on normalized artist + album + title + track number + ±2s duration tolerance), and transparently routes matched tracks in Apple Music queues to local lossless playback across Linux (GStreamer), macOS (Core Audio `ExtAudioFile` 32-bit float), and Windows (Media Foundation 32-bit float) while preserving catalog IDs, artwork, lyrics, Last.fm scrobbling, Discord RPC, and the active Now Playing format badge. Closes #217, refs #185.
 
+### Changed
+- **Dependencies** — updates Go module dependencies (`bubbletea/v2` `v2.1.1`, `bubbles/v2` `v2.2.1`, `lipgloss/v2` `v2.1.0`, `x/sys` `v0.50.0`, `godbus/dbus/v5` `v5.2.4`, `go-winio` `v0.6.4`, and indirect modules). Refs #224.
+- **Community chat** — adds a Matrix chat badge (`#vibez-player:matrix.org`) to `README.md`.
+
 ### Fixed
+- **GStreamer `playbin` preference and `avdemux_aiff` pad-race fix** — prefers `playbin` (with `playbin3` fallback) on Linux to prevent `uridecodebin3`/`decodebin3` `GST_FLOW_FLUSHING` multiqueue stalls and gapless transition races, and emits unsupported-AIFF errors deterministically on `avdemux_aiff` `no-more-pads`.
 - **"Suggest Less" feedback and auto-skip** — pressing `x` (and `f`) now displays an immediate confirmation in the status bar across both standard and `:art` views (`✓ ⊘ Suggest Less`, `✓ ♥ Favorited`), and automatically advances to the next track (`p.Next()`) once Apple Music persists a `RatingDisliked` rating for the currently playing track. Refs #216.
 - **Vibe local LLM planner timeout, prompt budget, and fallback telemetry** — raises `vibe.DefaultPlanTimeout` from 10s to 30s (with customizable `"vibe_timeout"` in `config.json`), keeps `runVibeSearch` aligned at `planTimeout + 15s`, compacts the planner system prompt (`up to 6` `seed_tracks`, `1 to 2` `search_queries`, `3-6 word` explanation) to reduce local token generation latency, and logs planner progress (`[vibe] planning ...`), active backend, and fallback reasons (`[vibe] fallback to keyword (...)`) in `:debug-logs`. Refs #215.
 
@@ -826,7 +833,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.0.8...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/simonepelosi/vibez/compare/v2.0.8...v2.1.0
 [2.0.8]: https://github.com/simonepelosi/vibez/compare/v2.0.7...v2.0.8
 [2.0.7]: https://github.com/simonepelosi/vibez/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/simonepelosi/vibez/compare/v2.0.5...v2.0.6
