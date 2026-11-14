@@ -9,6 +9,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
+	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -182,5 +183,70 @@ func TestPlayerObj_SetPositionValidatesTrackAndPosition(t *testing.T) {
 	}
 	if ctrl.seekDuration != 5*time.Second {
 		t.Fatalf("current SetPosition sought to %s, want 5s", ctrl.seekDuration)
+	}
+}
+
+func TestPlayerObj_SeekRelativeOverflowAndClamp(t *testing.T) {
+	tests := []struct {
+		name     string
+		cur      time.Duration
+		dur      time.Duration
+		offsetUs int64
+		wantSeek bool
+		wantPos  time.Duration
+	}{
+		{name: "excessive positive us ignored", cur: 10 * time.Second, dur: 60 * time.Second, offsetUs: 1<<63 - 1, wantSeek: false},
+		{name: "excessive negative us ignored", cur: 10 * time.Second, dur: 60 * time.Second, offsetUs: -1 << 63, wantSeek: false},
+		{name: "clamped to zero", cur: 5 * time.Second, dur: 60 * time.Second, offsetUs: -10_000_000, wantSeek: true, wantPos: 0},
+		{name: "clamped to duration", cur: 50 * time.Second, dur: 60 * time.Second, offsetUs: 20_000_000, wantSeek: true, wantPos: 60 * time.Second},
+		{name: "valid step", cur: 10 * time.Second, dur: 60 * time.Second, offsetUs: 5_000_000, wantSeek: true, wantPos: 15 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := &mockController{seekDuration: -1}
+			srv := &Server{pos: tc.cur, currentTrackDuration: tc.dur}
+			obj := &playerObj{ctrl: ctrl, srv: srv}
+			if err := obj.seekRelative(tc.offsetUs); err != nil {
+				t.Fatalf("seekRelative returned error: %v", err)
+			}
+			if !tc.wantSeek {
+				if ctrl.seekDuration != -1 {
+					t.Fatalf("out-of-range seekRelative sought to %s", ctrl.seekDuration)
+				}
+				return
+			}
+			if ctrl.seekDuration != tc.wantPos {
+				t.Fatalf("seekRelative sought to %s, want %s", ctrl.seekDuration, tc.wantPos)
+			}
+		})
+	}
+}
+
+func TestPropsSpec_LoopStatusAndShuffleValidation(t *testing.T) {
+	ctrl := &mockController{}
+	specs := buildPropsSpec(ctrl)
+	playerSpecs := specs[mprisPlayerIface]
+
+	if err := playerSpecs["LoopStatus"].onSet(dbus.MakeVariant(123)); err == nil {
+		t.Error("LoopStatus wrong type succeeded, want error")
+	}
+	if err := playerSpecs["LoopStatus"].onSet(dbus.MakeVariant("Bad\x1b[31m\u202e")); err == nil || strings.ContainsAny(err.Error(), "\x1b\u202e") {
+		t.Errorf("LoopStatus invalid value error = %v, want sanitized error", err)
+	}
+	if err := playerSpecs["LoopStatus"].onSet(dbus.MakeVariant("Track")); err != nil || ctrl.repeatMode != player.RepeatModeOne {
+		t.Errorf("LoopStatus=Track err=%v mode=%d, want RepeatModeOne", err, ctrl.repeatMode)
+	}
+	if err := playerSpecs["LoopStatus"].onSet(dbus.MakeVariant("Playlist")); err != nil || ctrl.repeatMode != player.RepeatModeAll {
+		t.Errorf("LoopStatus=Playlist err=%v mode=%d, want RepeatModeAll", err, ctrl.repeatMode)
+	}
+	if err := playerSpecs["LoopStatus"].onSet(dbus.MakeVariant("None")); err != nil || ctrl.repeatMode != player.RepeatModeOff {
+		t.Errorf("LoopStatus=None err=%v mode=%d, want RepeatModeOff", err, ctrl.repeatMode)
+	}
+
+	if err := playerSpecs["Shuffle"].onSet(dbus.MakeVariant("yes")); err == nil {
+		t.Error("Shuffle wrong type succeeded, want error")
+	}
+	if err := playerSpecs["Shuffle"].onSet(dbus.MakeVariant(true)); err != nil || !ctrl.shuffleMode {
+		t.Errorf("Shuffle=true err=%v shuffle=%v, want true", err, ctrl.shuffleMode)
 	}
 }

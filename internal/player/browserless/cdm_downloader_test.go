@@ -129,3 +129,60 @@ func TestExtractCDMFromCRX3FindsWindowsDLL(t *testing.T) {
 		t.Errorf("extracted %d bytes, want %d", len(got), len(payload))
 	}
 }
+
+func TestCDMDownloaderURLAndHashGuards(t *testing.T) {
+	allowed := []string{
+		"https://dl.google.com/widevine-cdm/4.10.2891.0-linux-x64.zip",
+		"https://edgedl.me.gvt1.com/edgedl/widevine-cdm/foo.crx3",
+		"https://www.google.com/widevine-cdm/foo.crx3",
+	}
+	for _, u := range allowed {
+		if !isAllowedCDMHost(u) {
+			t.Errorf("isAllowedCDMHost(%q) = false, want true", u)
+		}
+	}
+
+	rejected := []string{
+		"",
+		"http://dl.google.com/foo.zip",
+		"https://user:pass@dl.google.com/foo.zip",
+		"https://evil.example.com/foo.zip",
+	}
+	for _, u := range rejected {
+		if isAllowedCDMHost(u) {
+			t.Errorf("isAllowedCDMHost(%q) = true, want false", u)
+		}
+	}
+
+	if !isValidSHA512Hex(fallbackCDNs["linux_amd64"].sha512) {
+		t.Error("fallback linux_amd64 sha512 rejected")
+	}
+	if isValidSHA512Hex("") || isValidSHA512Hex("deadbeef") || isValidSHA512Hex(bytesToHexInvalid128()) {
+		t.Error("invalid sha512 accepted")
+	}
+}
+
+func bytesToHexInvalid128() string {
+	var b [128]byte
+	for i := range b {
+		b[i] = 'g'
+	}
+	return string(b[:])
+}
+
+func TestExtractLibraryFromCRX_RejectsOverflowHeaderLen(t *testing.T) {
+	var crxBuf bytes.Buffer
+	crxBuf.WriteString("Cr24")
+	_ = binary.Write(&crxBuf, binary.LittleEndian, uint32(3))
+	_ = binary.Write(&crxBuf, binary.LittleEndian, uint32(0xffffffff))
+	crxBuf.WriteString("payload")
+
+	tmpDir := t.TempDir()
+	crxPath := filepath.Join(tmpDir, "bad.crx3")
+	if err := os.WriteFile(crxPath, crxBuf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractLibraryFromCRX(crxPath, filepath.Join(tmpDir, "out.so")); err == nil {
+		t.Fatal("extractLibraryFromCRX succeeded on overflowing uint32 headerLen, want error")
+	}
+}

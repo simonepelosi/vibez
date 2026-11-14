@@ -52,7 +52,7 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
             active = false;
             return;
         }
@@ -118,6 +118,7 @@ struct Session : public std::enable_shared_from_this<Session> {
     uint64_t enqueuedFrames = 0;
     UInt32 trimFramesRemaining = 0;
     int sock = -1;
+    std::mutex sockMutex;
     AudioFileStreamID streamID = nullptr;
     AudioQueueRef queue = nullptr;
     AudioConverterRef converter = nullptr;
@@ -148,15 +149,28 @@ struct Session : public std::enable_shared_from_this<Session> {
         cleanup();
     }
 
+    void setSock(int fd) {
+        std::lock_guard<std::mutex> lock(sockMutex);
+        if (sock >= 0 && sock != fd) {
+            close(sock);
+        }
+        sock = fd;
+    }
+
+    void closeSock(bool doShutdown) {
+        std::lock_guard<std::mutex> lock(sockMutex);
+        if (sock >= 0) {
+            if (doShutdown) shutdown(sock, SHUT_RDWR);
+            close(sock);
+            sock = -1;
+        }
+    }
+
     void cancel() {
         bool wasCancelled = cancelled.exchange(true);
         if (wasCancelled) return;
 
-        if (sock >= 0) {
-            shutdown(sock, SHUT_RDWR);
-            close(sock);
-            sock = -1;
-        }
+        closeSock(true);
 
         bufferCond.notify_all();
 
@@ -178,10 +192,7 @@ struct Session : public std::enable_shared_from_this<Session> {
             AudioFileStreamClose(streamID);
             streamID = nullptr;
         }
-        if (sock >= 0) {
-            close(sock);
-            sock = -1;
-        }
+        closeSock(false);
     }
 
     void reportError(const std::string& msg);
@@ -284,7 +295,7 @@ static void onPropertyFound(
             pcm.mSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44100.0;
             pcm.mFormatID = kAudioFormatLinearPCM;
             pcm.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
-            pcm.mChannelsPerFrame = asbd.mChannelsPerFrame > 0 ? asbd.mChannelsPerFrame : 2;
+            pcm.mChannelsPerFrame = asbd.mChannelsPerFrame == 1 ? 1 : 2;
             pcm.mBitsPerChannel = 32;
             pcm.mBytesPerFrame = pcm.mChannelsPerFrame * sizeof(float);
             pcm.mFramesPerPacket = 1;
@@ -311,9 +322,19 @@ static void onPropertyFound(
                 err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
                 if (err == noErr) {
                     std::lock_guard<std::mutex> lock(ses->bufferMutex);
+                    OSStatus allocErr = noErr;
                     for (int i = 0; i < Session::kNumBuffers; ++i) {
-                        AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
+                        allocErr = AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
+                        if (allocErr != noErr || !ses->buffers[i]) {
+                            break;
+                        }
                         ses->freeBuffers.push_back(ses->buffers[i]);
+                    }
+                    if (ses->freeBuffers.empty()) {
+                        AudioQueueDispose(ses->queue, true);
+                        ses->queue = nullptr;
+                        ses->reportError("Failed to allocate AudioQueue buffers: " + std::to_string(allocErr));
+                        return;
                     }
                     AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, ses->initialVolume.load());
                     ses->formatReady = true;
@@ -418,7 +439,10 @@ static void onPacketsParsed(
 
         SInt64 packetOffset = inPacketDescriptions ? inPacketDescriptions[i].mStartOffset : 0;
         UInt32 packetSize = inPacketDescriptions ? inPacketDescriptions[i].mDataByteSize : inNumberBytes;
-        if (packetSize == 0) continue;
+        if (packetSize == 0 || packetOffset < 0 ||
+            static_cast<uint64_t>(packetOffset) + static_cast<uint64_t>(packetSize) > inNumberBytes) {
+            continue;
+        }
 
         PacketContext pctx{};
         pctx.data = static_cast<const char*>(inInputData) + packetOffset;
@@ -510,11 +534,11 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
     if (url.empty() || url.find_first_of("\r\n \t") != std::string::npos) {
         return false;
     }
-    std::string u = url;
     const std::string httpPrefix = "http://";
-    if (u.find(httpPrefix) == 0) {
-        u = u.substr(httpPrefix.length());
+    if (url.rfind(httpPrefix, 0) != 0) {
+        return false;
     }
+    std::string u = url.substr(httpPrefix.length());
     size_t slashPos = u.find('/');
     std::string hostPort;
     if (slashPos != std::string::npos) {
@@ -528,8 +552,12 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
     size_t colonPos = hostPort.find(':');
     if (colonPos != std::string::npos) {
         host = hostPort.substr(0, colonPos);
+        std::string portStr = hostPort.substr(colonPos + 1);
+        if (portStr.empty()) return false;
         try {
-            port = std::stoi(hostPort.substr(colonPos + 1));
+            size_t parsed = 0;
+            port = std::stoi(portStr, &parsed, 10);
+            if (parsed != portStr.size()) return false;
         } catch (...) {
             return false;
         }
@@ -537,7 +565,13 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
         host = hostPort;
         port = 80;
     }
-    return !host.empty() && port > 0 && port <= 65535;
+    if (host == "localhost") {
+        host = "127.0.0.1";
+    }
+    if (host != "127.0.0.1") {
+        return false;
+    }
+    return port > 0 && port <= 65535;
 }
 
 static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& pcm) {
@@ -564,9 +598,19 @@ static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& p
         OSStatus err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
         if (err == noErr) {
             std::lock_guard<std::mutex> lock(ses->bufferMutex);
+            OSStatus allocErr = noErr;
             for (int i = 0; i < Session::kNumBuffers; ++i) {
-                AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
+                allocErr = AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
+                if (allocErr != noErr || !ses->buffers[i]) {
+                    break;
+                }
                 ses->freeBuffers.push_back(ses->buffers[i]);
+            }
+            if (ses->freeBuffers.empty()) {
+                AudioQueueDispose(ses->queue, true);
+                ses->queue = nullptr;
+                ses->reportError("Failed to allocate AudioQueue buffers: " + std::to_string(allocErr));
+                return false;
             }
             AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, ses->initialVolume.load());
             ses->formatReady = true;
@@ -643,6 +687,8 @@ static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::stri
     while (!ses->cancelled.load()) {
         double target = ses->seekTarget.exchange(-1.0);
         if (target >= 0.0 && rate > 0) {
+            if (std::isnan(target) || std::isinf(target)) target = 0.0;
+            if (target > 1e8) target = 1e8;
             SInt64 targetFrame = static_cast<SInt64>(target * rate);
             ExtAudioFileSeek(extFile, targetFrame);
             ses->curBufBytes = 0;
@@ -753,12 +799,13 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
         ses->reportError("Failed to create socket");
         return false;
     }
-    ses->sock = sock;
+    ses->setSock(sock);
 
     struct sockaddr_in sin{};
     sin.sin_family = AF_INET;
     sin.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &sin.sin_addr) <= 0) {
+        ses->closeSock(false);
         ses->reportError("Invalid server host");
         return false;
     }
@@ -770,6 +817,7 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
 
     if (connect(sock, reinterpret_cast<struct sockaddr*>(&sin), sizeof(sin)) < 0) {
+        ses->closeSock(false);
         if (!ses->cancelled.load()) {
             ses->reportError("Failed to connect to loopback audio stream");
         }
@@ -781,11 +829,17 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
                     + "User-Agent: vibez/1.0\r\n"
                     + "Connection: close\r\n\r\n";
 
-    if (send(sock, req.data(), req.size(), 0) < 0) {
-        if (!ses->cancelled.load()) {
-            ses->reportError("Failed to send HTTP request");
+    size_t totalSent = 0;
+    while (totalSent < req.size()) {
+        ssize_t n = send(sock, req.data() + totalSent, req.size() - totalSent, 0);
+        if (n <= 0) {
+            ses->closeSock(false);
+            if (!ses->cancelled.load()) {
+                ses->reportError("Failed to send HTTP request");
+            }
+            return false;
         }
-        return false;
+        totalSent += static_cast<size_t>(n);
     }
 
     std::string headerStr;
@@ -793,6 +847,7 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
     while (!ses->cancelled.load()) {
         ssize_t n = recv(sock, &c, 1, 0);
         if (n <= 0) {
+            ses->closeSock(false);
             if (!ses->cancelled.load()) {
                 ses->reportError("Stream connection closed before HTTP headers");
             }
@@ -804,14 +859,22 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
             break;
         }
         if (headerStr.length() > 8192) {
+            ses->closeSock(false);
             ses->reportError("Stream HTTP header exceeded size limit");
             return false;
         }
     }
 
-    if (ses->cancelled.load()) return false;
+    if (ses->cancelled.load()) {
+        ses->closeSock(false);
+        return false;
+    }
 
-    if (headerStr.find("200") == std::string::npos) {
+    bool statusOK = (headerStr.rfind("HTTP/1.0 200", 0) == 0 || headerStr.rfind("HTTP/1.1 200", 0) == 0) &&
+                    headerStr.size() > 12 &&
+                    (headerStr[12] == ' ' || headerStr[12] == '\r');
+    if (!statusOK) {
+        ses->closeSock(false);
         ses->reportError("Stream server returned error response: " + headerStr.substr(0, headerStr.find("\r\n")));
         return false;
     }
@@ -833,6 +896,7 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
         &ses->streamID
     );
     if (err != noErr) {
+        ses->closeSock(false);
         ses->reportError("Failed to create AudioFileStream: " + std::to_string(err));
         return false;
     }
@@ -849,22 +913,33 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
     } else {
         while (!ses->cancelled.load()) {
             std::string line;
+            bool gotLine = false;
             while (!ses->cancelled.load()) {
                 char ch = 0;
                 if (recv(sock, &ch, 1, 0) <= 0) break;
-                if (ch == '\n') break;
-                if (ch != '\r') line.push_back(ch);
+                if (ch == '\n') {
+                    gotLine = true;
+                    break;
+                }
+                if (ch != '\r') {
+                    if (line.size() >= 64) break;
+                    line.push_back(ch);
+                }
             }
-            if (line.empty()) break;
+            if (!gotLine || line.empty()) break;
             size_t semi = line.find(';');
             if (semi != std::string::npos) line = line.substr(0, semi);
             unsigned long chunkSize = 0;
             try {
-                chunkSize = std::stoul(line, nullptr, 16);
+                size_t parsed = 0;
+                chunkSize = std::stoul(line, &parsed, 16);
+                if (parsed != line.size()) break;
             } catch (...) {
                 break;
             }
             if (chunkSize == 0) break;
+            constexpr unsigned long kMaxChunkSize = 64u << 20;
+            if (chunkSize > kMaxChunkSize) break;
 
             unsigned long remaining = chunkSize;
             while (remaining > 0 && !ses->cancelled.load()) {
@@ -872,17 +947,15 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
                 ssize_t n = recv(sock, buf, toRead, 0);
                 if (n <= 0) break;
                 AudioFileStreamParseBytes(ses->streamID, static_cast<UInt32>(n), buf, 0);
-                remaining -= n;
+                remaining -= static_cast<unsigned long>(n);
             }
+            if (remaining > 0) break;
             char crlf[2];
-            recv(sock, crlf, 2, MSG_WAITALL);
+            if (recv(sock, crlf, 2, MSG_WAITALL) != 2) break;
         }
     }
 
-    if (ses->sock >= 0) {
-        close(ses->sock);
-        ses->sock = -1;
-    }
+    ses->closeSock(false);
     if (ses->cancelled.load()) return false;
 
     AudioFileStreamParseBytes(ses->streamID, 0, NULL, kAudioFileStreamParseFlag_Discontinuity);
@@ -1040,7 +1113,8 @@ void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds) {
     if (!sink || sink->closed.load()) return;
     auto ses = sink->currentSession();
     if (!ses) return;
-    if (seconds < 0.0) seconds = 0.0;
+    if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
+    if (seconds > 1e8) seconds = 1e8;
     ses->seekTarget.store(seconds);
 }
 

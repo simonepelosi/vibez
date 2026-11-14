@@ -812,6 +812,9 @@ func (p *Player) Next() error {
 	var nextIdx int
 	switch {
 	case p.state.RepeatMode == player.RepeatModeOne:
+		if p.idx < 0 || p.idx >= len(p.queue) {
+			p.idx = 0
+		}
 		nextIdx = p.idx
 	case p.state.ShuffleMode && len(p.queue) > 1:
 		if p.nextPrep != nil && p.nextPrep.idx >= 0 && p.nextPrep.idx < len(p.queue) {
@@ -1147,9 +1150,16 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	if !closed {
 		gains := make([]float64, len(bands))
 		for i, b := range bands {
-			if !math.IsNaN(b.Gain) {
-				gains[i] = b.Gain
+			if math.IsNaN(b.Gain) || math.IsInf(b.Gain, 0) {
+				continue
 			}
+			g := b.Gain
+			if g > 24 {
+				g = 24
+			} else if g < -24 {
+				g = -24
+			}
+			gains[i] = g
 		}
 		p.withSink(func(sk audioSink) { sk.SetEqualizer(gains) })
 	}
@@ -1185,7 +1195,9 @@ func (p *Player) RemoveFromQueue(idx int) error {
 		case idx < p.idx:
 			p.idx--
 		}
-		if p.idx >= len(p.queue) && len(p.queue) > 0 {
+		if len(p.queue) == 0 {
+			p.idx = 0
+		} else if p.idx >= len(p.queue) {
 			p.idx = len(p.queue) - 1
 		}
 	}

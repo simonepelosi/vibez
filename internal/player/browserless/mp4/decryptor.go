@@ -305,13 +305,18 @@ func DecryptSegment(
 		return nil, fmt.Errorf("truncated trun sample entries")
 	}
 
+	const maxSampleSize = 16 << 20 // 16 MiB defensive cap per audio sample
 	sampleSizes := make([]int, sampleCount)
 	for i := range sampleCount {
 		if hasDuration {
 			trunOffset += 4
 		}
 		if hasSize {
-			sampleSizes[i] = int(binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4]))
+			sz := binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4])
+			if sz > maxSampleSize {
+				return nil, fmt.Errorf("excessive sample %d size %d in trun", i, sz)
+			}
+			sampleSizes[i] = int(sz)
 			trunOffset += 4
 		}
 		if hasFlags {
@@ -333,7 +338,7 @@ func DecryptSegment(
 
 	for i := 0; i < int(sampleCount); i++ {
 		sSize := sampleSizes[i]
-		if sSize < 0 || currMdatOffset+sSize > len(mdatData) {
+		if sSize < 0 || sSize > len(mdatData)-currMdatOffset {
 			return nil, fmt.Errorf("sample %d exceeds mdat data bounds (size %d, remaining %d)", i, sSize, len(mdatData)-currMdatOffset)
 		}
 		sampleBytes := mdatData[currMdatOffset : currMdatOffset+sSize]

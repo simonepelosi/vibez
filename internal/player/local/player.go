@@ -6,6 +6,9 @@ package local
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,7 +73,16 @@ func (p *Player) currentState() player.State {
 }
 
 func (p *Player) playTrack(t provider.Track) {
-	uri := fmt.Sprintf("file://%s", t.ID[len("local:"):])
+	rawPath, ok := strings.CutPrefix(t.ID, "local:")
+	if !ok || rawPath == "" {
+		p.mu.Lock()
+		p.state.Error = fmt.Sprintf("local player: invalid track ID %q", provider.Clean(t.ID))
+		s := p.state
+		p.mu.Unlock()
+		p.broadcast(s)
+		return
+	}
+	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(rawPath)}).String()
 	p.gst.PlayURI(uri)
 	p.mu.Lock()
 	p.ended = false
