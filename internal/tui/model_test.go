@@ -154,10 +154,11 @@ func (m *stationMockProvider) GetStationTracks(_ context.Context, _ string) ([]p
 
 func testCfg() *config.Config {
 	return &config.Config{
-		StoreFront: "us",
-		AuthPort:   7777,
-		Provider:   "apple",
-		Theme:      "default",
+		StoreFront:  "us",
+		AuthPort:    7777,
+		Provider:    "apple",
+		Theme:       "default",
+		VibeBackend: "keyword",
 	}
 }
 
@@ -5083,5 +5084,26 @@ func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
 	}
 	if m.searchQuery != "久石譲 Summer" {
 		t.Fatalf("typed CJK IME space query = %q, want %q", m.searchQuery, "久石譲 Summer")
+	}
+}
+
+func TestVibeCommand_SelectsOMPAndKeywordBackends(t *testing.T) {
+	m := newModel(nil)
+	cmd := m.executeCommand("vibe omp haiku")
+	if cmd == nil {
+		t.Fatal("expected detectVibePlannerCmd after :vibe omp haiku")
+	}
+	if m.cfg.VibeBackend != "omp" || m.cfg.VibeModel != "haiku" {
+		t.Fatalf("cfg = (%q, %q), want (\"omp\", \"haiku\")", m.cfg.VibeBackend, m.cfg.VibeModel)
+	}
+	if !strings.Contains(m.errMsg, "omp haiku") {
+		t.Errorf("errMsg = %q, want confirmation containing omp haiku", m.errMsg)
+	}
+
+	if cmd := m.executeCommand("vibe unknown-backend"); cmd != nil {
+		t.Errorf("expected nil cmd on unknown backend")
+	}
+	if !strings.Contains(m.errMsg, "unknown backend") {
+		t.Errorf("errMsg = %q, want unknown backend error", m.errMsg)
 	}
 }

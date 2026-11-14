@@ -1581,6 +1581,7 @@ var allCommands = []cmdEntry{
 	{"save", "save <name>", "Save queue as a playlist in Apple Music"},
 	{"seek", "seek <seconds>", "Jump to a position in the current song"},
 	{"discover", "discover <n>|auto", "Queue n discovered songs now, or auto-discover indefinitely"},
+	{"vibe", "vibe [backend] [model]", "Select or inspect the Vibe AI backend (auto, ollama, lmstudio, llamacpp, omp, claude, gemini, codex, copilot, opencode, llm, keyword)"},
 	{"vol", "vol <0-100|+n|-n>", "Set, raise, or lower volume (e.g. vol 80, vol +10, vol -5)"},
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"art", "art", "Toggle album-art view (cover + track info instead of the bar)"},
@@ -1840,6 +1841,45 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		pos := time.Duration(n) * time.Second
 		m.appendLog(fmt.Sprintf("[player] seek → %s", views.FormatDuration(pos)))
 		return m.playerCmd(func(p player.Player) error { return p.Seek(pos) })
+
+	case cmd == "vibe" || strings.HasPrefix(cmd, "vibe "):
+		arg := strings.TrimSpace(strings.TrimPrefix(cmd, "vibe"))
+		if arg == "" {
+			active := "keyword"
+			if m.vibePlanner != nil {
+				active = m.vibePlanner.Name()
+			}
+			m.errMsg = fmt.Sprintf("vibe backend: %s (use :vibe <auto|omp|ollama|lmstudio|llamacpp|gemini|copilot|opencode|claude|codex|llm|keyword> [model])", active)
+			m.errExpiry = time.Now().Add(5 * time.Second)
+			return nil
+		}
+		fields := strings.Fields(arg)
+		backend := strings.ToLower(fields[0])
+		var modelArg string
+		if len(fields) > 1 {
+			modelArg = strings.Join(fields[1:], " ")
+		}
+		switch backend {
+		case "auto", "ollama", "lmstudio", "llamacpp", "llama.cpp", "llama-server", "openai", "keyword":
+		default:
+			if vibe.NormalizeCLIAgent(backend) == "" {
+				m.errMsg = fmt.Sprintf(":vibe unknown backend %q (valid: auto, omp, ollama, lmstudio, llamacpp, gemini, copilot, opencode, claude, codex, llm, keyword)", backend)
+				m.errExpiry = time.Now().Add(4 * time.Second)
+				return nil
+			}
+			backend = vibe.NormalizeCLIAgent(backend)
+		}
+		if m.cfg != nil {
+			m.cfg.VibeBackend = backend
+			m.cfg.VibeModel = modelArg
+			if err := m.cfg.Save(""); err != nil {
+				m.appendLog(fmt.Sprintf("[vibe] config save error: %v", err))
+			}
+		}
+		m.appendLog(fmt.Sprintf("[vibe] backend set to %q (model=%q)", backend, modelArg))
+		m.errMsg = fmt.Sprintf("✓ Vibe backend → %s", strings.TrimSpace(backend+" "+modelArg))
+		m.errExpiry = time.Now().Add(4 * time.Second)
+		return m.detectVibePlannerCmd()
 
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
@@ -2585,7 +2625,7 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 }
 
 // runVibeSearch plans and resolves the user's vibe description using the active
-// Planner (on-device Ollama / LM Studio runtime when available, transparently
+// Planner (on-device Ollama / LM Studio / explicit CLI agent, transparently
 // falling back to KeywordAgent) and grounds the resulting VibePlan against the
 // provider in parallel.
 func (m *Model) runVibeSearch(query string) tea.Cmd {
