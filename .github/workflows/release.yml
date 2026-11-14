@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -19,16 +19,18 @@ jobs:
   darwin:
     name: build-darwin
     runs-on: macos-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
       - name: Check token broker configuration
@@ -41,7 +43,7 @@ jobs:
           [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
 
       - name: Build darwin archives
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: '~> v2'
           args: release --clean --skip=publish
@@ -55,7 +57,7 @@ jobs:
           GOTOOLCHAIN: local
 
       - name: Upload darwin archives
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: darwin-archives
           path: dist/*.tar.gz
@@ -67,23 +69,25 @@ jobs:
     name: release
     needs: darwin
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.x'
           cache: true
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --fix-missing libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
 
       - name: Download darwin archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: darwin-archives
           path: dist-darwin
@@ -103,9 +107,9 @@ jobs:
         id: changelog
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          # Extracts the section for VERSION from CHANGELOG.md.
+          # Extracts the section for VERSION from CHANGELOG.md without regex interpolation.
           # Expected format: "## [X.Y.Z] — YYYY-MM-DD" headers.
-          awk "/^## \[${VERSION}\]/{found=1; next} found && /^## \[/{exit} found" CHANGELOG.md > release_notes.md
+          awk -v hdr="## [${VERSION}]" 'index($0, hdr) == 1 {found=1; next} found && index($0, "## [") == 1 {exit} found' CHANGELOG.md > release_notes.md
           if [ ! -s release_notes.md ]; then
             echo "No CHANGELOG entry found for version ${VERSION}" > release_notes.md
           fi
@@ -120,7 +124,7 @@ jobs:
           [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: '~> v2'
           args: release --clean --release-notes=release_notes.md
