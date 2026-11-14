@@ -75,7 +75,7 @@ func (f *FeedModel) SetRecommendations(groups []provider.RecommendationGroup) {
 
 func (f *FeedModel) SetError(err error) {
 	f.state = feedStateError
-	f.errMsg = err.Error()
+	f.errMsg = provider.Clean(err.Error())
 }
 
 // SelectedItem returns the currently highlighted recommendation, or nil.

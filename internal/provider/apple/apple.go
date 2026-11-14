@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -119,6 +120,51 @@ func validateStorefront(sf string) (string, error) {
 		}
 	}
 	return sf, nil
+}
+
+// validateResourceID rejects empty, dot-segment, path-separator, or control
+// bytes in Apple Music resource identifiers before interpolating into API paths.
+func validateResourceID(id string) error {
+	if id == "" || id == "." || id == ".." || len(id) > 256 {
+		return errors.New("invalid resource ID")
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c <= 0x20 || c >= 0x7f || c == '/' || c == '\\' || c == '?' || c == '#' || c == '%' {
+			return errors.New("invalid character in resource ID")
+		}
+	}
+	return nil
+}
+
+func isSafeMediaURL(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < 0x20 || raw[i] == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return true
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback()
+	}
+	return false
 }
 
 type AppleProvider struct {
@@ -383,9 +429,19 @@ type apiError struct {
 
 func (e *apiError) Error() string { return e.msg }
 
+const maxAPIErrorBody = 256
+
+func sanitizeErrorBody(body []byte) string {
+	trimmed := provider.Clean(strings.TrimSpace(string(body)))
+	if len(trimmed) <= maxAPIErrorBody {
+		return trimmed
+	}
+	return string([]rune(trimmed)[:min(len([]rune(trimmed)), maxAPIErrorBody)]) + "…"
+}
+
 func formatAPIError(statusCode int, status string, body []byte) string {
-	msg := fmt.Sprintf("apple music api %s", status)
-	trimmed := strings.TrimSpace(string(body))
+	msg := fmt.Sprintf("apple music api %s", provider.Clean(status))
+	trimmed := sanitizeErrorBody(body)
 	if trimmed != "" {
 		msg += ": " + trimmed
 	}
@@ -412,6 +468,9 @@ func (a artworkAttrs) formatted(size int) string {
 	s := strconv.Itoa(size)
 	u := strings.ReplaceAll(a.URL, "{w}", s)
 	u = strings.ReplaceAll(u, "{h}", s)
+	if !isSafeMediaURL(u) {
+		return ""
+	}
 	return u
 }
 
@@ -576,7 +635,7 @@ type librarySearchResponse struct {
 
 func toTrack(s songResource) provider.Track {
 	var preview string
-	if len(s.Attributes.Previews) > 0 {
+	if len(s.Attributes.Previews) > 0 && isSafeMediaURL(s.Attributes.Previews[0].URL) {
 		preview = s.Attributes.Previews[0].URL
 	}
 	// Keep the original resource ID. Library songs have IDs like "i.AbCdEfGh";
@@ -604,7 +663,7 @@ func toTrack(s songResource) provider.Track {
 		ISRC:                 provider.NormalizeISRC(s.Attributes.ISRC),
 	}
 	if s.Attributes.PlayParams != nil && s.Attributes.PlayParams.CatalogID != "" {
-		t.CatalogID = s.Attributes.PlayParams.CatalogID
+		t.CatalogID = provider.Clean(s.Attributes.PlayParams.CatalogID)
 	}
 	return t
 }
@@ -702,7 +761,7 @@ func toAlbum(r albumResource) provider.Album {
 		ReleaseDate: provider.Clean(r.Attributes.ReleaseDate),
 	}
 	if r.Attributes.PlayParams != nil && r.Attributes.PlayParams.CatalogID != "" {
-		a.CatalogID = r.Attributes.PlayParams.CatalogID
+		a.CatalogID = provider.Clean(r.Attributes.PlayParams.CatalogID)
 	}
 	return a
 }
@@ -1300,6 +1359,9 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 	if playlistID == favoritesPlaylistID {
 		return a.getFavoriteTracks(ctx)
 	}
+	if err := validateResourceID(playlistID); err != nil {
+		return nil, fmt.Errorf("GetPlaylistTracks: %w", err)
+	}
 
 	endpoint := fmt.Sprintf("/me/library/playlists/%s/tracks?limit=100", url.PathEscape(playlistID))
 	tracks, err := a.fetchSongsPaginated(ctx, endpoint, false)
@@ -1360,6 +1422,9 @@ func (a *AppleProvider) GetPlaylistTracks(ctx context.Context, playlistID string
 }
 
 func (a *AppleProvider) GetAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
+	if err := validateResourceID(albumID); err != nil {
+		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
+	}
 	sf, err := a.storefront(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetAlbumTracks: %w", err)
@@ -1380,6 +1445,9 @@ const maxArtistAlbumPages = 20
 // every page, so a failed page fails the whole call rather than returning a
 // list that looks complete and isn't.
 func (a *AppleProvider) GetArtistAlbums(ctx context.Context, artistID string) ([]provider.Album, error) {
+	if err := validateResourceID(artistID); err != nil {
+		return nil, fmt.Errorf("GetArtistAlbums: %w", err)
+	}
 	sf, err := a.storefront(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetArtistAlbums: %w", err)
@@ -1542,7 +1610,7 @@ func (a *AppleProvider) fetchSongRatingsBatch(ctx context.Context, ids []string)
 		return map[string]bool{}, nil
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("apple music api %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("apple music api %s: %s", provider.Clean(resp.Status), sanitizeErrorBody(body))
 	}
 	var ratings ratingsResponse
 	if len(body) > 0 {
@@ -1625,7 +1693,7 @@ func (a *AppleProvider) CreatePlaylist(ctx context.Context, name string, trackID
 	}
 	// Some API versions return 201 with no body — treat as success without data.
 	if len(resp.Data) == 0 {
-		return provider.Playlist{Name: name}, nil
+		return provider.Playlist{Name: provider.Clean(name)}, nil
 	}
 	return toPlaylist(resp.Data[0]), nil
 }
@@ -1636,6 +1704,12 @@ type addPlaylistTracksBody struct {
 }
 
 func (a *AppleProvider) AddToPlaylist(ctx context.Context, playlistID, trackID string) error {
+	if err := validateResourceID(playlistID); err != nil {
+		return fmt.Errorf("AddToPlaylist: playlistID: %w", err)
+	}
+	if err := validateResourceID(trackID); err != nil {
+		return fmt.Errorf("AddToPlaylist: trackID: %w", err)
+	}
 	typ := "songs"
 	if strings.HasPrefix(trackID, "i.") {
 		typ = "library-songs"
@@ -1678,6 +1752,9 @@ func (a *AppleProvider) ResolveCatalogSongID(ctx context.Context, libraryID stri
 // an error if the song has no catalog equivalent (e.g. an uploaded/unmatched
 // track), for which no per-song station exists.
 func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID string) (string, error) {
+	if err := validateResourceID(libraryID); err != nil {
+		return "", err
+	}
 	endpoint := "/me/library/songs/" + url.PathEscape(libraryID)
 	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 	if err != nil {
@@ -1689,9 +1766,13 @@ func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID stri
 		return "", err
 	}
 	if len(resp.Data) == 0 || resp.Data[0].Attributes.PlayParams == nil || resp.Data[0].Attributes.PlayParams.CatalogID == "" {
-		return "", fmt.Errorf("library song %q has no Apple Music catalog equivalent", libraryID)
+		return "", fmt.Errorf("library song %q has no Apple Music catalog equivalent", provider.Clean(libraryID))
 	}
-	return resp.Data[0].Attributes.PlayParams.CatalogID, nil
+	resolved := resp.Data[0].Attributes.PlayParams.CatalogID
+	if err := validateResourceID(resolved); err != nil {
+		return "", fmt.Errorf("invalid resolved catalog ID: %w", err)
+	}
+	return resolved, nil
 }
 
 // stationNextTracksPage fetches one batch (~2 tracks) of upcoming tracks for the
@@ -1699,6 +1780,9 @@ func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID stri
 // without an ID only accepts GET; next-tracks/{id} only accepts POST with a body
 // (an empty object suffices — the ID carries the seed).
 func (a *AppleProvider) stationNextTracksPage(ctx context.Context, catalogID string) ([]provider.Track, error) {
+	if err := validateResourceID(catalogID); err != nil {
+		return nil, err
+	}
 	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(catalogID)
 	req, err := a.newRequestWithBody(ctx, http.MethodPost, endpoint, "application/json", []byte("{}"))
 	if err != nil {
@@ -1778,6 +1862,9 @@ type ratingAttributes struct {
 // catalog ID first and falls back to the library song ratings endpoint if the
 // track has no catalog equivalent.
 func (a *AppleProvider) SetSongRating(ctx context.Context, catalogID string, rating provider.Rating) error {
+	if err := validateResourceID(catalogID); err != nil {
+		return fmt.Errorf("SetSongRating: %w", err)
+	}
 	switch rating {
 	case provider.RatingNone, provider.RatingLoved, provider.RatingDisliked:
 	default:
@@ -1852,6 +1939,9 @@ type ratingResponse struct {
 // ("i.XXXX"), it resolves the catalog ID first and falls back to
 // /me/ratings/library-songs/{id}.
 func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (provider.Rating, error) {
+	if err := validateResourceID(catalogID); err != nil {
+		return provider.RatingNone, fmt.Errorf("GetSongRating: %w", err)
+	}
 	ep := "/me/ratings/songs/" + url.PathEscape(catalogID)
 	if strings.HasPrefix(catalogID, "i.") {
 		if resolved, err := a.resolveCatalogSongID(ctx, catalogID); err == nil && resolved != "" {

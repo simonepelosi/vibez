@@ -7,8 +7,12 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -168,4 +172,49 @@ func TestDecodeBounded_RejectsOversizedDimensions(t *testing.T) {
 	if _, err := decodeBounded(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err == nil || !strings.Contains(err.Error(), "exceed max") {
 		t.Fatalf("decodeBounded(oversized) error = %v, want exceed max", err)
 	}
+}
+
+func TestIsUnsafeIP(t *testing.T) {
+	unsafe := []string{"127.0.0.1", "::1", "169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.1.1", "fc00::1", "fe80::1", "0.0.0.0"}
+	for _, s := range unsafe {
+		if !isUnsafeIP(net.ParseIP(s)) {
+			t.Errorf("isUnsafeIP(%s) = false, want true", s)
+		}
+	}
+	if isUnsafeIP(net.ParseIP("93.184.216.34")) {
+		t.Error("isUnsafeIP(93.184.216.34) = true, want false")
+	}
+}
+
+func TestNewSafeHTTPClient_BlocksLoopbackSSRF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewSafeHTTPClient(2 * time.Second)
+	if _, err := FetchAndDecode(t.Context(), c, srv.URL+"/cover.jpg", 1<<20); err == nil {
+		t.Fatal("expected NewSafeHTTPClient to block loopback connection")
+	}
+}
+
+func TestFetchAndDecode_RejectsUserinfoAndControlChars(t *testing.T) {
+	c := NewSafeHTTPClient(time.Second)
+	for _, bad := range []string{
+		"https://user:pass@is1-ssl.mzstatic.com/a.jpg",
+		"https://is1-ssl.mzstatic.com/\x00a.jpg",
+		"file:///etc/passwd",
+	} {
+		if _, err := FetchAndDecode(t.Context(), c, bad, 1<<20); err == nil {
+			t.Errorf("FetchAndDecode(%q) = nil error, want error", bad)
+		}
+	}
+}
+
+func FuzzDecodeBounded(f *testing.F) {
+	f.Add([]byte("\x89PNG\r\n\x1a\n"))
+	f.Add([]byte{0xff, 0xd8, 0xff})
+	f.Fuzz(func(_ *testing.T, data []byte) {
+		_, _ = decodeBounded(bytes.NewReader(data), 1<<20)
+	})
 }
