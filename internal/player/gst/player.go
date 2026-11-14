@@ -1070,6 +1070,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 const aacDecoderHelp = "install gstreamer1.0-libav or gstreamer1.0-plugins-bad (Debian/Ubuntu) / gst-libav or gst-plugins-bad (Arch/Fedora)"
@@ -1407,7 +1409,7 @@ func (p *Player) handleBusMessage(msgType C.GstMessageType, strOut *C.gchar) {
 	case C.GST_MESSAGE_ERROR:
 		var msg string
 		if strOut != nil {
-			msg = C.GoString((*C.char)(unsafe.Pointer(strOut)))
+			msg = provider.Clean(C.GoString((*C.char)(unsafe.Pointer(strOut))))
 			C.vibez_gst_free(strOut)
 		}
 		// gst-libav's AIFF demuxer only handles 16-bit, and playbin picks it
