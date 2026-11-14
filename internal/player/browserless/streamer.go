@@ -64,12 +64,9 @@ const (
 	maxInitSegmentBytes = 4 << 20  // 4 MiB cap on MP4 init segment
 	maxMediaSegmentSize = 64 << 20 // 64 MiB cap on a single HLS media segment
 	maxRawUploadSize    = 2 << 30  // 2 GiB ceiling on a non-seekable whole-file upload
-<<<<<<< HEAD
 	maxHLSSegments      = 20000    // bounded segment count per playlist (~55h at 10s/segment)
-=======
 	maxRetainedStreams  = 3
 	maxStreamAge        = 30 * time.Minute
->>>>>>> 655a1f3 (perf(browserless): close evicted CDM sessions, reuse C++ subsample scratch, avoid playlist split)
 )
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
