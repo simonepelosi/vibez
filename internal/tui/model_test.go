@@ -5107,7 +5107,7 @@ func TestInput_UnicodeSpacesAndJoinersPreserved(t *testing.T) {
 	}
 }
 
-func TestArtworkCache_FIFOEvictionPreservesRecentSizes(t *testing.T) {
+func TestArtworkCache_LRUEvictionPreservesRecentlyUsedSizes(t *testing.T) {
 	m := newModel(nil)
 	m.artMode = true
 	m.supportsArtColor = func() bool { return true }
@@ -5125,16 +5125,60 @@ func TestArtworkCache_FIFOEvictionPreservesRecentSizes(t *testing.T) {
 		_ = m.nowPlayingArtLines(80, 10+i)
 	}
 	firstSize := m.artwork.renderedOrder[0]
+	secondSize := m.artwork.renderedOrder[1]
 	if len(m.artwork.rendered) != 16 {
 		t.Fatalf("cached sizes = %d, want 16", len(m.artwork.rendered))
 	}
 
-	// Adding a 17th size must evict only the oldest entry instead of wiping the cache.
+	// Touch firstSize (height=20, npH=10) so secondSize becomes least recently used.
+	_ = m.nowPlayingArtLines(80, 10)
+
+	// Adding a 17th size must evict secondSize (LRU), keeping firstSize intact.
 	_ = m.nowPlayingArtLines(80, 30)
 	if len(m.artwork.rendered) != 16 {
 		t.Fatalf("cached sizes after 17th = %d, want 16", len(m.artwork.rendered))
 	}
-	if _, ok := m.artwork.rendered[firstSize]; ok {
-		t.Fatalf("expected oldest size %+v to be evicted", firstSize)
+	if _, ok := m.artwork.rendered[firstSize]; !ok {
+		t.Fatalf("expected recently touched size %+v to stay cached", firstSize)
+	}
+	if _, ok := m.artwork.rendered[secondSize]; ok {
+		t.Fatalf("expected LRU size %+v to be evicted", secondSize)
+	}
+}
+
+func TestModel_GlowTickGatedWhenPaused(t *testing.T) {
+	m := newModel(nil)
+	m.introStep = introDone
+	m.glowRunning = true
+
+	// Idle/paused: glowTickMsg must advance step once and stop rescheduling itself.
+	_, cmd := m.Update(glowTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatal("expected glowTickMsg to return nil cmd when paused/idle")
+	}
+	if m.glowRunning {
+		t.Fatal("expected glowRunning=false when paused/idle")
+	}
+
+	// Starting playback must re-arm the glow loop.
+	_, playCmd := m.Update(playerStateMsg(player.State{Playing: true}))
+	if playCmd == nil {
+		t.Fatal("expected playerStateMsg(Playing=true) to restart glowTick")
+	}
+	if !m.glowRunning {
+		t.Fatal("expected glowRunning=true while playing")
+	}
+
+	// While playing, glowTickMsg continues scheduling next tick.
+	_, tickCmd := m.Update(glowTickMsg(time.Now()))
+	if tickCmd == nil {
+		t.Fatal("expected glowTickMsg to reschedule while playing")
+	}
+
+	// Pausing allows the loop to stop cleanly on the next tick.
+	_, _ = m.Update(playerStateMsg(player.State{Playing: false}))
+	_, stopCmd := m.Update(glowTickMsg(time.Now()))
+	if stopCmd != nil || m.glowRunning {
+		t.Fatalf("expected glow loop to stop after pause, got cmd=%v glowRunning=%v", stopCmd, m.glowRunning)
 	}
 }
