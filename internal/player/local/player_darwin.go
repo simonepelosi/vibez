@@ -10,6 +10,7 @@ package local
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,7 +31,7 @@ typedef struct {
 } vibez_biquad;
 
 static void vibez_biquad_design(vibez_biquad *bq, double fs, double f0, double gainDb) {
-	if (fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+	if (isnan(gainDb) || isinf(gainDb) || fs <= 0.0 || fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
 		bq->active = 0;
 		return;
 	}
@@ -60,6 +61,7 @@ typedef struct {
 	AudioStreamBasicDescription format;
 	AudioQueueBufferRef bufs[kNumBuffers];
 	UInt32 bufFrames;
+	pthread_mutex_t eqMu;
 	vibez_biquad eq[kEQBands];
 	int done;
 	int playing;
@@ -69,12 +71,15 @@ typedef struct {
 static void vibez_set_eq_gains(vibez_audio_state *s, const double *gains, int count) {
 	if (!s) return;
 	double fs = s->format.mSampleRate > 0 ? s->format.mSampleRate : 44100.0;
+	pthread_mutex_lock(&s->eqMu);
 	for (int i = 0; i < kEQBands; i++) {
 		double g = (gains && i < count) ? gains[i] : 0.0;
+		if (isnan(g) || isinf(g)) g = 0.0;
 		if (g > 24.0) g = 24.0;
 		if (g < -24.0) g = -24.0;
 		vibez_biquad_design(&s->eq[i], fs, kEQBandHz[i], g);
 	}
+	pthread_mutex_unlock(&s->eqMu);
 }
 
 // This is called from C back into GO when the track ends
@@ -97,6 +102,7 @@ static int vibez_fill_buffer(vibez_audio_state *s, AudioQueueBufferRef buf) {
 	buf->mAudioDataByteSize = numFrames * s->format.mBytesPerFrame;
 	if (numFrames > 0 && s->format.mChannelsPerFrame == 2) {
 		int eqOn = 0;
+		pthread_mutex_lock(&s->eqMu);
 		for (int b = 0; b < kEQBands; b++) {
 			if (s->eq[b].active) { eqOn = 1; break; }
 		}
@@ -114,6 +120,7 @@ static int vibez_fill_buffer(vibez_audio_state *s, AudioQueueBufferRef buf) {
 				}
 			}
 		}
+		pthread_mutex_unlock(&s->eqMu);
 	}
 	return numFrames == 0;
 }
@@ -131,19 +138,35 @@ static void vibez_audio_callback(void *ctx, AudioQueueRef queue, AudioQueueBuffe
 	AudioQueueEnqueueBuffer(queue, buf, 0, NULL);
 }
 
-// vibez_open opens a file:// URI and sets up ExtAudioFile + AudioQueue
+// vibez_open opens a local file path and sets up ExtAudioFile + AudioQueue
 // Returning NULL on fail
 static vibez_audio_state* vibez_open(const char *uri){
+	if (!uri || uri[0] == '\0') return NULL;
 	vibez_audio_state *s = (vibez_audio_state*)calloc(1, sizeof(vibez_audio_state));
 	if(!s) return NULL;
+	pthread_mutex_init(&s->eqMu, NULL);
 
 	CFStringRef cfPath = CFStringCreateWithCString(NULL, uri, kCFStringEncodingUTF8);
+	if (!cfPath) {
+		pthread_mutex_destroy(&s->eqMu);
+		free(s);
+		return NULL;
+	}
 	CFURLRef url = CFURLCreateWithFileSystemPath(NULL, cfPath, kCFURLPOSIXPathStyle, false);
 	CFRelease(cfPath);
+	if (!url) {
+		pthread_mutex_destroy(&s->eqMu);
+		free(s);
+		return NULL;
+	}
 
 	OSStatus err = ExtAudioFileOpenURL(url, &s->file);
 	CFRelease(url);
-	if(err != noErr) {free(s); return NULL;}
+	if(err != noErr || !s->file) {
+		pthread_mutex_destroy(&s->eqMu);
+		free(s);
+		return NULL;
+	}
 
 	// Decode to 32-bit float stereo at the file's own sample rate, so a
 	// 24-bit or hi-res file reaches the EQ and the queue without being
@@ -168,6 +191,7 @@ static vibez_audio_state* vibez_open(const char *uri){
 	err = ExtAudioFileSetProperty(s->file, kExtAudioFileProperty_ClientDataFormat, sizeof(s->format), &s->format);
 	if(err != noErr){
 		ExtAudioFileDispose(s->file);
+		pthread_mutex_destroy(&s->eqMu);
 		free(s);
 		return NULL;
 	}
@@ -175,6 +199,7 @@ static vibez_audio_state* vibez_open(const char *uri){
 	err = AudioQueueNewOutput(&s->format, vibez_audio_callback, s, NULL, NULL, 0, &s->queue);
 	if(err != noErr){
 		ExtAudioFileDispose(s->file);
+		pthread_mutex_destroy(&s->eqMu);
 		free(s);
 		return NULL;
 	}
@@ -184,7 +209,10 @@ static vibez_audio_state* vibez_open(const char *uri){
 static void vibez_start(vibez_audio_state *s){
 	// Pre filling all buffers before starting
 	for(int i=0; i<kNumBuffers; i++){
-		AudioQueueAllocateBuffer(s->queue, s->bufFrames * s->format.mBytesPerFrame, &s->bufs[i]);
+		if(AudioQueueAllocateBuffer(s->queue, s->bufFrames * s->format.mBytesPerFrame, &s->bufs[i]) != noErr || !s->bufs[i]){
+			s->done = 1;
+			return;
+		}
 		if(vibez_fill_buffer(s, s->bufs[i])){
 			s->done = 1;
 			break;
@@ -264,6 +292,7 @@ static void vibez_destroy(vibez_audio_state *s){
 	if(!s) return;
 	AudioQueueDispose(s->queue, true);
 	ExtAudioFileDispose(s->file);
+	pthread_mutex_destroy(&s->eqMu);
 	free(s);
 }
 */
@@ -271,7 +300,9 @@ import "C"
 
 import (
 	"fmt"
+	"math"
 	"runtime/cgo"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -427,8 +458,15 @@ func vibezOnEOS(h C.uintptr_t) {
 }
 
 func (p *Player) playTrack(t provider.Track) {
-	// Stripping the "local:" prefix to get the raw fle path
-	path := t.ID[len("local:"):]
+	path, ok := strings.CutPrefix(t.ID, "local:")
+	if !ok || path == "" {
+		p.mu.Lock()
+		p.state.Error = fmt.Sprintf("local player: invalid track ID %q", provider.Clean(t.ID))
+		s := p.state
+		p.mu.Unlock()
+		p.broadcast(s)
+		return
+	}
 
 	cs := C.CString(path)
 	defer C.free(unsafe.Pointer(cs))
@@ -436,7 +474,7 @@ func (p *Player) playTrack(t provider.Track) {
 	raw := C.vibez_open(cs)
 	if raw == nil {
 		p.mu.Lock()
-		p.state.Error = fmt.Sprintf("failed to open: %s", path)
+		p.state.Error = fmt.Sprintf("failed to open: %s", provider.Clean(path))
 		s := p.state
 		p.mu.Unlock()
 		p.broadcast(s)
@@ -687,7 +725,16 @@ func (p *Player) SetRepeat(mode int) error {
 func (p *Player) SetEqualizer(bands []player.EQBand) error {
 	gains := make([]float64, len(bands))
 	for i, b := range bands {
-		gains[i] = b.Gain
+		if math.IsNaN(b.Gain) || math.IsInf(b.Gain, 0) {
+			continue
+		}
+		g := b.Gain
+		if g > 24 {
+			g = 24
+		} else if g < -24 {
+			g = -24
+		}
+		gains[i] = g
 	}
 	p.mu.Lock()
 	p.eqGains = gains

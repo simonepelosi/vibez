@@ -14,8 +14,15 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
+	"os"
 	"sync"
 	"unsafe"
+)
+
+const (
+	maxCDMInputBytes = 64 << 20 // 64 MiB defensive CGo ceiling matching BufferImpl
+	maxCDMSubsamples = 65536
 )
 
 type CDM struct {
@@ -26,6 +33,17 @@ type CDM struct {
 
 // New loads the Widevine CDM shared library from the given path.
 func New(libraryPath string) (*CDM, error) {
+	if libraryPath == "" {
+		return nil, errors.New("empty Widevine CDM path")
+	}
+	info, err := os.Stat(libraryPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Widevine CDM path: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("widevine CDM path %q is not a regular file", libraryPath)
+	}
+
 	cPath := C.CString(libraryPath)
 	defer C.free(unsafe.Pointer(cPath))
 
@@ -42,8 +60,8 @@ func (c *CDM) SetServerCertificate(cert []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(cert) == 0 {
-		return errors.New("empty server certificate")
+	if len(cert) == 0 || len(cert) > maxCDMInputBytes {
+		return errors.New("invalid server certificate size")
 	}
 	if c.ctx == nil {
 		return errors.New("cdm context is closed")
@@ -55,7 +73,7 @@ func (c *CDM) SetServerCertificate(cert []byte) error {
 	ret := C.cdm_context_set_server_certificate(
 		c.ctx,
 		(*C.uint8_t)(unsafe.Pointer(&cert[0])),
-		C.uint32_t(len(cert)),
+		C.uint32_t(len(cert)), //nolint:gosec // bounded <= maxCDMInputBytes
 	)
 	if ret != 0 {
 		return fmt.Errorf("failed to set server certificate: %d", ret)
@@ -97,6 +115,10 @@ func (c *CDM) GenerateChallenge(kid []byte) ([]byte, string, error) {
 	defer C.free(unsafe.Pointer(outChallenge))
 	defer C.free(unsafe.Pointer(outSessionID))
 
+	if outChallenge == nil || outSessionID == nil || outChallengeSize == 0 || uint64(outChallengeSize) > math.MaxInt32 {
+		return nil, "", fmt.Errorf("invalid license challenge output size: %d", outChallengeSize)
+	}
+
 	challenge := C.GoBytes(unsafe.Pointer(outChallenge), C.int(outChallengeSize))
 	sessionID := C.GoString(outSessionID)
 
@@ -108,7 +130,7 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if sessionID == "" || len(license) == 0 {
+	if sessionID == "" || len(license) == 0 || len(license) > maxCDMInputBytes {
 		return errors.New("invalid session update payload")
 	}
 	if c.ctx == nil {
@@ -122,7 +144,7 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 		c.ctx,
 		cSessionID,
 		(*C.uint8_t)(unsafe.Pointer(&license[0])),
-		C.uint32_t(len(license)),
+		C.uint32_t(len(license)), //nolint:gosec // bounded <= maxCDMInputBytes
 	)
 	if ret != 0 {
 		return fmt.Errorf("failed to update session with license: %d", ret)
@@ -146,11 +168,26 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(keyID) == 0 || len(iv) == 0 {
+	if len(keyID) == 0 || len(keyID) > maxCDMInputBytes || len(iv) == 0 || len(iv) > maxCDMInputBytes {
 		return nil, errors.New("invalid decrypt input parameters")
 	}
 	if len(input) == 0 {
 		return []byte{}, nil
+	}
+	if len(input) > maxCDMInputBytes {
+		return nil, fmt.Errorf("decrypt input size %d exceeds maximum (%d)", len(input), maxCDMInputBytes)
+	}
+	if len(subsamples) > maxCDMSubsamples {
+		return nil, fmt.Errorf("excessive subsample count: %d", len(subsamples))
+	}
+	if len(subsamples) > 0 {
+		var total uint64
+		for _, sub := range subsamples {
+			total += uint64(sub.ClearBytes) + uint64(sub.CipherBytes)
+			if total > uint64(len(input)) {
+				return nil, fmt.Errorf("subsample byte sum exceeds input size (%d)", len(input))
+			}
+		}
 	}
 	if c.ctx == nil {
 		return nil, errors.New("cdm context is closed")
@@ -161,7 +198,7 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 
 	var clearPtr *C.uint16_t
 	var cipherPtr *C.uint32_t
-	numSubs := C.uint32_t(len(subsamples))
+	numSubs := C.uint32_t(len(subsamples)) //nolint:gosec // bounded <= maxCDMSubsamples
 	if len(subsamples) > 0 {
 		clearBytes := make([]C.uint16_t, len(subsamples))
 		cipherBytes := make([]C.uint32_t, len(subsamples))
@@ -176,11 +213,11 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	ret := C.cdm_context_decrypt(
 		c.ctx,
 		(*C.uint8_t)(unsafe.Pointer(&keyID[0])),
-		C.uint32_t(len(keyID)),
+		C.uint32_t(len(keyID)), //nolint:gosec // bounded <= maxCDMInputBytes
 		(*C.uint8_t)(unsafe.Pointer(&iv[0])),
-		C.uint32_t(len(iv)),
+		C.uint32_t(len(iv)), //nolint:gosec // bounded <= maxCDMInputBytes
 		(*C.uint8_t)(unsafe.Pointer(&input[0])),
-		C.uint32_t(len(input)),
+		C.uint32_t(len(input)), //nolint:gosec // bounded <= maxCDMInputBytes
 		clearPtr,
 		cipherPtr,
 		numSubs,
@@ -190,7 +227,7 @@ func (c *CDM) DecryptSubsamples(keyID, iv, input []byte, subsamples []Subsample)
 	if ret != 0 {
 		return nil, fmt.Errorf("decryption failed with status %d", ret)
 	}
-	if int(outSize) > len(decrypted) {
+	if uint64(outSize) > uint64(len(decrypted)) {
 		return nil, fmt.Errorf("decryption output size %d exceeds buffer %d", outSize, len(decrypted))
 	}
 

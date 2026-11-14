@@ -10,6 +10,8 @@ package gst
 #cgo LDFLAGS: -lm
 #include <gst/gst.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <netinet/in.h>
 #include <stdint.h>
@@ -17,6 +19,7 @@ package gst
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define VIBEZ_EQ_BANDS 10
@@ -405,31 +408,51 @@ enum {
 
 static int vibez_connect_http_stream(const char* uri) {
     if (!uri) return -1;
-    const char* p = uri;
-    if (strncmp(p, "http://", 7) == 0) p += 7;
+    if (strncmp(uri, "http://", 7) != 0) return -1;
+    const char* p = uri + 7;
     const char* slash = strchr(p, '/');
     const char* path = slash ? slash : "/";
+    for (const char* q = path; *q != '\0'; ++q) {
+        if (*q == '\r' || *q == '\n' || *q == ' ' || *q == '\t') {
+            return -1;
+        }
+    }
     char hostport[128] = {0};
     size_t hp_len = slash ? (size_t)(slash - p) : strlen(p);
-    if (hp_len >= sizeof(hostport)) return -1;
+    if (hp_len == 0 || hp_len >= sizeof(hostport)) return -1;
     memcpy(hostport, p, hp_len);
 
-    char host[64] = "127.0.0.1";
-    int port = 80;
+    char host[64] = {0};
+    long port = 80;
     char* colon = strchr(hostport, ':');
     if (colon) {
         *colon = '\0';
+        const char* port_str = colon + 1;
+        if (port_str[0] == '\0') return -1;
+        char* endptr = NULL;
+        errno = 0;
+        port = strtol(port_str, &endptr, 10);
+        if (errno != 0 || !endptr || *endptr != '\0' || port <= 0 || port > 65535) {
+            return -1;
+        }
         snprintf(host, sizeof(host), "%s", hostport);
-        port = atoi(colon + 1);
-    } else if (hostport[0] != '\0') {
+    } else {
         snprintf(host, sizeof(host), "%s", hostport);
     }
     if (strcmp(host, "localhost") == 0) {
         snprintf(host, sizeof(host), "127.0.0.1");
+    } else if (strcmp(host, "127.0.0.1") != 0) {
+        return -1;
     }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
+
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in sin;
     memset(&sin, 0, sizeof(sin));
@@ -445,14 +468,20 @@ static int vibez_connect_http_stream(const char* uri) {
     }
 
     gchar* req = g_strdup_printf(
-        "GET %s HTTP/1.0\r\nHost: 127.0.0.1:%d\r\nUser-Agent: vibez/2.0\r\nConnection: close\r\n\r\n",
+        "GET %s HTTP/1.0\r\nHost: 127.0.0.1:%ld\r\nUser-Agent: vibez/2.0\r\nConnection: close\r\n\r\n",
         path, port);
-    ssize_t sent = send(fd, req, strlen(req), 0);
-    g_free(req);
-    if (sent < 0) {
-        close(fd);
-        return -1;
+    size_t req_len = strlen(req);
+    size_t total_sent = 0;
+    while (total_sent < req_len) {
+        ssize_t sent = send(fd, req + total_sent, req_len - total_sent, 0);
+        if (sent <= 0) {
+            g_free(req);
+            close(fd);
+            return -1;
+        }
+        total_sent += (size_t)sent;
     }
+    g_free(req);
 
     char hdr[4096];
     size_t hlen = 0;
@@ -465,7 +494,8 @@ static int vibez_connect_http_stream(const char* uri) {
         hlen++;
         if (hlen >= 4 && memcmp(&hdr[hlen - 4], "\r\n\r\n", 4) == 0) {
             hdr[hlen] = '\0';
-            if (strstr(hdr, " 200 ") == NULL) {
+            if ((strncmp(hdr, "HTTP/1.0 200", 12) != 0 && strncmp(hdr, "HTTP/1.1 200", 12) != 0) ||
+                (hdr[12] != ' ' && hdr[12] != '\r')) {
                 close(fd);
                 return -1;
             }
@@ -587,17 +617,23 @@ static GstPadProbeReturn on_filter_event(GstPad* pad, GstPadProbeInfo* info, gpo
     gst_event_parse_segment(ev, &seg);
     // A base of zero is a fresh start (new URI or flush), even for a stream
     // that is not trimmed, such as a seek's start_seg stream.
+    g_mutex_lock(&st->mu);
     if (seg->base == 0) st->trimmed = 0;
-    if (!st->trim_cur)
+    gboolean should_trim = st->trim_cur;
+    if (!should_trim) {
+        g_mutex_unlock(&st->mu);
         return GST_PAD_PROBE_OK;
+    }
     gint rate = 0;
     GstCaps* caps = gst_pad_get_current_caps(pad);
     if (caps) {
         gst_structure_get_int(gst_caps_get_structure(caps, 0), "rate", &rate);
         gst_caps_unref(caps);
     }
-    if (seg->format != GST_FORMAT_TIME || rate <= 0)
+    if (seg->format != GST_FORMAT_TIME || rate <= 0) {
+        g_mutex_unlock(&st->mu);
         return GST_PAD_PROBE_OK;
+    }
     st->trim_cur = FALSE;
 
     GstSegment s2;
@@ -607,6 +643,7 @@ static GstPadProbeReturn on_filter_event(GstPad* pad, GstPadProbeInfo* info, gpo
     // previous one, so pull it back by everything cut so far.
     s2.base -= MIN(s2.base, st->trimmed);
     st->trimmed += delay;
+    g_mutex_unlock(&st->mu);
     s2.start += delay;
     if (s2.position < s2.start) s2.position = s2.start;
     GstEvent* nev = gst_event_new_segment(&s2);

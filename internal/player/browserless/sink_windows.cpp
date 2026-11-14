@@ -67,8 +67,8 @@ F symbol(HMODULE mod, const char* name) {
 const MfApi* mfApi() {
     static MfApi api;
     static const bool ok = [] {
-        HMODULE plat = LoadLibraryW(L"mfplat.dll");
-        HMODULE rw = LoadLibraryW(L"mfreadwrite.dll");
+        HMODULE plat = LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        HMODULE rw = LoadLibraryExW(L"mfreadwrite.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!plat || !rw) return false;
         api.startup = symbol<decltype(api.startup)>(plat, "MFStartup");
         api.shutdown = symbol<decltype(api.shutdown)>(plat, "MFShutdown");
@@ -98,7 +98,7 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
             active = false;
             return;
         }
@@ -176,6 +176,7 @@ struct Handle {
 };
 
 std::wstring widen(const char* utf8) {
+    if (!utf8 || utf8[0] == '\0') return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
     if (n <= 0) return L"";
     std::wstring out(static_cast<size_t>(n), L'\0');
@@ -309,10 +310,18 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     const uint32_t rate = wfx->nSamplesPerSec;
     const int channels = wfx->nChannels;
     SampleFmt sampleFmt = sampleFmtOf(got.p, wfx);
+    if (rate == 0 || channels <= 0 || channels > 8 || sampleFmt == SampleFmt::None) {
+        CoTaskMemFree(wfx);
+        return reportError(sink, ses, "unsupported audio format", E_FAIL);
+    }
     ses->sampleRate = rate;
     ses->bytesPerSec = wfx->nAvgBytesPerSec;
 
     HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!ev) {
+        CoTaskMemFree(wfx);
+        return reportError(sink, ses, "cannot create audio event", HRESULT_FROM_WIN32(GetLastError()));
+    }
     HWAVEOUT hwo = nullptr;
     MMRESULT mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
     CoTaskMemFree(wfx);
@@ -326,10 +335,13 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             UINT32 wfx16Size = 0;
             if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
                 SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
-                sampleFmt = sampleFmtOf(got16.p, wfx16);
-                ses->sampleRate = wfx16->nSamplesPerSec;
-                ses->bytesPerSec = wfx16->nAvgBytesPerSec;
-                mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+                SampleFmt fmt16 = sampleFmtOf(got16.p, wfx16);
+                if (wfx16->nSamplesPerSec > 0 && wfx16->nChannels > 0 && wfx16->nChannels <= 8 && fmt16 != SampleFmt::None) {
+                    sampleFmt = fmt16;
+                    ses->sampleRate = wfx16->nSamplesPerSec;
+                    ses->bytesPerSec = wfx16->nAvgBytesPerSec;
+                    mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+                }
                 CoTaskMemFree(wfx16);
             }
         }
@@ -364,6 +376,8 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
 
         double target = ses->seekTarget.exchange(-1.0);
         if (target >= 0.0) {
+            if (std::isnan(target) || std::isinf(target)) target = 0.0;
+            if (target > 1e8) target = 1e8;
             if (!nullOut && hwo) {
                 waveOutReset(hwo);
                 for (auto& b : bufs) {
@@ -543,8 +557,12 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         b.hdr.lpData = b.data.data();
         b.hdr.dwBufferLength = static_cast<DWORD>(b.data.size());
         b.hdr.dwFlags = 0;
-        if (waveOutPrepareHeader(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR ||
-            waveOutWrite(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+        if (waveOutPrepareHeader(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+            reportError(sink, ses, "audio output failed", E_FAIL);
+            break;
+        }
+        if (waveOutWrite(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+            waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
             reportError(sink, ses, "audio output failed", E_FAIL);
             break;
         }
@@ -688,7 +706,8 @@ void vibez_winsink_seek(vibez_winsink_t handle, double seconds) {
         ses = sink->cur;
     }
     if (!ses) return;
-    if (seconds < 0.0) seconds = 0.0;
+    if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
+    if (seconds > 1e8) seconds = 1e8;
     ses->seekTarget.store(seconds);
 }
 

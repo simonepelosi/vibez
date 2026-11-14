@@ -73,7 +73,7 @@ var mozillaPlatformKeys = map[string]string{
 
 func isAllowedCDMHost(rawURL string) bool {
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" {
+	if err != nil || u.Scheme != "https" || u.User != nil {
 		return false
 	}
 	switch u.Hostname() {
@@ -82,6 +82,14 @@ func isAllowedCDMHost(rawURL string) bool {
 	default:
 		return false
 	}
+}
+
+func isValidSHA512Hex(s string) bool {
+	if len(s) != 128 {
+		return false
+	}
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == 64
 }
 
 // CanDownloadCDM reports whether the current OS and architecture have a known Widevine package.
@@ -109,7 +117,18 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 		return fallbackSpec, nil
 	}
 
-	client := &http.Client{Timeout: 8 * time.Second}
+	client := &http.Client{
+		Timeout: 8 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects fetching widevine manifest")
+			}
+			if req.URL.Scheme != "https" {
+				return errors.New("insecure redirect scheme fetching widevine manifest")
+			}
+			return nil
+		},
+	}
 	for _, mURL := range widevineManifestURLs {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, mURL, nil)
 		if err != nil {
@@ -141,15 +160,16 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 			} `json:"vendors"`
 		}
 		if err := json.Unmarshal(body, &manifest); err == nil {
-			if p, ok := manifest.Vendors.GMPWidevine.Platforms[mozKey]; ok && p.FileURL != "" && isAllowedCDMHost(p.FileURL) {
-				spec := cdmPackageSpec{
+			if p, ok := manifest.Vendors.GMPWidevine.Platforms[mozKey]; ok &&
+				p.FileURL != "" &&
+				isAllowedCDMHost(p.FileURL) &&
+				strings.EqualFold(manifest.HashFunction, "sha512") &&
+				isValidSHA512Hex(p.HashValue) {
+				return cdmPackageSpec{
 					url:      p.FileURL,
+					sha512:   p.HashValue,
 					fileSize: p.FileSize,
-				}
-				if strings.EqualFold(manifest.HashFunction, "sha512") {
-					spec.sha512 = p.HashValue
-				}
-				return spec, nil
+				}, nil
 			}
 		}
 	}
@@ -188,7 +208,18 @@ func DownloadCDM(ctx context.Context, destPath string, progress ...func(string))
 		return "", err
 	}
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects downloading widevine cdm")
+			}
+			if !isAllowedCDMHost(req.URL.String()) {
+				return fmt.Errorf("disallowed redirect target downloading widevine cdm: %s", req.URL.Hostname())
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("downloading widevine cdm: %w", err)
@@ -207,12 +238,13 @@ func DownloadCDM(ctx context.Context, destPath string, progress ...func(string))
 		return "", fmt.Errorf("downloaded CRX3 exceeds %d bytes limit", maxCRXBytes)
 	}
 
-	if spec.sha512 != "" {
-		sum := sha512.Sum512(crxBytes)
-		gotHash := hex.EncodeToString(sum[:])
-		if !strings.EqualFold(gotHash, spec.sha512) {
-			return "", fmt.Errorf("widevine CRX3 SHA-512 mismatch: got %s, want %s", gotHash, spec.sha512)
-		}
+	if !isValidSHA512Hex(spec.sha512) {
+		return "", errors.New("missing or malformed expected widevine CRX3 SHA-512 digest")
+	}
+	sum := sha512.Sum512(crxBytes)
+	gotHash := hex.EncodeToString(sum[:])
+	if !strings.EqualFold(gotHash, spec.sha512) {
+		return "", fmt.Errorf("widevine CRX3 SHA-512 mismatch: got %s, want %s", gotHash, spec.sha512)
 	}
 
 	tmpCRX, err := os.CreateTemp(filepath.Dir(destPath), "widevine-*.crx3")
@@ -317,7 +349,7 @@ func extractLibraryFromCRX(crxPath, destPath string) error {
 	}
 
 	headerLen := binary.LittleEndian.Uint32(headerPrefix[8:12])
-	zipOffset := int64(12 + headerLen)
+	zipOffset := int64(12) + int64(headerLen)
 	if zipOffset >= fileSize {
 		return errors.New("invalid crx header length")
 	}
@@ -341,9 +373,14 @@ func extractLibraryFromCRX(crxPath, destPath string) error {
 				return err
 			}
 
-			tmpDest := destPath + ".tmp"
-			out, err := os.OpenFile(tmpDest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755) //nolint:gosec
+			out, err := os.CreateTemp(filepath.Dir(destPath), targetName+".tmp-*")
 			if err != nil {
+				return err
+			}
+			tmpDest := out.Name()
+			if err := out.Chmod(0700); err != nil {
+				_ = out.Close()
+				_ = os.Remove(tmpDest)
 				return err
 			}
 

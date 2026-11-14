@@ -20,12 +20,14 @@ const (
 
 // MPRISPlayer controls an MPRIS-compatible media player over D-Bus.
 type MPRISPlayer struct {
-	conn *dbus.Conn
-	name string // e.g. org.mpris.MediaPlayer2.Cider
-	obj  dbus.BusObject
-	subs []chan player.State
-	mu   sync.Mutex
-	done chan struct{}
+	conn      *dbus.Conn
+	name      string // e.g. org.mpris.MediaPlayer2.Cider
+	obj       dbus.BusObject
+	subs      []chan player.State
+	mu        sync.Mutex
+	closed    bool
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // New connects to the D-Bus session bus and finds an available MPRIS player.
@@ -130,14 +132,33 @@ func (m *MPRISPlayer) GetState() (*player.State, error) {
 func (m *MPRISPlayer) Subscribe() <-chan player.State {
 	ch := make(chan player.State, 4)
 	m.mu.Lock()
-	m.subs = append(m.subs, ch)
+	if m.closed {
+		close(ch)
+	} else {
+		m.subs = append(m.subs, ch)
+	}
 	m.mu.Unlock()
 	return ch
 }
 
 func (m *MPRISPlayer) Close() error {
-	close(m.done)
-	return m.conn.Close()
+	var err error
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		m.closed = true
+		if m.done != nil {
+			close(m.done)
+		}
+		for _, ch := range m.subs {
+			close(ch)
+		}
+		m.subs = nil
+		m.mu.Unlock()
+		if m.conn != nil {
+			err = m.conn.Close()
+		}
+	})
+	return err
 }
 
 // --- Internal helpers ---
@@ -146,22 +167,29 @@ func (m *MPRISPlayer) Close() error {
 func parseMetadataMap(meta map[string]dbus.Variant) *provider.Track {
 	t := &provider.Track{}
 	if v, ok := meta["xesam:title"]; ok {
-		t.Title, _ = v.Value().(string)
+		s, _ := v.Value().(string)
+		t.Title = provider.Clean(s)
 	}
 	if v, ok := meta["xesam:album"]; ok {
-		t.Album, _ = v.Value().(string)
+		s, _ := v.Value().(string)
+		t.Album = provider.Clean(s)
 	}
 	if v, ok := meta["mpris:artUrl"]; ok {
 		t.ArtworkURL, _ = v.Value().(string)
 	}
 	if v, ok := meta["mpris:length"]; ok {
-		dur, _ := v.Value().(int64)
-		t.Duration = time.Duration(dur) * time.Microsecond
+		if dur, ok := v.Value().(int64); ok && dur > 0 {
+			t.Duration = time.Duration(dur) * time.Microsecond
+		}
 	}
 	if v, ok := meta["xesam:artist"]; ok {
 		artists, _ := v.Value().([]string)
 		if len(artists) > 0 {
-			t.Artist = strings.Join(artists, ", ")
+			cleaned := make([]string, 0, len(artists))
+			for _, a := range artists {
+				cleaned = append(cleaned, provider.Clean(a))
+			}
+			t.Artist = strings.Join(cleaned, ", ")
 		}
 	}
 	return t
@@ -224,10 +252,12 @@ func (m *MPRISPlayer) poll() {
 			if stateChanged(last, *s) {
 				last = *s
 				m.mu.Lock()
-				for _, ch := range m.subs {
-					select {
-					case ch <- *s:
-					default:
+				if !m.closed {
+					for _, ch := range m.subs {
+						select {
+						case ch <- *s:
+						default:
+						}
 					}
 				}
 				m.mu.Unlock()

@@ -137,9 +137,29 @@ func (p *playerObj) PlayPause() *dbus.Error {
 // Registered as D-Bus method "Seek" via ExportMethodTable to avoid go vet
 // clash with the io.Seeker interface signature.
 func (p *playerObj) seekRelative(offsetUs int64) *dbus.Error {
+	const maxPositionUs = int64(time.Duration(1<<63-1) / time.Microsecond)
+	if offsetUs > maxPositionUs || offsetUs < -maxPositionUs {
+		return nil
+	}
+	delta := time.Duration(offsetUs) * time.Microsecond
+
 	p.srv.mu.Lock()
-	newPos := p.srv.pos + time.Duration(offsetUs)*time.Microsecond
+	cur := p.srv.pos
+	dur := p.srv.currentTrackDuration
 	p.srv.mu.Unlock()
+
+	var newPos time.Duration
+	if delta > 0 && cur > time.Duration(1<<63-1)-delta {
+		newPos = time.Duration(1<<63 - 1)
+	} else {
+		newPos = cur + delta
+	}
+	if newPos < 0 {
+		newPos = 0
+	}
+	if dur > 0 && newPos > dur {
+		newPos = dur
+	}
 	_ = p.ctrl.Seek(newPos)
 	return nil
 }
@@ -208,61 +228,7 @@ func NewServer(ctrl Controller) (*Server, error) {
 		return nil, fmt.Errorf("mpris: export player: %w", err)
 	}
 
-	emptyMeta := map[string]dbus.Variant{
-		"mpris:trackid": dbus.MakeVariant(noTrackPath),
-	}
-	ro := func(v any) *propSpec { return &propSpec{value: dbus.MakeVariant(v)} }
-	propsSpec := map[string]map[string]*propSpec{
-		mprisRootIface: {
-			"CanQuit":             ro(false),
-			"CanRaise":            ro(false),
-			"HasTrackList":        ro(false),
-			"Identity":            ro("vibez"),
-			"DesktopEntry":        ro(assets.AppID),
-			"SupportedUriSchemes": ro([]string{}),
-			"SupportedMimeTypes":  ro([]string{}),
-		},
-		mprisPlayerIface: {
-			"PlaybackStatus": ro("Stopped"),
-			"LoopStatus": {
-				value:    dbus.MakeVariant("None"),
-				writable: true,
-				onSet: func(v dbus.Variant) *dbus.Error {
-					ls, _ := v.Value().(string)
-					mode := player.RepeatModeOff
-					switch ls {
-					case "Track":
-						mode = player.RepeatModeOne
-					case "Playlist":
-						mode = player.RepeatModeAll
-					}
-					_ = ctrl.SetRepeat(mode)
-					return nil
-				},
-			},
-			"Rate": ro(float64(1)),
-			"Shuffle": {
-				value:    dbus.MakeVariant(false),
-				writable: true,
-				onSet: func(v dbus.Variant) *dbus.Error {
-					on, _ := v.Value().(bool)
-					_ = ctrl.SetShuffle(on)
-					return nil
-				},
-			},
-			"Metadata":      ro(emptyMeta),
-			"Volume":        ro(float64(1)),
-			"Position":      ro(int64(0)),
-			"MinimumRate":   ro(float64(1)),
-			"MaximumRate":   ro(float64(1)),
-			"CanGoNext":     ro(true),
-			"CanGoPrevious": ro(true),
-			"CanPlay":       ro(true),
-			"CanPause":      ro(true),
-			"CanSeek":       ro(true),
-			"CanControl":    ro(true),
-		},
-	}
+	propsSpec := buildPropsSpec(ctrl)
 	props, err := newProperties(conn, mprisObjectPath, propsSpec)
 	if err != nil {
 		_ = conn.Close()
@@ -281,6 +247,74 @@ func NewServer(ctrl Controller) (*Server, error) {
 	}
 
 	return srv, nil
+}
+
+func buildPropsSpec(ctrl Controller) map[string]map[string]*propSpec {
+	emptyMeta := map[string]dbus.Variant{
+		"mpris:trackid": dbus.MakeVariant(noTrackPath),
+	}
+	ro := func(v any) *propSpec { return &propSpec{value: dbus.MakeVariant(v)} }
+	return map[string]map[string]*propSpec{
+		mprisRootIface: {
+			"CanQuit":             ro(false),
+			"CanRaise":            ro(false),
+			"HasTrackList":        ro(false),
+			"Identity":            ro("vibez"),
+			"DesktopEntry":        ro(assets.AppID),
+			"SupportedUriSchemes": ro([]string{}),
+			"SupportedMimeTypes":  ro([]string{}),
+		},
+		mprisPlayerIface: {
+			"PlaybackStatus": ro("Stopped"),
+			"LoopStatus": {
+				value:    dbus.MakeVariant("None"),
+				writable: true,
+				onSet: func(v dbus.Variant) *dbus.Error {
+					ls, ok := v.Value().(string)
+					if !ok {
+						return dbus.MakeFailedError(fmt.Errorf("mpris: invalid LoopStatus type"))
+					}
+					var mode int
+					switch ls {
+					case "None":
+						mode = player.RepeatModeOff
+					case "Track":
+						mode = player.RepeatModeOne
+					case "Playlist":
+						mode = player.RepeatModeAll
+					default:
+						return dbus.MakeFailedError(fmt.Errorf("mpris: unsupported LoopStatus %q", provider.Clean(ls)))
+					}
+					_ = ctrl.SetRepeat(mode)
+					return nil
+				},
+			},
+			"Rate": ro(float64(1)),
+			"Shuffle": {
+				value:    dbus.MakeVariant(false),
+				writable: true,
+				onSet: func(v dbus.Variant) *dbus.Error {
+					on, ok := v.Value().(bool)
+					if !ok {
+						return dbus.MakeFailedError(fmt.Errorf("mpris: invalid Shuffle type"))
+					}
+					_ = ctrl.SetShuffle(on)
+					return nil
+				},
+			},
+			"Metadata":      ro(emptyMeta),
+			"Volume":        ro(float64(1)),
+			"Position":      ro(int64(0)),
+			"MinimumRate":   ro(float64(1)),
+			"MaximumRate":   ro(float64(1)),
+			"CanGoNext":     ro(true),
+			"CanGoPrevious": ro(true),
+			"CanPlay":       ro(true),
+			"CanPause":      ro(true),
+			"CanSeek":       ro(true),
+			"CanControl":    ro(true),
+		},
+	}
 }
 
 // ── State update ──────────────────────────────────────────────────────────

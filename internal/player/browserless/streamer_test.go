@@ -432,3 +432,78 @@ func TestFetchSegmentWithRetry_LongRawUploadBypasses64MBLimit(t *testing.T) {
 		t.Errorf("len(data) = %d, want 100", len(data))
 	}
 }
+
+func TestStreamSecurityHelpers(t *testing.T) {
+	if _, err := NewStreamServer(nil, nil); err == nil {
+		t.Error("NewStreamServer(nil, nil) succeeded, want error")
+	}
+
+	if got, err := resolveUpstreamURL("https://cdn.example.com/dir/prog.m3u8", "seg1.mp4"); err != nil || got != "https://cdn.example.com/dir/seg1.mp4" {
+		t.Errorf("resolveUpstreamURL valid = (%q, %v), want https://cdn.example.com/dir/seg1.mp4", got, err)
+	}
+	for _, badRef := range []string{
+		"http://insecure.example.com/seg.mp4",
+		"https://user:pass@cdn.example.com/seg.mp4",
+		"https://cdn.example.com/seg\n.mp4",
+	} {
+		if _, err := resolveUpstreamURL("https://cdn.example.com/prog.m3u8", badRef); err == nil {
+			t.Errorf("resolveUpstreamURL(%q) succeeded, want error", badRef)
+		}
+	}
+
+	if length, offset, ok := parseByteRangeAttr("1024@512", false, 0); !ok || length != 1024 || offset != 512 {
+		t.Errorf("parseByteRangeAttr valid = (%d, %d, %v), want (1024, 512, true)", length, offset, ok)
+	}
+	for _, badSpec := range []string{
+		"0@0",
+		"-5@0",
+		"10@-1",
+		"9223372036854775807@1", // overflow length + offset
+		"10@notanint",
+	} {
+		if _, _, ok := parseByteRangeAttr(badSpec, false, 0); ok {
+			t.Errorf("parseByteRangeAttr(%q) = true, want false", badSpec)
+		}
+	}
+
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {trackID: "123", segments: []segmentRef{{uri: "seg0.mp4"}}},
+		},
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/stream/s1/tok.aac", nil)
+	postReq.RemoteAddr = "127.0.0.1:40000"
+	postRec := httptest.NewRecorder()
+	s.handleStream(postRec, postReq)
+	if postRec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST status = %d, want 405", postRec.Code)
+	}
+
+	headReq := httptest.NewRequest(http.MethodHead, "http://127.0.0.1/stream/s1/tok.aac", nil)
+	headReq.RemoteAddr = "127.0.0.1:40000"
+	headRec := httptest.NewRecorder()
+	s.handleStream(headRec, headReq)
+	if headRec.Code != http.StatusOK || headRec.Body.Len() != 0 {
+		t.Errorf("HEAD status=%d bodyLen=%d, want 200 and empty body", headRec.Code, headRec.Body.Len())
+	}
+}
+
+func FuzzParseByteRange(f *testing.F) {
+	f.Add("1024@512", false, int64(0))
+	f.Add("1024", true, int64(2048))
+	f.Add("9223372036854775807@10", false, int64(0))
+	f.Add("-1@0", false, int64(0))
+	f.Fuzz(func(t *testing.T, spec string, hasDefault bool, defaultOffset int64) {
+		length, offset, ok := parseByteRangeAttr(spec, hasDefault, defaultOffset)
+		if ok {
+			if length <= 0 || offset < 0 {
+				t.Errorf("invalid range accepted: length=%d offset=%d", length, offset)
+			}
+			if offset > (1<<63-1)-length {
+				t.Errorf("overflowing range accepted: length=%d offset=%d", length, offset)
+			}
+		}
+	})
+}

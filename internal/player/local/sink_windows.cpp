@@ -49,8 +49,8 @@ F symbol(HMODULE mod, const char* name) {
 const MfApi* mfApi() {
     static MfApi api;
     static const bool ok = [] {
-        HMODULE plat = LoadLibraryW(L"mfplat.dll");
-        HMODULE rw = LoadLibraryW(L"mfreadwrite.dll");
+        HMODULE plat = LoadLibraryExW(L"mfplat.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        HMODULE rw = LoadLibraryExW(L"mfreadwrite.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!plat || !rw) return false;
         api.startup = symbol<decltype(api.startup)>(plat, "MFStartup");
         api.shutdown = symbol<decltype(api.shutdown)>(plat, "MFShutdown");
@@ -79,7 +79,7 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
             active = false;
             return;
         }
@@ -149,6 +149,7 @@ struct OpenResult {
 };
 
 std::wstring widen(const char* utf8) {
+    if (!utf8 || utf8[0] == '\0') return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
     if (n <= 0) return L"";
     std::wstring out(static_cast<size_t>(n), L'\0');
@@ -252,7 +253,8 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     if (FAILED(hr)) return failOpen(formatHr("no audio stream found", hr));
 
     Com<IMFMediaType> want;
-    mf.createMediaType(&want);
+    hr = mf.createMediaType(&want);
+    if (FAILED(hr) || !want.p) return failOpen(formatHr("cannot create media type", hr));
     want->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     want->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
     want->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
@@ -271,12 +273,20 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     const uint32_t rate = wfx->nSamplesPerSec;
     const int channels = wfx->nChannels;
     const bool pcm16 = wfx->wBitsPerSample == 16 && wfx->wFormatTag == WAVE_FORMAT_PCM;
+    if (rate == 0 || channels <= 0 || channels > 8) {
+        CoTaskMemFree(wfx);
+        return failOpen("unsupported audio format");
+    }
     ses->sampleRate = rate;
     ses->bytesPerSec = wfx->nAvgBytesPerSec;
     const double dur = readDuration(reader.p);
     ses->durationSec = dur;
 
     HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!ev) {
+        CoTaskMemFree(wfx);
+        return failOpen(formatHr("cannot create audio event", HRESULT_FROM_WIN32(GetLastError())));
+    }
     HWAVEOUT hwo = nullptr;
     MMRESULT mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
     CoTaskMemFree(wfx);
@@ -305,8 +315,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     for (;;) {
         if (ses->cancel) break;
 
-        const double seekSec = ses->seekTarget.exchange(-1.0);
+        double seekSec = ses->seekTarget.exchange(-1.0);
         if (seekSec >= 0.0) {
+            if (std::isnan(seekSec) || std::isinf(seekSec)) seekSec = 0.0;
+            if (seekSec > 1e8) seekSec = 1e8;
             {
                 std::lock_guard<std::mutex> lk(ses->mu);
                 waveOutReset(hwo);
@@ -419,8 +431,12 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         b.hdr.lpData = b.data.data();
         b.hdr.dwBufferLength = static_cast<DWORD>(b.data.size());
         b.hdr.dwFlags = 0;
-        if (waveOutPrepareHeader(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR ||
-            waveOutWrite(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+        if (waveOutPrepareHeader(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+            reportError(sink, ses, "audio output failed");
+            break;
+        }
+        if (waveOutWrite(hwo, &b.hdr, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+            waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
             reportError(sink, ses, "audio output failed");
             break;
         }
@@ -564,7 +580,8 @@ void vibez_localsink_seek(vibez_localsink_t handle, double seconds) {
         ses = sink->cur;
     }
     if (!ses) return;
-    if (seconds < 0.0) seconds = 0.0;
+    if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
+    if (seconds > 1e8) seconds = 1e8;
     ses->seekTarget = seconds;
     ses->baseSec = seconds;
     std::lock_guard<std::mutex> lk(ses->mu);
@@ -575,7 +592,7 @@ void vibez_localsink_seek(vibez_localsink_t handle, double seconds) {
 void vibez_localsink_set_volume(vibez_localsink_t handle, double volume) {
     Sink* sink = sinkOf(handle);
     if (!sink) return;
-    if (volume < 0.0) volume = 0.0;
+    if (std::isnan(volume) || volume < 0.0) volume = 0.0;
     if (volume > 1.0) volume = 1.0;
     sink->volume = volume;
 }
@@ -587,6 +604,7 @@ void vibez_localsink_set_eq(vibez_localsink_t handle, const double* gains_db, in
         std::lock_guard<std::mutex> lk(sink->mu);
         for (int i = 0; i < kBands; ++i) {
             double g = (gains_db && i < count) ? gains_db[i] : 0.0;
+            if (std::isnan(g) || std::isinf(g)) g = 0.0;
             if (g > 24.0) g = 24.0;
             if (g < -24.0) g = -24.0;
             sink->eq[i] = g;

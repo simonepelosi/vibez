@@ -5,6 +5,7 @@ package mpris
 import (
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1079,4 +1080,46 @@ func TestServer_GetAllDuringFlushIsRaceFree(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+func TestMPRISPlayer_CloseIdempotentAndClosesSubscribers(t *testing.T) {
+	p := &MPRISPlayer{done: make(chan struct{})}
+	sub1 := p.Subscribe()
+	sub2 := p.Subscribe()
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("first Close() = %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
+
+	if _, ok := <-sub1; ok {
+		t.Error("sub1 not closed after Close()")
+	}
+	if _, ok := <-sub2; ok {
+		t.Error("sub2 not closed after Close()")
+	}
+
+	subAfter := p.Subscribe()
+	if _, ok := <-subAfter; ok {
+		t.Error("Subscribe after Close() returned open channel, want closed")
+	}
+}
+
+func TestParseMetadataMap_SanitizesControlAndBiDi(t *testing.T) {
+	meta := map[string]dbus.Variant{
+		"xesam:title":  dbus.MakeVariant("Song\x1b[31m\u202e\x07"),
+		"xesam:album":  dbus.MakeVariant("Album\r\nName"),
+		"xesam:artist": dbus.MakeVariant([]string{"Art\u202aist", "Band\x1b]0;pwn\x07"}),
+		"mpris:length": dbus.MakeVariant(int64(-500)),
+	}
+	track := parseMetadataMap(meta)
+	if strings.ContainsAny(track.Title+track.Album+track.Artist, "\x1b\x07\r\n") ||
+		strings.ContainsAny(track.Title+track.Album+track.Artist, "\u202a\u202e") {
+		t.Errorf("unsanitized metadata fields: %+v", track)
+	}
+	if track.Duration != 0 {
+		t.Errorf("negative mpris:length produced Duration = %v, want 0", track.Duration)
+	}
 }
