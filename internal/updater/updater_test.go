@@ -723,6 +723,7 @@ const updaterHelperEnv = "VIBEZ_TEST_UPDATER_HELPER"
 // copy has exited.
 func TestInstallBinary_ReplacesARunningBinary(t *testing.T) {
 	if os.Getenv(updaterHelperEnv) == "run" {
+		_, _ = os.Stdout.WriteString("ready\n")
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		return
 	}
@@ -748,8 +749,18 @@ func TestInstallBinary_ReplacesARunningBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stdout, err := running.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := running.Start(); err != nil {
 		t.Fatal(err)
+	}
+	readyBuf := make([]byte, len("ready\n"))
+	if _, err := io.ReadFull(stdout, readyBuf); err != nil {
+		_ = stdin.Close()
+		_ = running.Wait()
+		t.Fatalf("waiting for helper readiness: %v", err)
 	}
 	installErr := installBinary(exe, []byte("new binary"))
 	_ = stdin.Close()
