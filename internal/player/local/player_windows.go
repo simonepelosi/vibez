@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,14 +38,15 @@ const maxEQGain = 12.0
 // the reply to a command and as an asynchronous event. Gen names the track it
 // describes (0 when none is loaded) and Seq orders snapshots across both paths.
 type snapshot struct {
-	Gen      uint64
-	Seq      uint64
-	Kind     string // event type ("ended", "error", "timeupdate", ...); empty in command replies
-	Playing  bool
-	Loading  bool
-	Position float64 // seconds
-	Duration float64 // seconds; 0 until known
-	Error    string  // why the command or the decoder failed
+	Gen          uint64
+	Seq          uint64
+	Kind         string // event type ("ended", "error", "timeupdate", ...); empty in command replies
+	Playing      bool
+	Loading      bool
+	Position     float64 // seconds
+	Duration     float64 // seconds; 0 until known
+	Error        string  // why the command or the decoder failed
+	SampleFormat string  // negotiated PCM sample layout ("F32", "S24", "S32", "S16")
 }
 
 // engine runs commands on the native Windows audio sink. A command that fails
@@ -60,28 +62,31 @@ type engine interface {
 type Player struct {
 	eng   engine
 	bcast player.Broadcast
+	onLog func(string)
 
 	cmdMu sync.Mutex
 	mu    sync.Mutex
 
-	library map[string]provider.Track // registered tracks by ID
-	q       queue
-	state   player.State // Error and Logs are never stored, only sent
-	gen     uint64       // generation of the loaded track; 0 when none is
-	lastGen uint64
-	seq     uint64 // newest engine snapshot applied
-	ended   bool   // the loaded track finished with nothing queued after it
-	eq      []any  // equalizer bands awaiting applyEqualizer
-	eqDirty bool
-	closed  bool
+	library   map[string]provider.Track // registered tracks by ID
+	q         queue
+	state     player.State // Error and Logs are never stored, only sent
+	gen       uint64       // generation of the loaded track; 0 when none is
+	lastGen   uint64
+	seq       uint64 // newest engine snapshot applied
+	sampleFmt string // negotiated PCM layout of the active stream
+	ended     bool   // the loaded track finished with nothing queued after it
+	eq        []any  // equalizer bands awaiting applyEqualizer
+	eqDirty   bool
+	closed    bool
 
 	closeOnce sync.Once
 }
 
 // New starts a native Windows audio engine for local playback. Nothing plays
 // until the queue is loaded and started.
-func New(_ func(string)) (*Player, error) {
+func New(onLog func(string)) (*Player, error) {
 	p := newPlayer()
+	p.onLog = onLog
 	eng, err := openNativeEngine(p)
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
@@ -531,11 +536,20 @@ func (p *Player) loadCurrent(autoplay bool) error {
 	if snap.Error != "" {
 		return fmt.Errorf("local player: cannot play %q: %s", t.Title, snap.Error)
 	}
+	if p.onLog != nil && snap.SampleFormat != "" {
+		p.onLog(fmt.Sprintf("[local] audio output: %s (%s)", snap.SampleFormat, filepath.Base(path)))
+	}
 	return nil
 }
 
 // command runs method on the loaded track and applies the engine's reply. The
 // caller holds cmdMu.
+func (p *Player) sampleFormat() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sampleFmt
+}
+
 func (p *Player) command(method string, args ...any) error {
 	p.mu.Lock()
 	gen := p.gen
@@ -557,6 +571,7 @@ func (p *Player) unload() error {
 	p.mu.Lock()
 	loaded := p.gen != 0
 	p.gen = 0
+	p.sampleFmt = ""
 	p.ended = false
 	p.state.Track = nil
 	p.state.Playing = false
@@ -606,6 +621,9 @@ func (p *Player) applyLocked(snap snapshot) bool {
 		return false
 	}
 	p.seq = snap.Seq
+	if snap.SampleFormat != "" {
+		p.sampleFmt = snap.SampleFormat
+	}
 	p.state.Playing = snap.Playing
 	p.state.Loading = snap.Loading
 	p.state.Position = seconds(snap.Position)
