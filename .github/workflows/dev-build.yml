@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number to build (leave empty to build from main)"
+        description: "PR number to build (same-repo trusted PR only; leave empty to build from main)"
         required: false
         type: string
 
 permissions:
   contents: read
-  pull-requests: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -32,22 +31,54 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ github.event.inputs.pr_number }}
+          DEFAULT_SHA: ${{ github.sha }}
+          DEFAULT_REF: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          set -euo pipefail
           if [ -z "$PR_NUM" ]; then
-            echo "is_pr=false" >> "$GITHUB_OUTPUT"
-            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-            echo "ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-            echo "version=dev-main-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
-            echo "name_suffix=dev-main" >> "$GITHUB_OUTPUT"
+            short_sha=$(printf '%s' "$DEFAULT_SHA" | cut -c1-7)
+            {
+              echo "is_pr=false"
+              echo "sha=$DEFAULT_SHA"
+              echo "ref=$DEFAULT_REF"
+              echo "version=dev-main-$short_sha"
+              echo "name_suffix=dev-main"
+            } >> "$GITHUB_OUTPUT"
           else
-            PR_DATA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUM --jq '{head_sha: .head.sha, head_ref: .head.ref, title: .title}')
-            SHA=$(echo "$PR_DATA" | jq -r .head_sha)
-            echo "is_pr=true" >> "$GITHUB_OUTPUT"
-            echo "pr_num=$PR_NUM" >> "$GITHUB_OUTPUT"
-            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-            echo "ref=$(echo "$PR_DATA" | jq -r .head_ref)" >> "$GITHUB_OUTPUT"
-            echo "version=dev-pr${PR_NUM}-$(echo $SHA | cut -c1-7)" >> "$GITHUB_OUTPUT"
-            echo "name_suffix=dev-pr${PR_NUM}" >> "$GITHUB_OUTPUT"
+            if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]]; then
+              echo "::error::Invalid PR number: must be digits only"
+              exit 1
+            fi
+            PR_DATA=$(gh api "repos/${GH_REPO}/pulls/${PR_NUM}" --jq '{head_sha: .head.sha, head_ref: .head.ref, head_repo: (.head.repo.full_name // ""), assoc: .author_association}')
+            HEAD_REPO=$(printf '%s' "$PR_DATA" | jq -r .head_repo)
+            ASSOC=$(printf '%s' "$PR_DATA" | jq -r .assoc)
+            if [ "$HEAD_REPO" != "$GH_REPO" ]; then
+              echo "::error::Refusing to run secret-bearing CGO build on fork PR (${HEAD_REPO})"
+              exit 1
+            fi
+            case "$ASSOC" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *)
+                echo "::error::Refusing dev build for untrusted author association (${ASSOC})"
+                exit 1
+                ;;
+            esac
+            SHA=$(printf '%s' "$PR_DATA" | jq -r .head_sha)
+            REF=$(printf '%s' "$PR_DATA" | jq -r .head_ref)
+            if ! [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::Unexpected head SHA format"
+              exit 1
+            fi
+            short_sha=$(printf '%s' "$SHA" | cut -c1-7)
+            {
+              echo "is_pr=true"
+              echo "pr_num=$PR_NUM"
+              echo "sha=$SHA"
+              printf 'ref<<__EOF__\n%s\n__EOF__\n' "$REF"
+              echo "version=dev-pr${PR_NUM}-${short_sha}"
+              echo "name_suffix=dev-pr${PR_NUM}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
   build-linux-windows:
@@ -56,14 +87,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.setup.outputs.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26"
+          go-version: '1.26.x'
           cache: true
 
       - name: Check token broker configuration
@@ -79,17 +110,19 @@ jobs:
 
       - name: Build (linux/amd64)
         env:
+          BUILD_VERSION: ${{ needs.setup.outputs.version }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "1"
           GOTOOLCHAIN: local
         run: |
-          go build -o vibez-linux-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ needs.setup.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
+          go build -mod=readonly -o vibez-linux-amd64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${BUILD_VERSION}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${VIBEZ_TOKEN_URL}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${VIBEZ_CLIENT_KEY}'" \
             .
 
       - name: Build (windows/amd64)
         env:
+          BUILD_VERSION: ${{ needs.setup.outputs.version }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           # cgo: the native engine needs MinGW (a C++ CDM bridge and a Media Foundation sink).
@@ -100,19 +133,19 @@ jobs:
           GOOS: windows
           GOARCH: amd64
         run: |
-          go build -o vibez-windows-amd64.exe \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ needs.setup.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
+          go build -mod=readonly -o vibez-windows-amd64.exe \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${BUILD_VERSION}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${VIBEZ_TOKEN_URL}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${VIBEZ_CLIENT_KEY}'" \
             .
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vibez-${{ needs.setup.outputs.name_suffix }}-linux-amd64
           path: vibez-linux-amd64
           retention-days: 14
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vibez-${{ needs.setup.outputs.name_suffix }}-windows-amd64
           path: vibez-windows-amd64.exe
@@ -124,14 +157,14 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.setup.outputs.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26"
+          go-version: '1.26.x'
           cache: true
 
       - name: Check token broker configuration
@@ -144,6 +177,7 @@ jobs:
 
       - name: Build (darwin/arm64)
         env:
+          BUILD_VERSION: ${{ needs.setup.outputs.version }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "1"
@@ -151,12 +185,13 @@ jobs:
           GOARCH: arm64
           GOTOOLCHAIN: local
         run: |
-          go build -o vibez-darwin-arm64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ needs.setup.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
+          go build -mod=readonly -o vibez-darwin-arm64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${BUILD_VERSION}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${VIBEZ_TOKEN_URL}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${VIBEZ_CLIENT_KEY}'" \
             .
 
       - name: Build (darwin/amd64)
         env:
+          BUILD_VERSION: ${{ needs.setup.outputs.version }}
           VIBEZ_TOKEN_URL: ${{ vars.VIBEZ_TOKEN_URL }}
           VIBEZ_CLIENT_KEY: ${{ secrets.VIBEZ_CLIENT_KEY }}
           CGO_ENABLED: "1"
@@ -169,19 +204,19 @@ jobs:
           CGO_LDFLAGS: "-arch x86_64"
           GOTOOLCHAIN: local
         run: |
-          go build -o vibez-darwin-amd64 \
-            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${{ needs.setup.outputs.version }}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${{ env.VIBEZ_TOKEN_URL }}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${{ env.VIBEZ_CLIENT_KEY }}'" \
+          go build -mod=readonly -o vibez-darwin-amd64 \
+            -ldflags "-s -w -X 'github.com/simone-vibes/vibez/internal/version.Version=${BUILD_VERSION}' -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=${VIBEZ_TOKEN_URL}' -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=${VIBEZ_CLIENT_KEY}'" \
             .
 
       - name: Upload Darwin AMD64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vibez-${{ needs.setup.outputs.name_suffix }}-darwin-amd64
           path: vibez-darwin-amd64
           retention-days: 14
 
       - name: Upload Darwin ARM64 artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vibez-${{ needs.setup.outputs.name_suffix }}-darwin-arm64
           path: vibez-darwin-arm64
@@ -191,6 +226,9 @@ jobs:
     name: notify
     needs: [setup, build-linux-windows, build-darwin]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     if: needs.setup.outputs.is_pr == 'true'
     steps:
       - name: Comment on PR
@@ -198,14 +236,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR_NUM: ${{ needs.setup.outputs.pr_num }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BUILD_VERSION: ${{ needs.setup.outputs.version }}
+          NAME_SUFFIX: ${{ needs.setup.outputs.name_suffix }}
+          BUILD_SHA: ${{ needs.setup.outputs.sha }}
         run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh pr comment "$PR_NUM" --body "🎵 **Dev builds ready** — [\`${{ needs.setup.outputs.version }}\`]($RUN_URL)
+          BODY="🎵 **Dev builds ready** — [\`${BUILD_VERSION}\`](${RUN_URL})
 
-          **Download:** Go to the [workflow run]($RUN_URL) → Artifacts:
-          - \`vibez-${{ needs.setup.outputs.name_suffix }}-linux-amd64\`
-          - \`vibez-${{ needs.setup.outputs.name_suffix }}-darwin-amd64\`
-          - \`vibez-${{ needs.setup.outputs.name_suffix }}-darwin-arm64\` (for Apple Silicon Macs)
-          - \`vibez-${{ needs.setup.outputs.name_suffix }}-windows-amd64\` (native Windows)
+          **Download:** Go to the [workflow run](${RUN_URL}) → Artifacts:
+          - \`vibez-${NAME_SUFFIX}-linux-amd64\`
+          - \`vibez-${NAME_SUFFIX}-darwin-amd64\`
+          - \`vibez-${NAME_SUFFIX}-darwin-arm64\` (for Apple Silicon Macs)
+          - \`vibez-${NAME_SUFFIX}-windows-amd64\` (native Windows)
 
-          <sub>Built from ${{ needs.setup.outputs.sha }} • expires in 14 days</sub>"
+          <sub>Built from ${BUILD_SHA} • expires in 14 days</sub>"
+          gh pr comment "$PR_NUM" --repo "$GH_REPO" --body "$BODY"

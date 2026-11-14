@@ -24,15 +24,15 @@ repos:
         pass_filenames: false
 
       - id: go-mod-tidy
-        name: go mod tidy
+        name: go mod tidy & verify
         language: system
-        entry: bash -c 'go mod tidy && git diff --exit-code go.sum go.mod'
+        entry: bash -c 'go mod verify && go mod tidy && git diff --exit-code go.sum go.mod'
         types: [go]
         pass_filenames: false
 
   # ── golangci-lint (includes gosec + all security linters) ─────────────────
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.11.4
+    rev: 8f3b0c7ed018e57905fbd873c697e0b1ede605a5  # v2.11.4
     hooks:
       - id: golangci-lint
         name: golangci-lint
@@ -53,7 +53,7 @@ repos:
 
   # ── General file hygiene ───────────────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
     hooks:
       - id: trailing-whitespace
         exclude: "\\.(md)$"
