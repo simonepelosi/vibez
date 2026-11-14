@@ -312,3 +312,54 @@ func TestBrokerToken_SingleAttemptWhenFallingBackToValidCache(t *testing.T) {
 		t.Errorf("missing fallback log in %v", logs)
 	}
 }
+
+func TestBrokerTokenWithOptions_AsyncRefreshDoesNotBlockStartup(t *testing.T) {
+	now := time.Now()
+	const initialJWT = "cached.jwt.initial" //nolint:gosec // G101: test value
+	const freshJWT = "fresh.jwt.refreshed"  //nolint:gosec // G101: test value
+
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"` + freshJWT + `","expires_at":` + itoa(now.Add(7*24*time.Hour).Unix()) + `}`))
+	}))
+	defer srv.Close()
+
+	cache := filepath.Join(t.TempDir(), "devtoken.json")
+	if err := writeCache(cache, cachedToken{
+		Token:     initialJWT,
+		ExpiresAt: now.Add(time.Hour).Unix(), // inside 72h refreshBefore, above 5m safety margin
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tok, done, err := brokerTokenWithOptions(srv.URL, "k", cache, now, true)
+	if err != nil {
+		t.Fatalf("brokerTokenWithOptions failed: %v", err)
+	}
+	if tok != initialJWT {
+		t.Errorf("got token %q, want %q", tok, initialJWT)
+	}
+
+	select {
+	case <-done:
+		t.Fatal("background refresh completed before broker was released")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for background refresh")
+	}
+
+	updated, err := readCache(cache)
+	if err != nil {
+		t.Fatalf("readCache after refresh: %v", err)
+	}
+	if updated.Token != freshJWT {
+		t.Errorf("updated cache token = %q, want %q", updated.Token, freshJWT)
+	}
+}

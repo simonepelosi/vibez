@@ -2,11 +2,15 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
+
+var probeHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 const (
 	// storefrontURL needs both a developer token and a Music User Token, so a
@@ -64,7 +68,11 @@ func CheckTokens(devToken, userToken string) (TokenStatus, string) {
 // checkTokens is the testable core of CheckTokens. It takes both URLs
 // explicitly so tests can point them at an httptest server.
 func checkTokens(userURL, devURL, devToken, userToken string) (TokenStatus, string) {
-	if devToken == "" {
+	return checkTokensAt(userURL, devURL, devToken, userToken, time.Now())
+}
+
+func checkTokensAt(userURL, devURL, devToken, userToken string, now time.Time) (TokenStatus, string) {
+	if devToken == "" || jwtExpired(devToken, now) {
 		return DeveloperTokenRejected, ""
 	}
 	if userToken == "" {
@@ -119,7 +127,7 @@ func probe(url, devToken, userToken string) (probeResult, string) {
 		req.Header.Set("Music-User-Token", userToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := probeHTTPClient.Do(req)
 	if err != nil {
 		return probeInconclusive, ""
 	}
@@ -150,4 +158,25 @@ func firstResourceID(r io.Reader) string {
 		return ""
 	}
 	return body.Data[0].ID
+}
+
+// jwtExpired reports whether tok is a 3-segment base64url JWT whose numeric
+// "exp" claim is at or before now. Non-JWT or unreadable payloads return false
+// so callers fall back to the network probe.
+func jwtExpired(tok string, now time.Time) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 || parts[1] == "" {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp *int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
+		return false
+	}
+	return now.Unix() >= *claims.Exp
 }

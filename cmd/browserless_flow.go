@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/auth"
@@ -27,9 +28,26 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	var stopRPC func()
 
 	go func() {
-		if exe := updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
-			prog.Send(tui.InitStatusMsg(msg))
-		}); exe != "" {
+		var (
+			exe        string
+			authStatus = auth.TokensValid
+			sf         string
+			wg         sync.WaitGroup
+		)
+		wg.Go(func() {
+			exe = updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
+				prog.Send(tui.InitStatusMsg(msg))
+			})
+		})
+		if cfg.AppleUserToken != "" {
+			prog.Send(tui.InitStatusMsg("Checking Apple Music session..."))
+			wg.Go(func() {
+				authStatus, sf = auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken)
+			})
+		}
+		wg.Wait()
+
+		if exe != "" {
 			restartExe <- exe
 			prog.Send(tui.RestartMsg{})
 			return
@@ -37,8 +55,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 		devTokenRejected := false
 		if cfg.AppleUserToken != "" {
-			prog.Send(tui.InitStatusMsg("Checking Apple Music session..."))
-			switch status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); status {
+			switch authStatus {
 			case auth.UserTokenRejected:
 				prog.Send(tui.InitStatusMsg("Session expired - re-authenticating..."))
 				cfg.AppleUserToken = ""
@@ -65,17 +82,24 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			}
 		}
 
+		tuiAuthLog := func(msg string) {
+			prog.Send(tui.InitStatusMsg(msg))
+			prog.Send(tui.DebugLogMsg("[auth] " + msg))
+		}
+
 		if cfg.AppleUserToken == "" {
 			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music..."))
-			if err := auth.Login(cfg); err != nil {
+			if err := auth.LoginWithLogger(cfg, tuiAuthLog); err != nil {
 				prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
 				return
 			}
 			if onUserToken != nil {
 				onUserToken(cfg.AppleUserToken)
 			}
-			if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" && onStorefront != nil {
-				onStorefront(sf)
+			if cfg.StoreFront == "" && onStorefront != nil {
+				if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" {
+					onStorefront(sf)
+				}
 			}
 		}
 
@@ -96,15 +120,12 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		blPlayer.OnSessionExpired = func() {
 			prog.Send(tui.SessionExpiredMsg{})
 			go func() {
-				if err := auth.Login(cfg); err != nil {
+				if err := auth.LoginWithLogger(cfg, tuiAuthLog); err != nil {
 					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
 					return
 				}
 				if onUserToken != nil {
 					onUserToken(cfg.AppleUserToken)
-				}
-				if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" && onStorefront != nil {
-					onStorefront(sf)
 				}
 				blPlayer.ResetSessionExpired()
 				prog.Send(tui.SessionRestoredMsg{})

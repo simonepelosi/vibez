@@ -61,7 +61,15 @@ var (
 	retryBackoff   = 300 * time.Millisecond //nolint:gochecknoglobals // modified in tests
 	brokerLogsMu   sync.Mutex               //nolint:gochecknoglobals
 	lastBrokerLogs []string                 //nolint:gochecknoglobals
+	// brokerHTTPClient is shared across broker requests so retries and refreshes
+	// reuse connections without following redirects (which must never carry clientKey).
+	brokerHTTPClient = &http.Client{
+		Timeout:       30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 )
+
+const asyncRefreshMinMargin = 5 * time.Minute
 
 func logBroker(msg string) {
 	brokerLogsMu.Lock()
@@ -96,31 +104,52 @@ func ApplyEmbedded(cfg *config.Config) {
 	_ = ResolveDeveloperToken(cfg)
 }
 
+func closedChan() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
 // ResolveDeveloperToken is ApplyEmbedded with the failure reason. A broker
 // error is returned only when no usable token was found; a fetch that failed
 // but left a still-valid cached token succeeds.
 func ResolveDeveloperToken(cfg *config.Config) error {
+	done, err := resolveDeveloperToken(cfg, false)
+	<-done
+	return err
+}
+
+// ResolveDeveloperTokenAsync resolves the developer token immediately when
+// possible and, when a still-usable cached token is within the proactive
+// refresh window (with at least 5 minutes left), returns it without blocking
+// startup while refreshing the on-disk cache in a background goroutine.
+// The returned channel closes once any background refresh finishes.
+func ResolveDeveloperTokenAsync(cfg *config.Config) (<-chan struct{}, error) {
+	return resolveDeveloperToken(cfg, true)
+}
+
+func resolveDeveloperToken(cfg *config.Config, allowAsyncRefresh bool) (<-chan struct{}, error) {
 	resetBrokerLogs()
 	if devToken != "" {
 		logBroker("[broker] using build-time embedded developer token")
 		cfg.AppleDeveloperToken = devToken
-		return nil
+		return closedChan(), nil
 	}
 	if tokenURL == "" {
 		if cfg.AppleDeveloperToken != "" {
 			logBroker("[broker] using developer token from config file")
 		}
-		return nil
+		return closedChan(), nil
 	}
-	tok, err := brokerToken(tokenURL, clientKey, cachePath(), time.Now())
+	tok, done, err := brokerTokenWithOptions(tokenURL, clientKey, cachePath(), time.Now(), allowAsyncRefresh)
 	if err != nil {
 		if cfg.AppleDeveloperToken != "" {
 			logBroker(fmt.Sprintf("[broker] falling back to configured apple_developer_token after broker error: %v", err))
 		}
-		return err
+		return done, err
 	}
 	cfg.AppleDeveloperToken = tok
-	return nil
+	return done, nil
 }
 
 type cachedToken struct {
@@ -167,11 +196,33 @@ func isPermanentError(err error) bool {
 // time left, otherwise from the broker. If the broker is unreachable it falls
 // back to a cached token that has not yet expired.
 func brokerToken(endpoint, key, cache string, now time.Time) (string, error) {
+	tok, done, err := brokerTokenWithOptions(endpoint, key, cache, now, false)
+	<-done
+	return tok, err
+}
+
+func brokerTokenWithOptions(endpoint, key, cache string, now time.Time, allowAsyncRefresh bool) (string, <-chan struct{}, error) {
 	cached, _ := readCache(cache)
 	if cached.validFor(now, refreshBefore) {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] using cached developer token (valid for %v)", remaining))
-		return cached.Token, nil
+		return cached.Token, closedChan(), nil
+	}
+
+	if allowAsyncRefresh && cached.validFor(now, asyncRefreshMinMargin) {
+		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
+		logBroker(fmt.Sprintf("[broker] using cached developer token (valid for %v); refreshing in background", remaining))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			fetched, err := fetchTokenWithTimeout(endpoint, key, now, refreshTimeout)
+			if err != nil {
+				logBroker(fmt.Sprintf("[broker] background refresh failed: %v", err))
+				return
+			}
+			_ = writeCache(cache, fetched)
+		}()
+		return cached.Token, done, nil
 	}
 
 	hasFallback := cached.validFor(now, 0)
@@ -200,17 +251,17 @@ func brokerToken(endpoint, key, cache string, now time.Time) (string, error) {
 		validity := time.Unix(fetched.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] fresh developer token received (valid for %v)", validity))
 		_ = writeCache(cache, fetched)
-		return fetched.Token, nil
+		return fetched.Token, closedChan(), nil
 	}
 
 	if hasFallback {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] fetch failed, falling back to unexpired cached token (valid for %v)", remaining))
-		return cached.Token, nil
+		return cached.Token, closedChan(), nil
 	}
 
 	logBroker(fmt.Sprintf("[broker] all fetch attempts failed and no valid cache available: %v", err))
-	return "", fmt.Errorf("fetching developer token from broker: %w", err)
+	return "", closedChan(), fmt.Errorf("fetching developer token from broker: %w", err)
 }
 
 func fetchTokenWithRetry(endpoint, key string, now time.Time) (cachedToken, error) {
@@ -262,11 +313,7 @@ func fetchTokenWithTimeout(endpoint, key string, now time.Time, timeout time.Dur
 	req.Header.Set("X-Vibez-Client", key)
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{
-		Timeout:       timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	resp, err := client.Do(req)
+	resp, err := brokerHTTPClient.Do(req)
 	if err != nil {
 		return cachedToken{}, err
 	}
