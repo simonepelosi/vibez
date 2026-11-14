@@ -18,19 +18,23 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"net"
 	"net/http"
 	urlpkg "net/url"
 	"os"
 	"strings"
+	"syscall"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 )
 
 const (
-	MaxArtworkWidth  = 4096
-	MaxArtworkHeight = 4096
-	MaxArtworkPixels = 16_000_000
+	MaxArtworkWidth       = 4096
+	MaxArtworkHeight      = 4096
+	MaxArtworkPixels      = 16_000_000
+	defaultMaxDecodeBytes = 32 << 20
 )
 
 // upperHalfBlock fills the top half of a cell; the bottom half shows through
@@ -51,15 +55,62 @@ func SupportsColor() bool {
 	return colorprofile.Detect(os.Stdout, os.Environ()) >= colorprofile.ANSI256
 }
 
+func isUnsafeIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+// NewSafeHTTPClient returns an HTTP client for fetching external artwork that
+// refuses dialing loopback, private, link-local, or multicast IP addresses and
+// blocks HTTPS-to-HTTP downgrades or userinfo in redirects.
+func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if isUnsafeIP(net.ParseIP(host)) {
+				return fmt.Errorf("fetch artwork: refusing connection to non-public address")
+			}
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext:         dialer.DialContext,
+			TLSHandshakeTimeout: timeout,
+			MaxIdleConnsPerHost: 4,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("fetch artwork: stopped after 5 redirects")
+			}
+			if req.URL.User != nil {
+				return fmt.Errorf("fetch artwork: refusing redirect with userinfo")
+			}
+			if req.URL.Scheme != "https" && req.URL.Scheme != "http" {
+				return fmt.Errorf("fetch artwork: refusing redirect to scheme %q", req.URL.Scheme)
+			}
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+				return fmt.Errorf("fetch artwork: refusing HTTPS-to-HTTP redirect downgrade")
+			}
+			return nil
+		},
+	}
+}
+
+// Decode decodes an artwork image after validating stream size and dimensions.
 func Decode(r io.Reader) (image.Image, error) {
-	if r == nil {
-		return nil, fmt.Errorf("decode artwork: nil reader")
-	}
-	img, _, err := image.Decode(r)
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
+	return decodeBounded(r, defaultMaxDecodeBytes)
 }
 
 func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxBytes int64) (image.Image, error) {
@@ -72,6 +123,11 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if maxBytes <= 0 {
 		return nil, fmt.Errorf("fetch artwork: non-positive max bytes %d", maxBytes)
 	}
+	for i := 0; i < len(url); i++ {
+		if url[i] < 0x20 || url[i] == 0x7f {
+			return nil, fmt.Errorf("fetch artwork: URL contains control characters")
+		}
+	}
 
 	parsed, err := urlpkg.Parse(url)
 	if err != nil {
@@ -79,6 +135,9 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	}
 	switch parsed.Scheme {
 	case "http", "https":
+		if parsed.User != nil || parsed.Hostname() == "" {
+			return nil, fmt.Errorf("fetch artwork: invalid URL authority")
+		}
 	case "data":
 		return decodeDataURL(url, maxBytes)
 	case "":
@@ -153,7 +212,11 @@ func decodeBounded(r io.Reader, maxBytes int64) (image.Image, error) {
 	if cfg.Width > MaxArtworkPixels/cfg.Height {
 		return nil, fmt.Errorf("decode artwork: pixels %dx%d exceed max %d", cfg.Width, cfg.Height, MaxArtworkPixels)
 	}
-	return Decode(bytes.NewReader(buf))
+	img, _, err := image.Decode(bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	return img, nil
 }
 
 // RenderHalfBlocks converts img into exactly size.Height strings, each of

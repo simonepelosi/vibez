@@ -563,7 +563,7 @@ func (m *LibraryModel) View() string {
 		return header + "\n\n  " + m.spinner.View() + " " + m.loadingText()
 	}
 	if m.loadErr != nil && m.pane != paneSections {
-		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load: "+m.loadErr.Error()), m.width)
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load: "+provider.Clean(m.loadErr.Error())), m.width)
 	}
 	if len(m.list.Items()) == 0 {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render(m.emptyText()), m.width)
@@ -582,7 +582,7 @@ func (m *LibraryModel) renderDrillView() string {
 		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"
 	}
 	if m.drillErr != nil {
-		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load tracks: "+m.drillErr.Error()), m.width)
+		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load tracks: "+provider.Clean(m.drillErr.Error())), m.width)
 	}
 	if len(m.drillTracks) == 0 {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("No tracks found"), m.width)

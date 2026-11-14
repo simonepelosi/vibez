@@ -24,7 +24,7 @@ func TestParseLRCStripsControlSequences(t *testing.T) {
 			t.Errorf("line %q still carries a control or override character", l.Text)
 		}
 	}
-	if lines[0].Text != "hello [2Jworld]0;pwned" {
+	if lines[0].Text != "hello world" {
 		t.Errorf("line 0 = %q", lines[0].Text)
 	}
 }
@@ -128,4 +128,48 @@ func TestFetchFallsBackToSearchOn404(t *testing.T) {
 	if !res.Synced || len(res.Lines) != 1 || res.Lines[0].Text != "Like the legend of the phoenix" {
 		t.Errorf("unexpected result: %+v", res)
 	}
+}
+
+func TestParseLRCTimestamp_RejectsNegativeAndOverflow(t *testing.T) {
+	for _, bad := range []string{"-01:00", "01:-10", "01:60", "9999999999:00", "01:00.-5", "01:00.", "abc:00"} {
+		if _, err := parseLRCTimestamp(bad); err == nil {
+			t.Errorf("parseLRCTimestamp(%q) succeeded, want error", bad)
+		}
+	}
+	d, err := parseLRCTimestamp("02:05.5")
+	if err != nil || d != 2*time.Minute+5500*time.Millisecond {
+		t.Errorf("parseLRCTimestamp(02:05.5) = %v, %v", d, err)
+	}
+}
+
+func TestFetch_RejectsRemoteHTTPAndRedirects(t *testing.T) {
+	c := NewClient()
+	c.baseURL = "http://lrclib.example"
+	if _, err := c.Fetch(context.Background(), "a", "b", "", 0); err == nil {
+		t.Fatal("expected error for remote non-HTTPS baseURL")
+	}
+
+	redirTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer redirTarget.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirTarget.URL+"/steal", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c2 := NewClient()
+	c2.baseURL = srv.URL
+	if _, err := c2.Fetch(context.Background(), "a", "b", "", 0); err == nil {
+		t.Fatal("expected error on cross-origin redirect")
+	}
+}
+
+func FuzzParseLRC(f *testing.F) {
+	f.Add("[00:01.00] hello\n[9999999999:99.9999] x")
+	f.Add("[01:02.3] <01:02.30>word <99:99.abc>next")
+	f.Fuzz(func(_ *testing.T, s string) {
+		_, _ = parseLRC(s)
+	})
 }

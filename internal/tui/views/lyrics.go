@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/lyrics"
+	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
@@ -53,7 +54,7 @@ func (l *LyricsModel) SetLoading() {
 func (l *LyricsModel) SetLyrics(res *lyrics.Result, err error) {
 	l.loading = false
 	if err != nil {
-		l.errMsg = err.Error()
+		l.errMsg = provider.Clean(err.Error())
 		l.lines = nil
 		return
 	}

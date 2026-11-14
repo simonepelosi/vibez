@@ -460,3 +460,44 @@ func TestSetSongRating_RetriesPutOn429And503WithRewoundBody(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateResourceID(t *testing.T) {
+	for _, good := range []string{"12345", "i.AbCdEf123", "pl.u-XYZ_9", "vibez:favorites"} {
+		if err := validateResourceID(good); err != nil {
+			t.Errorf("validateResourceID(%q) = %v, want nil", good, err)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "../songs", "a/b", `a\b`, "a?b=1", "a#frag", "a%2fb", "a\x00b", "a b", strings.Repeat("x", 300)} {
+		if err := validateResourceID(bad); err == nil {
+			t.Errorf("validateResourceID(%q) = nil, want error", bad)
+		}
+	}
+}
+
+func TestArtworkAttrsFormatted_Validation(t *testing.T) {
+	if got := (artworkAttrs{URL: "https://is1-ssl.mzstatic.com/image/{w}x{h}bb.jpg"}).formatted(300); got != "https://is1-ssl.mzstatic.com/image/300x300bb.jpg" {
+		t.Errorf("valid artwork formatted = %q", got)
+	}
+	for _, bad := range []string{
+		"http://is1-ssl.mzstatic.com/a/{w}x{h}.jpg",
+		"javascript:alert(1)",
+		"file:///etc/passwd",
+		"https://user:pass@is1-ssl.mzstatic.com/{w}x{h}.jpg",
+		"https://is1-ssl.mzstatic.com/\x1b[31m{w}x{h}.jpg",
+	} {
+		if got := (artworkAttrs{URL: bad}).formatted(300); got != "" {
+			t.Errorf("artworkAttrs{%q}.formatted() = %q, want empty", bad, got)
+		}
+	}
+}
+
+func TestFormatAPIError_CapsAndSanitizes(t *testing.T) {
+	evil := []byte("\x1b[31m" + strings.Repeat("A", 500) + "\u202e\x07")
+	got := formatAPIError(500, "500 Internal\x1b[2J Error", evil)
+	if strings.ContainsAny(got, "\x1b\x07\u202e") {
+		t.Errorf("formatAPIError leaked control/ANSI/BiDi runes: %q", got)
+	}
+	if len(got) > 350 {
+		t.Errorf("formatAPIError length = %d, expected bounded", len(got))
+	}
+}
