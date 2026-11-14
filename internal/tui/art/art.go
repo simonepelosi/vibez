@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	MaxArtworkWidth  = 4096
-	MaxArtworkHeight = 4096
-	MaxArtworkPixels = 16_000_000
+	MaxArtworkWidth      = 4096
+	MaxArtworkHeight     = 4096
+	MaxArtworkPixels     = 16_000_000
+	MaxDecodedArtworkDim = 256
 )
 
 // upperHalfBlock fills the top half of a cell; the bottom half shows through
@@ -154,7 +155,55 @@ func decodeBounded(r io.Reader, maxBytes int64) (image.Image, error) {
 	if cfg.Width > MaxArtworkPixels/cfg.Height {
 		return nil, fmt.Errorf("decode artwork: pixels %dx%d exceed max %d", cfg.Width, cfg.Height, MaxArtworkPixels)
 	}
-	return Decode(bytes.NewReader(buf))
+	img, err := Decode(bytes.NewReader(buf))
+	if err != nil {
+		return nil, err
+	}
+	return Downsample(img, MaxDecodedArtworkDim), nil
+}
+
+// Downsample scales img down with box averaging so neither dimension exceeds
+// maxDim, returning an *image.RGBA to avoid retaining multi-megabyte backing
+// pixel buffers in memory. Images already within maxDim on both axes are
+// returned unchanged.
+func Downsample(img image.Image, maxDim int) image.Image {
+	if img == nil || maxDim <= 0 {
+		return img
+	}
+	bounds := img.Bounds()
+	w, h := bounds.Dx(), bounds.Dy()
+	if w <= 0 || h <= 0 || (w <= maxDim && h <= maxDim) {
+		return img
+	}
+
+	var dstW, dstH int
+	if w >= h {
+		dstW = maxDim
+		dstH = max(1, (h*maxDim+w/2)/w)
+	} else {
+		dstH = maxDim
+		dstW = max(1, (w*maxDim+h/2)/h)
+	}
+
+	src := newPixelSource(img)
+	var xRangeBuf [256][2]int
+	xRanges := computeXRanges(xRangeBuf[:], dstW, src.srcW)
+	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
+	for dy := range dstH {
+		y0 := (dy * src.srcH) / dstH
+		y1 := max(((dy+1)*src.srcH)/dstH, y0+1)
+		row := dst.Pix[dy*dst.Stride:]
+		for dx := range dstW {
+			xr := xRanges[dx]
+			r, g, b := src.averageBox(xr[0], y0, xr[1], y1)
+			off := dx * 4
+			row[off] = r
+			row[off+1] = g
+			row[off+2] = b
+			row[off+3] = 0xff
+		}
+	}
+	return dst
 }
 
 // RenderHalfBlocks converts img into exactly size.Height strings, each of

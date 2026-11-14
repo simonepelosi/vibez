@@ -202,3 +202,28 @@ func TestRenderHalfBlocks_PixelSourcesAndSubImage(t *testing.T) {
 		t.Fatalf("unexpected SubImage upscale output: %#v", up)
 	}
 }
+
+func TestDecodeBounded_DownsamplesOversizedCoverToMaxDecodedDim(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 1024, 512))
+	for y := range 512 {
+		for x := range 1024 {
+			img.SetNRGBA(x, y, color.NRGBA{R: 120, G: 80, B: 40, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := decodeBounded(bytes.NewReader(buf.Bytes()), 10<<20)
+	if err != nil {
+		t.Fatalf("decodeBounded(1024x512) = %v", err)
+	}
+	b := decoded.Bounds()
+	if b.Dx() != MaxDecodedArtworkDim || b.Dy() != MaxDecodedArtworkDim/2 {
+		t.Fatalf("downsampled bounds = %dx%d, want %dx%d", b.Dx(), b.Dy(), MaxDecodedArtworkDim, MaxDecodedArtworkDim/2)
+	}
+	if _, ok := decoded.(*image.RGBA); !ok {
+		t.Fatalf("downsampled type = %T, want *image.RGBA", decoded)
+	}
+}

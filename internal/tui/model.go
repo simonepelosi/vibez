@@ -146,6 +146,10 @@ type artworkLoadedMsg struct {
 	img image.Image
 	err error
 }
+type artworkPrefetchMsg struct {
+	url string
+	img image.Image
+}
 type searchResultMsg struct {
 	result *provider.SearchResult
 	query  string
@@ -186,6 +190,7 @@ type songRatingMsg struct {
 	trackID   string
 	catalogID string
 	rating    provider.Rating
+	err       error
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -219,6 +224,14 @@ func (c *artworkCache) touchSize(s art.Size) {
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
+type flushVolumeSaveMsg struct{ gen int }
+
+const (
+	maxArtworkLRUCache = 8
+	maxCheckedRatings  = 1024
+	volumeSaveDebounce = 400 * time.Millisecond
+)
+
 type saveAudioQualityMsg struct {
 	kbps      int
 	savedOnly bool
@@ -337,6 +350,8 @@ type Model struct {
 	renderArt        func(image.Image, art.Size) []string // cover renderer, see artRenderer
 	artwork          artworkCache
 	artworkGen       int
+	artworkLRU       map[string]image.Image
+	artworkLRUOrder  []string
 	artHTTP          *http.Client
 	supportsArtColor func() bool
 	artCellAsp       float64          // terminal cell height/width ratio, for square art
@@ -397,7 +412,11 @@ type Model struct {
 
 	// Ratings: love / "Suggest Less" state per track ID (library and catalog),
 	// kept in sync with Apple Music. Missing entries mean RatingNone.
-	ratings map[string]provider.Rating
+	ratings        map[string]provider.Rating
+	checkedRatings map[string]bool
+
+	volSaveGen   int
+	volSaveDirty bool
 
 	// Animation
 	glowStep    int
@@ -426,16 +445,23 @@ type Model struct {
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
+	artTransport := http.DefaultTransport.(*http.Transport).Clone()
+	artTransport.MaxIdleConns = 16
+	artTransport.MaxIdleConnsPerHost = 8
+	artTransport.IdleConnTimeout = 60 * time.Second
+
 	m := &Model{
-		cfg:          cfg,
-		provider:     prov,
-		player:       plyr,
-		activePanel:  -1,
-		memProfiling: opts.MemProfiling,
-		preMuteVol:   -1,
-		artMode:      cfg.AlbumArt,
-		artwork:      artworkCache{rendered: map[art.Size][]string{}},
-		artHTTP:      &http.Client{Timeout: 5 * time.Second},
+		cfg:            cfg,
+		provider:       prov,
+		player:         plyr,
+		activePanel:    -1,
+		memProfiling:   opts.MemProfiling,
+		preMuteVol:     -1,
+		artMode:        cfg.AlbumArt,
+		artwork:        artworkCache{rendered: map[art.Size][]string{}},
+		artworkLRU:     make(map[string]image.Image),
+		artHTTP:        &http.Client{Timeout: 5 * time.Second, Transport: artTransport},
+		checkedRatings: make(map[string]bool),
 		// Album art needs at least a 256-colour terminal to look reasonable;
 		// on 16-colour/ASCII terminals we skip it (and its download) entirely.
 		supportsArtColor: art.SupportsColor,
@@ -713,11 +739,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.artwork = artworkCache{rendered: map[art.Size][]string{}}
 		} else if s.Track.ArtworkURL != m.artwork.url {
 			m.artworkGen++
-			m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
-			// Only download covers while the art view is active; toggling
-			// :art on fetches the current track's cover on demand.
+			if cachedImg, ok := m.getCachedArtwork(s.Track.ArtworkURL); ok {
+				m.artwork = artworkCache{
+					url:      s.Track.ArtworkURL,
+					img:      cachedImg,
+					rendered: map[art.Size][]string{},
+				}
+			} else {
+				m.artwork = artworkCache{url: s.Track.ArtworkURL, rendered: map[art.Size][]string{}}
+				// Only download covers while the art view is active; toggling
+				// :art on fetches the current track's cover on demand.
+				if m.artMode {
+					cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
+				}
+			}
 			if m.artMode {
-				cmds = append(cmds, m.fetchArtworkCmd(s.Track.ArtworkURL, m.artworkGen))
+				if cmd := m.prefetchNextArtworkCmd(s.Track); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 		if s.Track != nil && (m.playerState.Track == nil ||
@@ -736,7 +775,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendLog(pp)
 			// Check whether the new track is already loved or disliked on Apple Music.
-			cmds = append(cmds, m.checkSongRatingCmd(s.Track))
+			if cmd := m.checkSongRatingCmd(s.Track); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			// visible, otherwise mark stale so the fetch is deferred until
 			// the user opens the panel (lazy loading).
 			if id := views.PlaybackID(*s.Track); id != m.lastLyricsTrackID {
@@ -810,14 +851,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[art] artwork unavailable: %v", msg.err))
 			break
 		}
+		m.putCachedArtwork(msg.url, msg.img)
 		m.artwork.img = msg.img
 		m.artwork.failed = false
 		m.artwork.rendered = map[art.Size][]string{}
 		m.artwork.renderedOrder = nil
 
+	case artworkPrefetchMsg:
+		m.putCachedArtwork(msg.url, msg.img)
+
 	case songRatingMsg:
 		// Update rating state to match what Apple Music reports.
 		m.setRating(msg.trackID, msg.catalogID, msg.rating)
+		if msg.err == nil {
+			m.markRatingChecked(msg.trackID, msg.catalogID)
+		}
 	case DebugLogMsg:
 		m.appendLog(string(msg))
 
@@ -1081,6 +1129,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[rating] ✗ %s: %v", msg.title, msg.err))
 		} else {
 			m.setRating(msg.trackID, msg.catalogID, msg.rating)
+			m.markRatingChecked(msg.trackID, msg.catalogID)
 			m.library.m.InvalidateTracksCache()
 			m.appendLog(fmt.Sprintf("[rating] %s %s synced to Apple Music", ratingIcon(msg.rating), msg.title))
 			m.errMsg = ratingStatusMessage(msg.rating, msg.prev, msg.title)
@@ -1254,8 +1303,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case saveVolumeMsg:
 		m.cfg.SetVolume(msg.vol)
-		if err := m.cfg.Save(""); err != nil {
-			m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
+		m.volSaveDirty = true
+		m.volSaveGen++
+		gen := m.volSaveGen
+		cmds = append(cmds, tea.Tick(volumeSaveDebounce, func(time.Time) tea.Msg {
+			return flushVolumeSaveMsg{gen: gen}
+		}))
+
+	case flushVolumeSaveMsg:
+		if msg.gen == m.volSaveGen {
+			m.flushPendingVolumeSave()
 		}
 
 	case saveAudioQualityMsg:
@@ -1324,6 +1381,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(5 * time.Second)
 
 	case RestartMsg:
+		m.flushPendingVolumeSave()
 		return m, tea.Quit
 
 	case tea.PasteMsg:
@@ -1357,6 +1415,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 
 	// ctrl+c always quits
 	if k == "ctrl+c" {
+		m.flushPendingVolumeSave()
 		if m.player != nil {
 			_ = m.player.Close()
 		}
@@ -1712,6 +1771,7 @@ func (m *Model) handleCommandKeyMsg(k string, msg tea.KeyPressMsg) tea.Cmd {
 func (m *Model) executeCommand(cmd string) tea.Cmd {
 	switch {
 	case cmd == "q" || cmd == "quit":
+		m.flushPendingVolumeSave()
 		if m.player != nil {
 			_ = m.player.Close()
 		}
@@ -1911,12 +1971,98 @@ func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	}
 }
 
+func (m *Model) getCachedArtwork(url string) (image.Image, bool) {
+	if url == "" || len(m.artworkLRU) == 0 {
+		return nil, false
+	}
+	img, ok := m.artworkLRU[url]
+	if !ok {
+		return nil, false
+	}
+	n := len(m.artworkLRUOrder)
+	if n > 0 && m.artworkLRUOrder[n-1] != url {
+		for i, u := range m.artworkLRUOrder {
+			if u == url {
+				copy(m.artworkLRUOrder[i:], m.artworkLRUOrder[i+1:])
+				m.artworkLRUOrder[n-1] = url
+				break
+			}
+		}
+	}
+	return img, true
+}
+
+func (m *Model) putCachedArtwork(url string, img image.Image) {
+	if url == "" || img == nil {
+		return
+	}
+	if m.artworkLRU == nil {
+		m.artworkLRU = make(map[string]image.Image, maxArtworkLRUCache)
+	}
+	if _, exists := m.artworkLRU[url]; exists {
+		m.artworkLRU[url] = img
+		_, _ = m.getCachedArtwork(url)
+		return
+	}
+	for len(m.artworkLRUOrder) >= maxArtworkLRUCache {
+		oldest := m.artworkLRUOrder[0]
+		copy(m.artworkLRUOrder, m.artworkLRUOrder[1:])
+		m.artworkLRUOrder = m.artworkLRUOrder[:len(m.artworkLRUOrder)-1]
+		delete(m.artworkLRU, oldest)
+	}
+	m.artworkLRU[url] = img
+	m.artworkLRUOrder = append(m.artworkLRUOrder, url)
+}
+
+func (m *Model) nextQueuedTrack(current *provider.Track) *provider.Track {
+	if current == nil || len(m.queueTracks) < 2 {
+		return nil
+	}
+	curID := views.PlaybackID(*current)
+	for i, t := range m.queueTracks {
+		if views.PlaybackID(t) == curID && i+1 < len(m.queueTracks) {
+			next := m.queueTracks[i+1]
+			return &next
+		}
+	}
+	return nil
+}
+
+func (m *Model) prefetchNextArtworkCmd(current *provider.Track) tea.Cmd {
+	if current == nil || m.supportsArtColor == nil || !m.supportsArtColor() {
+		return nil
+	}
+	next := m.nextQueuedTrack(current)
+	if next == nil || next.ArtworkURL == "" || next.ArtworkURL == current.ArtworkURL {
+		return nil
+	}
+	if _, ok := m.getCachedArtwork(next.ArtworkURL); ok {
+		return nil
+	}
+	url := next.ArtworkURL
+	client := m.artHTTP
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		img, err := art.FetchAndDecode(ctx, client, url, 5<<20)
+		if err != nil {
+			return nil
+		}
+		return artworkPrefetchMsg{url: url, img: img}
+	}
+}
+
 func (m *Model) fetchArtworkCmd(url string, gen int) tea.Cmd {
 	if url == "" || m.supportsArtColor == nil || !m.supportsArtColor() {
 		return nil
 	}
 	if m.artwork.url == url && gen == m.artworkGen && (m.artwork.img != nil || m.artwork.failed) {
 		return nil
+	}
+	if cachedImg, ok := m.getCachedArtwork(url); ok {
+		return func() tea.Msg {
+			return artworkLoadedMsg{url: url, gen: gen, img: cachedImg}
+		}
 	}
 	client := m.artHTTP
 	return func() tea.Msg {
@@ -2883,9 +3029,44 @@ func (m *Model) rateSongCmd(t *provider.Track, rating, prev provider.Rating) tea
 	}
 }
 
+func (m *Model) flushPendingVolumeSave() {
+	if !m.volSaveDirty || m.cfg == nil {
+		return
+	}
+	m.volSaveDirty = false
+	if err := m.cfg.Save(""); err != nil {
+		m.appendLog(fmt.Sprintf("[vol] config save error: %v", err))
+	}
+}
+
+func (m *Model) isRatingChecked(trackID, catalogID string) bool {
+	if len(m.checkedRatings) == 0 {
+		return false
+	}
+	return (trackID != "" && m.checkedRatings[trackID]) || (catalogID != "" && m.checkedRatings[catalogID])
+}
+
+func (m *Model) markRatingChecked(trackID, catalogID string) {
+	if trackID == "" && catalogID == "" {
+		return
+	}
+	if m.checkedRatings == nil {
+		m.checkedRatings = make(map[string]bool)
+	} else if len(m.checkedRatings) >= maxCheckedRatings {
+		clear(m.checkedRatings)
+	}
+	if trackID != "" {
+		m.checkedRatings[trackID] = true
+	}
+	if catalogID != "" {
+		m.checkedRatings[catalogID] = true
+	}
+}
+
 // checkSongRatingCmd fetches the track's rating (loved / disliked / none)
 // from Apple Music and returns a songRatingMsg so the model can update
-// m.ratings accordingly.
+// m.ratings accordingly. Returns nil when the rating is already known for this
+// track in the current session.
 func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 	if m.provider == nil || t == nil {
 		return nil
@@ -2895,12 +3076,15 @@ func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 		catalogID = t.ID
 	}
 	trackID := t.ID
+	if m.trackRating(t) != provider.RatingNone || m.isRatingChecked(trackID, catalogID) {
+		return nil
+	}
 	prov := m.provider
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		rating, _ := prov.GetSongRating(ctx, catalogID)
-		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating}
+		rating, err := prov.GetSongRating(ctx, catalogID)
+		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating, err: err}
 	}
 }
 

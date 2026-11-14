@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -5180,5 +5181,164 @@ func TestModel_GlowTickGatedWhenPaused(t *testing.T) {
 	_, stopCmd := m.Update(glowTickMsg(time.Now()))
 	if stopCmd != nil || m.glowRunning {
 		t.Fatalf("expected glow loop to stop after pause, got cmd=%v glowRunning=%v", stopCmd, m.glowRunning)
+	}
+}
+
+func TestArtworkLRU_ReusesDecodedImageAcrossTracksAndEvictsOldest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testArtworkPNG(t))
+	}))
+	defer server.Close()
+
+	m := newModel(newMockPlayer())
+	m.stateCh = nil
+	m.artMode = true
+	m.supportsArtColor = func() bool { return true }
+
+	urlA := server.URL + "/a.png"
+	urlB := server.URL + "/b.png"
+
+	// Load track A -> HTTP fetch once.
+	_, cmd := m.Update(playerStateMsg{Track: &provider.Track{ID: "tA", Title: "A", ArtworkURL: urlA}})
+	updated, _ := m.Update(runArtworkCommand(t, cmd))
+	m = updated.(*Model)
+
+	// Switch to track B -> HTTP fetch once.
+	_, cmd = m.Update(playerStateMsg{Track: &provider.Track{ID: "tB", Title: "B", ArtworkURL: urlB}})
+	updated, _ = m.Update(runArtworkCommand(t, cmd))
+	m = updated.(*Model)
+
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests after A and B = %d, want 2", got)
+	}
+
+	// Switch back to track A -> served directly from LRU cache with zero HTTP fetches.
+	updated, cmd = m.Update(playerStateMsg{Track: &provider.Track{ID: "tA", Title: "A", ArtworkURL: urlA}})
+	m = updated.(*Model)
+	if cmd != nil {
+		if msg := runArtworkCommand(t, cmd); msg != nil {
+			updated, _ = m.Update(msg)
+			m = updated.(*Model)
+		}
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests after switching back to A = %d, want 2 (cache hit)", got)
+	}
+	if m.artwork.img == nil {
+		t.Fatal("expected cached artwork image to be restored on switch back to A")
+	}
+
+	// Verify LRU capacity eviction past maxArtworkLRUCache (touch urlA first so urlB is oldest).
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	_, _ = m.getCachedArtwork(urlA)
+	for i := range maxArtworkLRUCache {
+		m.putCachedArtwork(server.URL+"/extra-"+string(rune('0'+i))+".png", img)
+	}
+	if len(m.artworkLRU) != maxArtworkLRUCache {
+		t.Fatalf("artworkLRU len = %d, want %d", len(m.artworkLRU), maxArtworkLRUCache)
+	}
+	if _, ok := m.getCachedArtwork(urlB); ok {
+		t.Fatalf("expected least recently used %s to be evicted", urlB)
+	}
+}
+
+type ratingSpyProvider struct {
+	mockProvider
+	calls atomic.Int32
+	err   error
+}
+
+func (p *ratingSpyProvider) GetSongRating(_ context.Context, _ string) (provider.Rating, error) {
+	p.calls.Add(1)
+	return provider.RatingNone, p.err
+}
+
+func TestCheckSongRatingCmd_SkipsAlreadyCheckedTracks(t *testing.T) {
+	spy := &ratingSpyProvider{}
+	m := newModel(nil)
+	m.provider = spy
+	track := &provider.Track{ID: "i.10", CatalogID: "cat.10", Title: "Song"}
+
+	// First check hits provider and marks checked on success.
+	cmd := m.checkSongRatingCmd(track)
+	if cmd == nil {
+		t.Fatal("first checkSongRatingCmd = nil, want non-nil")
+	}
+	updated, _ := m.Update(cmd())
+	m = updated.(*Model)
+	if spy.calls.Load() != 1 {
+		t.Fatalf("GetSongRating calls = %d, want 1", spy.calls.Load())
+	}
+
+	// Subsequent check for the same track skips provider call.
+	if cmd2 := m.checkSongRatingCmd(track); cmd2 != nil {
+		t.Fatal("second checkSongRatingCmd != nil, want nil cache hit")
+	}
+
+	// Transient error must NOT suppress future retries.
+	spy.err = errors.New("timeout")
+	trackErr := &provider.Track{ID: "i.11", CatalogID: "cat.11", Title: "Song 2"}
+	cmdErr := m.checkSongRatingCmd(trackErr)
+	updated, _ = m.Update(cmdErr())
+	m = updated.(*Model)
+	spy.err = nil
+	if retry := m.checkSongRatingCmd(trackErr); retry == nil {
+		t.Fatal("checkSongRatingCmd after error = nil, want retryable")
+	}
+}
+
+func TestVolumeSaveDebounce_FlushesLatestGenAndOnQuit(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	cfg.SetVolume(0.20)
+	if err := cfg.Save(""); err != nil {
+		t.Fatalf("initial cfg.Save: %v", err)
+	}
+
+	m := New(cfg, nil, nil, Options{})
+	updated, _ := m.Update(saveVolumeMsg{vol: 0.45})
+	m = updated.(*Model)
+	gen1 := m.volSaveGen
+	updated, _ = m.Update(saveVolumeMsg{vol: 0.65})
+	m = updated.(*Model)
+	gen2 := m.volSaveGen
+
+	// Stale debounce tick must not write early or clear dirty state.
+	updated, _ = m.Update(flushVolumeSaveMsg{gen: gen1})
+	m = updated.(*Model)
+	if !m.volSaveDirty {
+		t.Fatal("stale flushVolumeSaveMsg cleared volSaveDirty unexpectedly")
+	}
+
+	// Matching debounce tick persists final volume cleanly.
+	updated, _ = m.Update(flushVolumeSaveMsg{gen: gen2})
+	m = updated.(*Model)
+	if m.volSaveDirty {
+		t.Fatal("matching flushVolumeSaveMsg did not clear volSaveDirty")
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cfg: %v", err)
+	}
+	if reloaded.Volume == nil || *reloaded.Volume != 0.65 {
+		t.Fatalf("saved volume = %v, want 0.65", reloaded.Volume)
+	}
+
+	// Quitting while dirty flushes pending volume save synchronously.
+	updated, _ = m.Update(saveVolumeMsg{vol: 0.80})
+	m = updated.(*Model)
+	_ = m.executeCommand("q")
+	reloaded, err = config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cfg after quit: %v", err)
+	}
+	if reloaded.Volume == nil || *reloaded.Volume != 0.80 {
+		t.Fatalf("saved volume after quit = %v, want 0.80", reloaded.Volume)
 	}
 }
