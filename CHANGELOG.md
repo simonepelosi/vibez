@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Hermetic `omp` and local CLI agent adapters + `:vibe` selector for Vibe Mode** — supports invoking installed CLI agents (**🥧 `omp`** in `~/.bun/bin` or `PATH` using its fast `--model=smol` role by default, plus `claude`, `gemini`, `codex`, `copilot`, `opencode`, and `llm`) via explicit opt-in (`:vibe <backend>` or `"vibe_backend": "<cli>"`) in an isolated `0700` temporary directory with tools, extensions, hooks/MCP, and session persistence disabled, while keeping `"auto"` strictly on local HTTP runtimes (`Ollama`, `LM Studio`, custom `vibe_endpoint`) + `KeywordAgent`. Refs #215.
+- **Hermetic `omp` and local CLI agent adapters + `:vibe` selector for Vibe Mode** — supports invoking installed CLI agents (**🥧 `omp`** in `~/.bun/bin` or `PATH` using its configured default model unless overridden, plus `claude`, `gemini`, `codex`, `copilot`, `opencode`, and `llm`) via explicit opt-in (`:vibe <backend>` or `"vibe_backend": "<cli>"`) in an isolated `0700` temporary directory with tools, extensions, hooks/MCP, and session persistence disabled, while keeping `"auto"` strictly on local HTTP runtimes (`Ollama`, `LM Studio`, custom `vibe_endpoint`) + `KeywordAgent`. Refs #215.
 
 ### Fixed
 - **"Suggest Less" feedback and auto-skip** — pressing `x` (and `f`) now displays an immediate confirmation in the status bar across both standard and `:art` views (`✓ ⊘ Suggest Less`, `✓ ♥ Favorited`), and automatically advances to the next track (`p.Next()`) once Apple Music persists a `RatingDisliked` rating for the currently playing track. Refs #216.

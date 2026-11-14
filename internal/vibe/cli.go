@@ -239,10 +239,6 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 
 	switch agent {
 	case "omp":
-		ompModel := model
-		if ompModel == "" {
-			ompModel = "smol"
-		}
 		args = []string{
 			"-p",
 			"--cwd=" + tmpDir,
@@ -254,8 +250,12 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 			"--no-context-files",
 			"--no-title",
 			"--thinking=off",
-			"--model=" + ompModel,
 			"--system-prompt=" + sysPrompt,
+		}
+		// Omit --model when unset so omp uses its configured default; --model is
+		// a fuzzy model-name match rather than the "smol" role.
+		if model != "" {
+			args = append(args, "--model="+model)
 		}
 		return args, userMsg, nil, nil
 
@@ -325,11 +325,10 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 		return args, "", nil, nil
 
 	case "opencode":
+		// cmd.Dir is already set to tmpDir; avoid --pure/--dir which opencode 2.2+ rejects on `run`.
 		args = []string{
 			"run",
 			"--format", "default",
-			"--pure",
-			"--dir", tmpDir,
 		}
 		if model != "" {
 			args = append(args, "--model", model)
