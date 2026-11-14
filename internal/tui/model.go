@@ -1985,7 +1985,13 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		backend := strings.ToLower(fields[0])
 		var modelArg string
 		if len(fields) > 1 {
-			modelArg = strings.Join(fields[1:], " ")
+			validatedModel, err := vibe.ValidateCLIModelName(strings.Join(fields[1:], " "))
+			if err != nil {
+				m.errMsg = fmt.Sprintf(":vibe %v", err)
+				m.errExpiry = time.Now().Add(4 * time.Second)
+				return nil
+			}
+			modelArg = validatedModel
 		}
 		switch backend {
 		case "auto", "ollama", "lmstudio", "llamacpp", "llama.cpp", "llama-server", "openai", "keyword":

@@ -5385,3 +5385,25 @@ func TestVibeCommand_SelectsOMPAndKeywordBackends(t *testing.T) {
 		t.Errorf("errMsg = %q, want unknown backend error", m.errMsg)
 	}
 }
+
+func TestVibeCommand_RejectsInvalidModelFlags(t *testing.T) {
+	m := newModel(nil)
+	origBackend := m.cfg.VibeBackend
+	origModel := m.cfg.VibeModel
+
+	for _, cmdStr := range []string{
+		"vibe omp --tools=bash",
+		"vibe ollama qwen;id",
+		"vibe claude model with spaces",
+	} {
+		if cmd := m.executeCommand(cmdStr); cmd != nil {
+			t.Errorf("%q returned non-nil cmd, want rejection", cmdStr)
+		}
+		if !strings.Contains(m.errMsg, "invalid model name") {
+			t.Errorf("%q errMsg = %q, want 'invalid model name'", cmdStr, m.errMsg)
+		}
+		if m.cfg.VibeBackend != origBackend || m.cfg.VibeModel != origModel {
+			t.Fatalf("%q mutated cfg to (%q, %q), want (%q, %q)", cmdStr, m.cfg.VibeBackend, m.cfg.VibeModel, origBackend, origModel)
+		}
+	}
+}
