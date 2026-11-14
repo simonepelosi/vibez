@@ -203,3 +203,34 @@ func TestProvider_GetSongRating_ReturnsNone(t *testing.T) {
 		t.Errorf("GetSongRating() = %d, want RatingNone", rating)
 	}
 }
+
+func TestNew_SkipsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideTrack := filepath.Join(outsideDir, "Outside - Album - Secret.mp3")
+	if err := os.WriteFile(outsideTrack, []byte{}, 0o600); err != nil {
+		t.Fatalf("write outside track: %v", err)
+	}
+	insideTrack := filepath.Join(dir, "Inside - Album - Song.mp3")
+	if err := os.WriteFile(insideTrack, []byte{}, 0o600); err != nil {
+		t.Fatalf("write inside track: %v", err)
+	}
+	linkFile := filepath.Join(dir, "Symlink - Album - Linked.mp3")
+	if err := os.Symlink(outsideTrack, linkFile); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	p, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 1 {
+		t.Fatalf("len(tracks) = %d, want 1 (symlink should be skipped)", len(tracks))
+	}
+	if !strings.Contains(tracks[0].Title, "Song") {
+		t.Errorf("tracks[0].Title = %q, want Song", tracks[0].Title)
+	}
+}

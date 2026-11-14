@@ -180,7 +180,7 @@ func (s *Service) ensureConnected() error {
 		}
 		if err := json.Unmarshal(payload, &resp); err == nil {
 			if resp.Evt == "ERROR" {
-				s.log(fmt.Sprintf("%s error (%d): %s", resp.Cmd, resp.Data.Code, resp.Data.Message))
+				s.log(fmt.Sprintf("%s error (%d): %s", sanitizeIPCPreview([]byte(resp.Cmd)), resp.Data.Code, sanitizeIPCPreview([]byte(resp.Data.Message))))
 			}
 		}
 	})

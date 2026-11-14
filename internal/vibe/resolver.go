@@ -116,7 +116,7 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 
 	seedCount := len(tracks)
 
-	// 2. If we still have room, run SearchQueries in parallel to fill the queue.
+	// 2. If we still have room, run SearchQueries in bounded parallel workers.
 	if len(tracks) < maxTracks && len(plan.SearchQueries) > 0 {
 		type queryOut struct {
 			tracks   []provider.Track
@@ -124,10 +124,13 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 			err      error
 		}
 		chs := make([]chan queryOut, len(plan.SearchQueries))
+		sem := make(chan struct{}, maxResolveWorkers)
 		for i, q := range plan.SearchQueries {
 			ch := make(chan queryOut, 1)
 			chs[i] = ch
 			go func(term string, out chan queryOut) {
+				sem <- struct{}{}
+				defer func() { <-sem }()
 				res, err := prov.Search(ctx, term)
 				if err != nil || res == nil {
 					out <- queryOut{err: err}
@@ -140,9 +143,11 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 		for _, ch := range chs {
 			r := <-ch
 			if r.err != nil {
-				reasons = append(reasons, r.err.Error())
+				reasons = append(reasons, sanitizeVibeText(r.err.Error()))
 			}
-			reasons = append(reasons, r.warnings...)
+			for _, w := range r.warnings {
+				reasons = append(reasons, sanitizeVibeText(w))
+			}
 			fallbackPool = append(fallbackPool, r.tracks...)
 		}
 		if !plan.Ordered {
