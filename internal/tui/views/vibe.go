@@ -320,6 +320,10 @@ func similarityBar(similarity float64, barWidth int) (string, string) {
 }
 
 // Lines returns the vibe panel content as exactly h lines each visually ≤ w chars wide.
+func (v *VibeModel) IsAnimating() bool {
+	return v.state == vibeSearching || (v.state == vibeDiscovery && v.discovery.Refilling)
+}
+
 func (v *VibeModel) Lines(w, h, step int) []string {
 	accent := styles.NowPlayingArtist
 	muted := styles.QueueItemMuted

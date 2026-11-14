@@ -201,6 +201,21 @@ type artworkCache struct {
 	failed        bool
 }
 
+func (c *artworkCache) touchSize(s art.Size) {
+	n := len(c.renderedOrder)
+	if n > 0 && c.renderedOrder[n-1] == s {
+		return
+	}
+	for i, existing := range c.renderedOrder {
+		if existing == s {
+			copy(c.renderedOrder[i:], c.renderedOrder[i+1:])
+			c.renderedOrder[n-1] = s
+			return
+		}
+	}
+	c.renderedOrder = append(c.renderedOrder, s)
+}
+
 // saveVolumeMsg is returned by volume-change commands to persist the new
 // volume to the config file.
 type saveVolumeMsg struct{ vol float64 }
@@ -385,9 +400,10 @@ type Model struct {
 	ratings map[string]provider.Rating
 
 	// Animation
-	glowStep   int
-	introStep  int    // introDone (-1) when complete
-	initStatus string // status text shown on the loading screen
+	glowStep    int
+	glowRunning bool
+	introStep   int    // introDone (-1) when complete
+	initStatus  string // status text shown on the loading screen
 
 	// Memory profiling (enabled with --mem-profiling)
 	memProfiling bool
@@ -471,9 +487,9 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 func (m *Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		tick(),
-		glowTick(),
 		introTick(),
 	}
+	m.ensureGlow(&cmds)
 	if m.provider != nil {
 		cmds = append(cmds, m.library.Init())
 	}
@@ -513,6 +529,17 @@ func tick() tea.Cmd {
 
 func glowTick() tea.Cmd {
 	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg { return glowTickMsg(t) })
+}
+
+func (m *Model) shouldGlow() bool {
+	return m.introStep != introDone || m.playerState.Playing || m.playerState.Loading || m.vibe.IsAnimating()
+}
+
+func (m *Model) ensureGlow(cmds *[]tea.Cmd) {
+	if !m.glowRunning && m.shouldGlow() {
+		m.glowRunning = true
+		*cmds = append(*cmds, glowTick())
+	}
 }
 
 func introTick() tea.Cmd {
@@ -585,7 +612,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case glowTickMsg:
 		m.glowStep++
-		cmds = append(cmds, glowTick())
+		if m.shouldGlow() {
+			m.glowRunning = true
+			cmds = append(cmds, glowTick())
+		} else {
+			m.glowRunning = false
+		}
 
 	case introTickMsg:
 		if m.introStep != introDone {
@@ -756,6 +788,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.runRadioSearch())
 		}
 		m.playerState = s
+		m.ensureGlow(&cmds)
 		if !wasPlaying && m.playerState.Playing {
 			m.appendLog("[player] playing")
 		} else if wasPlaying && !m.playerState.Playing && !m.playerState.Loading {
@@ -862,6 +895,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case views.VibeQueryMsg:
 		// User submitted a vibe description — start async provider search.
 		m.vibe.SetSearching()
+		m.ensureGlow(&cmds)
 		cmds = append(cmds, m.runVibeSearch(msg.Query))
 
 	case views.DiscoveryMetricSelectedMsg:
@@ -3676,12 +3710,15 @@ func (m *Model) nowPlayingArtLines(contentW, h int) []string {
 		m.artwork.rendered = map[art.Size][]string{}
 	}
 	artLines := m.artwork.rendered[size]
-	if artLines == nil && m.artwork.img != nil {
+	if artLines != nil {
+		m.artwork.touchSize(size)
+	} else if m.artwork.img != nil {
 		const maxRenderedArtworkSizes = 16
 		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
 			if len(m.artwork.renderedOrder) > 0 {
 				oldest := m.artwork.renderedOrder[0]
-				m.artwork.renderedOrder = m.artwork.renderedOrder[1:]
+				copy(m.artwork.renderedOrder, m.artwork.renderedOrder[1:])
+				m.artwork.renderedOrder = m.artwork.renderedOrder[:len(m.artwork.renderedOrder)-1]
 				delete(m.artwork.rendered, oldest)
 			} else {
 				m.artwork.rendered = map[art.Size][]string{}
