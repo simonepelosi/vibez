@@ -530,14 +530,14 @@ func (p *Player) loadCurrent(autoplay bool) error {
 	snap, err := p.eng.call("load", path, gen, autoplay)
 	if err != nil {
 		p.stalled(gen)
-		return fmt.Errorf("local player: load %q: %w", t.Title, err)
+		return fmt.Errorf("local player: load %q: %w", provider.Clean(t.Title), err)
 	}
 	p.apply(snap)
 	if snap.Error != "" {
-		return fmt.Errorf("local player: cannot play %q: %s", t.Title, snap.Error)
+		return fmt.Errorf("local player: cannot play %q: %s", provider.Clean(t.Title), provider.Clean(snap.Error))
 	}
 	if p.onLog != nil && snap.SampleFormat != "" {
-		p.onLog(fmt.Sprintf("[local] audio output: %s (%s)", snap.SampleFormat, filepath.Base(path)))
+		p.onLog(fmt.Sprintf("[local] audio output: %s (%s)", provider.Clean(snap.SampleFormat), provider.Clean(filepath.Base(path))))
 	}
 	return nil
 }
@@ -561,7 +561,7 @@ func (p *Player) command(method string, args ...any) error {
 	}
 	p.apply(snap)
 	if snap.Error != "" {
-		return fmt.Errorf("local player: %s: %s", method, snap.Error)
+		return fmt.Errorf("local player: %s: %s", method, provider.Clean(snap.Error))
 	}
 	return nil
 }
@@ -657,7 +657,7 @@ func (p *Player) onEvent(snap snapshot) {
 		if s.Track != nil {
 			title = s.Track.Title
 		}
-		s.Error = fmt.Sprintf("local player: %q: %s", title, snap.Error)
+		s.Error = fmt.Sprintf("local player: %q: %s", provider.Clean(title), provider.Clean(snap.Error))
 		p.bcast.Send(s)
 		return
 	case "ended":

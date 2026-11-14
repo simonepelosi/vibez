@@ -242,17 +242,24 @@ double readFlacStreamInfoDuration(const std::wstring& path) {
                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (f.h == INVALID_HANDLE_VALUE) return 0.0;
+    if (GetFileType(f.h) != FILE_TYPE_DISK) return 0.0;
+
+    LARGE_INTEGER fileSize = {};
+    if (!GetFileSizeEx(f.h, &fileSize) || fileSize.QuadPart < 42) return 0.0;
 
     unsigned char hdr[10] = {};
     if (!readExact(f.h, hdr, 4)) return 0.0;
     // Skip an optional ID3v2 header prepended to the FLAC stream.
+    constexpr LONGLONG kMaxId3Size = 64LL << 20;
     if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
         if (!readExact(f.h, hdr + 4, 6)) return 0.0;
+        if (((hdr[6] | hdr[7] | hdr[8] | hdr[9]) & 0x80) != 0) return 0.0;
         const LONGLONG skip =
-            (static_cast<LONGLONG>(hdr[6] & 0x7F) << 21) |
-            (static_cast<LONGLONG>(hdr[7] & 0x7F) << 14) |
-            (static_cast<LONGLONG>(hdr[8] & 0x7F) << 7) |
-            static_cast<LONGLONG>(hdr[9] & 0x7F);
+            (static_cast<LONGLONG>(hdr[6]) << 21) |
+            (static_cast<LONGLONG>(hdr[7]) << 14) |
+            (static_cast<LONGLONG>(hdr[8]) << 7) |
+            static_cast<LONGLONG>(hdr[9]);
+        if (skip < 0 || skip > kMaxId3Size || skip > fileSize.QuadPart - 14) return 0.0;
         LARGE_INTEGER dist = {};
         dist.QuadPart = skip;
         if (!SetFilePointerEx(f.h, dist, nullptr, FILE_CURRENT) || !readExact(f.h, hdr, 4)) {
