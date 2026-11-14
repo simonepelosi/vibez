@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
@@ -183,5 +184,35 @@ func TestCheckTokens_NoStorefrontFromTiebreakerOrNetworkError(t *testing.T) {
 	}
 	if status, sf := checkTokens(deadURL, dev.URL, "dev", "user"); status != TokensValid || sf != "" {
 		t.Errorf("checkTokens = %v, %q, want TokensValid, \"\"", status, sf)
+	}
+}
+
+func TestProbe_DoesNotFollowRedirects(t *testing.T) {
+	var leaked atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	res, _ := probe(redirector.URL, "secret-dev", "secret-user")
+	if res != probeInconclusive {
+		t.Errorf("probe = %v, want probeInconclusive", res)
+	}
+	if leaked.Load() != 0 {
+		t.Error("credentials leaked to redirect target")
+	}
+}
+
+func TestFirstResourceID_RejectsUnsafeCharacters(t *testing.T) {
+	srv := bodyServer(t, `{"data":[{"id":"us\u001b[31m"}]}`)
+	dev, _ := statusServer(t, http.StatusOK)
+	if _, sf := checkTokens(srv.URL, dev.URL, "dev", "user"); sf != "" {
+		t.Errorf("storefront = %q, want empty for unsafe ID", sf)
 	}
 }

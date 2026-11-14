@@ -312,3 +312,61 @@ func TestBrokerToken_SingleAttemptWhenFallingBackToValidCache(t *testing.T) {
 		t.Errorf("missing fallback log in %v", logs)
 	}
 }
+
+func TestResolveDeveloperToken_DoesNotPersistRuntimeSecretToConfig(t *testing.T) {
+	origDev, origURL, origKey := devToken, tokenURL, clientKey
+	t.Cleanup(func() { devToken, tokenURL, clientKey = origDev, origURL, origKey })
+
+	devToken, tokenURL, clientKey = "emb.header.sig", "", "" //nolint:gosec // G101: test fixture
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := &config.Config{AuthPort: 7777, Provider: "apple", Theme: "default"}
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := ResolveDeveloperToken(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppleDeveloperToken != "emb.header.sig" {
+		t.Fatalf("in-memory token = %q", cfg.AppleDeveloperToken)
+	}
+	if err := cfg.Save(""); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path) //nolint:gosec // temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "emb.header.sig") {
+		t.Fatalf("runtime embedded token leaked into saved config: %s", string(data))
+	}
+}
+
+func TestIsValidJWT_Bounds(t *testing.T) {
+	huge := strings.Repeat("a", maxJWTSize+1) + ".b.c"
+	if isValidJWT(huge) {
+		t.Error("expected oversized JWT to be rejected")
+	}
+}
+
+func TestBrokerLogs_SanitizeEndpointQuery(t *testing.T) {
+	origBackoff := retryBackoff
+	retryBackoff = time.Millisecond
+	t.Cleanup(func() { retryBackoff = origBackoff })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"` + fakeJWT + `","expires_at":` + itoa(time.Now().Add(time.Hour).Unix()) + `}`))
+	}))
+	defer srv.Close()
+
+	resetBrokerLogs()
+	_, err := brokerToken(srv.URL+"/v1/token?secret=leak", "k", filepath.Join(t.TempDir(), "c.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range BrokerLogs() {
+		if strings.Contains(l, "secret=leak") {
+			t.Fatalf("broker log leaked query parameter: %q", l)
+		}
+	}
+}

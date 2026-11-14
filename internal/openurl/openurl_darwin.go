@@ -4,6 +4,14 @@ package openurl
 
 import "os/exec"
 
-func Open(url string) error {
-	return exec.Command("open", url).Start() //nolint:gosec
+func Open(rawURL string) error {
+	if err := validateURL(rawURL); err != nil {
+		return err
+	}
+	cmd := exec.Command("open", "--", rawURL) //nolint:gosec
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

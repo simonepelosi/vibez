@@ -55,6 +55,8 @@ const (
 	maxTokenResponse = 8 << 10
 	// maxFetchAttempts is the maximum number of attempts for cold-start broker requests.
 	maxFetchAttempts = 3
+	// maxJWTSize caps developer token size before splitting or templating.
+	maxJWTSize = 4096
 )
 
 var (
@@ -103,7 +105,7 @@ func ResolveDeveloperToken(cfg *config.Config) error {
 	resetBrokerLogs()
 	if devToken != "" {
 		logBroker("[broker] using build-time embedded developer token")
-		cfg.AppleDeveloperToken = devToken
+		cfg.SetRuntimeDeveloperToken(devToken)
 		return nil
 	}
 	if tokenURL == "" {
@@ -119,7 +121,7 @@ func ResolveDeveloperToken(cfg *config.Config) error {
 		}
 		return err
 	}
-	cfg.AppleDeveloperToken = tok
+	cfg.SetRuntimeDeveloperToken(tok)
 	return nil
 }
 
@@ -132,10 +134,13 @@ func (c cachedToken) validFor(now time.Time, d time.Duration) bool {
 	return isValidJWT(c.Token) && time.Unix(c.ExpiresAt, 0).After(now.Add(d))
 }
 
-// isValidJWT checks that tok has three non-empty base64url segments.
-// Because the developer token is rendered into musickit.html via text/template,
-// restricting it to the base64url alphabet prevents template/JS injection.
+// isValidJWT checks that tok is bounded in size and has three non-empty base64url
+// segments. Because the developer token is rendered into login.html, restricting
+// it to the base64url alphabet prevents template/JS injection.
 func isValidJWT(tok string) bool {
+	if len(tok) > maxJWTSize {
+		return false
+	}
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 {
 		return false
@@ -174,12 +179,13 @@ func brokerToken(endpoint, key, cache string, now time.Time) (string, error) {
 		return cached.Token, nil
 	}
 
+	safeEndpoint := sanitizeURLForLog(endpoint)
 	hasFallback := cached.validFor(now, 0)
 	if hasFallback {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
-		logBroker(fmt.Sprintf("[broker] cached token expiring soon (%v remaining), fetching fresh token from %s", remaining, endpoint))
+		logBroker(fmt.Sprintf("[broker] cached token expiring soon (%v remaining), fetching fresh token from %s", remaining, safeEndpoint))
 	} else {
-		logBroker(fmt.Sprintf("[broker] fetching fresh developer token from %s", endpoint))
+		logBroker(fmt.Sprintf("[broker] fetching fresh developer token from %s", safeEndpoint))
 	}
 
 	var (
@@ -268,7 +274,7 @@ func fetchTokenWithTimeout(endpoint, key string, now time.Time, timeout time.Dur
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return cachedToken{}, err
+		return cachedToken{}, redactURLError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -313,12 +319,37 @@ func cachePath() string {
 	return filepath.Join(d, "vibez", "devtoken.json")
 }
 
+func sanitizeURLForLog(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid-url>"
+	}
+	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: u.Path}).String()
+}
+
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return &url.Error{Op: ue.Op, URL: sanitizeURLForLog(ue.URL), Err: ue.Err}
+	}
+	return err
+}
+
 func readCache(path string) (cachedToken, error) {
 	var c cachedToken
 	if path == "" {
 		return c, errors.New("no cache dir")
 	}
-	b, err := os.ReadFile(path) //nolint:gosec // G304: fixed path under the user cache dir
+	f, err := os.Open(path) //nolint:gosec // G304: fixed path under the user cache dir
+	if err != nil {
+		return c, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return c, errors.New("invalid cache file")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxTokenResponse))
 	if err != nil {
 		return c, err
 	}
