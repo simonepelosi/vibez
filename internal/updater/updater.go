@@ -4,8 +4,11 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,41 +35,101 @@ const (
 	// maxDownloadSize caps the release archive itself; it is compressed, so it
 	// never legitimately exceeds the extracted binary's limit.
 	maxDownloadSize = maxBinarySize
+	// maxArchiveStream caps total uncompressed bytes scanned in a .tar.gz
+	// archive so dummy entries cannot spin gzip decompression without bound.
+	maxArchiveStream = 512 << 20 // 512 MB
+	// maxArchiveEntries caps the number of tar headers scanned in one archive.
+	maxArchiveEntries = 1024
 	// maxMetadataSize caps the release JSON and checksums.txt.
 	maxMetadataSize = 4 << 20
+	// maxSignatureSize caps checksums.txt.sig.
+	maxSignatureSize = 4 << 10
 )
 
-// checkAssetURL accepts only HTTPS URLs on GitHub's own hosts, so a tampered
-// API response cannot point the updater at an arbitrary server, or at plain
-// HTTP, to fetch the binary it is about to install.
+// releasePubKey may hold an Ed25519 public key (hex or base64 encoded) injected
+// via -ldflags at build time to require signed checksums.txt.sig manifests.
+var releasePubKey string //nolint:gochecknoglobals // optionally set via ldflags
+
+func parseReleasePubKey(raw string) (ed25519.PublicKey, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, false, nil
+	}
+	if b, err := hex.DecodeString(trimmed); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), true, nil
+	}
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding} {
+		if b, err := enc.DecodeString(trimmed); err == nil && len(b) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(b), true, nil
+		}
+	}
+	return nil, true, errors.New("invalid embedded release public key")
+}
+
+// checkAPIURL accepts only HTTPS GitHub release API URLs for this repository.
+func checkAPIURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return fmt.Errorf("refusing untrusted API URL %q", raw)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host != "api.github.com" {
+		return fmt.Errorf("refusing API URL on unexpected host %q", host)
+	}
+	if !strings.HasPrefix(u.Path, "/repos/"+repo+"/releases") {
+		return fmt.Errorf("refusing API URL outside repository releases path: %q", u.Path)
+	}
+	return nil
+}
+
+// checkAssetURL accepts only HTTPS release asset URLs belonging to this
+// repository or GitHub's release asset CDN hosts.
 func checkAssetURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
 	}
-	if u.Scheme != "https" {
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
 		return fmt.Errorf("refusing non-https URL %q", raw)
 	}
 	host := strings.ToLower(u.Hostname())
-	if host != "github.com" && !strings.HasSuffix(host, ".githubusercontent.com") {
+	switch host {
+	case "github.com":
+		if !strings.HasPrefix(u.Path, "/"+repo+"/releases/download/") {
+			return fmt.Errorf("refusing GitHub asset URL outside repository releases path: %q", u.Path)
+		}
+		return nil
+	case "objects.githubusercontent.com", "release-assets.githubusercontent.com":
+		return nil
+	default:
 		return fmt.Errorf("refusing URL on unexpected host %q", host)
 	}
-	return nil
 }
 
-// assetURLCheck is indirected so tests can serve assets from httptest servers.
-var assetURLCheck = checkAssetURL
+// apiURLCheck and assetURLCheck are indirected so tests can serve fixtures from
+// loopback httptest servers.
+var (
+	apiURLCheck   = checkAPIURL   //nolint:gochecknoglobals // overridden in tests
+	assetURLCheck = checkAssetURL //nolint:gochecknoglobals // overridden in tests
+)
 
 // newClient returns an HTTP client that applies assetURLCheck to every
 // redirect hop as well as to the first request.
 func newClient(timeout time.Duration) *http.Client {
+	return newClientWithCheck(timeout, assetURLCheck)
+}
+
+func newClientWithCheck(timeout time.Duration, check func(string) error) *http.Client {
 	return &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("stopped after 10 redirects")
 			}
-			return assetURLCheck(req.URL.String())
+			return check(req.URL.String())
 		},
 	}
 }
@@ -185,6 +248,10 @@ func update(api, current string, install bool, log func(string)) Result {
 		return Result{Outcome: OutcomeFailed}
 	}
 
+	if _, ok := parseVersion(rel.TagName); !ok {
+		return Result{Outcome: OutcomeFailed}
+	}
+
 	markChecked()
 
 	if !isNewer(rel.TagName, current) {
@@ -196,13 +263,15 @@ func update(api, current string, install bool, log func(string)) Result {
 	res := Result{Outcome: OutcomeManual, Tag: rel.TagName}
 
 	assetName, binaryName := releaseAsset(runtime.GOOS, runtime.GOARCH)
-	var downloadURL, checksumURL string
+	var downloadURL, checksumURL, sigURL string
 	for _, a := range rel.Assets {
 		switch a.Name {
 		case assetName:
 			downloadURL = a.BrowserDownloadURL
 		case "checksums.txt":
 			checksumURL = a.BrowserDownloadURL
+		case "checksums.txt.sig":
+			sigURL = a.BrowserDownloadURL
 		}
 	}
 	// Checked before install, so a platform with no published asset - today,
@@ -224,6 +293,16 @@ func update(api, current string, install bool, log func(string)) Result {
 	if assetURLCheck(downloadURL) != nil || assetURLCheck(checksumURL) != nil {
 		log("Update aborted: release assets are not on a trusted host")
 		return res
+	}
+	if releasePubKey != "" {
+		if sigURL == "" {
+			log("Update aborted: the release publishes no checksums.txt.sig")
+			return res
+		}
+		if assetURLCheck(sigURL) != nil {
+			log("Update aborted: release signature asset is not on a trusted host")
+			return res
+		}
 	}
 
 	// Only attempt self-update for writable, self-managed installs.
@@ -248,7 +327,7 @@ func update(api, current string, install bool, log func(string)) Result {
 		return res
 	}
 
-	if err := verifyChecksum(archivePath, assetName, checksumURL); err != nil {
+	if err := verifyChecksums(archivePath, assetName, checksumURL, sigURL); err != nil {
 		log("Update aborted: checksum verification failed")
 		_ = os.RemoveAll(tmpDir)
 		return res
@@ -283,8 +362,17 @@ func update(api, current string, install bool, log func(string)) Result {
 }
 
 func fetchLatestRelease(api string) (*ghRelease, error) {
-	client := &http.Client{Timeout: apiTimeout}
-	resp, err := client.Get(api) //nolint:gosec // URL is a hardcoded constant or test server
+	if err := apiURLCheck(api); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, api, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	client := newClientWithCheck(apiTimeout, apiURLCheck)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -300,8 +388,17 @@ func fetchLatestRelease(api string) (*ghRelease, error) {
 }
 
 func downloadFile(rawURL, dst string) error {
+	if err := assetURLCheck(rawURL); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dlTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
+	if err != nil {
+		return err
+	}
 	client := newClient(dlTimeout)
-	resp, err := client.Get(rawURL) //nolint:gosec // URL comes from the GitHub releases API response, checked by assetURLCheck
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -323,19 +420,59 @@ func downloadFile(rawURL, dst string) error {
 	return err
 }
 
-func verifyChecksum(archivePath, assetName, checksumURL string) error {
-	client := newClient(apiTimeout)
-	resp, err := client.Get(checksumURL) //nolint:gosec // URL comes from the GitHub releases API response, checked by assetURLCheck
+func fetchBounded(rawURL string, maxBytes int64) ([]byte, error) {
+	if err := assetURLCheck(rawURL); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	resp, err := newClient(apiTimeout).Do(req)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("checksums: unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("fetch %s: unexpected status %d", rawURL, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetadataSize))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response exceeds %d byte limit", maxBytes)
+	}
+	return data, nil
+}
+
+func verifyChecksum(archivePath, assetName, checksumURL string) error {
+	return verifyChecksums(archivePath, assetName, checksumURL, "")
+}
+
+func verifyChecksums(archivePath, assetName, checksumURL, sigURL string) error {
+	body, err := fetchBounded(checksumURL, maxMetadataSize)
 	if err != nil {
 		return err
+	}
+
+	pubKey, hasKey, err := parseReleasePubKey(releasePubKey)
+	if err != nil {
+		return err
+	}
+	if hasKey {
+		if sigURL == "" {
+			return errors.New("release signature missing")
+		}
+		sig, err := fetchBounded(sigURL, maxSignatureSize)
+		if err != nil {
+			return fmt.Errorf("fetching checksum signature: %w", err)
+		}
+		if len(sig) != ed25519.SignatureSize || !ed25519.Verify(pubKey, body, sig) {
+			return errors.New("checksum signature verification failed")
+		}
 	}
 
 	// checksums.txt format: "<sha256>  <filename>" per line.
@@ -343,12 +480,15 @@ func verifyChecksum(archivePath, assetName, checksumURL string) error {
 	for line := range strings.SplitSeq(string(body), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) == 2 && parts[1] == assetName {
-			expected = parts[0]
+			expected = strings.ToLower(parts[0])
 			break
 		}
 	}
-	if expected == "" {
-		return fmt.Errorf("checksum for %s not found in checksums.txt", assetName)
+	if len(expected) != sha256.Size*2 {
+		return fmt.Errorf("valid checksum for %s not found in checksums.txt", assetName)
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return fmt.Errorf("malformed checksum for %s in checksums.txt", assetName)
 	}
 
 	f, err := os.Open(archivePath) //nolint:gosec // archivePath is a path inside our own tmpDir
@@ -396,8 +536,8 @@ func extractTarGzBinary(tarPath, binaryName, dst string) error {
 		return err
 	}
 	defer func() { _ = gz.Close() }()
-	tr := tar.NewReader(gz)
-	for {
+	tr := tar.NewReader(io.LimitReader(gz, maxArchiveStream))
+	for range maxArchiveEntries {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -406,6 +546,9 @@ func extractTarGzBinary(tarPath, binaryName, dst string) error {
 			return err
 		}
 		if filepath.Base(hdr.Name) == binaryName && hdr.Typeflag == tar.TypeReg {
+			if hdr.Size < 0 || hdr.Size > maxBinarySize {
+				return fmt.Errorf("%s is %d bytes in the archive, over the %d byte limit", hdr.Name, hdr.Size, maxBinarySize)
+			}
 			return writeBinary(dst, tr)
 		}
 	}
@@ -440,16 +583,22 @@ func extractZipBinary(zipPath, binaryName, dst string) error {
 	return fmt.Errorf("binary %q not found in archive", binaryName)
 }
 
-// writeBinary copies r to dst, stopping at maxBinarySize so that no archive
-// can decompress into an unbounded file.
+// writeBinary copies r to dst, rejecting streams exceeding maxBinarySize so
+// that no archive can decompress into an unbounded or silently truncated file.
 func writeBinary(dst string, r io.Reader) error {
 	out, err := os.Create(dst) //nolint:gosec // dst is a path inside our own tmpDir
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, io.LimitReader(r, maxBinarySize))
+	n, copyErr := io.Copy(out, io.LimitReader(r, maxBinarySize+1))
 	if closeErr := out.Close(); closeErr != nil && copyErr == nil {
 		copyErr = closeErr
+	}
+	if copyErr == nil && n > maxBinarySize {
+		copyErr = fmt.Errorf("binary exceeds the %d byte limit", maxBinarySize)
+	}
+	if copyErr != nil {
+		_ = os.Remove(dst)
 	}
 	return copyErr
 }
@@ -485,26 +634,48 @@ func canReplace(exe string) bool {
 	return true
 }
 
-// installBinary puts data in place of exe. It is written out beside exe first,
-// so exe is never left half-written and the swap is a rename within one
+// installBinary puts data in place of exe. It is written out via an
+// unpredictable O_CREATE|O_EXCL temp file beside exe first, so pre-planted
+// symlinks cannot hijack the write and the swap is a rename within one
 // directory: a plain rename over exe, or on Windows, which will not replace a
 // running executable, replaceRunningExe.
 func installBinary(exe string, data []byte) error {
-	staged := exe + ".new"
-	if err := os.WriteFile(staged, data, 0o755); err != nil { //nolint:gosec // executable permissions required
-		_ = os.Remove(staged)
+	f, err := os.CreateTemp(filepath.Dir(exe), filepath.Base(exe)+".*.new")
+	if err != nil {
 		return err
 	}
-	var err error
+	staged := f.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(staged)
+		}
+	}()
+	if err := f.Chmod(0o755); err != nil { //nolint:gosec // executable permissions required
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	if runtime.GOOS == "windows" {
 		err = replaceRunningExe(staged, exe)
 	} else {
 		err = rename(staged, exe)
 	}
 	if err != nil {
-		_ = os.Remove(staged)
+		return err
 	}
-	return err
+	cleanup = false
+	return nil
 }
 
 // replaceRunningExe moves staged to exe while exe may be running. Windows
@@ -566,12 +737,15 @@ func removeAside(exe string) {
 	}
 }
 
-// isNewer reports whether latestTag represents a higher version than currentTag.
-// Both may carry a leading "v". Uses integer comparison per component so that
-// e.g. 0.0.10 > 0.0.9 is handled correctly.
+// isNewer reports whether latestTag represents a higher stable version than
+// currentTag. Both may carry a leading "v". Rejects prereleases, malformed
+// strings, and versions containing non-digit components.
 func isNewer(latestTag, currentTag string) bool {
-	l := parseVersion(strings.TrimPrefix(latestTag, "v"))
-	c := parseVersion(strings.TrimPrefix(currentTag, "v"))
+	l, okL := parseVersion(latestTag)
+	c, okC := parseVersion(currentTag)
+	if !okL || !okC {
+		return false
+	}
 	for i := range l {
 		if l[i] != c[i] {
 			return l[i] > c[i]
@@ -580,16 +754,32 @@ func isNewer(latestTag, currentTag string) bool {
 	return false
 }
 
-func parseVersion(v string) [3]int {
-	parts := strings.SplitN(v, ".", 3)
+func parseVersion(tag string) ([3]int, bool) {
 	var r [3]int
-	for i, p := range parts {
-		if i >= 3 {
-			break
-		}
-		r[i], _ = strconv.Atoi(p) //nolint:gosec // i is always < 3: SplitN cap + guard above
+	v := strings.TrimPrefix(tag, "v")
+	if v == "" || len(v) > 32 {
+		return r, false
 	}
-	return r
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return r, false
+	}
+	for i, p := range parts {
+		if p == "" {
+			return r, false
+		}
+		for j := 0; j < len(p); j++ {
+			if p[j] < '0' || p[j] > '9' {
+				return r, false
+			}
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return r, false
+		}
+		r[i] = n
+	}
+	return r, true
 }
 
 func cacheDir() string {

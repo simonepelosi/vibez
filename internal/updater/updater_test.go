@@ -5,6 +5,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -36,6 +38,9 @@ func TestIsNewer(t *testing.T) {
 		{"v0.1.0", "v0.0.9", true},   // minor bump
 		{"0.0.10", "0.0.9", true},    // no leading v
 		{"v0.0.9", "v0.0.10", false}, // current is newer
+		{"v2.0.0-rc1", "v1.0.0", false},
+		{"v2.0.0\x1b[31m", "v1.0.0", false},
+		{"v2.0", "v1.0.0", false},
 	}
 	for _, tc := range cases {
 		got := isNewer(tc.latest, tc.current)
@@ -825,7 +830,34 @@ func TestAdvice(t *testing.T) {
 // The fixtures serve assets from loopback HTTP, which the real policy refuses,
 // so the tests that exercise the update flow run with it relaxed. The policy
 // itself is covered by TestCheckAssetURL, which calls it directly.
-func init() { assetURLCheck = func(string) error { return nil } }
+func init() {
+	apiURLCheck = func(string) error { return nil }
+	assetURLCheck = func(string) error { return nil }
+}
+
+func TestCheckAPIURL(t *testing.T) {
+	good := []string{
+		"https://api.github.com/repos/simonepelosi/vibez/releases/latest",
+		"https://api.github.com/repos/simonepelosi/vibez/releases/tags/v1.0.0",
+	}
+	bad := []string{
+		"http://api.github.com/repos/simonepelosi/vibez/releases/latest",
+		"https://api.github.com/repos/attacker/vibez/releases/latest",
+		"https://api.github.com:8443/repos/simonepelosi/vibez/releases/latest",
+		"https://user@api.github.com/repos/simonepelosi/vibez/releases/latest",
+		"https://evil.example/repos/simonepelosi/vibez/releases/latest",
+	}
+	for _, u := range good {
+		if err := checkAPIURL(u); err != nil {
+			t.Errorf("checkAPIURL(%q) = %v, want ok", u, err)
+		}
+	}
+	for _, u := range bad {
+		if err := checkAPIURL(u); err == nil {
+			t.Errorf("checkAPIURL(%q) accepted, want refused", u)
+		}
+	}
+}
 
 func TestCheckAssetURL(t *testing.T) {
 	good := []string{
@@ -835,6 +867,10 @@ func TestCheckAssetURL(t *testing.T) {
 	}
 	bad := []string{
 		"http://github.com/simonepelosi/vibez/releases/download/v1/x.tar.gz",
+		"https://github.com/attacker/vibez/releases/download/v1/x.tar.gz",
+		"https://raw.githubusercontent.com/simonepelosi/vibez/main/x",
+		"https://user@github.com/simonepelosi/vibez/releases/download/v1/x.tar.gz",
+		"https://github.com:8443/simonepelosi/vibez/releases/download/v1/x.tar.gz",
 		"https://evil.example/vibez.tar.gz",
 		"https://github.com.evil.example/x",
 		"https://githubusercontent.com.evil.example/x",
@@ -940,4 +976,102 @@ func TestUpdate_UntrustedAssetHostInstallsNothing(t *testing.T) {
 	if got := readFile(t, exe); got != "old binary" {
 		t.Errorf("binary was installed from an untrusted host: %q", got)
 	}
+}
+
+func TestUpdate_UntrustedAPIHostFails(t *testing.T) {
+	isolateCache(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(ghRelease{TagName: "v2.0.0"})
+	}))
+	defer srv.Close()
+
+	orig := apiURLCheck
+	apiURLCheck = checkAPIURL
+	t.Cleanup(func() { apiURLCheck = orig })
+
+	if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %v, want OutcomeFailed", got.Outcome)
+	}
+}
+
+func TestUpdate_Ed25519SignedRelease(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origKey := releasePubKey
+	releasePubKey = hex.EncodeToString(pub)
+	t.Cleanup(func() { releasePubKey = origKey })
+
+	assetName, archive := releaseArchive(t, []byte("signed new binary"))
+	sum := sha256.Sum256(archive)
+	checksumBody := []byte(hex.EncodeToString(sum[:]) + "  " + assetName + "\n")
+	validSig := ed25519.Sign(priv, checksumBody)
+
+	serveRelease := func(sig []byte, includeSig bool) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			base := "http://" + r.Host
+			switch r.URL.Path {
+			case "/checksums.txt":
+				_, _ = w.Write(checksumBody)
+			case "/checksums.txt.sig":
+				_, _ = w.Write(sig)
+			case "/asset":
+				_, _ = w.Write(archive)
+			default:
+				assets := []ghAsset{
+					{Name: "checksums.txt", BrowserDownloadURL: base + "/checksums.txt"},
+					{Name: assetName, BrowserDownloadURL: base + "/asset"},
+				}
+				if includeSig {
+					assets = append(assets, ghAsset{Name: "checksums.txt.sig", BrowserDownloadURL: base + "/checksums.txt.sig"})
+				}
+				_ = json.NewEncoder(w).Encode(ghRelease{TagName: "v2.0.0", Assets: assets})
+			}
+		}))
+	}
+
+	t.Run("missing signature aborts install", func(t *testing.T) {
+		isolateCache(t)
+		exe := fakeExe(t, 0o755)
+		srv := serveRelease(nil, false)
+		defer srv.Close()
+
+		if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+			t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+		}
+		if got := readFile(t, exe); got != "old binary" {
+			t.Errorf("binary modified without signature: %q", got)
+		}
+	})
+
+	t.Run("tampered signature aborts install", func(t *testing.T) {
+		isolateCache(t)
+		exe := fakeExe(t, 0o755)
+		badSig := append([]byte(nil), validSig...)
+		badSig[0] ^= 0xff
+		srv := serveRelease(badSig, true)
+		defer srv.Close()
+
+		if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+			t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+		}
+		if got := readFile(t, exe); got != "old binary" {
+			t.Errorf("binary modified with tampered signature: %q", got)
+		}
+	})
+
+	t.Run("valid signature installs update", func(t *testing.T) {
+		isolateCache(t)
+		exe := fakeExe(t, 0o755)
+		srv := serveRelease(validSig, true)
+		defer srv.Close()
+
+		if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeInstalled {
+			t.Errorf("Outcome = %v, want OutcomeInstalled", got.Outcome)
+		}
+		if got := readFile(t, exe); got != "signed new binary" {
+			t.Errorf("exe = %q, want signed new binary", got)
+		}
+	})
 }

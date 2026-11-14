@@ -102,6 +102,14 @@ const (
 	probeInconclusive
 )
 
+var validationClient = &http.Client{
+	Timeout: 5 * time.Second,
+	// Never follow redirects when sending Authorization / Music-User-Token headers.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // probe makes one lightweight Apple Music request. An empty userToken sends
 // the developer token alone. On acceptance it also returns the id of the first
 // resource in the response, which for storefrontURL is the account's
@@ -119,7 +127,7 @@ func probe(url, devToken, userToken string) (probeResult, string) {
 		req.Header.Set("Music-User-Token", userToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := validationClient.Do(req)
 	if err != nil {
 		return probeInconclusive, ""
 	}
@@ -149,5 +157,13 @@ func firstResourceID(r io.Reader) string {
 	if err := json.NewDecoder(io.LimitReader(r, 64<<10)).Decode(&body); err != nil || len(body.Data) == 0 {
 		return ""
 	}
-	return body.Data[0].ID
+	id := body.Data[0].ID
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !isAlphaNum && c != '-' && c != '_' {
+			return ""
+		}
+	}
+	return id
 }

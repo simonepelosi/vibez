@@ -516,3 +516,56 @@ func TestConfig_VibePlanTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestSave_OmitsRuntimeCredentialsAndPreservesDiskValues(t *testing.T) {
+	path := writeCfg(t, map[string]any{
+		"storefront": "us",
+	})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SetRuntimeDeveloperToken("runtime-dev-token")
+	cfg.SetRuntimeLastfmCredentials("runtime-lfm-key", "runtime-lfm-secret")
+	cfg.AppleUserToken = "user-session"
+	if err := cfg.Save(""); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path) //nolint:gosec // temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	for _, secret := range []string{"runtime-dev-token", "runtime-lfm-key", "runtime-lfm-secret"} {
+		if strings.Contains(s, secret) {
+			t.Errorf("config file leaked runtime credential %q", secret)
+		}
+	}
+	if !strings.Contains(s, "user-session") {
+		t.Error("config file missing expected user-session")
+	}
+	if cfg.AppleDeveloperToken != "runtime-dev-token" {
+		t.Error("Save should preserve in-memory runtime token")
+	}
+}
+
+func TestLoad_TightensLoosePermissionsOnUnix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions do not apply on Windows")
+	}
+	path := writeCfg(t, map[string]any{"storefront": "us"})
+	if err := os.Chmod(path, 0o644); err != nil { //nolint:gosec // G302: test specifically verifies tightening from 0644
+		t.Fatal(err)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("permissions after Load = %v, want 0600", fi.Mode().Perm())
+	}
+}

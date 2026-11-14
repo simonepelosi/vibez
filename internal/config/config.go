@@ -22,6 +22,16 @@ type Config struct {
 	// --config file instead of silently falling back to the default profile.
 	path string
 
+	// Runtime-injected credentials (embedded via ldflags or fetched from a token
+	// broker) and the values read from disk, so Save() never writes ephemeral or
+	// build-embedded secrets into config.json.
+	runtimeAppleDevToken string
+	diskAppleDevToken    string
+	runtimeLastfmKey     string
+	runtimeLastfmSecret  string
+	diskLastfmKey        string
+	diskLastfmSecret     string
+
 	AppleDeveloperToken string `json:"apple_developer_token"`
 	AppleUserToken      string `json:"apple_user_token"`
 	AppleKeyID          string `json:"apple_key_id"`
@@ -122,6 +132,43 @@ func (c *Config) SetVolume(v float64) {
 	c.Volume = &v
 }
 
+// SetRuntimeDeveloperToken stores an embedded or broker-fetched developer
+// token in memory so subsequent Save calls do not persist it into config.json.
+func (c *Config) SetRuntimeDeveloperToken(tok string) {
+	if tok == "" {
+		return
+	}
+	c.AppleDeveloperToken = tok
+	c.runtimeAppleDevToken = tok
+}
+
+// SetRuntimeLastfmCredentials stores build-time Last.fm credentials in memory
+// so subsequent Save calls do not persist them into config.json.
+func (c *Config) SetRuntimeLastfmCredentials(apiKey, apiSecret string) {
+	if apiKey != "" {
+		c.LastfmAPIKey = apiKey
+		c.runtimeLastfmKey = apiKey
+	}
+	if apiSecret != "" {
+		c.LastfmAPISecret = apiSecret
+		c.runtimeLastfmSecret = apiSecret
+	}
+}
+
+func (c *Config) forPersistence() Config {
+	out := *c
+	if c.runtimeAppleDevToken != "" && c.AppleDeveloperToken == c.runtimeAppleDevToken {
+		out.AppleDeveloperToken = c.diskAppleDevToken
+	}
+	if c.runtimeLastfmKey != "" && c.LastfmAPIKey == c.runtimeLastfmKey {
+		out.LastfmAPIKey = c.diskLastfmKey
+	}
+	if c.runtimeLastfmSecret != "" && c.LastfmAPISecret == c.runtimeLastfmSecret {
+		out.LastfmAPISecret = c.diskLastfmSecret
+	}
+	return out
+}
+
 func defaults() *Config {
 	return &Config{
 		AuthPort:     7777,
@@ -182,11 +229,16 @@ func Load(override string) (*Config, error) {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
+	ensurePrivatePermissions(path)
+
 	cfg := defaults()
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 	cfg.path = path
+	cfg.diskAppleDevToken = cfg.AppleDeveloperToken
+	cfg.diskLastfmKey = cfg.LastfmAPIKey
+	cfg.diskLastfmSecret = cfg.LastfmAPISecret
 	cfg.normalize()
 	return cfg, nil
 }
@@ -235,7 +287,8 @@ func (c *Config) save(path string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	toSave := c.forPersistence()
+	data, err := json.MarshalIndent(&toSave, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshalling config: %w", err)
 	}
@@ -260,12 +313,19 @@ func (c *Config) save(path string) error {
 		_ = tmp.Close()
 		return fmt.Errorf("writing temp config: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("syncing temp config: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing temp config: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replacing config: %w", err)
 	}
+	c.diskAppleDevToken = toSave.AppleDeveloperToken
+	c.diskLastfmKey = toSave.LastfmAPIKey
+	c.diskLastfmSecret = toSave.LastfmAPISecret
 	cleanup = false
 	return nil
 }
