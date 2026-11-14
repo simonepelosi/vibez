@@ -111,6 +111,21 @@ struct Biquad {
     }
 };
 
+// SampleFmt is the PCM layout the reader hands us. Float is preferred so
+// 24-bit and hi-res files reach the EQ and waveOut without being truncated to
+// 16 bits; integer formats are the fallback when no float path exists.
+enum class SampleFmt { None, S16, S24, S32, F32 };
+
+const char* sampleFmtName(SampleFmt f) {
+    switch (f) {
+    case SampleFmt::S16: return "S16";
+    case SampleFmt::S24: return "S24";
+    case SampleFmt::S32: return "S32";
+    case SampleFmt::F32: return "F32";
+    default: return "";
+    }
+}
+
 struct Session {
     uint64_t gen = 0;
     std::atomic<bool> cancel{false};
@@ -123,6 +138,7 @@ struct Session {
     HANDLE ev = nullptr;
     std::atomic<uint32_t> sampleRate{0};
     std::atomic<uint32_t> bytesPerSec{0};
+    std::atomic<SampleFmt> sampleFmt{SampleFmt::None};
     std::atomic<uint64_t> baseSamples{0};
     std::atomic<uint64_t> baseBytes{0};
     std::atomic<uint64_t> nullFrames{0};
@@ -206,7 +222,70 @@ bool waitFree(Buf& b, HWAVEOUT hwo, HANDLE ev, const Session& ses) {
     return true;
 }
 
-double readDuration(IMFSourceReader* reader) {
+struct FileHandle {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    ~FileHandle() {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    }
+};
+
+bool readExact(HANDLE h, void* dst, DWORD n) {
+    DWORD got = 0;
+    return ReadFile(h, dst, n, &got, nullptr) && got == n;
+}
+
+// readFlacStreamInfoDuration reads total_samples / sample_rate from a FLAC
+// STREAMINFO block when Media Foundation omits MF_PD_DURATION.
+double readFlacStreamInfoDuration(const std::wstring& path) {
+    FileHandle f{CreateFileW(path.c_str(), GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (f.h == INVALID_HANDLE_VALUE) return 0.0;
+
+    unsigned char hdr[10] = {};
+    if (!readExact(f.h, hdr, 4)) return 0.0;
+    // Skip an optional ID3v2 header prepended to the FLAC stream.
+    if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
+        if (!readExact(f.h, hdr + 4, 6)) return 0.0;
+        const LONGLONG skip =
+            (static_cast<LONGLONG>(hdr[6] & 0x7F) << 21) |
+            (static_cast<LONGLONG>(hdr[7] & 0x7F) << 14) |
+            (static_cast<LONGLONG>(hdr[8] & 0x7F) << 7) |
+            static_cast<LONGLONG>(hdr[9] & 0x7F);
+        LARGE_INTEGER dist = {};
+        dist.QuadPart = skip;
+        if (!SetFilePointerEx(f.h, dist, nullptr, FILE_CURRENT) || !readExact(f.h, hdr, 4)) {
+            return 0.0;
+        }
+    }
+    if (hdr[0] != 'f' || hdr[1] != 'L' || hdr[2] != 'a' || hdr[3] != 'C') return 0.0;
+
+    unsigned char blk[4] = {};
+    if (!readExact(f.h, blk, 4) || (blk[0] & 0x7F) != 0) return 0.0;
+    const uint32_t blkLen =
+        (static_cast<uint32_t>(blk[1]) << 16) |
+        (static_cast<uint32_t>(blk[2]) << 8) |
+        static_cast<uint32_t>(blk[3]);
+    if (blkLen < 34) return 0.0;
+
+    unsigned char si[34] = {};
+    if (!readExact(f.h, si, sizeof(si))) return 0.0;
+
+    const uint32_t rate =
+        (static_cast<uint32_t>(si[10]) << 12) |
+        (static_cast<uint32_t>(si[11]) << 4) |
+        static_cast<uint32_t>(si[12] >> 4);
+    const uint64_t samples =
+        (static_cast<uint64_t>(si[13] & 0x0F) << 32) |
+        (static_cast<uint64_t>(si[14]) << 24) |
+        (static_cast<uint64_t>(si[15]) << 16) |
+        (static_cast<uint64_t>(si[16]) << 8) |
+        static_cast<uint64_t>(si[17]);
+    if (rate == 0 || samples == 0) return 0.0;
+    return static_cast<double>(samples) / static_cast<double>(rate);
+}
+
+double readDuration(IMFSourceReader* reader, const std::wstring& path) {
     PROPVARIANT var;
     PropVariantInit(&var);
     double sec = 0.0;
@@ -217,6 +296,9 @@ double readDuration(IMFSourceReader* reader) {
             sec = static_cast<double>(var.hVal.QuadPart) / 10000000.0;
         }
         PropVariantClear(&var);
+    }
+    if (sec <= 0.0) {
+        sec = readFlacStreamInfoDuration(path);
     }
     return sec;
 }
@@ -233,11 +315,6 @@ void snapshotWaveOutBase(Session& ses, HWAVEOUT hwo) {
         ses.baseBytes = 0;
     }
 }
-
-// SampleFmt is the PCM layout the reader hands us. Float is preferred so
-// 24-bit and hi-res files reach the EQ and waveOut without being truncated to
-// 16 bits; integer formats are the fallback when no float path exists.
-enum class SampleFmt { None, S16, S24, S32, F32 };
 
 int sampleBytes(SampleFmt f) {
     switch (f) {
@@ -445,9 +522,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     const int channels = out.channels;
     const SampleFmt fmt = out.fmt;
     const size_t frameBytes = static_cast<size_t>(sampleBytes(fmt)) * static_cast<size_t>(channels);
+    ses->sampleFmt = fmt;
     ses->sampleRate = rate;
     ses->bytesPerSec = out.bytesPerSec;
-    const double dur = readDuration(reader.p);
+    const double dur = readDuration(reader.p, path);
     ses->durationSec = dur;
     {
         std::lock_guard<std::mutex> lk(ses->mu);
@@ -850,6 +928,17 @@ int vibez_localsink_is_playing(vibez_localsink_t handle) {
         ses = sink->cur;
     }
     return (ses && !ses->cancel && !ses->paused) ? 1 : 0;
+}
+
+const char* vibez_localsink_sample_format(vibez_localsink_t handle) {
+    Sink* sink = sinkOf(handle);
+    if (!sink) return "";
+    std::shared_ptr<Session> ses;
+    {
+        std::lock_guard<std::mutex> lk(sink->mu);
+        ses = sink->cur;
+    }
+    return ses ? sampleFmtName(ses->sampleFmt.load()) : "";
 }
 
 void vibez_localsink_destroy(vibez_localsink_t handle) {

@@ -183,7 +183,8 @@ func (e *nativeEngine) call(method string, args ...any) (snapshot, error) {
 		}
 		e.playing = autoplay
 		e.dur = float64(dur)
-		return snapshot{Gen: gen, Seq: e.seq, Playing: autoplay, Duration: e.dur}, nil
+		sampleFmt := C.GoString(C.vibez_localsink_sample_format(e.handle))
+		return snapshot{Gen: gen, Seq: e.seq, Playing: autoplay, Duration: e.dur, SampleFormat: sampleFmt}, nil
 
 	case "play":
 		C.vibez_localsink_play(e.handle)

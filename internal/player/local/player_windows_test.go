@@ -17,13 +17,14 @@ import (
 // fakeEngine stands in for the native Windows Media Foundation engine. It
 // keeps just enough state to reply and emit events, and records every command.
 type fakeEngine struct {
-	mu      sync.Mutex
-	seq     uint64
-	gen     uint64
-	playing bool
-	calls   []fakeCall
-	fail    map[string]string // method → media error to reply with
-	closes  int
+	mu        sync.Mutex
+	seq       uint64
+	gen       uint64
+	playing   bool
+	sampleFmt string
+	calls     []fakeCall
+	fail      map[string]string // method → media error to reply with
+	closes    int
 }
 
 type fakeCall struct {
@@ -39,10 +40,12 @@ func (e *fakeEngine) call(method string, args ...any) (snapshot, error) {
 	}
 	e.calls = append(e.calls, fakeCall{method, args})
 	var position float64
+	var sampleFmt string
 	switch method {
 	case "load":
 		e.gen = args[1].(uint64)
 		e.playing = args[2].(bool)
+		sampleFmt = e.sampleFmt
 	case "play":
 		e.playing = true
 	case "pause", "stop":
@@ -57,7 +60,7 @@ func (e *fakeEngine) call(method string, args ...any) (snapshot, error) {
 		e.playing = false
 	}
 	e.seq++
-	return snapshot{Gen: e.gen, Seq: e.seq, Playing: e.playing, Position: position, Duration: 200, Error: errMsg}, nil
+	return snapshot{Gen: e.gen, Seq: e.seq, Playing: e.playing, Position: position, Duration: 200, Error: errMsg, SampleFormat: sampleFmt}, nil
 }
 
 func (e *fakeEngine) close() {
@@ -469,5 +472,27 @@ func TestCloseReleasesEverythingOnce(t *testing.T) {
 	}
 	if err := p.Play(); !errors.Is(err, errClosed) {
 		t.Fatalf("Play after Close = %v, want errClosed", err)
+	}
+}
+
+func TestLoadReportsAndClearsSampleFormat(t *testing.T) {
+	p, eng, tracks := newTestPlayer(t, "A")
+	eng.sampleFmt = "F32"
+	var gotLogs []string
+	p.onLog = func(msg string) {
+		gotLogs = append(gotLogs, msg)
+	}
+	if err := p.SetQueue(ids(tracks...)); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.sampleFormat(); got != "F32" {
+		t.Fatalf("sampleFormat() = %q, want F32", got)
+	}
+	if len(gotLogs) != 1 || !strings.Contains(gotLogs[0], "F32") {
+		t.Fatalf("logs = %v, want F32 entry", gotLogs)
+	}
+	p.LoadTracks(nil)
+	if got := p.sampleFormat(); got != "" {
+		t.Fatalf("sampleFormat() after unload = %q, want empty", got)
 	}
 }

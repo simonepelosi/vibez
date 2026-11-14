@@ -27,6 +27,9 @@ void vibez_localsink_unload(vibez_localsink_t handle);
 double vibez_localsink_position(vibez_localsink_t handle);
 double vibez_localsink_duration(vibez_localsink_t handle);
 int vibez_localsink_is_playing(vibez_localsink_t handle);
+// vibez_localsink_sample_format returns the negotiated PCM sample layout for
+// the active stream ("F32", "S32", "S24", "S16"), or "" if none is open.
+const char* vibez_localsink_sample_format(vibez_localsink_t handle);
 void vibez_localsink_destroy(vibez_localsink_t handle);
 
 #ifdef __cplusplus
