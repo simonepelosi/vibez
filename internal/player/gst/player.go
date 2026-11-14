@@ -933,14 +933,16 @@ static gint64 vibez_gst_duration(GstElement* p) {
     return v;
 }
 
-// vibez_gst_pop_bus pops one message from the pipeline bus.
-// Returns the GstMessageType (0 = no message).
+// vibez_gst_wait_bus blocks until a relevant message arrives on bus or the bus
+// begins flushing. Returns the GstMessageType (0 = flushing/unavailable, -1 = ignored).
 // For ERROR or APPLICATION messages, *strOut is set to a g_strdup'd string (caller frees).
-static gint vibez_gst_pop_bus(GstElement* p, gchar** strOut) {
-    GstBus* bus = gst_element_get_bus(p);
-    if (!bus) return 0;
-    GstMessage* msg = gst_bus_pop(bus);
-    gst_object_unref(bus);
+static gint vibez_gst_wait_bus(GstElement* p, GstBus* bus, gchar** strOut) {
+    if (!p || !bus) return 0;
+    GstMessage* msg = gst_bus_timed_pop_filtered(
+        bus,
+        GST_CLOCK_TIME_NONE,
+        (GstMessageType)(GST_MESSAGE_EOS | GST_MESSAGE_ERROR | GST_MESSAGE_APPLICATION | GST_MESSAGE_STREAM_START)
+    );
     if (!msg) return 0;
     gint t = (gint)GST_MESSAGE_TYPE(msg);
     if (t == (gint)GST_MESSAGE_STREAM_START) {
@@ -973,6 +975,20 @@ static gint vibez_gst_pop_bus(GstElement* p, gchar** strOut) {
     return t;
 }
 
+static void vibez_gst_wake_bus(GstBus* bus) {
+    if (!bus) return;
+    gst_bus_set_flushing(bus, FALSE);
+    GstStructure* s = gst_structure_new_empty("vibez-bus-wake");
+    GstMessage* msg = gst_message_new_application(NULL, s);
+    if (msg) {
+        gst_bus_post(bus, msg);
+    }
+}
+
+static void vibez_gst_unref_bus(GstBus* bus) {
+    if (bus) gst_object_unref(bus);
+}
+
 static void vibez_gst_free(gchar* s) { g_free(s); }
 
 static void vibez_gst_destroy(GstElement* p) {
@@ -1001,6 +1017,7 @@ var once sync.Once
 type Player struct {
 	mu            sync.Mutex
 	pipeline      *C.GstElement
+	bus           *C.GstBus
 	eq            *C.GstElement
 	st            *C.VibezGstState
 	committedURI  string
@@ -1008,6 +1025,7 @@ type Player struct {
 	onError       func(error)
 	onStreamStart func(string)
 	stop          chan struct{}
+	busWake       chan struct{}
 	destroyOnce   sync.Once
 	wg            sync.WaitGroup
 }
@@ -1027,6 +1045,8 @@ func New() (*Player, error) {
 		C.vibez_gst_state_free(st)
 		return nil, fmt.Errorf("gst: playbin3/playbin element unavailable — is gstreamer1.0-plugins-base installed?")
 	}
+	p.busWake = make(chan struct{}, 1)
+	p.bus = C.gst_element_get_bus(pl)
 	p.pipeline = pl
 	p.eq = eq
 	p.wg.Add(1)
@@ -1112,6 +1132,7 @@ func (p *Player) PlayURI(uri string) {
 	p.committedURI = ""
 	C.vibez_gst_set_uri(p.pipeline, p.st, cs)
 	C.vibez_gst_play(p.pipeline)
+	p.wakeBus()
 }
 
 // Play resumes a paused pipeline.
@@ -1119,8 +1140,16 @@ func (p *Player) Play() {
 	p.mu.Lock()
 	if p.pipeline != nil {
 		C.vibez_gst_play(p.pipeline)
+		p.wakeBus()
 	}
 	p.mu.Unlock()
+}
+
+func (p *Player) wakeBus() {
+	select {
+	case p.busWake <- struct{}{}:
+	default:
+	}
 }
 
 // Pause pauses the pipeline.
@@ -1219,8 +1248,16 @@ func (p *Player) Duration() time.Duration {
 func (p *Player) Destroy() {
 	p.destroyOnce.Do(func() {
 		close(p.stop)
+		p.mu.Lock()
+		bus := p.bus
+		p.mu.Unlock()
+		C.vibez_gst_wake_bus(bus)
 		p.wg.Wait()
 		p.mu.Lock()
+		if p.bus != nil {
+			C.vibez_gst_unref_bus(p.bus)
+			p.bus = nil
+		}
 		if p.pipeline != nil {
 			C.vibez_gst_destroy(p.pipeline)
 			p.pipeline = nil
@@ -1236,27 +1273,23 @@ func (p *Player) Destroy() {
 
 func (p *Player) busLoop() {
 	defer p.wg.Done()
-	tick := time.NewTicker(50 * time.Millisecond)
-	defer tick.Stop()
+	pipeline := p.pipeline
+	bus := p.bus
 	for {
 		select {
 		case <-p.stop:
 			return
-		case <-tick.C:
-			p.drainBus()
+		default:
 		}
-	}
-}
-
-func (p *Player) drainBus() {
-	for {
 		var strOut *C.gchar
-		p.mu.Lock()
-		t := C.vibez_gst_pop_bus(p.pipeline, &strOut) //nolint:gocritic // false positive: CGO AST confuses dupSubExpr
-		p.mu.Unlock()
-
+		t := C.vibez_gst_wait_bus(pipeline, bus, &strOut) //nolint:gocritic // false positive: CGO AST confuses dupSubExpr
 		if t == 0 {
-			return
+			select {
+			case <-p.stop:
+				return
+			case <-p.busWake:
+			}
+			continue
 		}
 		if t < 0 {
 			if strOut != nil {
@@ -1264,57 +1297,61 @@ func (p *Player) drainBus() {
 			}
 			continue
 		}
-		switch C.GstMessageType(t) {
-		case C.GST_MESSAGE_APPLICATION:
-			var uri string
-			if strOut != nil {
-				uri = C.GoString((*C.char)(unsafe.Pointer(strOut)))
-				C.vibez_gst_free(strOut)
-			}
-			if uri != "" {
-				p.mu.Lock()
-				p.committedURI = uri
-				p.mu.Unlock()
-			}
-		case C.GST_MESSAGE_STREAM_START:
+		p.handleBusMessage(C.GstMessageType(t), strOut)
+	}
+}
+
+func (p *Player) handleBusMessage(msgType C.GstMessageType, strOut *C.gchar) {
+	switch msgType {
+	case C.GST_MESSAGE_APPLICATION:
+		var uri string
+		if strOut != nil {
+			uri = C.GoString((*C.char)(unsafe.Pointer(strOut)))
+			C.vibez_gst_free(strOut)
+		}
+		if uri != "" {
 			p.mu.Lock()
-			var cb func(string)
-			uri := p.committedURI
-			if uri != "" {
-				p.committedURI = ""
-				cb = p.onStreamStart
-			}
+			p.committedURI = uri
 			p.mu.Unlock()
-			if cb != nil {
-				go cb(uri)
-			}
-		case C.GST_MESSAGE_EOS:
-			p.mu.Lock()
-			cb := p.onEOS
-			p.mu.Unlock()
-			if cb != nil {
-				go cb()
-			}
-		case C.GST_MESSAGE_ERROR:
-			var msg string
-			if strOut != nil {
-				msg = C.GoString((*C.char)(unsafe.Pointer(strOut)))
-				C.vibez_gst_free(strOut)
-			}
-			// gst-libav's AIFF demuxer only handles 16-bit, and playbin picks it
-			// only when aiffparse (plugins-bad) is missing. The debug text names
-			// the failing element; the pipeline URI may already be the next track.
-			if strings.Contains(msg, "avdemux_aiff") && !hasElement("aiffparse") {
-				msg = fmt.Sprintf("%s (%s)", msg, aiffParserHelp)
-			} else if strings.Contains(msg, "No suitable plugins found") || strings.Contains(msg, "missing a plug-in") {
-				msg = fmt.Sprintf("%s (%s)", msg, aacDecoderHelp)
-			}
-			p.mu.Lock()
-			cb := p.onError
-			p.mu.Unlock()
-			if cb != nil {
-				go cb(fmt.Errorf("gst: %s", msg))
-			}
+		}
+	case C.GST_MESSAGE_STREAM_START:
+		p.mu.Lock()
+		var cb func(string)
+		uri := p.committedURI
+		if uri != "" {
+			p.committedURI = ""
+			cb = p.onStreamStart
+		}
+		p.mu.Unlock()
+		if cb != nil {
+			go cb(uri)
+		}
+	case C.GST_MESSAGE_EOS:
+		p.mu.Lock()
+		cb := p.onEOS
+		p.mu.Unlock()
+		if cb != nil {
+			go cb()
+		}
+	case C.GST_MESSAGE_ERROR:
+		var msg string
+		if strOut != nil {
+			msg = C.GoString((*C.char)(unsafe.Pointer(strOut)))
+			C.vibez_gst_free(strOut)
+		}
+		// gst-libav's AIFF demuxer only handles 16-bit, and playbin picks it
+		// only when aiffparse (plugins-bad) is missing. The debug text names
+		// the failing element; the pipeline URI may already be the next track.
+		if strings.Contains(msg, "avdemux_aiff") && !hasElement("aiffparse") {
+			msg = fmt.Sprintf("%s (%s)", msg, aiffParserHelp)
+		} else if strings.Contains(msg, "No suitable plugins found") || strings.Contains(msg, "missing a plug-in") {
+			msg = fmt.Sprintf("%s (%s)", msg, aacDecoderHelp)
+		}
+		p.mu.Lock()
+		cb := p.onError
+		p.mu.Unlock()
+		if cb != nil {
+			go cb(fmt.Errorf("gst: %s", msg))
 		}
 	}
 }
