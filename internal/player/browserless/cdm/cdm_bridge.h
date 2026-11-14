@@ -66,6 +66,30 @@ int cdm_context_decrypt(
     uint32_t* out_size
 );
 
+// cdm_context_decrypt_batch decrypts num_samples audio buffers in one CGo call
+// using shared key_id and sequential flat input/IV/subsample arrays.
+// out_decrypted must have at least in_total_size bytes allocated and out_sizes
+// must hold at least num_samples uint32_t entries.
+// Returns 0 on success.
+int cdm_context_decrypt_batch(
+    cdm_context_t* ctx,
+    const uint8_t* key_id,
+    uint32_t key_id_size,
+    const uint8_t* ivs_data,
+    uint32_t ivs_total_size,
+    const uint32_t* iv_sizes,
+    const uint8_t* in_data,
+    uint32_t in_total_size,
+    const uint32_t* in_sizes,
+    const uint16_t* clear_bytes,
+    const uint32_t* cipher_bytes,
+    const uint32_t* sub_counts,
+    uint32_t total_subsamples,
+    uint32_t num_samples,
+    uint8_t* out_decrypted,
+    uint32_t* out_sizes
+);
+
 // cdm_context_destroy destroys the CDM instance and unloads the shared library.
 void cdm_context_destroy(cdm_context_t* ctx);
 

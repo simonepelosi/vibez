@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"math/rand"
 	"net/http"
@@ -442,6 +443,41 @@ type Model struct {
 
 	// Vibe planner (auto-detected on-device runtime or KeywordAgent fallback).
 	vibePlanner vibe.Planner
+
+	// Frame-local render caches for static border/status segments.
+	cachedHorizW     int
+	cachedHoriz      string
+	statusNavKey     statusNavCacheKey
+	statusNavCached  []string
+	statusPlayKey    statusPlayCacheKey
+	statusPlayCached []string
+	statusAllCached  []string
+}
+
+type statusNavCacheKey struct {
+	valid        bool
+	w            int
+	mode         viewMode
+	searchQuery  string
+	searchCursor int
+	cmdBuf       string
+	debugView    bool
+	vibeFocused  bool
+	activePanel  int
+	primary      color.Color
+	fg           color.Color
+	muted        color.Color
+}
+
+type statusPlayCacheKey struct {
+	valid            bool
+	w                int
+	discoveryEnabled bool
+	vibePicker       bool
+	radioEnabled     bool
+	primary          color.Color
+	fg               color.Color
+	muted            color.Color
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
@@ -3634,7 +3670,11 @@ func (m *Model) renderBoxLayout() string {
 	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
 	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
 
-	horiz := strings.Repeat("─", inner)
+	if m.cachedHorizW != inner {
+		m.cachedHorizW = inner
+		m.cachedHoriz = strings.Repeat("─", inner)
+	}
+	horiz := m.cachedHoriz
 	var sb strings.Builder
 	sb.Grow(max(512, m.width*m.height*2))
 
@@ -4374,10 +4414,34 @@ func (m *Model) searchLines(contentW, h int) []string {
 // statusNavLines is the top status line: mode chip + context-aware shortcuts,
 // wrapped to fit width w.
 func (m *Model) statusNavLines(w int) []string {
+	vibeFocused := m.vibe != nil && m.vibe.IsFocused()
+	key := statusNavCacheKey{
+		valid:       true,
+		w:           w,
+		mode:        m.mode,
+		debugView:   m.debugView,
+		vibeFocused: vibeFocused,
+		activePanel: m.activePanel,
+		primary:     styles.ColorPrimary,
+		fg:          styles.ColorFg,
+		muted:       styles.ColorMuted,
+	}
+	switch m.mode {
+	case modeSearch:
+		key.searchQuery = m.searchQuery
+		key.searchCursor = m.searchCursor
+	case modeCommand:
+		key.cmdBuf = m.cmdBuf
+	}
+	if m.statusNavKey == key {
+		return m.statusNavCached[:len(m.statusNavCached):len(m.statusNavCached)]
+	}
+
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
 	dot := muted.Render("  ·  ")
 
+	var res []string
 	switch m.mode {
 	case modeSearch:
 		runes := []rune(m.searchQuery)
@@ -4389,9 +4453,9 @@ func (m *Model) statusNavLines(w int) []string {
 				accent.Render("/") + before + accent.Render("█") + after,
 			accent.Render("Ctrl+U") + muted.Render(" clear"),
 		}
-		return wrapFit(parts, dot, w)
+		res = wrapFit(parts, dot, w)
 	case modeCommand:
-		return []string{styles.ModeCommand.Render("CMD") + "  " +
+		res = []string{styles.ModeCommand.Render("CMD") + "  " +
 			muted.Render(":") + m.cmdBuf + accent.Render("_") +
 			muted.Render("  Tab complete · ↑/↓ navigate · Esc cancel")}
 	default:
@@ -4403,7 +4467,7 @@ func (m *Model) statusNavLines(w int) []string {
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
-		case m.vibe.IsFocused():
+		case vibeFocused:
 			parts = []string{
 				styles.ModeNormal.Render("VIBE"),
 				accent.Render("Enter") + muted.Render(" search"),
@@ -4476,13 +4540,33 @@ func (m *Model) statusNavLines(w int) []string {
 				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
-		return wrapFit(parts, dot, w)
+		res = wrapFit(parts, dot, w)
 	}
+
+	m.statusNavKey = key
+	m.statusNavCached = res[:len(res):len(res)]
+	m.statusAllCached = nil
+	return m.statusNavCached
 }
 
 // statusPlayLines is the bottom status line: always shows playback controls,
 // wrapped to fit width w.
 func (m *Model) statusPlayLines(w int) []string {
+	vibePicker := m.vibe != nil && m.vibe.PickerActive()
+	key := statusPlayCacheKey{
+		valid:            true,
+		w:                w,
+		discoveryEnabled: m.discovery.enabled,
+		vibePicker:       vibePicker,
+		radioEnabled:     m.radio.enabled,
+		primary:          styles.ColorPrimary,
+		fg:               styles.ColorFg,
+		muted:            styles.ColorMuted,
+	}
+	if m.statusPlayKey == key {
+		return m.statusPlayCached[:len(m.statusPlayCached):len(m.statusPlayCached)]
+	}
+
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
 	dot := muted.Render("  ·  ")
@@ -4490,7 +4574,7 @@ func (m *Model) statusPlayLines(w int) []string {
 	discoverHint := accent.Render("d") + muted.Render(" metric")
 	if m.discovery.enabled {
 		discoverHint = accent.Render("d") + styles.Playing.Render(" ● discovery")
-	} else if m.vibe.PickerActive() {
+	} else if vibePicker {
 		discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
 	}
 
@@ -4510,7 +4594,11 @@ func (m *Model) statusPlayLines(w int) []string {
 		discoverHint,
 		radioHint,
 	}
-	return wrapFit(parts, dot, w)
+	res := wrapFit(parts, dot, w)
+	m.statusPlayKey = key
+	m.statusPlayCached = res[:len(res):len(res)]
+	m.statusAllCached = nil
+	return m.statusPlayCached
 }
 
 // commandLines renders the command palette in the panel area when CMD mode is active.
@@ -4550,7 +4638,16 @@ func (m *Model) commandLines(_ int, h int) []string {
 // each already wrapped to fit width w. The count varies with terminal width,
 // so panelHeight consults it rather than assuming a fixed two rows.
 func (m *Model) statusLines(w int) []string {
-	return append(m.statusNavLines(w), m.statusPlayLines(w)...)
+	nav := m.statusNavLines(w)
+	play := m.statusPlayLines(w)
+	if m.statusAllCached != nil {
+		return m.statusAllCached
+	}
+	all := make([]string, len(nav)+len(play))
+	copy(all, nav)
+	copy(all[len(nav):], play)
+	m.statusAllCached = all[:len(all):len(all)]
+	return m.statusAllCached
 }
 
 // panelHeight returns the number of rows available for the split panel section.

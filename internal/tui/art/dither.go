@@ -37,7 +37,7 @@ func RenderDithered(img image.Image, size Size) []string {
 	}
 	gw, gh := size.Width*2, size.Height*3
 	px := sampleGrid(img, gw, gh)
-	out := atkinson(px, gw, gh, palette(px, ditherColors))
+	out := atkinson(px, gw, gh, palette(px, gw, gh, ditherColors))
 
 	lines := make([]string, size.Height)
 	buf := make([]byte, 0, size.Width*44)
@@ -113,17 +113,30 @@ func sampleGrid(img image.Image, gw, gh int) []rgb {
 // colours as the full grid at a fraction of the cost.
 const paletteSamples = 4096
 
-// palette picks k representative colours with k-means. Seeding is maximin
-// (start at the colour nearest the mean, then repeatedly add the pixel
-// farthest from every seed), which is deterministic and guarantees small
-// but distinct accent colours a slot.
-func palette(all []rgb, k int) []rgb {
-	px := all
-	if step := len(all) / paletteSamples; step > 1 {
-		px = make([]rgb, 0, len(all)/step+1)
-		for i := 0; i < len(all); i += step {
-			px = append(px, all[i])
+// palette picks k representative colours with k-means over a 2×2 subsample
+// of the gw × gh grid (falling back to stride sampling above paletteSamples).
+// Seeding is maximin (start at the colour nearest the mean, then repeatedly add
+// the pixel farthest from every seed), which is deterministic and guarantees
+// small but distinct accent colours a slot.
+func palette(all []rgb, gw, gh, k int) []rgb {
+	var px []rgb
+	if gw >= 4 && gh >= 4 && len(all) >= gw*gh {
+		px = make([]rgb, 0, ((gh+1)/2)*((gw+1)/2))
+		for y := 0; y < gh; y += 2 {
+			row := all[y*gw:]
+			for x := 0; x < gw; x += 2 {
+				px = append(px, row[x])
+			}
 		}
+	} else {
+		px = all
+	}
+	if step := len(px) / paletteSamples; step > 1 {
+		sub := make([]rgb, 0, len(px)/step+1)
+		for i := 0; i < len(px); i += step {
+			sub = append(sub, px[i])
+		}
+		px = sub
 	}
 	var mean rgb
 	for _, p := range px {

@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/player"
+	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
 
 func TestEQModel_Update(t *testing.T) {
@@ -102,5 +103,38 @@ func TestEQModel_Update(t *testing.T) {
 		if b.Gain != 0.0 {
 			t.Errorf("expected band %d gain to be reset, got %f", i, b.Gain)
 		}
+	}
+}
+
+func TestEQModel_ViewCacheInvalidatesOnChanges(t *testing.T) {
+	defer styles.Apply(styles.DefaultTheme())
+
+	bands := []player.EQBand{
+		{Frequency: 32, Gain: 0},
+		{Frequency: 64, Gain: 0},
+	}
+	m := NewEqualizer(bands)
+	m.SetSize(40, 20)
+
+	v1 := m.View()
+	if v2 := m.View(); v2 != v1 {
+		t.Fatal("steady-state View() changed unexpectedly")
+	}
+
+	m.bands[0].Gain = 6.0
+	vGain := m.View()
+	if vGain == v1 {
+		t.Fatal("View() did not invalidate after direct band gain change")
+	}
+
+	m.SetSize(60, 24)
+	if vSize := m.View(); vSize == vGain {
+		t.Fatal("View() did not invalidate after SetSize")
+	}
+
+	beforeTheme := m.View()
+	styles.Apply(styles.DraculaTheme())
+	if afterTheme := m.View(); afterTheme == beforeTheme {
+		t.Fatal("View() did not invalidate after theme change")
 	}
 }

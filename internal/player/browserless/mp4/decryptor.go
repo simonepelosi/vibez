@@ -161,40 +161,54 @@ type SampleEncInfo struct {
 	Subsamples []Subsample
 }
 
+// EncryptedSample holds one encrypted sample's payload, IV, and CENC subsamples.
+type EncryptedSample struct {
+	Data       []byte
+	IV         []byte
+	Subsamples []Subsample
+}
+
 // DecryptFunc decrypts an audio sample buffer using AES-CTR (cenc).
 type DecryptFunc func(kid, iv, input []byte, subsamples []Subsample) ([]byte, error)
 
-// DecryptSegment parses a fragmented MP4 audio segment (moof + mdat) and uses
-// the provided decrypt function to decrypt samples, returning an elementary AAC bitstream.
-func DecryptSegment(
-	segData []byte,
-	kid []byte,
-	cfg AudioConfig,
-	decryptFn DecryptFunc,
-) ([]byte, error) {
+// DecryptBatchFunc decrypts a slice of audio samples in a single call.
+type DecryptBatchFunc func(kid []byte, samples []EncryptedSample) ([][]byte, error)
+
+func appendADTSSample(out, decryptedSample []byte, cfg AudioConfig, sampleIdx int) ([]byte, error) {
+	const maxADTSPayloadSize = 0x1FFF - 7
+	if len(decryptedSample) > maxADTSPayloadSize {
+		return nil, fmt.Errorf("sample %d size %d exceeds 13-bit ADTS frame limit (%d)", sampleIdx, len(decryptedSample), maxADTSPayloadSize)
+	}
+	hdrStart := len(out)
+	out = append(out, 0, 0, 0, 0, 0, 0, 0)
+	WriteADTSHeader(out[hdrStart:hdrStart+7], len(decryptedSample), cfg)
+	return append(out, decryptedSample...), nil
+}
+
+func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 	// Find moof box
 	moofIdx := bytes.Index(segData, []byte("moof"))
 	if moofIdx < 4 {
-		return nil, fmt.Errorf("moof box not found in segment")
+		return nil, 0, fmt.Errorf("moof box not found in segment")
 	}
 	moofStart := moofIdx - 4
 	if moofStart+8 > len(segData) {
-		return nil, fmt.Errorf("truncated moof box header")
+		return nil, 0, fmt.Errorf("truncated moof box header")
 	}
 	moofSize := int(binary.BigEndian.Uint32(segData[moofStart : moofStart+4]))
 	if moofSize < 8 || moofStart+moofSize > len(segData) {
-		return nil, fmt.Errorf("invalid moof size: %d", moofSize)
+		return nil, 0, fmt.Errorf("invalid moof size: %d", moofSize)
 	}
 	moofData := segData[moofStart : moofStart+moofSize]
 
 	// 1. Parse senc box
 	sencIdx := bytes.Index(moofData, []byte("senc"))
 	if sencIdx < 4 {
-		return nil, fmt.Errorf("senc box not found in moof")
+		return nil, 0, fmt.Errorf("senc box not found in moof")
 	}
 	sencStart := sencIdx - 4
 	if sencStart+16 > len(moofData) {
-		return nil, fmt.Errorf("truncated senc box: need at least 16 bytes, got %d", len(moofData)-sencStart)
+		return nil, 0, fmt.Errorf("truncated senc box: need at least 16 bytes, got %d", len(moofData)-sencStart)
 	}
 	sencSize := int(binary.BigEndian.Uint32(moofData[sencStart : sencStart+4]))
 	if sencSize < 16 || sencStart+sencSize > len(moofData) {
@@ -208,7 +222,7 @@ func DecryptSegment(
 	// Sanity-bound sampleCount against remaining senc buffer to prevent OOM
 	remainingSencBytes := sencEnd - (sencStart + 16)
 	if remainingSencBytes < 0 || int64(sampleCount) > int64(remainingSencBytes)/8 || sampleCount > 65536 {
-		return nil, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, remainingSencBytes)
+		return nil, 0, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, remainingSencBytes)
 	}
 
 	type sampleEncSlot struct {
@@ -228,7 +242,7 @@ func DecryptSegment(
 	}
 	for i := range sampleCount {
 		if offset+ivSize > len(moofData) {
-			return nil, fmt.Errorf("unexpected EOF in senc IVs at sample %d", i)
+			return nil, 0, fmt.Errorf("unexpected EOF in senc IVs at sample %d", i)
 		}
 		iv := moofData[offset : offset+ivSize]
 		offset += ivSize
@@ -237,18 +251,18 @@ func DecryptSegment(
 		subLen := 0
 		if hasSubsamples {
 			if offset+2 > len(moofData) {
-				return nil, fmt.Errorf("unexpected EOF in senc subsamples count at sample %d", i)
+				return nil, 0, fmt.Errorf("unexpected EOF in senc subsamples count at sample %d", i)
 			}
 			subCount := binary.BigEndian.Uint16(moofData[offset : offset+2])
 			offset += 2
 			remainingSubBytes := len(moofData) - offset
 			if int(subCount) > remainingSubBytes/6 {
-				return nil, fmt.Errorf("invalid subsample count %d at sample %d", subCount, i)
+				return nil, 0, fmt.Errorf("invalid subsample count %d at sample %d", subCount, i)
 			}
 			subLen = int(subCount)
 			for range subCount {
 				if offset+6 > len(moofData) {
-					return nil, fmt.Errorf("unexpected EOF in senc subsample entry")
+					return nil, 0, fmt.Errorf("unexpected EOF in senc subsample entry")
 				}
 				clearBytes := binary.BigEndian.Uint16(moofData[offset : offset+2])
 				cipherBytes := binary.BigEndian.Uint32(moofData[offset+2 : offset+6])
@@ -269,23 +283,23 @@ func DecryptSegment(
 	// 2. Parse trun box
 	trunIdx := bytes.Index(moofData, []byte("trun"))
 	if trunIdx < 4 {
-		return nil, fmt.Errorf("trun box not found in moof")
+		return nil, 0, fmt.Errorf("trun box not found in moof")
 	}
 	trunStart := trunIdx - 4
 	if trunStart+16 > len(moofData) {
-		return nil, fmt.Errorf("truncated trun box: need at least 16 bytes, got %d", len(moofData)-trunStart)
+		return nil, 0, fmt.Errorf("truncated trun box: need at least 16 bytes, got %d", len(moofData)-trunStart)
 	}
 	trunFlags := binary.BigEndian.Uint32(moofData[trunStart+8:trunStart+12]) & 0x00FFFFFF
 	trunSampleCount := binary.BigEndian.Uint32(moofData[trunStart+12 : trunStart+16])
 	if trunSampleCount != sampleCount {
-		return nil, fmt.Errorf("sample count mismatch between senc (%d) and trun (%d)", sampleCount, trunSampleCount)
+		return nil, 0, fmt.Errorf("sample count mismatch between senc (%d) and trun (%d)", sampleCount, trunSampleCount)
 	}
 	trunOffset := trunStart + 16
 
 	dataOffset := int64(moofSize + 8) // Default fallback to right after moof + mdat header
 	if (trunFlags & 0x01) != 0 {
 		if trunOffset+4 > len(moofData) {
-			return nil, fmt.Errorf("truncated trun data_offset")
+			return nil, 0, fmt.Errorf("truncated trun data_offset")
 		}
 		// data_offset is a signed 32-bit integer per ISO/IEC 14496-12
 		dataOffset = int64(int32(binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4]))) //nolint:gosec // G115: ISO/IEC 14496-12 defines data_offset as signed 32-bit
@@ -293,7 +307,7 @@ func DecryptSegment(
 	}
 	if (trunFlags & 0x04) != 0 {
 		if trunOffset+4 > len(moofData) {
-			return nil, fmt.Errorf("truncated trun first_sample_flags")
+			return nil, 0, fmt.Errorf("truncated trun first_sample_flags")
 		}
 		trunOffset += 4 // first_sample_flags
 	}
@@ -318,7 +332,7 @@ func DecryptSegment(
 	}
 
 	if trunOffset+int(sampleCount)*entrySize > len(moofData) {
-		return nil, fmt.Errorf("truncated trun sample entries")
+		return nil, 0, fmt.Errorf("truncated trun sample entries")
 	}
 
 	const maxSampleSize = 16 << 20 // 16 MiB defensive cap per audio sample
@@ -331,7 +345,7 @@ func DecryptSegment(
 		if hasSize {
 			szUint := binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4])
 			if szUint > maxSampleSize {
-				return nil, fmt.Errorf("excessive sample %d size %d in trun", i, szUint)
+				return nil, 0, fmt.Errorf("excessive sample %d size %d in trun", i, szUint)
 			}
 			sz := int(szUint)
 			sampleSizes[i] = sz
@@ -348,44 +362,87 @@ func DecryptSegment(
 		}
 	}
 
-	// 3. Locate mdat and decrypt samples
+	// 3. Locate mdat and slice samples
 	mdatTarget := int64(moofStart) + dataOffset
 	if mdatTarget < 0 || mdatTarget > int64(len(segData)) {
-		return nil, fmt.Errorf("invalid dataOffset %d: points to %d (seg length %d)", dataOffset, mdatTarget, len(segData))
+		return nil, 0, fmt.Errorf("invalid dataOffset %d: points to %d (seg length %d)", dataOffset, mdatTarget, len(segData))
 	}
 	mdatData := segData[mdatTarget:]
-	out := make([]byte, 0, min(totalSampleBytes, len(mdatData))+int(sampleCount)*7)
+	samples := make([]EncryptedSample, sampleCount)
 	currMdatOffset := 0
 
-	for i := 0; i < int(sampleCount); i++ {
+	for i := range int(sampleCount) {
 		sSize := sampleSizes[i]
 		if sSize < 0 || sSize > len(mdatData)-currMdatOffset {
-			return nil, fmt.Errorf("sample %d exceeds mdat data bounds (size %d, remaining %d)", i, sSize, len(mdatData)-currMdatOffset)
+			return nil, 0, fmt.Errorf("sample %d exceeds mdat data bounds (size %d, remaining %d)", i, sSize, len(mdatData)-currMdatOffset)
 		}
-		sampleBytes := mdatData[currMdatOffset : currMdatOffset+sSize]
-		currMdatOffset += sSize
-
 		encInfo := samplesEnc[i]
 		var subs []Subsample
 		if encInfo.subLen > 0 {
 			subs = subPool[encInfo.subStart : encInfo.subStart+encInfo.subLen]
 		}
-		decryptedSample, err := decryptFn(kid, encInfo.iv, sampleBytes, subs)
+		samples[i] = EncryptedSample{
+			Data:       mdatData[currMdatOffset : currMdatOffset+sSize],
+			IV:         encInfo.iv,
+			Subsamples: subs,
+		}
+		currMdatOffset += sSize
+	}
+
+	return samples, min(totalSampleBytes, len(mdatData)) + int(sampleCount)*7, nil
+}
+
+// DecryptSegment parses a fragmented MP4 audio segment (moof + mdat) and uses
+// the provided decrypt function to decrypt samples, returning an elementary AAC bitstream.
+func DecryptSegment(
+	segData []byte,
+	kid []byte,
+	cfg AudioConfig,
+	decryptFn DecryptFunc,
+) ([]byte, error) {
+	samples, estBytes, err := parseSegmentSamples(segData)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, estBytes)
+	for i, s := range samples {
+		decryptedSample, err := decryptFn(kid, s.IV, s.Data, s.Subsamples)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt sample %d: %w", i, err)
 		}
-
-		const maxADTSPayloadSize = 0x1FFF - 7
-		if len(decryptedSample) > maxADTSPayloadSize {
-			return nil, fmt.Errorf("sample %d size %d exceeds 13-bit ADTS frame limit (%d)", i, len(decryptedSample), maxADTSPayloadSize)
+		out, err = appendADTSSample(out, decryptedSample, cfg, i)
+		if err != nil {
+			return nil, err
 		}
-
-		// Prepend ADTS header directly into the pre-sized output buffer.
-		hdrStart := len(out)
-		out = append(out, 0, 0, 0, 0, 0, 0, 0)
-		WriteADTSHeader(out[hdrStart:hdrStart+7], len(decryptedSample), cfg)
-		out = append(out, decryptedSample...)
 	}
+	return out, nil
+}
 
+// DecryptSegmentBatch parses a fragmented MP4 audio segment (moof + mdat) and
+// decrypts all samples in a single batch call before ADTS framing.
+func DecryptSegmentBatch(
+	segData []byte,
+	kid []byte,
+	cfg AudioConfig,
+	decryptBatchFn DecryptBatchFunc,
+) ([]byte, error) {
+	samples, estBytes, err := parseSegmentSamples(segData)
+	if err != nil {
+		return nil, err
+	}
+	decryptedSamples, err := decryptBatchFn(kid, samples)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt segment batch: %w", err)
+	}
+	if len(decryptedSamples) != len(samples) {
+		return nil, fmt.Errorf("batch decrypt returned %d samples, want %d", len(decryptedSamples), len(samples))
+	}
+	out := make([]byte, 0, estBytes)
+	for i, decryptedSample := range decryptedSamples {
+		out, err = appendADTSSample(out, decryptedSample, cfg, i)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
 }
