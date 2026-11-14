@@ -45,32 +45,17 @@ func (p *Provider) IsAuthenticated() bool { return true }
 
 // scan walks dir recursively and indexes all supported audio files.
 func (p *Provider) scan() error {
-	p.tracks = nil
-	p.skipped = map[string]int{}
-	p.unreadable = 0
-	return filepath.Walk(p.dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsPermission(err) {
-				return filepath.SkipDir
-			}
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if !supportedExts[ext] {
-			p.skipped[ext]++
-			return nil
-		}
-		t, err := trackFromFile(path)
-		if err != nil {
-			p.unreadable++
-			return nil // skipping files that have unreadable metadata
-		}
-		p.tracks = append(p.tracks, t)
-		return nil
-	})
+	res, err := scanDirectory(context.Background(), p.dir, false)
+	if err != nil {
+		p.tracks = nil
+		p.skipped = map[string]int{}
+		p.unreadable = 0
+		return err
+	}
+	p.tracks = res.tracks
+	p.skipped = res.skipped
+	p.unreadable = res.unreadable
+	return nil
 }
 
 // ScanNotice reports what the last scan left out, or "" when every file in the
