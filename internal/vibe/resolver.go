@@ -71,19 +71,20 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 		return true
 	}
 
-	// 1. Resolve SeedTracks in parallel (bounded by maxResolveWorkers) while
-	// preserving seed order in the output.
-	if len(plan.SeedTracks) > 0 {
+	// 1. Resolve unique SeedTracks in parallel (bounded by maxResolveWorkers)
+	// while preserving seed order in the output.
+	uniqueSeeds := dedupeSeedTracks(plan.SeedTracks)
+	if len(uniqueSeeds) > 0 {
 		type seedResult struct {
 			track    *provider.Track
 			warnings []string
 			err      error
 		}
-		results := make([]seedResult, len(plan.SeedTracks))
+		results := make([]seedResult, len(uniqueSeeds))
 		sem := make(chan struct{}, maxResolveWorkers)
-		done := make(chan int, len(plan.SeedTracks))
+		done := make(chan int, len(uniqueSeeds))
 
-		for i, seed := range plan.SeedTracks {
+		for i, seed := range uniqueSeeds {
 			go func(idx int, st SeedTrack) {
 				sem <- struct{}{}
 				defer func() {
@@ -100,14 +101,16 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 				results[idx] = seedResult{track: best, warnings: res.Warnings}
 			}(i, seed)
 		}
-		for range len(plan.SeedTracks) {
+		for range len(uniqueSeeds) {
 			<-done
 		}
 		for _, r := range results {
 			if r.err != nil {
-				reasons = append(reasons, r.err.Error())
+				reasons = append(reasons, sanitizeVibeText(r.err.Error()))
 			}
-			reasons = append(reasons, r.warnings...)
+			for _, w := range r.warnings {
+				reasons = append(reasons, sanitizeVibeText(w))
+			}
 			if r.track != nil && len(tracks) < maxTracks {
 				addTrack(*r.track)
 			}
@@ -116,16 +119,17 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 
 	seedCount := len(tracks)
 
-	// 2. If we still have room, run SearchQueries in bounded parallel workers.
-	if len(tracks) < maxTracks && len(plan.SearchQueries) > 0 {
+	// 2. If we still have room, run unique SearchQueries in bounded parallel workers to fill the queue.
+	uniqueQueries := dedupeNormalizedQueries(plan.SearchQueries)
+	if len(tracks) < maxTracks && len(uniqueQueries) > 0 {
 		type queryOut struct {
 			tracks   []provider.Track
 			warnings []string
 			err      error
 		}
-		chs := make([]chan queryOut, len(plan.SearchQueries))
+		chs := make([]chan queryOut, len(uniqueQueries))
 		sem := make(chan struct{}, maxResolveWorkers)
-		for i, q := range plan.SearchQueries {
+		for i, q := range uniqueQueries {
 			ch := make(chan queryOut, 1)
 			chs[i] = ch
 			go func(term string, out chan queryOut) {
@@ -167,10 +171,12 @@ func ResolvePlan(ctx context.Context, prov provider.Provider, plan *VibePlan, ra
 	if len(tracks) == 0 && strings.TrimSpace(rawQuery) != "" {
 		res, err := prov.Search(ctx, rawQuery)
 		if err != nil {
-			reasons = append(reasons, err.Error())
+			reasons = append(reasons, sanitizeVibeText(err.Error()))
 		}
 		if res != nil {
-			reasons = append(reasons, res.Warnings...)
+			for _, w := range res.Warnings {
+				reasons = append(reasons, sanitizeVibeText(w))
+			}
 			for _, t := range res.Tracks {
 				if len(tracks) >= maxTracks {
 					break
@@ -339,6 +345,49 @@ func noResultsError(query string, reasons []string) error {
 		return fmt.Errorf("no results for %q", query)
 	}
 	return fmt.Errorf("no results for %q (%s)", query, strings.Join(reasons, "; "))
+}
+
+func dedupeSeedTracks(seeds []SeedTrack) []SeedTrack {
+	if len(seeds) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(seeds))
+	out := make([]SeedTrack, 0, len(seeds))
+	for _, st := range seeds {
+		artist := strings.TrimSpace(st.Artist)
+		title := strings.TrimSpace(st.Title)
+		if artist == "" && title == "" {
+			continue
+		}
+		key := strings.ToLower(artist + "||" + title)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, SeedTrack{Artist: artist, Title: title})
+	}
+	return out
+}
+
+func dedupeNormalizedQueries(queries []string) []string {
+	if len(queries) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(queries))
+	out := make([]string, 0, len(queries))
+	for _, raw := range queries {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func dedupeStrings(s []string) []string {
