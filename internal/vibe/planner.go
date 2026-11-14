@@ -213,11 +213,20 @@ func (a *KeywordAgent) Plan(_ context.Context, req PlanRequest) (*VibePlan, erro
 	return SanitizePlan(plan, req.PlayerIdle), nil
 }
 
-// noRedirectHTTPClient returns an HTTP client with bounded timeout that
-// refuses all HTTP redirects so loopback probes never leave the target host.
+var sharedLoopbackTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConns = 8
+	t.MaxIdleConnsPerHost = 4
+	t.IdleConnTimeout = 60 * time.Second
+	return t
+}()
+
+// noRedirectHTTPClient returns an HTTP client with bounded timeout and pooled
+// transport that refuses HTTP redirects so loopback probes never leave the host.
 func noRedirectHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: sharedLoopbackTransport,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

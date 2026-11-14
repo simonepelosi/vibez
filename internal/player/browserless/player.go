@@ -85,6 +85,7 @@ type Player struct {
 	ended              bool                     // queue played through to the end
 	sessionExpiredOnce sync.Once
 	doneCh             chan struct{}
+	pollWakeCh         chan struct{}
 	closeOnce          sync.Once
 	bgWg               sync.WaitGroup
 }
@@ -160,13 +161,14 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 	}
 
 	p := &Player{
-		cfg:       cfg,
-		provider:  prov,
-		cdmEngine: cdmEngine,
-		licClient: licClient,
-		streamer:  streamer,
-		sink:      sink,
-		doneCh:    make(chan struct{}),
+		cfg:        cfg,
+		provider:   prov,
+		cdmEngine:  cdmEngine,
+		licClient:  licClient,
+		streamer:   streamer,
+		sink:       sink,
+		doneCh:     make(chan struct{}),
+		pollWakeCh: make(chan struct{}, 1),
 		state: player.State{
 			Volume:  1.0,
 			Bitrate: 256,
@@ -215,6 +217,7 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 		s := p.state
 		s.Error = p.streamErr
 		p.mu.Unlock()
+		p.signalPoll()
 		p.bcast.SendLog(s, "[stream] "+err.Error())
 	}
 	p.streamer.onLog = func(msg string) {
@@ -243,6 +246,7 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 			s.Error = e.Error()
 		}
 		p.mu.Unlock()
+		p.signalPoll()
 		p.bcast.SendLog(s, "[sink] "+s.Error)
 	})
 
@@ -251,39 +255,85 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 	return p, nil
 }
 
+func (p *Player) signalPoll() {
+	if p.pollWakeCh == nil {
+		return
+	}
+	select {
+	case p.pollWakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (p *Player) pollPosition() {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
+	var ticker *time.Ticker
+	var tickC <-chan time.Time
+	stopTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickC = nil
+		}
+	}
+	defer stopTicker()
+
+	syncTicker := func() bool {
+		p.mu.RLock()
+		closed := p.closed
+		active := p.state.Playing && !p.state.Loading
+		p.mu.RUnlock()
+		if closed {
+			return false
+		}
+		if active {
+			if ticker == nil {
+				ticker = time.NewTicker(250 * time.Millisecond)
+				tickC = ticker.C
+			}
+		} else {
+			stopTicker()
+		}
+		return true
+	}
+
+	if !syncTicker() {
+		return
+	}
 
 	for {
 		select {
 		case <-p.doneCh:
 			return
-		case <-ticker.C:
+		case <-p.pollWakeCh:
+			if !syncTicker() {
+				return
+			}
+		case <-tickC:
 			p.mu.RLock()
 			closed := p.closed
-			playing := p.state.Playing
-			loading := p.state.Loading
+			active := p.state.Playing && !p.state.Loading
 			p.mu.RUnlock()
 
 			if closed {
 				return
 			}
-			if playing && !loading {
-				pos, ok := p.sinkPosition()
-				if !ok {
-					return
-				}
-				p.mu.Lock()
-				if p.closed {
-					p.mu.Unlock()
-					return
-				}
-				p.state.Position = p.seekOffset + pos
-				s := p.state
-				p.mu.Unlock()
-				p.bcast.Send(s)
+			if !active {
+				stopTicker()
+				continue
 			}
+			pos, ok := p.sinkPosition()
+			if !ok {
+				return
+			}
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				return
+			}
+			p.state.Position = p.seekOffset + pos
+			s := p.state
+			p.mu.Unlock()
+			p.bcast.Send(s)
 		}
 	}
 }
@@ -380,6 +430,7 @@ func (p *Player) handleStreamStart(uri string) {
 	p.curStreamURL = prep.streamURL
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	p.logHybridTrack(s, tCopy)
 	p.scheduleNextPrefetch()
@@ -547,6 +598,7 @@ func (p *Player) playTrack(t provider.Track) {
 	matcher := p.localMatcher
 	p.bgWg.Add(1)
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 
 	go func() {
@@ -587,7 +639,9 @@ func (p *Player) playTrack(t provider.Track) {
 		// Backfill full metadata (Title, Artist, Album, ArtworkURL, Duration)
 		// for library-ID or placeholder tracks so MPRIS, Lyrics, Discord RPC,
 		// Last.fm, and the TUI Now Playing panel have complete track info.
+		backfilledCatalog := false
 		if t.Title == "" && prov != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
+			backfilledCatalog = true
 			if fetched, err := prov.GetCatalogTracks(ctx, []string{catalogID}); err == nil && len(fetched) > 0 {
 				meta := fetched[0]
 				meta.ID = t.ID
@@ -604,7 +658,7 @@ func (p *Player) playTrack(t provider.Track) {
 
 		if matcher != nil {
 			match, matched := matcher.Match(t)
-			if !matched && t.ISRC == "" && prov != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
+			if !matched && !backfilledCatalog && t.ISRC == "" && prov != nil && catalogID != "" && !strings.HasPrefix(catalogID, "i.") {
 				if fetched, err := prov.GetCatalogTracks(ctx, []string{catalogID}); err == nil && len(fetched) > 0 && fetched[0].ISRC != "" {
 					t.ISRC = fetched[0].ISRC
 					match, matched = matcher.Match(t)
@@ -634,6 +688,7 @@ func (p *Player) playTrack(t provider.Track) {
 				p.state.Track = &tCopy
 				s = p.state
 				p.mu.Unlock()
+				p.signalPoll()
 				p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
 				p.logHybridTrack(s, tCopy)
 				p.scheduleNextPrefetch()
@@ -664,6 +719,7 @@ func (p *Player) playTrack(t provider.Track) {
 				s := p.state
 				cb := p.OnSessionExpired
 				p.mu.Unlock()
+				p.signalPoll()
 				p.bcast.Send(s)
 				if cb != nil {
 					p.sessionExpiredOnce.Do(func() { go cb() })
@@ -686,6 +742,7 @@ func (p *Player) playTrack(t provider.Track) {
 				s.SkippedID = skippedID
 				hasMore := len(p.queue) > 1 && (p.idx < len(p.queue)-1 || p.state.RepeatMode == player.RepeatModeAll || p.state.ShuffleMode)
 				p.mu.Unlock()
+				p.signalPoll()
 				p.bcast.SendLog(s, "[skip] "+skippedID+": "+err.Error())
 				if hasMore {
 					_ = p.Next()
@@ -701,6 +758,7 @@ func (p *Player) playTrack(t provider.Track) {
 			s := p.state
 			s.Error = err.Error()
 			p.mu.Unlock()
+			p.signalPoll()
 			p.bcast.SendLog(s, "[error] "+err.Error())
 			return
 		}
@@ -724,6 +782,7 @@ func (p *Player) playTrack(t provider.Track) {
 		}
 		s = p.state
 		p.mu.Unlock()
+		p.signalPoll()
 		p.withSink(func(sk audioSink) { sk.PlayURI(streamURL) })
 		p.bcast.Send(s)
 		p.scheduleNextPrefetch()
@@ -751,6 +810,7 @@ func (p *Player) Play() error {
 	p.state.Playing = true
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.withSink(func(sk audioSink) { sk.Play() })
 	p.bcast.Send(s)
 	return nil
@@ -773,6 +833,7 @@ func (p *Player) Pause() error {
 	p.state.Playing = false
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.withSink(func(sk audioSink) { sk.Pause() })
 	p.bcast.Send(s)
 	return nil
@@ -797,6 +858,7 @@ func (p *Player) Stop() error {
 	p.state.Loading = false
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.withSink(func(sk audioSink) { sk.Stop() })
 	p.bcast.Send(s)
 	return nil
@@ -836,6 +898,7 @@ func (p *Player) Next() error {
 		p.state.Position = 0
 		s := p.state
 		p.mu.Unlock()
+		p.signalPoll()
 		p.withSink(func(sk audioSink) { sk.Stop() })
 		p.bcast.Send(s)
 		return nil
@@ -870,6 +933,7 @@ func (p *Player) Next() error {
 		p.curStreamURL = prep.streamURL
 		s := p.state
 		p.mu.Unlock()
+		p.signalPoll()
 		p.withSink(func(sk audioSink) { sk.PlayURI(prep.streamURL) })
 		p.bcast.Send(s)
 		p.scheduleNextPrefetch()
@@ -1125,6 +1189,7 @@ func (p *Player) SetRepeat(mode int) error {
 	p.state.RepeatMode = mode
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	p.scheduleNextPrefetch()
 	return nil
@@ -1135,6 +1200,7 @@ func (p *Player) SetShuffle(on bool) error {
 	p.state.ShuffleMode = on
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	p.scheduleNextPrefetch()
 	return nil
@@ -1191,6 +1257,7 @@ func (p *Player) RemoveFromQueue(idx int) error {
 	}
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	p.scheduleNextPrefetch()
 	return nil
@@ -1217,6 +1284,7 @@ func (p *Player) MoveInQueue(from, to int) error {
 	}
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	p.scheduleNextPrefetch()
 	return nil
@@ -1275,6 +1343,7 @@ func (p *Player) ClearQueue() error {
 	p.withSink(func(sk audioSink) { sk.Stop() })
 	s := p.state
 	p.mu.Unlock()
+	p.signalPoll()
 	p.bcast.Send(s)
 	return nil
 }

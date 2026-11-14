@@ -1130,3 +1130,65 @@ checkedLogs:
 		t.Error("expected [hybrid] playing local FLAC log on gapless handleStreamStart")
 	}
 }
+
+type pollSpySink struct {
+	posCalls atomic.Int32
+}
+
+func (s *pollSpySink) PlayURI(string)             {}
+func (s *pollSpySink) SetNextURI(string)          {}
+func (s *pollSpySink) Play()                      {}
+func (s *pollSpySink) Pause()                     {}
+func (s *pollSpySink) Stop()                      {}
+func (s *pollSpySink) Seek(time.Duration)         {}
+func (s *pollSpySink) SetVolume(float64)          {}
+func (s *pollSpySink) SetEqualizer([]float64)     {}
+func (s *pollSpySink) OnEOS(func())               {}
+func (s *pollSpySink) OnError(func(error))        {}
+func (s *pollSpySink) OnStreamStart(func(string)) {}
+func (s *pollSpySink) Destroy()                   {}
+func (s *pollSpySink) Position() time.Duration {
+	s.posCalls.Add(1)
+	return time.Second
+}
+
+func TestPollPositionParksWhenIdleOrPaused(t *testing.T) {
+	sink := &pollSpySink{}
+	p := &Player{
+		sink:         sink,
+		doneCh:       make(chan struct{}),
+		pollWakeCh:   make(chan struct{}, 1),
+		curStreamURL: "http://127.0.0.1/stream/s1/tok.aac",
+	}
+	p.bgWg.Go(p.pollPosition)
+	t.Cleanup(func() { _ = p.Close() })
+
+	// While idle (Playing=false), pollPosition must stay parked.
+	time.Sleep(320 * time.Millisecond)
+	if got := sink.posCalls.Load(); got != 0 {
+		t.Fatalf("posCalls while idle = %d, want 0", got)
+	}
+
+	// Resuming playback wakes the 250ms ticker.
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for sink.posCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if sink.posCalls.Load() == 0 {
+		t.Fatal("pollPosition did not wake after Play()")
+	}
+
+	// Pausing must park the ticker again without ongoing wakeups.
+	if err := p.Pause(); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	afterPause := sink.posCalls.Load()
+	time.Sleep(320 * time.Millisecond)
+	if got := sink.posCalls.Load(); got != afterPause {
+		t.Fatalf("posCalls grew while paused: before=%d after=%d", afterPause, got)
+	}
+}
