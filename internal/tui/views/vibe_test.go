@@ -221,10 +221,19 @@ func TestVibe_Lines_DoneState(t *testing.T) {
 	v := NewVibe()
 	v.Focus()
 	v.SetSearching()
+	v.SetUsage("384 tok (290↑ 94↓)")
 	v.SetResult(3, nil)
 	lines := v.Lines(40, 8, 0)
 	if len(lines) != 8 {
 		t.Errorf("Lines(done) returned %d lines, want 8", len(lines))
+	}
+	narrowOut := strings.Join(lines, "\n")
+	if !strings.Contains(narrowOut, "384 tok") || strings.Contains(narrowOut, "(290↑") {
+		t.Errorf("narrow Lines(w=40) should render compact token usage, got:\n%s", narrowOut)
+	}
+	wideOut := strings.Join(v.Lines(60, 8, 0), "\n")
+	if !strings.Contains(wideOut, "384 tok (290↑ 94↓)") {
+		t.Errorf("wide Lines(w=60) should render full token usage, got:\n%s", wideOut)
 	}
 }
 

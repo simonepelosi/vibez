@@ -81,6 +81,7 @@ type VibeModel struct {
 	added       int    // tracks added on last successful search
 	explanation string // optional curator explanation from VibePlan
 	backend     string // active planner backend badge (e.g. "ollama:qwen3" or "")
+	usage       string // formatted token usage from last VibePlan (e.g. "384 tok (290↑ 94↓)")
 	errStr      string // error message from last search
 	discovery   DiscoveryInfo
 	pickerIdx   int // selected row in the metric picker
@@ -147,6 +148,7 @@ func (v *VibeModel) IsFocused() bool { return v.state == vibeInputting }
 // Called by the model immediately after receiving VibeQueryMsg.
 func (v *VibeModel) SetSearching() {
 	v.state = vibeSearching
+	v.usage = ""
 	v.input.Blur()
 }
 
@@ -193,6 +195,14 @@ func (v *VibeModel) SetBackend(backend string) {
 // Backend returns the currently configured planner backend badge.
 func (v *VibeModel) Backend() string { return v.backend }
 
+// SetUsage sets the formatted token usage summary displayed on completion.
+func (v *VibeModel) SetUsage(usage string) {
+	v.usage = string(SanitizeSingleLineInput(usage, 40, true))
+}
+
+// Usage returns the formatted token usage summary from the last Vibe search.
+func (v *VibeModel) Usage() string { return v.usage }
+
 // SetResult transitions to done or error.
 // Called by the model after the provider search completes.
 func (v *VibeModel) SetResult(n int, err error) {
@@ -206,6 +216,7 @@ func (v *VibeModel) SetResultWithSummary(n int, explanation string, err error) {
 		v.state = vibeError
 		v.errStr = err.Error()
 		v.explanation = ""
+		v.usage = ""
 	} else {
 		if v.discovery.Active {
 			v.state = vibeDiscovery
@@ -494,6 +505,16 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		if v.added == 1 {
 			suffix = ""
 		}
+		doneText := primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix))
+		if v.usage != "" {
+			u := v.usage
+			if w < 48 {
+				if idx := strings.Index(u, " ("); idx > 0 {
+					u = u[:idx]
+				}
+			}
+			doneText += muted.Render(" · " + clip(u, max(w-24, 10)))
+		}
 		summaryLine := ""
 		if v.explanation != "" && !strings.EqualFold(v.explanation, v.lastQ) {
 			summaryLine = muted.Render(clip(v.explanation, 0))
@@ -501,7 +522,7 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		lines = []string{
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			summaryLine,
-			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
+			bear + " " + doneText,
 			"",
 			keySt.Render("v") + muted.Render(" new vibe") +
 				"  " + keySt.Render("d") + muted.Render(" set metric"),

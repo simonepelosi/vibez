@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -45,6 +46,85 @@ type SeedTrack struct {
 	Title  string `json:"title"`
 }
 
+// TokenUsage records token consumption for a VibePlan generation.
+type TokenUsage struct {
+	InputTokens  int  `json:"-"`
+	OutputTokens int  `json:"-"`
+	TotalTokens  int  `json:"-"`
+	Estimated    bool `json:"-"` // true when approximated from text length rather than provider metadata
+}
+
+// Total returns TotalTokens if positive, or InputTokens + OutputTokens.
+func (u TokenUsage) Total() int {
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
+	if u.InputTokens > 0 || u.OutputTokens > 0 {
+		return max(0, u.InputTokens) + max(0, u.OutputTokens)
+	}
+	return 0
+}
+
+// Format returns a compact human-readable token summary such as
+// "384 tok (290↑ 94↓)" or "~384 tok (290↑ 94↓)", or "" when zero.
+func (u TokenUsage) Format() string {
+	total := u.Total()
+	if total <= 0 {
+		return ""
+	}
+	prefix := ""
+	if u.Estimated {
+		prefix = "~"
+	}
+	if u.InputTokens > 0 || u.OutputTokens > 0 {
+		return fmt.Sprintf("%s%d tok (%d↑ %d↓)", prefix, total, max(0, u.InputTokens), max(0, u.OutputTokens))
+	}
+	return fmt.Sprintf("%s%d tok", prefix, total)
+}
+
+func normalizeTokenUsage(u TokenUsage) TokenUsage {
+	in := max(0, u.InputTokens)
+	out := max(0, u.OutputTokens)
+	tot := max(0, u.TotalTokens)
+	if tot == 0 && (in > 0 || out > 0) {
+		tot = in + out
+	}
+	if tot == 0 {
+		return TokenUsage{}
+	}
+	return TokenUsage{
+		InputTokens:  in,
+		OutputTokens: out,
+		TotalTokens:  tot,
+		Estimated:    u.Estimated,
+	}
+}
+
+// EstimateTokens approximates BPE token count (~4 UTF-8 runes per token).
+func EstimateTokens(text string) int {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return 0
+	}
+	n := utf8.RuneCountInString(trimmed)
+	return max(1, (n+3)/4)
+}
+
+// EstimateTokenUsage returns an estimated TokenUsage for a prompt/completion pair.
+func EstimateTokenUsage(prompt, completion string) TokenUsage {
+	in := EstimateTokens(prompt)
+	out := EstimateTokens(completion)
+	if in == 0 && out == 0 {
+		return TokenUsage{}
+	}
+	return TokenUsage{
+		InputTokens:  in,
+		OutputTokens: out,
+		TotalTokens:  in + out,
+		Estimated:    true,
+	}
+}
+
 // VibePlan is the structured output of a Planner before catalog grounding.
 type VibePlan struct {
 	Action         string      `json:"action"`
@@ -57,6 +137,7 @@ type VibePlan struct {
 	ExcludeArtists []string    `json:"exclude_artists"`
 	Backend        string      `json:"-"` // human-readable backend label (e.g. "ollama:qwen3" or "keyword")
 	FallbackReason string      `json:"-"` // non-empty when a primary planner failed and fell back
+	Usage          TokenUsage  `json:"-"` // token consumption for this plan (zero for keyword planner)
 }
 
 // PlanRequest carries the user's vibe prompt and sanitized session context.
@@ -86,6 +167,7 @@ func SanitizePlan(p *VibePlan, playerIdle bool) *VibePlan {
 		Energy:  min(max(p.Energy, 0), 1),
 		Ordered: p.Ordered,
 		Backend: sanitizeVibeText(p.Backend),
+		Usage:   normalizeTokenUsage(p.Usage),
 	}
 
 	switch strings.ToLower(strings.TrimSpace(p.Action)) {
@@ -530,6 +612,7 @@ func (p *OllamaPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, e
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
+	userMsg := buildUserMessage(req)
 	reqBody := struct {
 		Model    string          `json:"model"`
 		Messages []chatMsg       `json:"messages"`
@@ -539,7 +622,7 @@ func (p *OllamaPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, e
 		Model: model,
 		Messages: []chatMsg{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: buildUserMessage(req)},
+			{Role: "user", Content: userMsg},
 		},
 		Stream: false,
 		Format: vibePlanJSONSchema,
@@ -570,6 +653,8 @@ func (p *OllamaPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, e
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
+		PromptEvalCount int `json:"prompt_eval_count"`
+		EvalCount       int `json:"eval_count"`
 	}
 	if err := json.Unmarshal(body, &chatResp); err != nil {
 		return nil, fmt.Errorf("ollama decode envelope: %w", err)
@@ -579,6 +664,15 @@ func (p *OllamaPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, e
 		return nil, fmt.Errorf("ollama decode plan: %w", err)
 	}
 	plan.Backend = "ollama:" + model
+	if chatResp.PromptEvalCount > 0 || chatResp.EvalCount > 0 {
+		plan.Usage = TokenUsage{
+			InputTokens:  chatResp.PromptEvalCount,
+			OutputTokens: chatResp.EvalCount,
+			TotalTokens:  chatResp.PromptEvalCount + chatResp.EvalCount,
+		}
+	} else {
+		plan.Usage = EstimateTokenUsage(systemPrompt+"\n\n"+userMsg, chatResp.Message.Content)
+	}
 	sanitized := SanitizePlan(&plan, req.PlayerIdle)
 	if len(sanitized.SeedTracks) == 0 && len(sanitized.SearchQueries) == 0 {
 		return nil, errors.New("ollama returned empty plan")
@@ -720,6 +814,7 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}
+	userMsg := buildUserMessage(req)
 	reqBody := struct {
 		Model          string    `json:"model"`
 		Messages       []chatMsg `json:"messages"`
@@ -736,7 +831,7 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 		Model: model,
 		Messages: []chatMsg{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: buildUserMessage(req)},
+			{Role: "user", Content: userMsg},
 		},
 		Temperature: 0.4,
 	}
@@ -773,6 +868,11 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &chatResp); err != nil || len(chatResp.Choices) == 0 {
 		return nil, fmt.Errorf("%s decode choices: %w", p.prefix(), err)
@@ -782,6 +882,15 @@ func (p *OpenAICompatPlanner) Plan(ctx context.Context, req PlanRequest) (*VibeP
 		return nil, fmt.Errorf("%s decode plan: %w", p.prefix(), err)
 	}
 	plan.Backend = p.prefix() + ":" + model
+	if chatResp.Usage.TotalTokens > 0 || chatResp.Usage.PromptTokens > 0 || chatResp.Usage.CompletionTokens > 0 {
+		plan.Usage = TokenUsage{
+			InputTokens:  chatResp.Usage.PromptTokens,
+			OutputTokens: chatResp.Usage.CompletionTokens,
+			TotalTokens:  chatResp.Usage.TotalTokens,
+		}
+	} else {
+		plan.Usage = EstimateTokenUsage(systemPrompt+"\n\n"+userMsg, chatResp.Choices[0].Message.Content)
+	}
 	sanitized := SanitizePlan(&plan, req.PlayerIdle)
 	if len(sanitized.SeedTracks) == 0 && len(sanitized.SearchQueries) == 0 {
 		return nil, fmt.Errorf("%s returned empty plan", p.prefix())

@@ -169,6 +169,7 @@ type vibeResultMsg struct {
 	explanation    string // curator explanation from VibePlan
 	backend        string // planner backend that produced the plan
 	fallbackReason string // non-empty when primary planner fell back to keyword
+	usage          vibe.TokenUsage
 	err            error
 	warnings       []string // non-fatal provider failures behind an incomplete result
 	discovery      bool     // true when result is from a discovery auto-refill
@@ -1069,8 +1070,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.backend != "" {
 			m.vibe.SetBackend(msg.backend)
 		}
-		playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
 		isVibePrompt := !msg.discovery && !msg.radio
+		if isVibePrompt {
+			m.vibe.SetUsage(msg.usage.Format())
+		}
+		playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
 		action := msg.action
 		if isVibePrompt && action == "" && playerIdle {
 			action = vibe.ActionPlayNow
@@ -1078,7 +1082,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if isVibePrompt && action == vibe.ActionStartRadio {
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] starting radio from %s — %s for %q%s", tracks[0].Artist, tracks[0].Title, msg.query, vibeBackendTag(msg.backend)))
+			m.appendLog(fmt.Sprintf("[vibe] starting radio from %s — %s for %q%s", tracks[0].Artist, tracks[0].Title, msg.query, vibeBackendTag(msg.backend, msg.usage)))
 			seed := tracks[0]
 			cmds = append(cmds, m.startRadioFrom(&seed))
 			break
@@ -1104,7 +1108,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.playerState.Position = 0
 			m.queue.SetTracks(m.queueTracks)
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] playing %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend)))
+			m.appendLog(fmt.Sprintf("[vibe] playing %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend, msg.usage)))
 			break
 		}
 
@@ -1136,7 +1140,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLog(fmt.Sprintf("[radio] refilled %d tracks", len(tracks)))
 		default:
 			m.vibe.SetResultWithSummary(len(tracks), msg.explanation, nil)
-			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend)))
+			m.appendLog(fmt.Sprintf("[vibe] added %d tracks for %q%s", len(tracks), msg.query, vibeBackendTag(msg.backend, msg.usage)))
 		}
 
 	case rateSongMsg:
@@ -2898,6 +2902,7 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 				query:          query,
 				backend:        plan.Backend,
 				fallbackReason: plan.FallbackReason,
+				usage:          plan.Usage,
 				err:            err,
 				warnings:       out.Warnings,
 			}
@@ -2909,6 +2914,7 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 			explanation:    plan.Explanation,
 			backend:        plan.Backend,
 			fallbackReason: plan.FallbackReason,
+			usage:          plan.Usage,
 			warnings:       out.Warnings,
 		}
 	}
@@ -3030,11 +3036,18 @@ func (m *Model) isPlayingRatedTrack(trackID, catalogID string) bool {
 	return trackID == "" && catalogID == ""
 }
 
-func vibeBackendTag(backend string) string {
-	if backend == "" {
+func vibeBackendTag(backend string, usage vibe.TokenUsage) string {
+	u := usage.Format()
+	switch {
+	case backend != "" && u != "":
+		return " (" + backend + " · " + u + ")"
+	case backend != "":
+		return " (" + backend + ")"
+	case u != "":
+		return " (" + u + ")"
+	default:
 		return ""
 	}
-	return " (" + backend + ")"
 }
 
 func ratingStatusMessage(rating, prev provider.Rating, title string) string {

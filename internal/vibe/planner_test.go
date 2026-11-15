@@ -522,3 +522,56 @@ func TestResolvePlan_DeduplicatesSeedsAndQueriesBeforeSearch(t *testing.T) {
 		t.Errorf("query search calls = %d, want 1", got)
 	}
 }
+
+func TestTokenUsage_FormatAndPlanners(t *testing.T) {
+	if got := (TokenUsage{}).Format(); got != "" {
+		t.Errorf("zero TokenUsage.Format() = %q, want empty", got)
+	}
+	exact := TokenUsage{InputTokens: 290, OutputTokens: 94, TotalTokens: 384}
+	if got := exact.Format(); got != "384 tok (290↑ 94↓)" {
+		t.Errorf("exact.Format() = %q, want %q", got, "384 tok (290↑ 94↓)")
+	}
+	est := EstimateTokenUsage("late night synthwave coding", `{"action":"play_now","explanation":"synthwave","ordered":false,"seed_tracks":[],"search_queries":["synthwave"]}`)
+	if !est.Estimated || est.Total() <= 0 || !strings.HasPrefix(est.Format(), "~") {
+		t.Errorf("EstimateTokenUsage = %+v (%q), want Estimated=true with '~' prefix", est, est.Format())
+	}
+
+	// KeywordAgent must report zero token usage.
+	kwPlan, err := (&KeywordAgent{}).Plan(context.Background(), PlanRequest{Prompt: "chill", PlayerIdle: true})
+	if err != nil {
+		t.Fatalf("KeywordAgent.Plan: %v", err)
+	}
+	if kwPlan.Usage.Total() != 0 || kwPlan.Usage.Format() != "" {
+		t.Errorf("KeywordAgent Usage = %+v, want zero", kwPlan.Usage)
+	}
+
+	// OllamaPlanner extracts exact prompt_eval_count and eval_count.
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"message":{"content":"{\"action\":\"play_now\",\"explanation\":\"chill\",\"ordered\":false,\"seed_tracks\":[],\"search_queries\":[\"chillhop\"]}"},"prompt_eval_count":312,"eval_count":88}`))
+	}))
+	defer ollamaSrv.Close()
+	op := &OllamaPlanner{BaseURL: ollamaSrv.URL, Model: "qwen3:8b", Client: ollamaSrv.Client()}
+	oPlan, err := op.Plan(context.Background(), PlanRequest{Prompt: "chill", PlayerIdle: true})
+	if err != nil {
+		t.Fatalf("OllamaPlanner.Plan: %v", err)
+	}
+	if oPlan.Usage.InputTokens != 312 || oPlan.Usage.OutputTokens != 88 || oPlan.Usage.TotalTokens != 400 || oPlan.Usage.Estimated {
+		t.Errorf("OllamaPlanner Usage = %+v, want 312/88/400 exact", oPlan.Usage)
+	}
+
+	// OpenAICompatPlanner extracts exact usage.prompt_tokens / completion_tokens / total_tokens.
+	oaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"play_now\",\"explanation\":\"chill\",\"ordered\":false,\"seed_tracks\":[],\"search_queries\":[\"lofi\"]}"}}],"usage":{"prompt_tokens":250,"completion_tokens":75,"total_tokens":325}}`))
+	}))
+	defer oaSrv.Close()
+	oap := &OpenAICompatPlanner{BackendName: "lmstudio", BaseURL: oaSrv.URL, Model: "mistral", Client: oaSrv.Client()}
+	oaPlan, err := oap.Plan(context.Background(), PlanRequest{Prompt: "chill", PlayerIdle: true})
+	if err != nil {
+		t.Fatalf("OpenAICompatPlanner.Plan: %v", err)
+	}
+	if oaPlan.Usage.InputTokens != 250 || oaPlan.Usage.OutputTokens != 75 || oaPlan.Usage.TotalTokens != 325 || oaPlan.Usage.Estimated {
+		t.Errorf("OpenAICompatPlanner Usage = %+v, want 250/75/325 exact", oaPlan.Usage)
+	}
+}
