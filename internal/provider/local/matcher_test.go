@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -616,5 +617,261 @@ func TestScan_SanitizesTamperedCacheEntries(t *testing.T) {
 	}
 	if len(got.Genres) != 1 || strings.Contains(got.Genres[0], "\x1b") {
 		t.Errorf("unsanitized cached genres = %v", got.Genres)
+	}
+}
+
+func TestScanCache_RejectsWrongDirWorldWritableAndSanitizesAllFields(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("LOCALAPPDATA", cacheDir)
+
+	dir := t.TempDir()
+	flacPath := filepath.Join(dir, "song.flac")
+	writeSyntheticFLAC(t, flacPath, 180*time.Second, map[string]string{
+		"TITLE": "Clean Song", "ARTIST": "Clean Artist", "ALBUM": "Clean Album",
+	})
+
+	// Cold scan writes the verified cache file.
+	if _, err := local.New(dir); err != nil {
+		t.Fatalf("cold local.New: %v", err)
+	}
+	var cacheFile string
+	_ = filepath.WalkDir(cacheDir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".json") {
+			cacheFile = path
+		}
+		return nil
+	})
+	if cacheFile == "" {
+		t.Fatal("expected cache file to be written")
+	}
+	// Cache file name must use full 256-bit SHA-256 hex digest (64 hex chars).
+	base := filepath.Base(cacheFile)
+	hexPart := strings.TrimSuffix(strings.TrimPrefix(base, "local-scan-"), ".json")
+	if len(hexPart) != 64 {
+		t.Fatalf("cache hash hex len = %d (%q), want 64", len(hexPart), base)
+	}
+
+	raw, err := os.ReadFile(cacheFile) //nolint:gosec // G304: cache file created inside t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	entries := payload["entries"].(map[string]any)
+	for _, v := range entries {
+		tr := v.(map[string]any)["track"].(map[string]any)
+		tr["ArtworkURL"] = "http://127.0.0.1:9999/ssrf.jpg"
+		tr["PreviewURL"] = "http://169.254.169.254/latest"
+		tr["CatalogID"] = "\x1b[31m999"
+		tr["ReleaseDate"] = "\x1b[2J2020"
+		tr["ContentRating"] = "\x1b[31mexplicit"
+		tr["AudioVariants"] = []any{"\x1b[31mdolby-atmos"}
+		tr["ArtworkPalette"] = map[string]any{"BgColor": "\x1b[31m#000000"}
+		tr["LocalFormat"] = "\x1b[31mALAC"
+		tr["ISRC"] = "usrc-12345678\x1b[0m"
+	}
+	tampered, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cacheFile, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p2, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("warm local.New: %v", err)
+	}
+	tracks, _ := p2.GetLibraryTracks(context.Background())
+	if len(tracks) != 1 {
+		t.Fatalf("tracks len = %d, want 1", len(tracks))
+	}
+	got := tracks[0]
+	if got.ArtworkURL != "" || got.PreviewURL != "" || got.CatalogID != "" ||
+		got.ReleaseDate != "" || got.ContentRating != "" || len(got.AudioVariants) != 0 ||
+		got.ArtworkPalette != (provider.ArtworkPalette{}) {
+		t.Fatalf("remote/catalog fields leaked from cache: %+v", got)
+	}
+	if got.LocalFormat != "FLAC" {
+		t.Errorf("LocalFormat = %q, want FLAC (re-validated from extension)", got.LocalFormat)
+	}
+
+	// Mismatched dir field in cache JSON must force cache rejection and full re-parse.
+	info, err := os.Stat(flacPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origFLAC, err := os.ReadFile(flacPath) //nolint:gosec // G304: test temp file path created above
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace file contents with an updated title while holding size/mtime? Simpler: check
+	// title restored to real disk tag after zeroed-vs-mismatch test or write wrong dir + title.
+	for _, v := range entries {
+		v.(map[string]any)["track"].(map[string]any)["Title"] = "Poisoned Wrong Dir"
+	}
+	payload["dir"] = filepath.Join(dir, "other")
+	wrongDirBytes, _ := json.Marshal(payload)
+	if err := os.WriteFile(cacheFile, wrongDirBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pWrongDir, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("local.New(wrong dir cache): %v", err)
+	}
+	wrongDirTracks, _ := pWrongDir.GetLibraryTracks(context.Background())
+	if len(wrongDirTracks) != 1 || wrongDirTracks[0].Title != "Clean Song" {
+		t.Fatalf("wrong dir cache was trusted! got=%+v", wrongDirTracks)
+	}
+
+	// On Unix, world-writable cache files must also be ignored.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		_ = origFLAC
+		payload["dir"] = dir
+		for _, v := range entries {
+			v.(map[string]any)["track"].(map[string]any)["Title"] = "Poisoned World Writable"
+		}
+		wwBytes, _ := json.Marshal(payload)
+		if err := os.WriteFile(cacheFile, wwBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(cacheFile, 0o666); err != nil { //nolint:gosec // G302: intentionally creating world-writable file in security test
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(flacPath, info.ModTime(), info.ModTime())
+		pWW, err := local.New(dir)
+		if err != nil {
+			t.Fatalf("local.New(world-writable cache): %v", err)
+		}
+		wwTracks, _ := pWW.GetLibraryTracks(context.Background())
+		if len(wwTracks) != 1 || wwTracks[0].Title != "Clean Song" {
+			t.Fatalf("world-writable cache was trusted! got=%+v", wwTracks)
+		}
+	}
+}
+
+func TestMatcher_ISRCWildcardAndMinInt64Overflow(t *testing.T) {
+	t.Run("rejects unknown-duration ISRC wildcard with conflicting metadata", func(t *testing.T) {
+		dir := t.TempDir()
+		badPath := filepath.Join(dir, "spoof.flac")
+		writeSyntheticFLAC(t, badPath, 0, map[string]string{
+			"TITLE": "Completely Different Track", "ARTIST": "Impostor", "ISRC": "USRC55555555",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		if res, ok := m.Match(provider.Track{
+			ID:       "1",
+			Title:    "Real Song",
+			Artist:   "Real Artist",
+			Duration: 3 * time.Minute,
+			ISRC:     "USRC55555555",
+		}); ok {
+			t.Fatalf("expected conflicting unknown-duration ISRC candidate to be rejected, got %+v", res)
+		}
+	})
+
+	t.Run("rejects ambiguous ISRC candidates when want duration is missing", func(t *testing.T) {
+		dir := t.TempDir()
+		sub1 := filepath.Join(dir, "d1")
+		sub2 := filepath.Join(dir, "d2")
+		_ = os.MkdirAll(sub1, 0o750)
+		_ = os.MkdirAll(sub2, 0o750)
+		writeSyntheticFLAC(t, filepath.Join(sub1, "a.flac"), 3*time.Minute, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ISRC": "USRC66666666",
+		})
+		writeSyntheticFLAC(t, filepath.Join(sub2, "b.flac"), 5*time.Minute, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ISRC": "USRC66666666",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		if res, ok := m.Match(provider.Track{
+			ID:     "2",
+			Title:  "Track",
+			Artist: "Artist",
+			ISRC:   "USRC66666666",
+		}); ok {
+			t.Fatalf("expected ambiguous ISRC without duration to be rejected, got %+v", res)
+		}
+	})
+
+	t.Run("handles MinInt64 duration subtraction without wraparound match", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "track.flac")
+		writeSyntheticFLAC(t, p, 3*time.Minute, map[string]string{
+			"TITLE": "Track", "ARTIST": "Artist", "ISRC": "USRC77777777",
+		})
+		m, err := local.NewMatcher(dir)
+		if err != nil {
+			t.Fatalf("NewMatcher: %v", err)
+		}
+		if res, ok := m.Match(provider.Track{
+			ID:       "3",
+			Title:    "Track",
+			Artist:   "Artist",
+			Duration: math.MaxInt64,
+			ISRC:     "USRC77777777",
+		}); ok {
+			t.Fatalf("expected extreme MaxInt64 duration mismatch to be rejected, got %+v", res)
+		}
+	})
+}
+
+func TestTrackFromFile_FLACPictureAllocDoSAndPanicSafety(t *testing.T) {
+	dir := t.TempDir()
+	evilPath := filepath.Join(dir, "giant-pic.flac")
+
+	// Craft a 100-byte FLAC whose PICTURE metadata block claims a 0xFFFFFFFF data length,
+	// which would otherwise cause dhowden/tag/vorbis.go:make([]byte, dataLen) to OOM/panic.
+	var buf bytes.Buffer
+	buf.WriteString("fLaC")
+	// Minimal PICTURE block: type(4)=3, mimeLen(4)=0, descLen(4)=0, w/h/d/c(16)=0, dataLen(4)=0xFFFFFFFF.
+	var pic [32]byte
+	binary.BigEndian.PutUint32(pic[0:4], 3)
+	binary.BigEndian.PutUint32(pic[28:32], 0xFFFFFFFF)
+	buf.Write([]byte{0x86, 0x00, 0x00, byte(len(pic))})
+	buf.Write(pic[:])
+	if err := os.WriteFile(evilPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := local.New(dir)
+	if err != nil {
+		t.Fatalf("local.New failed on adversarial FLAC: %v", err)
+	}
+	tracks, _ := p.GetLibraryTracks(context.Background())
+	if len(tracks) != 1 || tracks[0].Title != "giant-pic.flac" {
+		t.Fatalf("tracks = %+v, want safe fallback to filename", tracks)
+	}
+}
+
+func TestScanNotice_SanitizesPathAndExtension(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("filenames with ESC are invalid on Windows")
+	}
+	parent := t.TempDir()
+	evilDir := filepath.Join(parent, "music\x1b[31m")
+	if err := os.MkdirAll(evilDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evilDir, "note.txt\x1b[2J"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := local.New(evilDir)
+	if err != nil {
+		t.Fatalf("local.New: %v", err)
+	}
+	notice := p.ScanNotice()
+	if strings.Contains(notice, "\x1b") {
+		t.Fatalf("ScanNotice contains unsanitized ESC: %q", notice)
 	}
 }

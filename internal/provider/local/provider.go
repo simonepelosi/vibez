@@ -8,8 +8,10 @@ package local
 import (
 	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -108,7 +110,7 @@ func (p *Provider) ScanNotice() string {
 		return ""
 	}
 
-	dir := shortPath(p.dir)
+	dir := provider.Clean(shortPath(p.dir))
 	head := "no playable tracks in " + dir
 	if len(p.tracks) > 0 {
 		head = fmt.Sprintf("indexed %d of %d files in %s",
@@ -155,7 +157,7 @@ func skippedExtList(counts map[string]int) string {
 			parts = append(parts, fmt.Sprintf("+%d more", len(exts)-named))
 			break
 		}
-		name := ext
+		name := provider.Clean(ext)
 		if name == "" {
 			name = "no extension"
 		}
@@ -193,7 +195,7 @@ func trackFromFile(path string) (provider.Track, error) {
 	}
 	defer func() { _ = f.Close() }()
 
-	m, err := tag.ReadFrom(f)
+	m, err := safeReadTags(f)
 
 	title := filepath.Base(path)
 	artist := "Unknown Artist"
@@ -244,6 +246,140 @@ func capTagString(s string) string {
 		return string(runes[:maxTagRunes])
 	}
 	return s
+}
+
+const (
+	maxTagReadBytes    = 32 << 20 // 32 MiB total bytes read while parsing tags
+	maxTagBlockBytes   = 32 << 20 // 32 MiB cap for a single FLAC metadata block
+	maxTagPictureBytes = 16 << 20 // 16 MiB cap for embedded FLAC picture payload
+)
+
+type boundedReadSeeker struct {
+	rs        io.ReadSeeker
+	remaining int64
+}
+
+func (b *boundedReadSeeker) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		return 0, errors.New("tag metadata read budget exceeded")
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.rs.Read(p)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+func (b *boundedReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return b.rs.Seek(offset, whence)
+}
+
+// safeReadTags wraps tag.ReadFrom with panic recovery, bounded read I/O, and
+// pre-flight FLAC block/picture bounds validation so malformed tags cannot
+// panic or trigger multi-gigabyte allocations inside github.com/dhowden/tag.
+func safeReadTags(rs io.ReadSeeker) (m tag.Metadata, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			m = nil
+			err = fmt.Errorf("tag parser panic: %v", r)
+		}
+	}()
+
+	fileSize, err := rs.Seek(0, io.SeekEnd)
+	if err != nil || fileSize <= 0 {
+		return nil, errors.New("empty or unseekable audio file")
+	}
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	if err := validateFLACTagBounds(rs, fileSize); err != nil {
+		return nil, err
+	}
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return tag.ReadFrom(&boundedReadSeeker{rs: rs, remaining: maxTagReadBytes})
+}
+
+func validateFLACTagBounds(rs io.ReadSeeker, fileSize int64) error {
+	if err := skipID3v2(rs); err != nil {
+		return nil // let tag.ReadFrom handle non-ID3/short inputs
+	}
+	var magic [4]byte
+	if _, err := io.ReadFull(rs, magic[:]); err != nil || string(magic[:]) != "fLaC" {
+		return nil
+	}
+	for range maxMetadataBlocks {
+		var hdr [4]byte
+		if _, err := io.ReadFull(rs, hdr[:]); err != nil {
+			return err
+		}
+		last := hdr[0]&0x80 != 0
+		typ := hdr[0] & 0x7F
+		blockLen := int64(hdr[1])<<16 | int64(hdr[2])<<8 | int64(hdr[3])
+		curPos, err := rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		if blockLen < 0 || blockLen > fileSize-curPos || blockLen > maxTagBlockBytes {
+			return errors.New("flac metadata block exceeds file or memory bounds")
+		}
+		if typ == 6 {
+			if err := validateFLACPictureBounds(rs, curPos, blockLen); err != nil {
+				return err
+			}
+		}
+		if _, err := rs.Seek(curPos+blockLen, io.SeekStart); err != nil {
+			return err
+		}
+		if last {
+			return nil
+		}
+	}
+	return errors.New("flac metadata block count exceeded")
+}
+
+func validateFLACPictureBounds(rs io.ReadSeeker, blockStart, blockLen int64) error {
+	if blockLen < 32 {
+		return errors.New("truncated flac picture block")
+	}
+	var head [8]byte
+	if _, err := io.ReadFull(rs, head[:]); err != nil {
+		return err
+	}
+	mimeLen := int64(binary.BigEndian.Uint32(head[4:8]))
+	if mimeLen < 0 || mimeLen > blockLen-8-24 {
+		return errors.New("flac picture mime length out of bounds")
+	}
+	if _, err := rs.Seek(mimeLen, io.SeekCurrent); err != nil {
+		return err
+	}
+	var descHdr [4]byte
+	if _, err := io.ReadFull(rs, descHdr[:]); err != nil {
+		return err
+	}
+	descLen := int64(binary.BigEndian.Uint32(descHdr[:]))
+	if descLen < 0 || descLen > blockLen-(mimeLen+12)-20 {
+		return errors.New("flac picture description length out of bounds")
+	}
+	if _, err := rs.Seek(descLen+16, io.SeekCurrent); err != nil {
+		return err
+	}
+	var dataHdr [4]byte
+	if _, err := io.ReadFull(rs, dataHdr[:]); err != nil {
+		return err
+	}
+	dataLen := int64(binary.BigEndian.Uint32(dataHdr[:]))
+	curPos, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	blockRem := (blockStart + blockLen) - curPos
+	if dataLen < 0 || dataLen > maxTagPictureBytes || dataLen > blockRem {
+		return errors.New("flac picture payload length out of bounds")
+	}
+	return nil
 }
 
 // extractISRC inspects raw tag maps (ID3 TSRC/TRC, Vorbis/FLAC ISRC, MP4

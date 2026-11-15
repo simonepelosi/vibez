@@ -121,3 +121,65 @@ func FuzzReadAudioDurations(f *testing.F) {
 		_ = readOGGDuration(r)
 	})
 }
+
+func TestReadAIFFDuration_MaxInt64BoundaryOverflow(t *testing.T) {
+	// frames/sr * 1e9 == 2^63 (float64(math.MaxInt64) rounds up to 2^63).
+	// A naive > float64(math.MaxInt64) guard would convert 2^63 to negative MinInt64.
+	var b bytes.Buffer
+	b.WriteString("FORM")
+	_ = binary.Write(&b, binary.BigEndian, uint32(30))
+	b.WriteString("AIFF")
+	b.WriteString("COMM")
+	_ = binary.Write(&b, binary.BigEndian, uint32(18))
+	_ = binary.Write(&b, binary.BigEndian, uint16(2))          // channels
+	_ = binary.Write(&b, binary.BigEndian, uint32(0xFFFFFFFF)) // frames
+	_ = binary.Write(&b, binary.BigEndian, uint16(16))         // sampleSize
+	// 80-bit extended float small positive sample rate: exponent 0x3FFD (0.25 Hz) -> ~1.718e19 ns > 2^63 ns.
+	b.Write([]byte{0x3F, 0xFD, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	if got := readAIFFDuration(bytes.NewReader(b.Bytes())); got != 0 {
+		t.Fatalf("readAIFFDuration overflow returned %v, want 0", got)
+	}
+	// Exact 2^63 ns boundary check: sr = 1e9 / 2^32 (~0.23283 Hz) => 2^31 / sr * 1e9 == 2^63.
+	b.Reset()
+	b.WriteString("FORM")
+	_ = binary.Write(&b, binary.BigEndian, uint32(30))
+	b.WriteString("AIFF")
+	b.WriteString("COMM")
+	_ = binary.Write(&b, binary.BigEndian, uint32(18))
+	_ = binary.Write(&b, binary.BigEndian, uint16(2))
+	_ = binary.Write(&b, binary.BigEndian, uint32(1<<31)) // 2^31 frames
+	_ = binary.Write(&b, binary.BigEndian, uint16(16))
+	srBytes := [10]byte{0x3F, 0xFC, 0xEE, 0x6B, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00}
+	b.Write(srBytes[:])
+	if got := readAIFFDuration(bytes.NewReader(b.Bytes())); got != 0 {
+		t.Fatalf("readAIFFDuration 2^63 boundary = %v, want 0 (must not wrap negative)", got)
+	}
+}
+
+func TestWalkMP4Boxes_SharedBoxBudgetStopsExponentialDoS(t *testing.T) {
+	// Nested sibling moov trees each containing children must share one global box budget.
+	// Build a tree of branching depth 3 with many small leaf boxes under moov so total
+	// boxes exceed maxMetadataBlocks while each node stays well under maxMetadataBlocks.
+	leaf := []byte{0, 0, 0, 8, 'f', 'r', 'e', 'e'}
+	childCount := 100
+	var inner bytes.Buffer
+	for range childCount {
+		inner.Write(leaf)
+	}
+	var root bytes.Buffer
+	outerBranches := (maxMetadataBlocks / childCount) + 10
+	for range outerBranches {
+		var box bytes.Buffer
+		_ = binary.Write(&box, binary.BigEndian, uint32(8+inner.Len())) //nolint:gosec
+		box.WriteString("moov")
+		box.Write(inner.Bytes())
+		root.Write(box.Bytes())
+	}
+	var dur time.Duration
+	var codec string
+	budget := maxMetadataBlocks
+	walkMP4BoxesBounded(bytes.NewReader(root.Bytes()), 0, int64(root.Len()), 0, &budget, &dur, &codec)
+	if budget != 0 {
+		t.Fatalf("shared budget remaining = %d, want 0 (enforced global cap)", budget)
+	}
+}

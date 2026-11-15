@@ -228,7 +228,9 @@ func readAIFFDuration(r io.ReadSeeker) time.Duration {
 				return 0
 			}
 			secs := float64(frames) / sr
-			if secs*float64(time.Second) > float64(math.MaxInt64) {
+			// float64(math.MaxInt64) rounds up to 2^63, so >= prevents overflow
+			// when converting back to int64/time.Duration.
+			if secs*float64(time.Second) >= float64(math.MaxInt64) {
 				return 0
 			}
 			return time.Duration(secs * float64(time.Second))
@@ -277,11 +279,17 @@ func readMP4Info(r io.ReadSeeker) (time.Duration, string) {
 }
 
 func walkMP4Boxes(r io.ReadSeeker, start, end int64, depth int, dur *time.Duration, codec *string) {
+	budget := maxMetadataBlocks
+	walkMP4BoxesBounded(r, start, end, depth, &budget, dur, codec)
+}
+
+func walkMP4BoxesBounded(r io.ReadSeeker, start, end int64, depth int, budget *int, dur *time.Duration, codec *string) {
 	if depth > maxMP4BoxDepth {
 		return
 	}
 	pos := start
-	for boxes := 0; boxes < maxMetadataBlocks && pos+8 <= end; boxes++ {
+	for *budget > 0 && pos+8 <= end {
+		*budget--
 		if _, err := r.Seek(pos, io.SeekStart); err != nil {
 			return
 		}
@@ -311,7 +319,7 @@ func walkMP4Boxes(r io.ReadSeeker, start, end int64, depth int, dur *time.Durati
 
 		switch typ {
 		case "moov", "trak", "mdia", "minf", "stbl":
-			walkMP4Boxes(r, bodyStart, bodyEnd, depth+1, dur, codec)
+			walkMP4BoxesBounded(r, bodyStart, bodyEnd, depth+1, budget, dur, codec)
 		case "mvhd":
 			if bodyEnd-bodyStart >= 20 {
 				var buf [32]byte

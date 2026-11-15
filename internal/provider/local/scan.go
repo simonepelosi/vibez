@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	scanCacheVersion  = 1
-	maxScanWorkers    = 8
-	maxScanCacheBytes = 64 << 20 // 64 MiB cap on persisted directory index
+	scanCacheVersion    = 1
+	maxScanWorkers      = 8
+	maxScanCacheBytes   = 64 << 20 // 64 MiB cap on persisted directory index
+	maxCachedGenreCount = 16
 )
 
 type cachedTrackEntry struct {
@@ -116,19 +117,13 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 	}
 
 	cachePath := scanCachePath(root)
-	cached := loadScanCache(cachePath)
+	cached := loadScanCache(cachePath, root)
 
 	results := make([]scanItemResult, len(candidates))
 	missIdx := make([]int, 0, len(candidates))
 	for i, c := range candidates {
 		if entry, ok := cached[c.path]; ok && c.size >= 0 && entry.Size == c.size && entry.ModNano == c.modNano {
-			t := entry.Track
-			t.ID = "local:" + c.path
-			t.LocalPath = c.path
-			t.Title = provider.Clean(capTagString(t.Title))
-			t.Artist = provider.Clean(capTagString(t.Artist))
-			t.Album = provider.Clean(capTagString(t.Album))
-			t.Genres = provider.CleanAll(t.Genres)
+			t := sanitizeCachedTrack(c.path, entry.Track)
 			results[i] = scanItemResult{
 				track:     t,
 				cachedHit: true,
@@ -241,22 +236,110 @@ func parseCandidatesParallel(ctx context.Context, candidates []scanCandidate, mi
 	return ctx.Err()
 }
 
+func sanitizeCachedTrack(path string, t provider.Track) provider.Track {
+	t.ID = "local:" + path
+	t.LocalPath = path
+	t.Title = provider.Clean(capTagString(t.Title))
+	if t.Title == "" {
+		t.Title = provider.Clean(capTagString(filepath.Base(path)))
+	}
+	t.Artist = provider.Clean(capTagString(t.Artist))
+	t.Album = provider.Clean(capTagString(t.Album))
+	t.Genres = provider.CleanAll(t.Genres)
+	if len(t.Genres) > maxCachedGenreCount {
+		t.Genres = t.Genres[:maxCachedGenreCount]
+	}
+	for i := range t.Genres {
+		t.Genres[i] = capTagString(t.Genres[i])
+	}
+	if t.Duration < 0 {
+		t.Duration = 0
+	}
+	if t.DiscNumber < 0 {
+		t.DiscNumber = 0
+	}
+	if t.TrackNumber < 0 {
+		t.TrackNumber = 0
+	}
+	t.ISRC = provider.NormalizeISRC(t.ISRC)
+	// Local scans never populate remote Apple Music catalog metadata or URLs.
+	t.CatalogID = ""
+	t.ArtworkURL = ""
+	t.PreviewURL = ""
+	t.ContentRating = ""
+	t.IsAppleDigitalMaster = false
+	t.ReleaseDate = ""
+	t.ArtworkPalette = provider.ArtworkPalette{}
+	t.AudioVariants = nil
+	t.LocalFormat = sanitizeCachedFormat(path, t.LocalFormat)
+	return t
+}
+
+func sanitizeCachedFormat(path, cachedFmt string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".flac":
+		return "FLAC"
+	case ".wav":
+		return "WAV"
+	case ".aiff", ".aif":
+		return "AIFF"
+	case ".mp3":
+		return "MP3"
+	case ".ogg":
+		return "OGG"
+	case ".m4a":
+		if cachedFmt == "ALAC" || cachedFmt == "M4A" {
+			return cachedFmt
+		}
+		return LosslessFormatLabel(path)
+	default:
+		return formatFromExt(path)
+	}
+}
+
 func scanCachePath(dir string) string {
 	cacheRoot, err := os.UserCacheDir()
-	if err != nil || cacheRoot == "" {
+	if err != nil || cacheRoot == "" || !filepath.IsAbs(cacheRoot) {
 		return ""
+	}
+	if info, err := os.Lstat(cacheRoot); err == nil {
+		// Reject a world-writable cache root unless it is a sticky shared base like /tmp.
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o002 != 0 && info.Mode()&fs.ModeSticky == 0 {
+			return ""
+		}
 	}
 	clean := filepath.Clean(dir)
 	if abs, absErr := filepath.Abs(clean); absErr == nil {
 		clean = abs
 	}
 	sum := sha256.Sum256([]byte(clean))
-	name := "local-scan-" + hex.EncodeToString(sum[:8]) + ".json"
+	name := "local-scan-" + hex.EncodeToString(sum[:]) + ".json"
 	return filepath.Join(cacheRoot, "vibez", name)
 }
 
-func loadScanCache(path string) map[string]cachedTrackEntry {
-	if path == "" {
+func isSafeCacheNode(path string, wantDir bool) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&fs.ModeSymlink != 0 {
+		return false
+	}
+	if wantDir {
+		if !info.IsDir() {
+			return false
+		}
+	} else if !info.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o002 != 0 {
+		return false
+	}
+	return true
+}
+
+func loadScanCache(path, expectedDir string) map[string]cachedTrackEntry {
+	if !isSafeCacheNode(filepath.Dir(path), true) || !isSafeCacheNode(path, false) {
 		return nil
 	}
 	f, err := openRegularAudioFile(path)
@@ -264,6 +347,9 @@ func loadScanCache(path string) map[string]cachedTrackEntry {
 		return nil
 	}
 	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || (runtime.GOOS != "windows" && fi.Mode().Perm()&0o002 != 0) {
+		return nil
+	}
 	b, err := io.ReadAll(io.LimitReader(f, maxScanCacheBytes+1))
 	if err != nil || len(b) == 0 || len(b) > maxScanCacheBytes {
 		return nil
@@ -272,15 +358,21 @@ func loadScanCache(path string) map[string]cachedTrackEntry {
 	if err := json.Unmarshal(b, &file); err != nil || file.Version != scanCacheVersion {
 		return nil
 	}
+	if expectedDir != "" && file.Dir != filepath.Clean(expectedDir) {
+		return nil
+	}
 	return file.Entries
 }
 
 func saveScanCache(path, dir string, entries map[string]cachedTrackEntry) {
-	if path == "" {
+	if path == "" || !filepath.IsAbs(path) {
 		return
 	}
 	parent := filepath.Dir(path)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return
+	}
+	if !isSafeCacheNode(parent, true) {
 		return
 	}
 	payload, err := json.Marshal(scanCacheFile{
@@ -303,6 +395,10 @@ func saveScanCache(path, dir string, entries map[string]cachedTrackEntry) {
 		return
 	}
 	if _, err := f.Write(payload); err != nil {
+		_ = f.Close()
+		return
+	}
+	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		return
 	}

@@ -63,3 +63,34 @@ func FuzzClean(f *testing.F) {
 		}
 	})
 }
+
+func TestClean_MalformedUTF8CloakingANSI(t *testing.T) {
+	if got := Clean("bad\xff\x1b[31mred\x1b[0m"); got != "badred" {
+		t.Fatalf("Clean(invalid UTF-8 before CSI) = %q, want %q", got, "badred")
+	}
+	if got := Clean("\x1b]0;\xfftitle\x07visible"); got != "visible" {
+		t.Fatalf("Clean(invalid UTF-8 inside OSC) = %q, want %q", got, "visible")
+	}
+	if got := Clean("safe\x1b\xff[31mevil\x1b[0m"); got == "" || got[0] == '\x1b' {
+		t.Fatalf("Clean(broken CSI) unexpected output: %q", got)
+	}
+}
+
+func TestClean_CRAndCombiningMarksDoS(t *testing.T) {
+	if got := Clean("first\rsecond\r\nthird"); got != "first second third" {
+		t.Fatalf("Clean(CR/CRLF) = %q, want %q", got, "first second third")
+	}
+	if got := CleanLines("first\rsecond\r\nthird"); got != "first\nsecond\nthird" {
+		t.Fatalf("CleanLines(CR/CRLF) = %q, want %q", got, "first\nsecond\nthird")
+	}
+	const comb = "\u0301" // 2 bytes in UTF-8
+	zalgo := make([]byte, 0, 1+30*len(comb))
+	zalgo = append(zalgo, 'a')
+	for range 30 {
+		zalgo = append(zalgo, comb...)
+	}
+	want := "a\u0301\u0301\u0301\u0301"
+	if got := Clean(string(zalgo)); got != want {
+		t.Fatalf("Clean(zalgo) len=%d (%q), want len=%d (%q)", len(got), got, len(want), want)
+	}
+}
