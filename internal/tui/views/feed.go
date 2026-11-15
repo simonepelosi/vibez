@@ -134,29 +134,24 @@ func (f *FeedModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 
 func (f *FeedModel) View() string {
 	muted := styles.QueueItemMuted
-	hdr := styles.TabActive
 	groupTitle := styles.NowPlayingArtist
 	itemStyle := styles.QueueItem
 	sel := styles.Playing
 
-	sep := muted.Render(strings.Repeat("─", 5))
-
 	switch f.state {
 	case feedStateLoading:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("loading recommendations…")
+		return "\n" + muted.Render("loading recommendations…")
 	case feedStateEmpty:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("no recommendations") + "\n\n" +
+		return "\n" + muted.Render("no recommendations") + "\n\n" +
 			muted.Render("press ") + styles.KeyName.Render("r") + muted.Render(" to reload")
 	case feedStateError:
-		return hdr.Render("Feed") + "\n" + sep + "\n\n" + muted.Render("could not load feed") + "\n\n" +
+		return "\n" + muted.Render("could not load feed") + "\n\n" +
 			muted.Render("press ") + styles.KeyName.Render("r") + muted.Render(" to try again")
 	}
 
 	var sb strings.Builder
-	sb.WriteString(hdr.Render("Feed") + "\n")
-	sb.WriteString(sep + "\n")
 
-	visible := max(f.height-2, 1)
+	visible := max(f.height, 1)
 	if f.scroll < 0 {
 		f.scroll = 0
 	}

@@ -107,6 +107,18 @@ func (v *VibeModel) Focus() {
 	v.input.Focus()
 }
 
+// Blur leaves input or metric-picker focus so keyboard shortcuts return to the main view.
+func (v *VibeModel) Blur() {
+	v.input.Blur()
+	if v.state == vibeInputting || v.state == vibeDiscoveryPicker {
+		if v.discovery.Active {
+			v.state = vibeDiscovery
+		} else {
+			v.state = vibeIdle
+		}
+	}
+}
+
 // ShowPicker opens the similarity metric picker, pre-selecting the option
 // closest to currentSimilarity. No-op while a search is in progress.
 func (v *VibeModel) ShowPicker(currentSimilarity float64) {
@@ -138,37 +150,38 @@ func (v *VibeModel) SetSearching() {
 	v.input.Blur()
 }
 
-// backendEmoji returns a playful icon for the given planner backend identifier.
-func backendEmoji(backend string) string {
+// BackendEmoji returns a single-cell geometric/technical glyph for the given
+// planner backend identifier (guaranteed 1 terminal column wide across all terminals).
+func BackendEmoji(backend string) string {
 	b := strings.ToLower(strings.TrimSpace(backend))
 	if idx := strings.IndexByte(b, ':'); idx >= 0 {
 		b = b[:idx]
 	}
 	switch b {
 	case "omp", "oh-my-pi", "ohmypi":
-		return "🥧"
+		return "π"
 	case "ollama", "llamacpp", "llama.cpp", "llama-server", "llama-cpp":
-		return "🦙"
+		return "◉"
 	case "lmstudio":
-		return "🧪"
+		return "◈"
 	case "apple-fm", "foundationmodels":
-		return "🍎"
+		return "⌘"
 	case "claude":
-		return "🧠"
+		return "✳"
 	case "gemini":
-		return "✨"
+		return "✦"
 	case "codex", "openai":
-		return "🤖"
+		return "⎔"
 	case "copilot":
-		return "✈️"
+		return "❖"
 	case "opencode", "local":
-		return "⚡"
+		return "⟡"
 	case "llm":
-		return "🦉"
+		return "◇"
 	case "keyword":
-		return "🔑"
+		return "⌕"
 	default:
-		return "✨"
+		return "✦"
 	}
 }
 
@@ -284,14 +297,48 @@ func (v *VibeModel) Update(msg tea.Msg) tea.Cmd {
 				v.pickerIdx++
 			}
 		case "enter":
-			opt := discoveryOptions[v.pickerIdx]
-			v.state = vibeIdle
-			return func() tea.Msg { return DiscoveryMetricSelectedMsg{Similarity: opt.similarity} }
+			return v.selectPickerOption(v.pickerIdx)
 		case "d", "esc":
 			v.state = vibeIdle
 		}
 	}
 	return nil
+}
+
+// SelectPickerAtRow chooses a discovery similarity option matching visual row
+// index inside Lines() when the metric picker is active.
+func (v *VibeModel) SelectPickerAtRow(row int) tea.Cmd {
+	if v.state != vibeDiscoveryPicker {
+		return nil
+	}
+	idx := row - 2
+	if idx < 0 || idx >= len(discoveryOptions) {
+		return nil
+	}
+	return v.selectPickerOption(idx)
+}
+
+// BackendBadge returns the planner backend emoji and name (or "" for keyword/empty)
+// so card headers can show the active planner without duplicating inside the body.
+func (v *VibeModel) BackendBadge() string {
+	if v.backend == "" || v.backend == "keyword" {
+		return ""
+	}
+	b := v.backend
+	if runes := []rune(b); len(runes) > 24 {
+		b = string(runes[:23]) + "…"
+	}
+	return BackendEmoji(v.backend) + " " + b
+}
+
+func (v *VibeModel) selectPickerOption(idx int) tea.Cmd {
+	if idx < 0 || idx >= len(discoveryOptions) {
+		return nil
+	}
+	opt := discoveryOptions[idx]
+	v.pickerIdx = idx
+	v.state = vibeIdle
+	return func() tea.Msg { return DiscoveryMetricSelectedMsg{Similarity: opt.similarity} }
 }
 
 // similarityBar returns a styled block-progress bar and a label for the similarity value.
@@ -330,11 +377,12 @@ func (v *VibeModel) IsAnimating() bool {
 
 func (v *VibeModel) Lines(w, h, step int) []string {
 	accent := styles.NowPlayingArtist
+	keySt := styles.KeyName
 	muted := styles.QueueItemMuted
 	primary := styles.Playing
 	errSt := lipgloss.NewStyle().Foreground(styles.ColorError)
 
-	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ•̀ᴥ•́ʔ"}
+	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ^ᴥ^ʔ"}
 	bear := styles.BearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
 
 	v.input.SetWidth(max(w-4, 10))
@@ -349,21 +397,10 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		return s
 	}
 
-	labelTitle := "Vibe"
-	if v.state == vibeDiscovery || v.state == vibeDiscoveryPicker {
-		labelTitle = "Discovery"
-	}
-	label := styles.TabActive.Render(labelTitle)
-	if labelTitle == "Vibe" && v.backend != "" && v.backend != "keyword" {
-		icon := backendEmoji(v.backend)
-		label += " " + muted.Render("["+icon+" "+clip(v.backend, 24)+"]")
-	}
-	sep := muted.Render(strings.Repeat("─", 5))
-
 	var lines []string
 	switch v.state {
 	case vibeDiscoveryPicker:
-		lines = []string{label, sep, accent.Render("select metric:"), ""}
+		lines = []string{accent.Render("select metric:"), ""}
 		for i, opt := range discoveryOptions {
 			prefix := "  "
 			nameStyle := muted
@@ -375,9 +412,9 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		}
 		lines = append(lines,
 			"",
-			accent.Render("↑↓")+muted.Render(" navigate")+
-				"  "+accent.Render("Enter")+muted.Render(" select")+
-				"  "+accent.Render("esc")+muted.Render(" cancel"),
+			keySt.Render("↑↓")+muted.Render(" navigate")+
+				"  "+keySt.Render("Enter")+muted.Render(" select")+
+				"  "+keySt.Render("esc")+muted.Render(" cancel"),
 		)
 
 	case vibeDiscovery:
@@ -408,7 +445,6 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 		}
 
 		lines = []string{
-			label, sep,
 			accent.Render(clip(d.SeedArtist, w-4)),
 			muted.Render(clip(d.SeedTitle, w-4)),
 			"",
@@ -418,37 +454,34 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			"",
 			bearStatus,
 			"",
-			accent.Render("+") + muted.Render(" similar") +
-				"  " + accent.Render("-") + muted.Render(" different") +
-				"  " + accent.Render("d") + muted.Render(" stop"),
+			keySt.Render("+") + muted.Render(" similar") +
+				"  " + keySt.Render("-") + muted.Render(" different") +
+				"  " + keySt.Render("d") + muted.Render(" stop"),
 		}
 
 	case vibeIdle:
 		lines = []string{
-			label, sep,
 			muted.Render("describe your vibe:"),
-			"> " + accent.Render(v.input.Placeholder),
+			accent.Render("❯ ") + accent.Render(v.input.Placeholder),
 			"",
-			bear + " " + muted.Render("press v to start"),
+			bear + " " + muted.Render("press ") + keySt.Render("v") + muted.Render(" to start"),
 			"",
-			accent.Render("d") + muted.Render(" set metric  ") + accent.Render(":discover") + muted.Render(" start"),
+			keySt.Render(":discover") + muted.Render(" start"),
 		}
 
 	case vibeInputting:
 		lines = []string{
-			label, sep,
 			accent.Render("describe your vibe:"),
-			"> " + v.input.View(),
+			accent.Render("❯ ") + v.input.View(),
 			"",
 			bear + " " + muted.Render("listening…"),
 			"",
-			accent.Render("Enter") + muted.Render(" search") +
-				"  " + accent.Render("esc") + muted.Render(" cancel"),
+			keySt.Render("Enter") + muted.Render(" search") +
+				"  " + keySt.Render("esc") + muted.Render(" cancel"),
 		}
 
 	case vibeSearching:
 		lines = []string{
-			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
 			bear + " " + primary.Render("searching…"),
@@ -466,27 +499,28 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 			summaryLine = muted.Render(clip(v.explanation, 0))
 		}
 		lines = []string{
-			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			summaryLine,
 			bear + " " + primary.Render(fmt.Sprintf("✓ added %d track%s", v.added, suffix)),
 			"",
-			accent.Render("v") + muted.Render(" new vibe") +
-				"  " + accent.Render("d") + muted.Render(" set metric"),
+			keySt.Render("v") + muted.Render(" new vibe") +
+				"  " + keySt.Render("d") + muted.Render(" set metric"),
 		}
 
 	case vibeError:
 		lines = []string{
-			label, sep,
 			muted.Render(`"` + clip(v.lastQ, 0) + `"`),
 			"",
-			styles.BearStyle.Render("ʕ•̀ᴥ•́ʔ") + " " + errSt.Render("no results"),
+			styles.BearStyle.Render("ʕ-ᴥ-ʔ") + " " + errSt.Render("no results"),
 			"",
-			accent.Render("v") + muted.Render(" try again") +
-				"  " + accent.Render("d") + muted.Render(" set metric"),
+			keySt.Render("v") + muted.Render(" try again") +
+				"  " + keySt.Render("d") + muted.Render(" set metric"),
 		}
 	}
 
+	if v.state != vibeDiscoveryPicker && h >= len(lines)+2 {
+		lines = append([]string{""}, lines...)
+	}
 	for len(lines) < h {
 		lines = append(lines, "")
 	}

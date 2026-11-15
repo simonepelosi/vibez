@@ -157,7 +157,7 @@ func TestStatusLines_NothingHidden(t *testing.T) {
 		m.radio.enabled = true
 
 		joined := strings.Join(m.statusLines(w-4), "\n")
-		for _, hint := range []string{"vibe", "radio", "equalizer|eq", "quit", "shuffle"} {
+		for _, hint := range []string{"command", "vibe", "radio", "quit", "shuffle"} {
 			if !containsAny(joined, strings.Split(hint, "|")) {
 				t.Errorf("width=%d: hint %q missing from status lines", w, hint)
 			}

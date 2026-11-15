@@ -21,6 +21,8 @@ type bearFrame struct {
 	below string // annotation below the bear (empty → blank line)
 }
 
+// All expressions strictly use 5 single-width BMP columns so the mascot never
+// causes horizontal layout jitter when animating inline.
 var sleepFrames = []bearFrame{
 	{above: "z", expr: "ʕ-ᴥ-ʔ"},
 	{expr: "ʕ˘ᴥ˘ʔ"},
@@ -30,14 +32,13 @@ var sleepFrames = []bearFrame{
 
 var danceFrames = []bearFrame{
 	{above: "♪", expr: "ʕ·ᴥ·ʔ"},
-	{expr: "ʕ•̀ω•́ʔ✧", below: "♫"},
-	{above: "♫", expr: "ʕง•ᴥ•ʔง"},
-	{expr: "ʕっ•ᴥ•ʔっ", below: "♪"},
-	{above: "♪", expr: "ʕ•ᴥ•ʔゝ☆"},
+	{expr: "ʕ•ᴥ•ʔ", below: "♫"},
+	{above: "♫", expr: "ʕ^ᴥ^ʔ"},
+	{expr: "ʕoᴥoʔ", below: "♪"},
+	{above: "♪", expr: "ʕ˘ᴥ˘ʔ"},
 }
 
-// RenderBearLine returns a single animated line: bear kaomoji + note/z + status text.
-// Used in the Now Playing section.
+// RenderBearLine returns a fixed-width animated line: bear kaomoji + note/z + status text.
 func RenderBearLine(step int, playing bool) string {
 	if playing {
 		f := danceFrames[(step/6)%len(danceFrames)]
@@ -47,15 +48,14 @@ func RenderBearLine(step int, playing bool) string {
 		} else if f.below != "" {
 			note = f.below
 		}
-		status := styles.VibingStatus.Render("vibing...")
-		return styles.BearStyle.Render(f.expr) + styles.NoteStyle.Render(note) + " " + status
+		return styles.BearStyle.Render(f.expr) + styles.NoteStyle.Render(note) + " " + styles.VibingStatus.Render("vibing...")
 	}
 	f := sleepFrames[(step/12)%len(sleepFrames)]
-	zz := ""
+	zz := " "
 	if f.above != "" {
-		zz = styles.SleepStyle.Render(f.above) + " "
+		zz = string([]rune(f.above)[0])
 	}
-	return zz + styles.BearStyle.Render(f.expr) + " " + styles.SleepStyle.Render("zZz...")
+	return styles.BearStyle.Render(f.expr) + styles.SleepStyle.Render(zz) + " " + styles.SleepStyle.Render("zZz...   ")
 }
 
 // BearExpr returns just the styled bear kaomoji for the current animation step.

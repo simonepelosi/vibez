@@ -4,8 +4,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // --- NewVibe ---
@@ -378,20 +380,86 @@ func TestVibe_Lines_BackendEmojiBadge(t *testing.T) {
 		backend   string
 		wantEmoji string
 	}{
-		{"omp:smol", "🥧"},
-		{"ollama:qwen3:8b", "🦙"},
-		{"llamacpp:llama-3.2", "🦙"},
-		{"lmstudio:mistral", "🧪"},
-		{"claude:haiku", "🧠"},
-		{"gemini:flash", "✨"},
-		{"codex:mini", "🤖"},
+		{"omp:smol", "π"},
+		{"ollama:qwen3:8b", "◉"},
+		{"llamacpp:llama-3.2", "◉"},
+		{"lmstudio:mistral", "◈"},
+		{"apple-fm", "⌘"},
+		{"claude:haiku", "✳"},
+		{"gemini:flash", "✦"},
+		{"codex:mini", "⎔"},
+		{"copilot:gpt-4.1", "❖"},
+		{"opencode:default", "⟡"},
+		{"llm:default", "◇"},
+		{"keyword", "⌕"},
 	}
 	for _, tc := range cases {
+		if got := BackendEmoji(tc.backend); got != tc.wantEmoji {
+			t.Errorf("BackendEmoji(%q) = %q, want %q", tc.backend, got, tc.wantEmoji)
+		}
+		if w := ansi.StringWidth(tc.wantEmoji); w != 1 {
+			t.Errorf("glyph %q for %q has cell width %d, want 1", tc.wantEmoji, tc.backend, w)
+		}
+		if tc.backend == "keyword" {
+			continue
+		}
 		v := NewVibe()
 		v.SetBackend(tc.backend)
+		badge := v.BackendBadge()
+		if !strings.Contains(badge, tc.wantEmoji) || !strings.Contains(badge, tc.backend) {
+			t.Errorf("BackendBadge() for %q = %q, want %q and backend name", tc.backend, badge, tc.wantEmoji)
+		}
 		out := strings.Join(v.Lines(60, 10, 0), "\n")
-		if !strings.Contains(out, tc.wantEmoji) || !strings.Contains(out, tc.backend) {
-			t.Errorf("Lines with backend %q should contain %q and backend name, got:\n%s", tc.backend, tc.wantEmoji, out)
+		if strings.Contains(out, tc.backend) {
+			t.Errorf("Lines() should not duplicate backend badge %q inside card body:\n%s", tc.backend, out)
 		}
 	}
+}
+
+func TestVibe_Lines_BearFixedWidthNoCombiningMarks(t *testing.T) {
+	checkState := func(name string, setup func(*VibeModel), anchor string) {
+		t.Helper()
+		v := NewVibe()
+		setup(v)
+		wantWidth := -1
+		for step := range 50 {
+			lines := v.Lines(48, 10, step)
+			found := false
+			for _, l := range lines {
+				plain := ansi.Strip(l)
+				for _, r := range plain {
+					if unicode.Is(unicode.Mn, r) {
+						t.Fatalf("%s step=%d line %q contains combining mark %U", name, step, plain, r)
+					}
+				}
+				if strings.Contains(plain, anchor) {
+					found = true
+					w := ansi.StringWidth(plain)
+					if wantWidth < 0 {
+						wantWidth = w
+					} else if w != wantWidth {
+						t.Fatalf("%s step=%d bear status line width = %d, want constant %d (%q)", name, step, w, wantWidth, plain)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("%s step=%d missing anchor %q in %v", name, step, anchor, lines)
+			}
+		}
+	}
+
+	checkState("idle", func(*VibeModel) {}, "press v to start")
+	checkState("searching", func(v *VibeModel) {
+		v.Focus()
+		v.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+		v.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	}, "searching…")
+	checkState("done", func(v *VibeModel) {
+		v.SetSearching()
+		v.SetResult(2, nil)
+	}, "✓ added 2 tracks")
+	checkState("error", func(v *VibeModel) {
+		v.SetSearching()
+		v.SetResult(0, errors.New("none"))
+	}, "no results")
 }

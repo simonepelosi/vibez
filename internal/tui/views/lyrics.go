@@ -189,7 +189,7 @@ func (l *LyricsModel) Back() bool {
 }
 
 func (l *LyricsModel) visibleRows() int {
-	return max(l.height-2, 1)
+	return max(l.height, 1)
 }
 
 func (l *LyricsModel) centerOn(idx int) {
@@ -329,28 +329,19 @@ func (l *LyricsModel) View() string {
 	normal := styles.QueueItem
 	current := l.cachedCurrentStyle
 	selected := styles.Selected
-	header := styles.TabActive
 
 	var rendered string
 	switch {
 	case l.loading:
-		rendered = header.Render("Lyrics") + "\n" +
-			strings.Repeat("─", 5) + "\n\n" +
-			muted.Render("fetching lyrics…")
+		rendered = "\n" + muted.Render("fetching lyrics…")
 	case l.errMsg != "":
-		rendered = header.Render("Lyrics") + "\n" +
-			strings.Repeat("─", 5) + "\n\n" +
-			muted.Render("You cannot sing this song :(")
+		rendered = "\n" + muted.Render("You cannot sing this song :(")
 	case len(l.lines) == 0:
-		rendered = header.Render("Lyrics") + "\n" +
-			strings.Repeat("─", 5) + "\n\n" +
-			muted.Render("no lyrics found")
+		rendered = "\n" + muted.Render("no lyrics found")
 	default:
 		end := min(l.scroll+l.visibleRows(), len(l.lines))
 		var sb strings.Builder
 		sb.Grow((end - l.scroll) * 48)
-		sb.WriteString(header.Render("Lyrics") + "\n")
-		sb.WriteString(muted.Render(strings.Repeat("─", 5)) + "\n")
 
 		for i := l.scroll; i < end; i++ {
 			line := l.lines[i]

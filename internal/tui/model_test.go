@@ -592,11 +592,17 @@ func TestModel_Update_PlayerStateMsg(t *testing.T) {
 
 func TestModel_ContentHeight(t *testing.T) {
 	m := newModel(nil)
+	m.width = 100
 	m.height = 26
 	got := m.panelHeight()
-	// fixed overhead = 20 lines (box layout with two status lines)
-	if got != 6 {
-		t.Errorf("panelHeight() = %d, want 6", got)
+	// fixed overhead at width=100: topbar(1) + hero borders(2) + hero(7) + panel borders(2) + wrapped status(2) = 14
+	if got != 12 {
+		t.Errorf("panelHeight() at width=100 = %d, want 12", got)
+	}
+	m.width = 160
+	// fixed overhead at width=160: single-line status(1) -> 13 overhead -> 13 panel rows
+	if gotWide := m.panelHeight(); gotWide != 13 {
+		t.Errorf("panelHeight() at width=160 = %d, want 13", gotWide)
 	}
 }
 
@@ -609,26 +615,29 @@ func TestModel_ContentHeight_Small(t *testing.T) {
 	}
 }
 
-// --- renderBoxHeader ---
+// --- buildTopBar ---
 
 func TestModel_RenderHeader_ContainsVibez(t *testing.T) {
 	m := newModel(nil)
 	m.width = 80
-	got := m.renderBoxHeader(m.width - 2)
+	got, _ := m.buildTopBar(m.width)
 	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(got, "")
 	if !strings.Contains(plain, "vibez") {
-		t.Errorf("renderBoxHeader() should contain 'vibez', got %q", got)
+		t.Errorf("buildTopBar() should contain 'vibez', got %q", got)
 	}
 }
 
-// --- statusNavLines ---
+// --- statusLines ---
 
 func TestModel_RenderFooter_ContainsKeyHints(t *testing.T) {
 	m := newModel(nil)
-	m.width = 100
-	got := strings.Join(m.statusNavLines(m.width-4), "\n")
-	if !strings.Contains(got, "search") {
-		t.Errorf("statusNavLines() should contain key hints, got %q", got)
+	m.width = 140
+	got := ansi.Strip(strings.Join(m.statusLines(m.width-2), "\n"))
+	if !strings.Contains(got, "command") || !strings.Contains(got, "vibe") {
+		t.Errorf("statusLines() should contain key hints, got %q", got)
+	}
+	if strings.Contains(got, "NORMAL") {
+		t.Errorf("statusLines() should not render legacy NORMAL mode badge, got %q", got)
 	}
 }
 
@@ -1276,11 +1285,14 @@ func TestSearch_StatusNavLinesShowsCtrlUClearHint(t *testing.T) {
 		m.searchQuery = "preserved search query"
 		m.searchCursor = len([]rune(m.searchQuery))
 
-		joined := strings.Join(m.statusNavLines(w-4), "\n")
-		for _, want := range []string{"SEARCH", "preserved search query", "Ctrl+U", "clear"} {
+		joined := ansi.Strip(strings.Join(m.statusLines(w-2), "\n"))
+		for _, want := range []string{"Enter", "Ctrl+U", "clear", "Esc"} {
 			if !strings.Contains(joined, want) {
-				t.Errorf("width=%d: statusNavLines missing %q in %q", w, want, joined)
+				t.Errorf("width=%d: statusLines missing %q in %q", w, want, joined)
 			}
+		}
+		if strings.Contains(joined, "SEARCH") {
+			t.Errorf("width=%d: statusLines should not render legacy SEARCH badge: %q", w, joined)
 		}
 
 		lines := strings.Split(m.View().Content, "\n")
@@ -2865,6 +2877,8 @@ func TestNowPlayingLines_NoColorFallsBackToText(t *testing.T) {
 
 func TestNowPlayingLines_ArtModeOffShowsBarWithoutArt(t *testing.T) {
 	m := newModel(nil)
+	m.width = 100
+	m.height = 30
 	m.supportsArtColor = func() bool { return true }
 	m.artwork = artworkCache{
 		url:      "https://example.invalid/a.png",
@@ -2877,14 +2891,14 @@ func TestNowPlayingLines_ArtModeOffShowsBarWithoutArt(t *testing.T) {
 	}
 
 	joined := strings.Join(m.nowPlayingLines(100, 12), "\n")
-	if !strings.Contains(joined, "Now Playing") || !strings.Contains(joined, "Bar Song") {
+	if !strings.Contains(joined, "Bar Song") || !strings.Contains(joined, "Bar Artist") || !strings.Contains(joined, "Playing") {
 		t.Fatalf("bar layout missing metadata: %q", joined)
 	}
 	if strings.Contains(joined, "▀") {
 		t.Fatalf("art mode off but artwork rendered: %q", joined)
 	}
-	if h := m.nowPlayingHeight(); h != 12 {
-		t.Fatalf("nowPlayingHeight() with art mode off = %d, want 12", h)
+	if h := m.nowPlayingHeight(); h != 7 {
+		t.Fatalf("nowPlayingHeight() with art mode off = %d, want 7", h)
 	}
 }
 
@@ -3074,11 +3088,13 @@ func TestNowPlayingArtModeClipsLongMetadata(t *testing.T) {
 	}
 }
 
-// TestNowPlayingArtMode_LayoutIsMinimal checks Simone's requested art view:
-// the cover with just track, album, and elapsed time — no progress bar or
-// control icons.
+// TestNowPlayingArtMode_LayoutIsMinimal checks the redesigned side-by-side
+// Art Hero: cover art on the left paired with track metadata, zigzag wave
+// scrubber, and transport controls on the right.
 func TestNowPlayingArtMode_LayoutIsMinimal(t *testing.T) {
 	m := newModel(nil)
+	m.width = 100
+	m.height = 40
 	m.artMode = true
 	m.supportsArtColor = func() bool { return true }
 	m.artwork = artworkCache{
@@ -3099,15 +3115,13 @@ func TestNowPlayingArtMode_LayoutIsMinimal(t *testing.T) {
 	}
 
 	joined := strings.Join(m.nowPlayingLines(100, 20), "\n")
-	for _, want := range []string{"▀", "Minimal Song", "Minimal Artist", "Minimal Album", "0:42 / 3:00"} {
+	for _, want := range []string{"▀", "Minimal Song", "Minimal Artist", "Minimal Album", "0:42", "3:00", "⏸", "⇄"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("art view missing %q: %q", want, joined)
 		}
 	}
-	for _, unwanted := range []string{"╱", "╲", "⏸", "⇄"} {
-		if strings.Contains(joined, unwanted) {
-			t.Fatalf("art view should not contain %q: %q", unwanted, joined)
-		}
+	if !strings.Contains(joined, "╱") && !strings.Contains(joined, "╲") {
+		t.Fatalf("art view missing progress wave: %q", joined)
 	}
 	if h := m.nowPlayingHeight(); h < 12 {
 		t.Fatalf("nowPlayingHeight() in art mode = %d, want >= 12", h)
@@ -4966,7 +4980,7 @@ func TestSearch_OutOfBoundsCursorClampedWithoutPanic(t *testing.T) {
 
 	m.searchCursor = -5
 	_ = m.searchLines(80, 12)
-	_ = m.statusNavLines(80)
+	_ = m.statusLines(80)
 	m.handleSearchKey("backspace", tea.KeyPressMsg{Code: tea.KeyBackspace})
 	if m.searchCursor != 0 || m.searchQuery != "Caffè" {
 		t.Fatalf("after negative cursor backspace: cursor=%d query=%q", m.searchCursor, m.searchQuery)
@@ -5144,7 +5158,7 @@ func TestArtworkCache_LRUEvictionPreservesRecentlyUsedSizes(t *testing.T) {
 	// Render 16 distinct sizes into cache (capacity is 16).
 	for i := range 16 {
 		m.height = 20 + i
-		_ = m.nowPlayingArtLines(80, 10+i)
+		_ = m.nowPlayingArtLines(100, 10+i)
 	}
 	firstSize := m.artwork.renderedOrder[0]
 	secondSize := m.artwork.renderedOrder[1]
@@ -5153,10 +5167,10 @@ func TestArtworkCache_LRUEvictionPreservesRecentlyUsedSizes(t *testing.T) {
 	}
 
 	// Touch firstSize (height=20, npH=10) so secondSize becomes least recently used.
-	_ = m.nowPlayingArtLines(80, 10)
+	_ = m.nowPlayingArtLines(100, 10)
 
 	// Adding a 17th size must evict secondSize (LRU), keeping firstSize intact.
-	_ = m.nowPlayingArtLines(80, 30)
+	_ = m.nowPlayingArtLines(100, 28)
 	if len(m.artwork.rendered) != 16 {
 		t.Fatalf("cached sizes after 17th = %d, want 16", len(m.artwork.rendered))
 	}

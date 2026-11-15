@@ -48,13 +48,10 @@ func (a *AboutModel) View() string {
 	muted := styles.QueueItemMuted
 	normal := lipgloss.NewStyle().Foreground(styles.ColorFg)
 	accent := styles.KeyName
-	header := styles.TabActive
 	primary := lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
 	secondary := lipgloss.NewStyle().Foreground(styles.ColorSecondary)
 
 	var sb strings.Builder
-	sb.WriteString(header.Render("About") + "\n")
-	sb.WriteString(muted.Render(strings.Repeat("─", 5)) + "\n\n")
 
 	contentLines := []string{
 		primary.Render("vibez ♪"),
@@ -76,7 +73,7 @@ func (a *AboutModel) View() string {
 	}
 
 	neededHeight := len(contentLines)
-	topPad := max(0, (a.height-3-neededHeight)/2)
+	topPad := max(0, (a.height-neededHeight)/2)
 
 	for range topPad {
 		sb.WriteByte('\n')
