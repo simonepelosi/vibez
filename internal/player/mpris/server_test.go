@@ -3,7 +3,9 @@
 package mpris
 
 import (
+	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,4 +251,95 @@ func TestPropsSpec_LoopStatusAndShuffleValidation(t *testing.T) {
 	if err := playerSpecs["Shuffle"].onSet(dbus.MakeVariant(true)); err != nil || !ctrl.shuffleMode {
 		t.Errorf("Shuffle=true err=%v shuffle=%v, want true", err, ctrl.shuffleMode)
 	}
+}
+
+func TestPlayerObj_SeekRelativeNegativeCurUnderflow(t *testing.T) {
+	ctrl := &mockController{seekDuration: -1}
+	srv := &Server{
+		pos:                  -time.Minute,
+		currentTrackDuration: 3 * time.Minute,
+	}
+	obj := &playerObj{ctrl: ctrl, srv: srv}
+	maxStepUs := int64(math.MaxInt64 / int64(time.Microsecond))
+	if err := obj.seekRelative(-maxStepUs); err != nil {
+		t.Fatalf("seekRelative returned error: %v", err)
+	}
+	if ctrl.seekDuration != 0 {
+		t.Fatalf("seekRelative with negative pos underflowed to %s, want 0", ctrl.seekDuration)
+	}
+}
+
+func TestServer_FormatErrorClassification(t *testing.T) {
+	if !isMarshalOrFormatErr(dbus.FormatError("bad utf-8")) {
+		t.Error("expected dbus.FormatError to be treated as marshal/format error")
+	}
+	if !isMarshalOrFormatErr(dbus.InvalidTypeError{}) {
+		t.Error("expected dbus.InvalidTypeError to be treated as marshal/format error")
+	}
+	if isMarshalOrFormatErr(dbus.ErrClosed) {
+		t.Error("dbus.ErrClosed must be treated as a transport failure")
+	}
+}
+
+func TestServer_UpdateDoesNotStarveUnderContinuousTicks(t *testing.T) {
+	srv := &Server{
+		props: &properties{m: buildPropsSpec(&mockController{})},
+	}
+	t.Cleanup(func() {
+		srv.mu.Lock()
+		srv.closed = true
+		if srv.debounce != nil {
+			srv.debounce.Stop()
+		}
+		srv.mu.Unlock()
+	})
+	srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "1"}})
+	srv.mu.Lock()
+	firstTimer := srv.debounce
+	scheduled := srv.flushPending
+	srv.mu.Unlock()
+	if !scheduled || firstTimer == nil {
+		t.Fatal("expected initial Update to schedule flush timer")
+	}
+	// Simulate bursts arriving faster than 100ms; timer must not be reset away.
+	for range 5 {
+		time.Sleep(5 * time.Millisecond)
+		srv.Update(player.State{Playing: true, Track: &provider.Track{ID: "1"}, Position: time.Second})
+	}
+	srv.mu.Lock()
+	sameTimer := srv.debounce == firstTimer
+	srv.mu.Unlock()
+	if !sameTimer {
+		t.Error("Update reset active debounce timer; continuous ticks could starve flush")
+	}
+}
+
+func TestProperties_ConcurrentSetAndGetRaceFree(t *testing.T) {
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Skip("D-Bus session bus unavailable")
+	}
+	defer conn.Close() //nolint:errcheck
+
+	ctrl := &mockController{}
+	p := &properties{
+		conn: conn,
+		path: mprisObjectPath,
+		m:    buildPropsSpec(ctrl),
+	}
+	var wg sync.WaitGroup
+	for g := range 4 {
+		wg.Go(func() {
+			for i := range 20 {
+				mode := "Track"
+				if (g+i)%2 == 0 {
+					mode = "Playlist"
+				}
+				_ = p.Set(mprisPlayerIface, "LoopStatus", dbus.MakeVariant(mode))
+				_, _ = p.Get(mprisPlayerIface, "LoopStatus")
+				_, _ = p.GetAll(mprisPlayerIface)
+			}
+		})
+	}
+	wg.Wait()
 }

@@ -1,7 +1,12 @@
 package smtc
 
 import (
+	"math"
+	"net"
+	"net/url"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
@@ -96,11 +101,73 @@ func statusOf(st player.State) playbackStatus {
 	}
 }
 
+const (
+	maxSMTCStringRunes   = 512
+	maxSMTCArtworkURLLen = 2048
+	maxSMTCHns           = math.MaxInt64 / 100
+)
+
+// allowLoopbackArtworkHTTP is set only inside Windows SMTC integration tests
+// so WinRT RandomAccessStreamReference can fetch local httptest fixtures.
+var allowLoopbackArtworkHTTP bool
+
+func sanitizeSMTCString(s string) string {
+	s = provider.Clean(s)
+	runes := []rune(s)
+	if len(runes) > maxSMTCStringRunes {
+		return string(runes[:maxSMTCStringRunes])
+	}
+	return s
+}
+
+func sanitizeSMTCArtworkURL(raw string) string {
+	if raw == "" || len(raw) > maxSMTCArtworkURLLen || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+		return ""
+	}
+	if provider.Clean(raw) != raw {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return ""
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" {
+		return ""
+	}
+	ip := net.ParseIP(host)
+	if allowLoopbackArtworkHTTP && u.Scheme == "http" && ip != nil && ip.IsLoopback() {
+		return raw
+	}
+	if u.Scheme != "https" {
+		return ""
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return ""
+	}
+	if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()) {
+		return ""
+	}
+	return raw
+}
+
+func hnsToDuration(hns int64) (time.Duration, bool) {
+	if hns < 0 || hns > maxSMTCHns {
+		return 0, false
+	}
+	return time.Duration(hns) * 100, true
+}
+
 func metadataOf(t *provider.Track) metadata {
 	if t == nil {
 		return metadata{}
 	}
-	return metadata{Title: t.Title, Artist: t.Artist, Album: t.Album, ArtworkURL: t.ArtworkURL}
+	return metadata{
+		Title:      sanitizeSMTCString(t.Title),
+		Artist:     sanitizeSMTCString(t.Artist),
+		Album:      sanitizeSMTCString(t.Album),
+		ArtworkURL: sanitizeSMTCArtworkURL(t.ArtworkURL),
+	}
 }
 
 func timelineOf(t *provider.Track, pos time.Duration) timeline {

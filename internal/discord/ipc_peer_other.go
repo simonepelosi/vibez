@@ -2,8 +2,11 @@
 
 package discord
 
-import "net"
+import (
+	"errors"
+	"net"
+)
 
 func verifyPeerUID(net.Conn) error {
-	return nil
+	return errors.New("discord ipc peer UID verification unsupported on this platform")
 }

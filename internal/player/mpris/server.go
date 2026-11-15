@@ -16,7 +16,9 @@ package mpris
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -62,9 +64,12 @@ type Server struct {
 	currentTrackDuration time.Duration
 	hasCurrentTrack      bool
 	debounce             *time.Timer
+	flushPending         bool
 	pending              *player.State
 	unavailable          bool
 	closed               bool
+	connCloseOnce        sync.Once
+	connCloseErr         error
 }
 
 // MusicKit can expose a partial now-playing item with no ID during a track
@@ -144,18 +149,18 @@ func (p *playerObj) seekRelative(offsetUs int64) *dbus.Error {
 	delta := time.Duration(offsetUs) * time.Microsecond
 
 	p.srv.mu.Lock()
-	cur := p.srv.pos
+	cur := max(p.srv.pos, 0)
 	dur := p.srv.currentTrackDuration
 	p.srv.mu.Unlock()
 
 	var newPos time.Duration
-	if delta > 0 && cur > time.Duration(1<<63-1)-delta {
-		newPos = time.Duration(1<<63 - 1)
-	} else {
-		newPos = cur + delta
-	}
-	if newPos < 0 {
+	switch {
+	case delta > 0 && cur > time.Duration(math.MaxInt64)-delta:
+		newPos = time.Duration(math.MaxInt64)
+	case delta < 0 && -delta >= cur:
 		newPos = 0
+	default:
+		newPos = cur + delta
 	}
 	if dur > 0 && newPos > dur {
 		newPos = dur
@@ -336,10 +341,11 @@ func (s *Server) Update(st player.State) {
 		s.currentTrackDuration = st.Track.Duration
 	}
 	s.pending = &st
-	if s.debounce == nil {
+	// Throttle rather than debounce-reset on every Update so continuous 250ms ticks
+	// or rapid bursts cannot starve D-Bus state publication indefinitely.
+	if !s.flushPending {
+		s.flushPending = true
 		s.debounce = time.AfterFunc(100*time.Millisecond, s.flush)
-	} else {
-		s.debounce.Reset(100 * time.Millisecond)
 	}
 	s.mu.Unlock()
 }
@@ -375,11 +381,33 @@ func (s *Server) setProperty(name string, value any) {
 	s.props.store(mprisPlayerIface, name, value)
 }
 
+// isMarshalOrFormatErr reports whether err is a local D-Bus payload formatting
+// or type error rather than a lost bus connection.
+func isMarshalOrFormatErr(err error) bool {
+	var fmtErr dbus.FormatError
+	var typeErr dbus.InvalidTypeError
+	var sigErr dbus.SignatureError
+	var msgErr dbus.InvalidMessageError
+	return errors.As(err, &fmtErr) || errors.As(err, &typeErr) || errors.As(err, &sigErr) || errors.As(err, &msgErr)
+}
+
+func (s *Server) closeConn() error {
+	s.connCloseOnce.Do(func() {
+		if s.conn != nil {
+			s.connCloseErr = s.conn.Close()
+		}
+	})
+	return s.connCloseErr
+}
+
 // emitChanged publishes one batched PropertiesChanged. MPRIS is optional, so a
-// lost session bus marks the server unavailable rather than terminating vibez.
+// lost session bus marks the server unavailable rather than terminating vibez;
+// malformed/unencodable values are dropped without killing the session bus.
 func (s *Server) emitChanged(changed map[string]dbus.Variant) bool {
 	if err := s.props.emitChanged(mprisPlayerIface, changed); err != nil {
-		s.markUnavailable()
+		if !isMarshalOrFormatErr(err) {
+			s.markUnavailable()
+		}
 		return false
 	}
 	return true
@@ -388,13 +416,14 @@ func (s *Server) emitChanged(changed map[string]dbus.Variant) bool {
 func (s *Server) markUnavailable() {
 	s.mu.Lock()
 	s.unavailable = true
+	s.flushPending = false
 	if s.debounce != nil {
 		s.debounce.Stop()
 		s.debounce = nil
 	}
 	s.pending = nil
 	s.mu.Unlock()
-	_ = s.conn.Close()
+	_ = s.closeConn()
 }
 
 func (s *Server) flush() {
@@ -402,6 +431,8 @@ func (s *Server) flush() {
 	defer s.flushMu.Unlock()
 
 	s.mu.Lock()
+	s.flushPending = false
+	s.debounce = nil
 	st := s.pending
 	if st == nil || s.closed {
 		s.mu.Unlock()
@@ -438,9 +469,12 @@ func (s *Server) flush() {
 	// Seeked signal (the Position property does not emit PropertiesChanged).
 	// Refresh Position first so a client reading it in response gets the new value.
 	if seeked {
-		s.setProperty("Position", st.Position.Microseconds())
-		if err := s.conn.Emit(mprisObjectPath, mprisPlayerIface+".Seeked", st.Position.Microseconds()); err != nil {
-			s.markUnavailable()
+		posUs := max(st.Position, 0).Microseconds()
+		s.setProperty("Position", posUs)
+		if err := s.conn.Emit(mprisObjectPath, mprisPlayerIface+".Seeked", posUs); err != nil {
+			if !isMarshalOrFormatErr(err) {
+				s.markUnavailable()
+			}
 			return
 		}
 		if !statusChanged && !trackChanged {
@@ -462,12 +496,16 @@ func (s *Server) flush() {
 		"xesam:album":   dbus.MakeVariant(""),
 	}
 	if t := st.Track; t != nil {
+		artURL := ""
+		if isSafeArtworkURL(t.ArtworkURL) {
+			artURL = t.ArtworkURL
+		}
 		meta["mpris:trackid"] = dbus.MakeVariant(trackPath)
-		meta["mpris:length"] = dbus.MakeVariant(t.Duration.Microseconds())
-		meta["mpris:artUrl"] = dbus.MakeVariant(t.ArtworkURL)
-		meta["xesam:title"] = dbus.MakeVariant(t.Title)
-		meta["xesam:artist"] = dbus.MakeVariant([]string{t.Artist})
-		meta["xesam:album"] = dbus.MakeVariant(t.Album)
+		meta["mpris:length"] = dbus.MakeVariant(max(t.Duration, 0).Microseconds())
+		meta["mpris:artUrl"] = dbus.MakeVariant(artURL)
+		meta["xesam:title"] = dbus.MakeVariant(sanitizeMPRISString(t.Title))
+		meta["xesam:artist"] = dbus.MakeVariant([]string{sanitizeMPRISString(t.Artist)})
+		meta["xesam:album"] = dbus.MakeVariant(sanitizeMPRISString(t.Album))
 	}
 
 	loopStatus := "None"
@@ -484,8 +522,8 @@ func (s *Server) flush() {
 		"LoopStatus":     dbus.MakeVariant(loopStatus),
 		"Shuffle":        dbus.MakeVariant(st.ShuffleMode),
 	}
-	if st.Volume > 0 {
-		changed["Volume"] = dbus.MakeVariant(st.Volume)
+	if vol, ok := sanitizeVolume(st.Volume); ok && vol > 0 {
+		changed["Volume"] = dbus.MakeVariant(vol)
 	}
 	for name, v := range changed {
 		s.setProperty(name, v.Value())
@@ -494,7 +532,7 @@ func (s *Server) flush() {
 	// Position is deliberately absent from the signal. The MPRIS spec marks it
 	// EmitsChangedSignal=false and announces discontinuous jumps with Seeked
 	// instead, which is handled above; a client extrapolates the rest.
-	s.setProperty("Position", st.Position.Microseconds())
+	s.setProperty("Position", max(st.Position, 0).Microseconds())
 
 	s.emitChanged(changed)
 }
@@ -507,6 +545,7 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	s.flushPending = false
 	if s.debounce != nil {
 		s.debounce.Stop()
 		s.debounce = nil
@@ -516,5 +555,5 @@ func (s *Server) Close() error {
 
 	s.flushMu.Lock()
 	defer s.flushMu.Unlock()
-	return s.conn.Close()
+	return s.closeConn()
 }

@@ -3,6 +3,7 @@
 package mpris
 
 import (
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -1232,5 +1233,62 @@ func TestMPRISPlayer_ReadState_PrefersSingleGetAllRPC(t *testing.T) {
 	}
 	if svc.getAllCalls.Load() != 1 || svc.getCalls.Load() != 0 {
 		t.Fatalf("calls: GetAll=%d Get=%d, want 1 and 0", svc.getAllCalls.Load(), svc.getCalls.Load())
+	}
+}
+
+func TestParseMetadataMap_RejectsInsecureArtworkAndDurationOverflow(t *testing.T) {
+	badURLs := []string{
+		"http://example.com/art.jpg",
+		"file:///etc/passwd",
+		"javascript:alert(1)",
+		"https://127.0.0.1/art.png",
+		"https://169.254.169.254/latest/meta-data",
+		"https://localhost/art.png",
+		"https://user:pass@example.com/art.png",
+		"https://example.com/" + strings.Repeat("a", 2500),
+		"https://example.com/art\x00.png",
+	}
+	for _, u := range badURLs {
+		track := parseMetadataMap(map[string]dbus.Variant{
+			"mpris:artUrl": dbus.MakeVariant(u),
+		})
+		if track.ArtworkURL != "" {
+			t.Errorf("parseMetadataMap accepted unsafe artUrl %q", u)
+		}
+	}
+
+	track := parseMetadataMap(map[string]dbus.Variant{
+		"mpris:artUrl": dbus.MakeVariant("https://is1-ssl.mzstatic.com/image/thumb/art.jpg"),
+		"mpris:length": dbus.MakeVariant(int64(math.MaxInt64)),
+	})
+	if track.ArtworkURL == "" {
+		t.Error("valid https public artwork URL was rejected")
+	}
+	if track.Duration != 0 {
+		t.Errorf("overflowing mpris:length returned %v, want 0", track.Duration)
+	}
+}
+
+func TestApplyPropertiesSignal_RejectsNaNInfVolumeLoop(t *testing.T) {
+	initial := player.State{
+		Playing: true,
+		Volume:  0.5,
+		Track:   track("Song", "Artist"),
+	}
+	for _, badVol := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -0.5} {
+		sig := &dbus.Signal{
+			Path: mprisPlayerObjectPath,
+			Body: []any{
+				mprisInterface,
+				map[string]dbus.Variant{"Volume": dbus.MakeVariant(badVol)},
+			},
+		}
+		next, changed := applyPropertiesSignal(initial, sig)
+		if changed {
+			t.Errorf("volume %v triggered stateChanged=true", badVol)
+		}
+		if math.IsNaN(next.Volume) || next.Volume != 0.5 {
+			t.Errorf("volume %v leaked into next state: %v", badVol, next.Volume)
+		}
 	}
 }

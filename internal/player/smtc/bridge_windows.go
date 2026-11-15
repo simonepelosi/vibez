@@ -103,8 +103,12 @@ func vibezSMTCOnEvent(userData C.uintptr_t, ev C.int, positionHns C.int64_t) {
 	case C.VIBEZ_SMTC_EVENT_PREVIOUS:
 		e.kind = eventPrevious
 	case C.VIBEZ_SMTC_EVENT_SEEK:
+		d, ok := hnsToDuration(int64(positionHns))
+		if !ok {
+			return
+		}
 		e.kind = eventSeek
-		e.position = time.Duration(positionHns) * 100
+		e.position = d
 	default:
 		return
 	}
@@ -130,6 +134,13 @@ func cstr(s string) *C.char {
 	return C.CString(s)
 }
 
+func durationToHns(d time.Duration) int64 {
+	if d <= 0 {
+		return 0
+	}
+	return int64(d / 100)
+}
+
 func (b *nativeBridge) apply(u update) {
 	var (
 		hasMeta, hasStatus, hasTimeline C.int
@@ -139,7 +150,10 @@ func (b *nativeBridge) apply(u update) {
 	)
 	if m := u.Metadata; m != nil {
 		hasMeta = 1
-		title, artist, album, artwork = cstr(m.Title), cstr(m.Artist), cstr(m.Album), cstr(m.ArtworkURL)
+		title = cstr(sanitizeSMTCString(m.Title))
+		artist = cstr(sanitizeSMTCString(m.Artist))
+		album = cstr(sanitizeSMTCString(m.Album))
+		artwork = cstr(sanitizeSMTCArtworkURL(m.ArtworkURL))
 		defer C.free(unsafe.Pointer(title))
 		defer C.free(unsafe.Pointer(artist))
 		defer C.free(unsafe.Pointer(album))
@@ -151,8 +165,8 @@ func (b *nativeBridge) apply(u update) {
 	}
 	if tl := u.Timeline; tl != nil {
 		hasTimeline = 1
-		pos = C.int64_t(tl.Position / 100)
-		dur = C.int64_t(tl.Duration / 100)
+		pos = C.int64_t(durationToHns(tl.Position))
+		dur = C.int64_t(durationToHns(tl.Duration))
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()

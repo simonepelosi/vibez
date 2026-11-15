@@ -2,6 +2,7 @@ package smtc
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -594,5 +595,53 @@ func TestNewServerReportsBridgeError(t *testing.T) {
 	factory := func(func(event), func(string)) (bridge, error) { return nil, want }
 	if _, err := newServer(newFakeController(), nil, factory, time.Now); !errors.Is(err, want) {
 		t.Errorf("newServer error = %v, want %v", err, want)
+	}
+}
+
+func TestHnsToDuration_RejectsNegativeAndOverflow(t *testing.T) {
+	if _, ok := hnsToDuration(-1); ok {
+		t.Error("expected negative HNS seek position to be rejected")
+	}
+	if _, ok := hnsToDuration(math.MaxInt64); ok {
+		t.Error("expected overflowing HNS seek position to be rejected")
+	}
+	got, ok := hnsToDuration(420_000_000)
+	if !ok || got != 42*time.Second {
+		t.Errorf("hnsToDuration(420_000_000) = (%v, %v), want (42s, true)", got, ok)
+	}
+}
+
+func TestMetadataOf_SanitizesTextAndBlocksSSRFArtworkURL(t *testing.T) {
+	badURLs := []string{
+		"http://example.com/art.jpg",
+		"http://169.254.169.254/latest/meta-data",
+		"https://127.0.0.1/art.jpg",
+		"https://10.0.0.1/art.jpg",
+		"https://localhost/art.jpg",
+		"file:///C:/Windows/win.ini",
+		"https://user:secret@example.com/art.jpg",
+		"https://example.com/bad\x00.jpg",
+	}
+	for _, u := range badURLs {
+		got := metadataOf(&provider.Track{
+			Title:      "Track\x1b[31m\u202e",
+			Artist:     "Art\x00ist",
+			Album:      "Alb\r\num",
+			ArtworkURL: u,
+		})
+		if got.ArtworkURL != "" {
+			t.Errorf("metadataOf allowed unsafe ArtworkURL %q -> %q", u, got.ArtworkURL)
+		}
+		if strings.ContainsAny(got.Title+got.Artist+got.Album, "\x1b\x00\r\n\u202e") {
+			t.Errorf("metadataOf failed to sanitize metadata text: %+v", got)
+		}
+	}
+
+	valid := metadataOf(&provider.Track{
+		Title:      "Clean",
+		ArtworkURL: "https://is1-ssl.mzstatic.com/image/thumb/cover.jpg",
+	})
+	if valid.ArtworkURL == "" {
+		t.Error("valid https artwork URL was unexpectedly stripped")
 	}
 }
