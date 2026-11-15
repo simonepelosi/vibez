@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-11-15
+
+### Added
+- **Modern card-based TUI redesign with zero-jitter layout (#243)** — replaces the legacy boxed layout with a dedicated card renderer (`internal/tui/layout.go`) featuring a unified 3-zone top bar (`ʕ·ᴥ·ʔ ♪ vibez`, centered color-coded clickable navigation tabs for `Home`, `l Library`, `q Queue`, `y Lyrics`, `F Feed`, `e EQ`, `/ Search`, and `? About`, plus live volume/memory telemetry), a rounded Hero Now Playing card, responsive split/full bottom cards, and unified theme styling across `default`, `dracula`, `gruvbox`, and `nord`.
+- **Keyboard-first Hero controls & single-cell geometric AI badges (#243)** — removes pointer clutter from the Hero transport bar with a geometrically centered `⏸  Playing` / `▶  Paused ` badge and breathing spacing row, warm amber-gold (`ColorAccentWarm`) shortcut keys, and crisp 1-column BMP geometric symbols for Vibe backends (`π omp`, `✳ claude`, `✦ gemini`, `⎔ codex`, `❖ copilot`, `◉ ollama`/`llamacpp`, `◈ lmstudio`, `⌘ apple-fm`, `⟡ opencode`, `◇ llm`, `⌕ keyword`).
+- **Apple Music auth overhaul, modern login page & `:login` / `:logout` (#244)** — makes startup session verification non-blocking when cached tokens and storefront exist (avoiding slow or failing launches on flaky networks), adds clear expired developer vs. user token diagnostics (`vibez auth status`), introduces `:login` and `:logout` TUI commands with automatic `500ms → 120s` re-auth backoff and library reload, and revamps `web/login.html` with CSP/popup-blocker guidance, `navigator.userActivation` awareness, `?state=` URL/referrer scrubbing, automatic closing of the Apple Music popup via `win.close()`, and a manual `media-user-token` paste fallback for SSH/headless setups.
+- **Vibe Mode per-request LLM token usage telemetry (#245)** — tracks exact token counts from Ollama (`prompt_eval_count` / `eval_count`), OpenAI-compatible APIs (`usage.*`), and structured CLI outputs, with a deterministic `~N tok (in↑ out↓)` estimate fallback for text-only CLI agents (0 for `keyword`), displayed inline in the Vibe card (`✓ added N tracks · 384 tok (290↑ 94↓)`, compacting cleanly on narrow widths) and in `[vibe]` `:debug-logs`.
+- **Go benchmark suite & CI security gates** — adds Go benchmarks (`BenchmarkModelView`, `BenchmarkRenderHalfBlocks`, `BenchmarkRenderDithered`, `BenchmarkEQView`, `BenchmarkRenderProgressBar`, `BenchmarkMakeADTSHeader`) and CI workflows for `govulncheck`, `-race` tests, `actionlint`, and fuzz smoke tests.
+
+### Changed
+- **2× faster TUI rendering & end-to-end runtime performance overhaul** — eliminates per-cell style allocations and redundant layout recalculations, caches Hero/card borders/top bar/EQ/lyrics views, downsamples artwork covers to 256 px with LRU caching, 2×2 dither sampling, and async prefetch, gates idle animation tickers, caps Go heap spikes with a default 48 MiB `GOMEMLIMIT`, pools HTTP transports across Apple Music/license/Vibe/Last.fm, parallelizes `--local` / `--hybrid` metadata scanning with incremental caching, adds 1-segment HLS lookahead prefetch and C++ CDM batch decrypt scratch reuse, switches GStreamer to event-driven bus timed pop + loopback `vibezhttpsrc` audio-only flags, and uses MPRIS signals.
+- **Toolchain & dependency security baseline** — updates minimum Go version to Go 1.26.11 and isolates `HOME`/`XDG_CONFIG_HOME` in TUI tests (`TestMain`) so test runs never touch user config.
+
+### Fixed
+- **Security audit hardening** — upgrades ANSI/BiDi terminal sanitization, enforces HTTPS/no-redirect SSRF guards on Apple Music and external requests, hardens Discord IPC peer checks, XDG/atomic asset writes, CGo CDM / native sink / GStreamer error sanitization, Windows FLAC ID3v2 bounds, and hermetic Vibe CLI sandboxing (explicit opt-in and omitting unset `--model` on `omp`).
+- **Self-updater reliability & music-dir symlink handling** — synchronizes helper startup and retries Windows file-sharing violations during self-update, and preserves configured `music_dir` prefixes unless the root itself is a symlink.
+
 ## [2.1.0] — 2026-11-14
 
 ### Added
@@ -835,7 +852,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/simonepelosi/vibez/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/simonepelosi/vibez/compare/v2.0.8...v2.1.0
 [2.0.8]: https://github.com/simonepelosi/vibez/compare/v2.0.7...v2.0.8
 [2.0.7]: https://github.com/simonepelosi/vibez/compare/v2.0.6...v2.0.7
