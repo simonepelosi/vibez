@@ -613,3 +613,77 @@ func TestAppleProvider_HTTPPoolAndLibraryCache(t *testing.T) {
 		t.Fatalf("tracks API calls after TTL expiry = %d, want 3", tracksCalls.Load())
 	}
 }
+
+func TestPagination_UnderreportedTotalNeverPanics(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/me/library/songs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "i.1", "attributes": map[string]any{"name": "S1"}},
+					{"id": "i.2", "attributes": map[string]any{"name": "S2"}},
+					{"id": "i.3", "attributes": map[string]any{"name": "S3"}},
+					{"id": "i.4", "attributes": map[string]any{"name": "S4"}},
+				},
+				"meta": map[string]any{"total": 2},
+			})
+		case "/me/library/playlists":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "p.1", "attributes": map[string]any{"name": "P1"}},
+					{"id": "p.2", "attributes": map[string]any{"name": "P2"}},
+					{"id": "p.3", "attributes": map[string]any{"name": "P3"}},
+				},
+				"meta": map[string]any{"total": 1},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := New(&config.Config{
+		AppleDeveloperToken: "dev",
+		AppleUserToken:      "usr",
+		StoreFront:          "us",
+	})
+	p.SetBaseURL(srv.URL)
+
+	tracks, err := p.GetLibraryTracks(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryTracks: %v", err)
+	}
+	if len(tracks) != 4 {
+		t.Fatalf("got %d tracks, want 4", len(tracks))
+	}
+
+	playlists, err := p.GetLibraryPlaylists(context.Background())
+	if err != nil {
+		t.Fatalf("GetLibraryPlaylists: %v", err)
+	}
+	// +1 for synthetic Favorites playlist.
+	if len(playlists) != 4 {
+		t.Fatalf("got %d playlists, want 4", len(playlists))
+	}
+}
+
+func TestInitPaginatedPage(t *testing.T) {
+	id := func(v int) int { return v }
+
+	if items, _, done := initPaginatedPage([]int(nil), 5, 10, id); !done || len(items) != 0 {
+		t.Fatalf("empty page = (%v, %v), want nil, done=true", items, done)
+	}
+	items, ps, done := initPaginatedPage([]int{1, 2, 3, 4}, 2, 10, id)
+	if !done || ps != 4 || len(items) != 4 {
+		t.Fatalf("underreported total = (%v, ps=%d, done=%v), want 4 items done=true", items, ps, done)
+	}
+	items, ps, done = initPaginatedPage([]int{1, 2, 3, 4}, 2, 3, id)
+	if !done || ps != 4 || len(items) != 3 {
+		t.Fatalf("capped first page = (%v, ps=%d, done=%v), want 3 items done=true", items, ps, done)
+	}
+	items, ps, done = initPaginatedPage([]int{1, 2}, 5, 10, id)
+	if done || ps != 2 || len(items) != 5 {
+		t.Fatalf("multi-page = (%v, ps=%d, done=%v), want len 5 done=false", items, ps, done)
+	}
+}

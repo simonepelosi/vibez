@@ -857,6 +857,12 @@ func TestCheckAPIURL(t *testing.T) {
 		"https://api.github.com:8443/repos/simonepelosi/vibez/releases/latest",
 		"https://user@api.github.com/repos/simonepelosi/vibez/releases/latest",
 		"https://evil.example/repos/simonepelosi/vibez/releases/latest",
+		"https://api.github.com/repos/simonepelosi/vibez/releases-evil/latest",
+		"https://api.github.com/repos/simonepelosi/vibez/releases/../../attacker/evil/releases/latest",
+		"https://api.github.com/repos/simonepelosi/vibez/releases/%2e%2e/%2e%2e/attacker/evil/releases/latest",
+		"https://api.github.com/repos/simonepelosi/vibez/releases/%2e%2e/tags",
+		"https://api.github.com/repos/simonepelosi/vibez/releases/..%2fattacker",
+		`https://api.github.com/repos/simonepelosi/vibez/releases\..\attacker`,
 	}
 	for _, u := range good {
 		if err := checkAPIURL(u); err != nil {
@@ -888,6 +894,12 @@ func TestCheckAssetURL(t *testing.T) {
 		"https://evilgithubusercontent.com/x",
 		"file:///etc/passwd",
 		"ftp://github.com/x",
+		"https://github.com/simonepelosi/vibez/releases/download-evil/v1/x.tar.gz",
+		"https://github.com/simonepelosi/vibez/releases/download/../../../attacker/evil/releases/download/v1/x.tar.gz",
+		"https://github.com/simonepelosi/vibez/releases/download/%2e%2e/%2e%2e/attacker/evil/x",
+		"https://github.com/simonepelosi/vibez/releases/download/v1/..%2f..%2fattacker",
+		"https://objects.githubusercontent.com/a/../../b",
+		`https://objects.githubusercontent.com/a\..\b`,
 		"",
 	}
 	for _, u := range good {
@@ -1083,6 +1095,21 @@ func TestUpdate_Ed25519SignedRelease(t *testing.T) {
 		}
 		if got := readFile(t, exe); got != "signed new binary" {
 			t.Errorf("exe = %q, want signed new binary", got)
+		}
+	})
+
+	t.Run("malformed release public key aborts install", func(t *testing.T) {
+		isolateCache(t)
+		exe := fakeExe(t, 0o755)
+		releasePubKey = "not-valid-ed25519-key"
+		srv := serveRelease(validSig, true)
+		defer srv.Close()
+
+		if got := update(srv.URL, "v1.0.0", true, discard); got.Outcome != OutcomeManual {
+			t.Errorf("Outcome = %v, want OutcomeManual", got.Outcome)
+		}
+		if got := readFile(t, exe); got != "old binary" {
+			t.Errorf("binary modified with malformed release public key: %q", got)
 		}
 	})
 }
