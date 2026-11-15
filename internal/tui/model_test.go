@@ -9,6 +9,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -28,6 +29,20 @@ import (
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 	"github.com/simone-vibes/vibez/internal/tui/views"
 )
+
+func TestMain(m *testing.M) {
+	tmpHome, err := os.MkdirTemp("", "vibez-tui-test-home-*")
+	if err == nil {
+		_ = os.Setenv("HOME", tmpHome)
+		_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
+		_ = os.Setenv("APPDATA", filepath.Join(tmpHome, "AppData", "Roaming"))
+	}
+	code := m.Run()
+	if tmpHome != "" {
+		_ = os.RemoveAll(tmpHome)
+	}
+	os.Exit(code)
+}
 
 // --- mock player ---
 
