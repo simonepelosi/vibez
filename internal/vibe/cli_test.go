@@ -236,6 +236,13 @@ EOF
 	if len(plan.SeedTracks) != 1 || plan.SeedTracks[0].Artist != "Kavinsky" {
 		t.Errorf("plan.SeedTracks = %+v, want Kavinsky - Nightcall", plan.SeedTracks)
 	}
+	if !plan.Usage.Estimated || plan.Usage.Total() <= 0 {
+		t.Errorf("plan.Usage = %+v, want positive estimated token usage for text-mode CLI", plan.Usage)
+	}
+
+	if got, ok := parseCLITokenUsage("", `{"usage":{"input_tokens":310,"output_tokens":95}}`); !ok || got.Estimated || got.TotalTokens != 405 {
+		t.Errorf("parseCLITokenUsage = (%+v, %v), want exact 405 tokens", got, ok)
+	}
 }
 
 func TestCLIPlanner_EndToEndEnvAndPolicy(t *testing.T) {

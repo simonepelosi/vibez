@@ -280,11 +280,62 @@ func (p *CLIPlanner) Plan(ctx context.Context, req PlanRequest) (*VibePlan, erro
 		return nil, fmt.Errorf("%s decode plan: %w", agent, err)
 	}
 	plan.Backend = p.Name()
+	if usage, ok := parseCLITokenUsage(rawOut, string(errBytes)); ok {
+		plan.Usage = usage
+	} else {
+		plan.Usage = EstimateTokenUsage(systemPrompt+"\n\n"+userMsg, extracted)
+	}
 	sanitized := SanitizePlan(&plan, req.PlayerIdle)
 	if len(sanitized.SeedTracks) == 0 && len(sanitized.SearchQueries) == 0 {
 		return nil, fmt.Errorf("%s returned empty plan", agent)
 	}
 	return sanitized, nil
+}
+
+// parseCLITokenUsage scans CLI stdout/stderr for a JSON object carrying a
+// "usage" block (e.g. input_tokens/output_tokens, prompt_tokens/completion_tokens,
+// or input/output/totalTokens).
+func parseCLITokenUsage(stdout, stderr string) (TokenUsage, bool) {
+	type usageBlock struct {
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		Input            int `json:"input"`
+		Output           int `json:"output"`
+		TotalTokens      int `json:"total_tokens"`
+		TotalTokensCamel int `json:"totalTokens"`
+	}
+	type envelope struct {
+		Usage usageBlock `json:"usage"`
+	}
+	for _, stream := range []string{stderr, stdout} {
+		for line := range strings.SplitSeq(stream, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.Contains(line, `"usage"`) {
+				continue
+			}
+			var env envelope
+			if err := json.Unmarshal([]byte(extractJSONObject(line)), &env); err != nil {
+				continue
+			}
+			u := env.Usage
+			in := max(u.InputTokens, max(u.PromptTokens, u.Input))
+			out := max(u.OutputTokens, max(u.CompletionTokens, u.Output))
+			tot := max(u.TotalTokens, u.TotalTokensCamel)
+			if tot <= 0 {
+				tot = in + out
+			}
+			if tot > 0 {
+				return TokenUsage{
+					InputTokens:  max(0, in),
+					OutputTokens: max(0, out),
+					TotalTokens:  tot,
+				}, true
+			}
+		}
+	}
+	return TokenUsage{}, false
 }
 
 const geminiDenyPolicyTOML = `[[rule]]
