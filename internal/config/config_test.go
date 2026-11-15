@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -568,4 +569,32 @@ func TestLoad_TightensLoosePermissionsOnUnix(t *testing.T) {
 	if fi.Mode().Perm() != 0o600 {
 		t.Errorf("permissions after Load = %v, want 0600", fi.Mode().Perm())
 	}
+}
+
+func TestConfig_TokenConcurrencyAndIsVibeLocalOnly(t *testing.T) {
+	path := writeCfg(t, map[string]any{"storefront": "us", "vibe_privacy": "LOCAL-ONLY"})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.IsVibeLocalOnly() {
+		t.Fatal("expected IsVibeLocalOnly()=true")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 50 {
+			cfg.SetRuntimeDeveloperToken(fmt.Sprintf("dev-%d", i))
+			cfg.SetUserToken(fmt.Sprintf("usr-%d", i))
+			_ = cfg.Save("")
+		}
+	}()
+	for range 50 {
+		d, u := cfg.GetAppleTokens()
+		_ = d + u
+		_ = cfg.DeveloperToken()
+		_ = cfg.UserToken()
+	}
+	<-done
 }

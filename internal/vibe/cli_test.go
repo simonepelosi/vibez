@@ -96,14 +96,17 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		}
 	})
 
-	t.Run("gemini writes deny-all policy and uses plan mode", func(t *testing.T) {
+	t.Run("gemini writes deny-all policy and passes prompt via stdin", func(t *testing.T) {
 		tmp := t.TempDir()
 		args, stdin, env, err := prepareCLIInvocation("gemini", tmp, "gemini-2.5-flash", "SYS", "USER")
 		if err != nil {
 			t.Fatalf("prepareCLIInvocation(gemini): %v", err)
 		}
-		if stdin != "" || len(env) != 0 {
-			t.Fatalf("gemini stdin=%q env=%v, want empty", stdin, env)
+		if len(env) != 0 || !strings.Contains(stdin, "SYS") || !strings.Contains(stdin, "USER") {
+			t.Fatalf("gemini stdin=%q env=%v, want combined prompt on stdin and empty env", stdin, env)
+		}
+		if slices.Contains(args, "USER") {
+			t.Fatalf("gemini args leaked user prompt on argv: %v", args)
 		}
 		policyPath := filepath.Join(tmp, "gemini-policy.toml")
 		for _, want := range []string{"plan", "none", policyPath, "gemini-2.5-flash"} {
@@ -118,6 +121,25 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		text := string(data)
 		if !strings.Contains(text, `toolName = "*"`) || !strings.Contains(text, `mcpName = "*"`) || !strings.Contains(text, `decision = "deny"`) {
 			t.Errorf("unexpected gemini policy:\n%s", text)
+		}
+	})
+
+	t.Run("copilot passes prompt via stdin with tools disabled", func(t *testing.T) {
+		tmp := t.TempDir()
+		args, stdin, _, err := prepareCLIInvocation("copilot", tmp, "gpt-4.1", "SYS", "USER")
+		if err != nil {
+			t.Fatalf("prepareCLIInvocation(copilot): %v", err)
+		}
+		if !strings.Contains(stdin, "SYS") || !strings.Contains(stdin, "USER") {
+			t.Fatalf("copilot stdin = %q, want combined prompt", stdin)
+		}
+		if slices.Contains(args, "-p") || slices.Contains(args, "USER") {
+			t.Fatalf("copilot args passed prompt on argv: %v", args)
+		}
+		for _, want := range []string{"-s", "--no-custom-instructions", "--available-tools=", "--model", "gpt-4.1"} {
+			if !slices.Contains(args, want) {
+				t.Errorf("copilot args %v missing %q", args, want)
+			}
 		}
 	})
 
@@ -425,8 +447,8 @@ func TestCLIPlanner_Plan_WindowsBatchShimAndDisableCLI(t *testing.T) {
 	}
 
 	p := &CLIPlanner{
-		Agent:      "gemini",
-		BinaryPath: filepath.Join(t.TempDir(), "gemini.cmd"),
+		Agent:      "opencode",
+		BinaryPath: filepath.Join(t.TempDir(), "opencode.cmd"),
 	}
 	if _, err := p.Plan(context.Background(), PlanRequest{Prompt: "ambient & calc.exe"}); err == nil {
 		t.Fatal("expected .cmd wrapper execution with unsafe prompt chars to fail before exec")
@@ -451,5 +473,20 @@ func TestCLIPlanner_Plan_WindowsBatchShimAndDisableCLI(t *testing.T) {
 	})
 	if slices.Contains(avail, "claude") {
 		t.Errorf("AvailableBackends with DisableCLI=true included claude: %v", avail)
+	}
+}
+
+func TestParseCLITokenUsage_PrefersStdoutAndClampsNegatives(t *testing.T) {
+	stdout := `{"usage":{"input_tokens":120,"output_tokens":30}}`
+	stderr := `{"usage":{"input_tokens":999,"output_tokens":999}}`
+	got, ok := parseCLITokenUsage(stdout, stderr)
+	if !ok || got.InputTokens != 120 || got.OutputTokens != 30 || got.TotalTokens != 150 {
+		t.Fatalf("parseCLITokenUsage = (%+v, %v), want stdout 120/30/150", got, ok)
+	}
+
+	neg := `{"usage":{"input_tokens":100,"output_tokens":-50}}`
+	gotNeg, ok := parseCLITokenUsage(neg, "")
+	if !ok || gotNeg.InputTokens != 100 || gotNeg.OutputTokens != 0 || gotNeg.TotalTokens != 100 {
+		t.Fatalf("parseCLITokenUsage negative output = (%+v, %v), want clamped 100/0/100", gotNeg, ok)
 	}
 }

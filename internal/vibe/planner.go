@@ -470,7 +470,9 @@ func buildUserMessage(req PlanRequest) string {
 	return b.String()
 }
 
-// extractJSONObject strips optional markdown code fences around a JSON object.
+// extractJSONObject strips optional markdown code fences and extracts the
+// first balanced, syntactically valid JSON object while ignoring braces inside
+// string literals.
 func extractJSONObject(raw string) string {
 	s := strings.TrimSpace(raw)
 	if strings.HasPrefix(s, "```") {
@@ -482,12 +484,57 @@ func extractJSONObject(raw string) string {
 		}
 		s = strings.TrimSpace(s)
 	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' {
+			continue
+		}
+		if end, ok := findMatchingBrace(s, i); ok {
+			candidate := s[i : end+1]
+			if json.Valid([]byte(candidate)) {
+				return candidate
+			}
+		}
+	}
 	start := strings.IndexByte(s, '{')
 	end := strings.LastIndexByte(s, '}')
 	if start >= 0 && end > start {
 		return s[start : end+1]
 	}
 	return s
+}
+
+func findMatchingBrace(s string, start int) (int, bool) {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return -1, false
 }
 
 // resolvePlanTimeout returns d if positive, or DefaultPlanTimeout otherwise.

@@ -47,18 +47,19 @@ var authStatusCmd = &cobra.Command{
 			return fmt.Errorf("loading config: %w", err)
 		}
 		_ = auth.ResolveDeveloperToken(cfg)
-		if exp, ok := auth.DeveloperTokenExpiry(cfg.AppleDeveloperToken); ok {
+		devTok, usrTok := cfg.GetAppleTokens()
+		if exp, ok := auth.DeveloperTokenExpiry(devTok); ok {
 			if rem := time.Until(exp).Round(time.Minute); rem > 0 {
 				fmt.Printf("Developer token: valid (expires in %s)\n", rem)
 			} else {
 				fmt.Println("Developer token: expired")
 			}
 		}
-		if cfg.AppleUserToken == "" {
+		if usrTok == "" {
 			fmt.Println("Not authenticated.")
 			return nil
 		}
-		status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken)
+		status, sf := auth.CheckTokens(devTok, usrTok)
 		switch status {
 		case auth.UserTokenRejected:
 			fmt.Println("Not authenticated (session expired or revoked — run 'vibez auth login').")

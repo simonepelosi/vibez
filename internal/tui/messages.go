@@ -26,6 +26,8 @@ type Options struct {
 	InitialLogs []string
 	// OnReauth optionally triggers an asynchronous Apple Music login/re-auth flow.
 	OnReauth func()
+	// OnLogout optionally tears down any in-flight re-auth and suppresses automatic re-auth after :logout.
+	OnLogout func()
 }
 
 // InitStatusMsg updates the status text shown on the loading screen.

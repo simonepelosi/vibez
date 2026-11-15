@@ -309,7 +309,7 @@ func parseCLITokenUsage(stdout, stderr string) (TokenUsage, bool) {
 	type envelope struct {
 		Usage usageBlock `json:"usage"`
 	}
-	for _, stream := range []string{stderr, stdout} {
+	for _, stream := range []string{stdout, stderr} {
 		for line := range strings.SplitSeq(stream, "\n") {
 			line = strings.TrimSpace(line)
 			if !strings.Contains(line, `"usage"`) {
@@ -320,16 +320,16 @@ func parseCLITokenUsage(stdout, stderr string) (TokenUsage, bool) {
 				continue
 			}
 			u := env.Usage
-			in := max(u.InputTokens, max(u.PromptTokens, u.Input))
-			out := max(u.OutputTokens, max(u.CompletionTokens, u.Output))
-			tot := max(u.TotalTokens, u.TotalTokensCamel)
+			in := max(0, max(u.InputTokens, max(u.PromptTokens, u.Input)))
+			out := max(0, max(u.OutputTokens, max(u.CompletionTokens, u.Output)))
+			tot := max(0, max(u.TotalTokens, u.TotalTokensCamel))
 			if tot <= 0 {
 				tot = in + out
 			}
 			if tot > 0 {
 				return TokenUsage{
-					InputTokens:  max(0, in),
-					OutputTokens: max(0, out),
+					InputTokens:  in,
+					OutputTokens: out,
 					TotalTokens:  tot,
 				}, true
 			}
@@ -411,7 +411,7 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 			return nil, "", nil, fmt.Errorf("write gemini policy: %w", err)
 		}
 		args = []string{
-			"-p", combined,
+			"-p", "Follow the instructions provided via stdin.",
 			"--output-format", "text",
 			"--approval-mode", "plan",
 			"--extensions", "none",
@@ -420,7 +420,7 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, "", nil, nil
+		return args, combined, nil, nil
 
 	case "codex":
 		args = []string{
@@ -437,7 +437,6 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 
 	case "copilot":
 		args = []string{
-			"-p", combined,
 			"-s",
 			"--no-custom-instructions",
 			"--available-tools=",
@@ -445,7 +444,7 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, "", nil, nil
+		return args, combined, nil, nil
 
 	case "opencode":
 		// cmd.Dir is already set to tmpDir; avoid --pure/--dir which opencode 2.2+ rejects on `run`.

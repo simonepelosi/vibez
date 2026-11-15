@@ -40,6 +40,9 @@ type callbackPayload struct {
 	UserToken string `json:"user_token"`
 }
 
+// ErrLoginCancelled indicates an active login flow was aborted (e.g. by :logout).
+var ErrLoginCancelled = errors.New("login cancelled")
+
 // Login starts the MusicKit auth flow: serves a local web page, opens the browser,
 // waits for the user token, then saves it to config.
 func Login(cfg *config.Config) error {
@@ -52,14 +55,24 @@ func Login(cfg *config.Config) error {
 // fallback-URL messages to logf instead of writing directly to stdout. Callers
 // running an interactive TUI pass a TUI-safe logger so stdout stays clean.
 func LoginWithLogger(cfg *config.Config, logf func(string)) error {
+	return LoginWithContext(context.Background(), cfg, logf)
+}
+
+// LoginWithContext behaves like LoginWithLogger and aborts the local callback
+// server if parentCtx is cancelled (for example when :logout interrupts re-auth).
+func LoginWithContext(parentCtx context.Context, cfg *config.Config, logf func(string)) error {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	if logf == nil {
 		logf = func(string) {}
 	}
-	if err := ResolveDeveloperToken(cfg); err != nil && cfg.AppleDeveloperToken == "" {
+	if err := ResolveDeveloperToken(cfg); err != nil && cfg.DeveloperToken() == "" {
 		return err
 	}
 
-	if cfg.AppleDeveloperToken == "" {
+	devTok := cfg.DeveloperToken()
+	if devTok == "" {
 		return errors.New(`apple developer token is not set.
 
 To get one:
@@ -76,7 +89,7 @@ To get one:
 	// state ties /login and /callback to this login attempt, so another
 	// program or website cannot post a token of its own.
 	state := rand.Text()
-	mux := buildMux(cfg.AppleDeveloperToken, state, loginTemplate, tokenCh, errCh)
+	mux := buildMux(devTok, state, loginTemplate, tokenCh, errCh)
 
 	// Loopback only: the page carries the developer token and /callback
 	// accepts a user token, neither of which belongs on the network.
@@ -104,7 +117,7 @@ To get one:
 
 	_ = openBrowser(loginURL) // intentional best-effort browser open
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parentCtx, 5*time.Minute)
 	defer cancel()
 
 	// Print the fallback URL after a short delay only if Login is still waiting
@@ -128,7 +141,10 @@ To get one:
 	select {
 	case token := <-tokenCh:
 		shutdownSrv()
-		cfg.AppleUserToken = token
+		if parentCtx.Err() != nil {
+			return ErrLoginCancelled
+		}
+		cfg.SetUserToken(token)
 		if err := cfg.Save(""); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
@@ -136,16 +152,22 @@ To get one:
 		return nil
 	case err := <-errCh:
 		shutdownSrv()
+		if parentCtx.Err() != nil {
+			return ErrLoginCancelled
+		}
 		return fmt.Errorf("auth flow error: %w", err)
 	case <-ctx.Done():
 		shutdownSrv()
+		if parentCtx.Err() != nil {
+			return ErrLoginCancelled
+		}
 		return errors.New("auth timed out after 5 minutes")
 	}
 }
 
 // Logout clears saved tokens from config.
 func Logout(cfg *config.Config) error {
-	cfg.AppleUserToken = ""
+	cfg.SetUserToken("")
 	if err := cfg.Save(""); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
