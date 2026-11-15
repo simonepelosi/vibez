@@ -5,9 +5,22 @@ package browserless
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const cdmLibName = "widevinecdm.dll"
+
+func absEnvPath(name string) string {
+	val := os.Getenv(name)
+	if val == "" || strings.ContainsRune(val, 0) || strings.HasPrefix(val, `\\.\`) {
+		return ""
+	}
+	cleaned := filepath.Clean(val)
+	if !filepath.IsAbs(cleaned) {
+		return ""
+	}
+	return cleaned
+}
 
 // Standard locations where widevinecdm.dll may exist on Windows: Chromium
 // browsers' component-updated copy (user data) and bundled copy (install dir),
@@ -15,21 +28,29 @@ const cdmLibName = "widevinecdm.dll"
 func candidatePaths() []string {
 	var res []string
 
-	local := os.Getenv("LOCALAPPDATA")
-	roaming := os.Getenv("APPDATA")
-	programFiles := []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), filepath.Join(local, "Programs")}
+	local := absEnvPath("LOCALAPPDATA")
+	roaming := absEnvPath("APPDATA")
+	var programFiles []string
+	for _, root := range []string{absEnvPath("ProgramFiles"), absEnvPath("ProgramFiles(x86)")} {
+		if root != "" {
+			programFiles = append(programFiles, root)
+		}
+	}
+	if local != "" {
+		programFiles = append(programFiles, filepath.Join(local, "Programs"))
+	}
 
 	const sub = "WidevineCdm"
 	plat := filepath.Join("_platform_specific", "win_x64", cdmLibName)
 
 	var patterns []string
-	userData := []string{
-		filepath.Join("Google", "Chrome", "User Data"),
-		filepath.Join("Microsoft", "Edge", "User Data"),
-		filepath.Join("BraveSoftware", "Brave-Browser", "User Data"),
-	}
-	for _, rel := range userData {
-		if local != "" {
+	if local != "" {
+		userData := []string{
+			filepath.Join("Google", "Chrome", "User Data"),
+			filepath.Join("Microsoft", "Edge", "User Data"),
+			filepath.Join("BraveSoftware", "Brave-Browser", "User Data"),
+		}
+		for _, rel := range userData {
 			patterns = append(patterns, filepath.Join(local, rel, sub, "*", plat))
 		}
 	}
@@ -39,9 +60,6 @@ func candidatePaths() []string {
 		filepath.Join("BraveSoftware", "Brave-Browser", "Application"),
 	}
 	for _, pf := range programFiles {
-		if pf == "" {
-			continue
-		}
 		for _, rel := range installs {
 			patterns = append(patterns, filepath.Join(pf, rel, "*", sub, plat))
 		}
@@ -52,17 +70,31 @@ func candidatePaths() []string {
 
 	for _, pattern := range patterns {
 		if matches, err := filepath.Glob(pattern); err == nil {
-			res = append(res, matches...)
+			for _, m := range matches {
+				if filepath.IsAbs(m) && !strings.HasPrefix(m, `\\.\`) {
+					res = append(res, m)
+				}
+			}
 		}
 	}
-	return append(res, DefaultCDMPath())
+	if def := DefaultCDMPath(); def != "" {
+		res = append(res, def)
+	}
+	return res
 }
 
 // DefaultCDMPath returns the destination path for the cached standalone CDM library on Windows.
+// Returns "" if no user-scoped cache or profile directory can be resolved safely.
 func DefaultCDMPath() string {
-	dir, err := os.UserCacheDir()
-	if err != nil {
-		dir = os.TempDir()
+	if dir, err := os.UserCacheDir(); err == nil && dir != "" && !strings.ContainsRune(dir, 0) && !strings.HasPrefix(dir, `\\.\`) {
+		if cleaned := filepath.Clean(dir); filepath.IsAbs(cleaned) {
+			return filepath.Join(cleaned, "vibez", "cdm", cdmLibName)
+		}
 	}
-	return filepath.Join(dir, "vibez", "cdm", cdmLibName)
+	if home, err := os.UserHomeDir(); err == nil && home != "" && !strings.ContainsRune(home, 0) && !strings.HasPrefix(home, `\\.\`) {
+		if cleaned := filepath.Clean(home); filepath.IsAbs(cleaned) {
+			return filepath.Join(cleaned, "AppData", "Local", "vibez", "cdm", cdmLibName)
+		}
+	}
+	return ""
 }

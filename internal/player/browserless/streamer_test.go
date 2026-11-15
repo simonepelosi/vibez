@@ -703,3 +703,87 @@ func TestStreamServerLRUEvictionPreservesActiveReaders(t *testing.T) {
 		t.Fatalf("after Close(): remaining=%d s4.seg0AAC=%v s2.seg0AAC=%v", remaining, s4.seg0AAC, s2.seg0AAC)
 	}
 }
+
+func TestSeekTargetConcurrentWithEvictionAndWarmNoRace(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("rawdata"))
+	}))
+	t.Cleanup(upstream.Close)
+
+	closeCtx, closeCancel := context.WithCancel(context.Background())
+	defer closeCancel()
+	s := &StreamServer{
+		port:        12345,
+		authToken:   "tok",
+		closeCtx:    closeCtx,
+		closeCancel: closeCancel,
+		streams:     make(map[string]*trackStream),
+	}
+	defer func() { _ = s.Close() }()
+
+	for i := range 20 {
+		id := string(rune('a' + i))
+		st := &trackStream{
+			trackID:   id,
+			baseURI:   upstream.URL + "/",
+			segments:  []segmentRef{{uri: "seg0.mp3", length: 7, duration: 5.0}},
+			raw:       true,
+			rawFormat: rawFormat{ext: ".mp3", contentType: "audio/mpeg", seekable: true},
+		}
+		_ = s.register(context.Background(), id, st, ".mp3")
+		_, _, _ = s.SeekTarget(id, 2*time.Second)
+	}
+}
+
+func TestHandleStreamNonSeekableRawStreamsAndDetectsTruncation(t *testing.T) {
+	payload := bytes.Repeat([]byte{0x41}, 100<<10)
+	var truncate atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if truncate.Load() {
+			_, _ = w.Write(payload[:1024])
+			return
+		}
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var failErr error
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID:   "i.mix",
+				baseURI:   upstream.URL + "/",
+				segments:  []segmentRef{{uri: "mix.m4a", length: int64(len(payload))}},
+				raw:       true,
+				rawFormat: rawFormat{ext: ".m4a", contentType: "audio/mp4", seekable: false},
+			},
+		},
+		onFail: func(_ string, err error) { failErr = err },
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1/stream/s1/tok.m4a", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	s.handleStream(rec, req)
+	if failErr != nil {
+		t.Fatalf("unexpected fail callback: %v", failErr)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), payload) {
+		t.Fatalf("streamed %d bytes, want %d", rec.Body.Len(), len(payload))
+	}
+
+	truncate.Store(true)
+	req2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1/stream/s1/tok.m4a", nil)
+	req2.RemoteAddr = "127.0.0.1:40000"
+	var panicked any
+	func() {
+		defer func() { panicked = recover() }()
+		s.handleStream(httptest.NewRecorder(), req2)
+	}()
+	if panicked == nil || failErr == nil {
+		t.Fatalf("truncated raw upload did not abort/report failure (panicked=%v failErr=%v)", panicked, failErr)
+	}
+}

@@ -67,23 +67,94 @@ func applyAudioSpecificConfig(asc []byte, cfg *AudioConfig) bool {
 	return true
 }
 
+func readBMFFBox(data []byte, off int) (typ string, hdrSize, boxEnd int, ok bool) {
+	if off < 0 || off+8 > len(data) {
+		return "", 0, 0, false
+	}
+	size32 := binary.BigEndian.Uint32(data[off : off+4])
+	typ = string(data[off+4 : off+8])
+	switch size32 {
+	case 0:
+		hdrSize = 8
+		boxEnd = len(data)
+	case 1:
+		if off+16 > len(data) {
+			return "", 0, 0, false
+		}
+		size64 := binary.BigEndian.Uint64(data[off+8 : off+16])
+		rem := len(data) - off
+		if size64 < 16 || size64 > uint64(rem) { //nolint:gosec // G115: off <= len(data) verified above
+			return "", 0, 0, false
+		}
+		hdrSize = 16
+		boxEnd = off + int(size64) //nolint:gosec // G115: bounded <= len(data)-off
+	default:
+		if size32 < 8 || int(size32) > len(data)-off {
+			return "", 0, 0, false
+		}
+		hdrSize = 8
+		boxEnd = off + int(size32)
+	}
+	if off+hdrSize > boxEnd {
+		return "", 0, 0, false
+	}
+	return typ, hdrSize, boxEnd, true
+}
+
+func findESDSInBoxes(data []byte, depth int) []byte {
+	const maxBMFFDepth = 16
+	if depth > maxBMFFDepth {
+		return nil
+	}
+	for off := 0; off < len(data); {
+		typ, hdrSize, boxEnd, ok := readBMFFBox(data, off)
+		if !ok {
+			return nil
+		}
+		payloadOff := off + hdrSize
+		switch typ {
+		case "esds":
+			if payloadOff+4 <= boxEnd {
+				return data[payloadOff+4 : boxEnd]
+			}
+			return nil
+		case "moov", "trak", "mdia", "minf", "stbl":
+			if found := findESDSInBoxes(data[payloadOff:boxEnd], depth+1); found != nil {
+				return found
+			}
+		case "stsd":
+			// FullBox (4B version/flags + 4B entry_count).
+			if payloadOff+8 <= boxEnd {
+				if found := findESDSInBoxes(data[payloadOff+8:boxEnd], depth+1); found != nil {
+					return found
+				}
+			}
+		case "mp4a", "enca":
+			// AudioSampleEntry fixed header (28 bytes) precedes child boxes.
+			if payloadOff+28 <= boxEnd {
+				if found := findESDSInBoxes(data[payloadOff+28:boxEnd], depth+1); found != nil {
+					return found
+				}
+			}
+		}
+		off = boxEnd
+	}
+	return nil
+}
+
 // ParseAudioConfig parses the AudioSpecificConfig from the init segment (ftyp + moov).
 func ParseAudioConfig(initData []byte) (AudioConfig, error) {
 	cfg := DefaultAudioConfig()
-	esdsIdx := bytes.Index(initData, []byte("esds"))
-	if esdsIdx == -1 || esdsIdx+8 > len(initData) {
+	esdsPayload := findESDSInBoxes(initData, 0)
+	if esdsPayload == nil && len(initData) >= 8 && len(initData) <= 512 && bytes.HasPrefix(initData, []byte("esds")) {
+		esdsPayload = initData[8:]
+	}
+	if len(esdsPayload) == 0 {
 		return cfg, nil
 	}
-
-	boxEnd := min(len(initData), esdsIdx+128)
-	if esdsIdx >= 4 {
-		boxSize := int(binary.BigEndian.Uint32(initData[esdsIdx-4 : esdsIdx]))
-		if boxSize >= 12 && esdsIdx-4+boxSize <= len(initData) {
-			boxEnd = esdsIdx - 4 + boxSize
-		}
+	if len(esdsPayload) > 4096 {
+		esdsPayload = esdsPayload[:4096]
 	}
-	// Skip "esds" (4 bytes) + version/flags (4 bytes)
-	esdsPayload := initData[esdsIdx+8 : boxEnd]
 
 	// Proper ISO/IEC 14496-1 descriptor walk:
 	// ES_Descriptor (0x03) -> DecoderConfigDescriptor (0x04) -> DecSpecificInfo (0x05).
@@ -185,44 +256,100 @@ func appendADTSSample(out, decryptedSample []byte, cfg AudioConfig, sampleIdx in
 	return append(out, decryptedSample...), nil
 }
 
+func findChildBox(data []byte, target string) ([]byte, bool) {
+	for off := 0; off < len(data); {
+		typ, hdrSize, boxEnd, ok := readBMFFBox(data, off)
+		if !ok {
+			return nil, false
+		}
+		if typ == target {
+			return data[off+hdrSize : boxEnd], true
+		}
+		off = boxEnd
+	}
+	return nil, false
+}
+
 func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
-	// Find moof box
-	moofIdx := bytes.Index(segData, []byte("moof"))
-	if moofIdx < 4 {
+	if len(segData) < 8 {
+		return nil, 0, fmt.Errorf("segment too short")
+	}
+
+	var (
+		hasMoof          bool
+		moofStart        int
+		moofPayload      []byte
+		hasMdat          bool
+		mdatPayloadStart int
+		mdatEnd          int
+	)
+	for off := 0; off < len(segData); {
+		typ, hdrSize, boxEnd, ok := readBMFFBox(segData, off)
+		if !ok {
+			return nil, 0, fmt.Errorf("malformed MP4 box at offset %d", off)
+		}
+		switch typ {
+		case "moof":
+			if !hasMoof {
+				hasMoof = true
+				moofStart = off
+				moofPayload = segData[off+hdrSize : boxEnd]
+			}
+		case "mdat":
+			if !hasMdat {
+				hasMdat = true
+				mdatPayloadStart = off + hdrSize
+				mdatEnd = boxEnd
+			}
+		}
+		off = boxEnd
+	}
+	if !hasMoof {
 		return nil, 0, fmt.Errorf("moof box not found in segment")
 	}
-	moofStart := moofIdx - 4
-	if moofStart+8 > len(segData) {
-		return nil, 0, fmt.Errorf("truncated moof box header")
+
+	trafPayload, ok := findChildBox(moofPayload, "traf")
+	if !ok {
+		return nil, 0, fmt.Errorf("traf box not found in moof")
 	}
-	moofSize := int(binary.BigEndian.Uint32(segData[moofStart : moofStart+4]))
-	if moofSize < 8 || moofStart+moofSize > len(segData) {
-		return nil, 0, fmt.Errorf("invalid moof size: %d", moofSize)
+
+	var sencBody, trunBody []byte
+	var hasSenc, hasTrun bool
+	for off := 0; off < len(trafPayload); {
+		typ, hdrSize, boxEnd, boxOK := readBMFFBox(trafPayload, off)
+		if !boxOK {
+			return nil, 0, fmt.Errorf("malformed box inside traf at offset %d", off)
+		}
+		switch typ {
+		case "senc":
+			if !hasSenc {
+				hasSenc = true
+				sencBody = trafPayload[off+hdrSize : boxEnd]
+			}
+		case "trun":
+			if !hasTrun {
+				hasTrun = true
+				trunBody = trafPayload[off+hdrSize : boxEnd]
+			}
+		}
+		off = boxEnd
 	}
-	moofData := segData[moofStart : moofStart+moofSize]
 
 	// 1. Parse senc box
-	sencIdx := bytes.Index(moofData, []byte("senc"))
-	if sencIdx < 4 {
+	if !hasSenc {
 		return nil, 0, fmt.Errorf("senc box not found in moof")
 	}
-	sencStart := sencIdx - 4
-	if sencStart+16 > len(moofData) {
-		return nil, 0, fmt.Errorf("truncated senc box: need at least 16 bytes, got %d", len(moofData)-sencStart)
+	if len(sencBody) < 8 {
+		return nil, 0, fmt.Errorf("truncated senc box: need at least 8 payload bytes, got %d", len(sencBody))
 	}
-	sencSize := int(binary.BigEndian.Uint32(moofData[sencStart : sencStart+4]))
-	if sencSize < 16 || sencStart+sencSize > len(moofData) {
-		sencSize = len(moofData) - sencStart
-	}
-	sencEnd := sencStart + sencSize
-	flags := binary.BigEndian.Uint32(moofData[sencStart+8:sencStart+12]) & 0x00FFFFFF
+	flags := binary.BigEndian.Uint32(sencBody[0:4]) & 0x00FFFFFF
 	hasSubsamples := (flags & 0x02) != 0
-	sampleCount := binary.BigEndian.Uint32(moofData[sencStart+12 : sencStart+16])
+	sampleCount := binary.BigEndian.Uint32(sencBody[4:8])
 
 	// Sanity-bound sampleCount against remaining senc buffer to prevent OOM
-	remainingSencBytes := sencEnd - (sencStart + 16)
-	if remainingSencBytes < 0 || int64(sampleCount) > int64(remainingSencBytes)/8 || sampleCount > 65536 {
-		return nil, 0, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, remainingSencBytes)
+	sencEntries := sencBody[8:]
+	if int64(sampleCount) > int64(len(sencEntries))/8 || sampleCount > 65536 {
+		return nil, 0, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, len(sencEntries))
 	}
 
 	type sampleEncSlot struct {
@@ -235,37 +362,44 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 	if hasSubsamples && sampleCount > 0 {
 		subPool = make([]Subsample, 0, sampleCount)
 	}
-	offset := sencStart + 16
+	offset := 0
 	ivSize := 8
-	if !hasSubsamples && sampleCount > 0 && remainingSencBytes == int(sampleCount)*16 {
-		ivSize = 16
+	if !hasSubsamples && sampleCount > 0 {
+		switch len(sencEntries) {
+		case int(sampleCount) * 8:
+			ivSize = 8
+		case int(sampleCount) * 16:
+			ivSize = 16
+		default:
+			return nil, 0, fmt.Errorf("invalid senc length %d for %d samples", len(sencEntries), sampleCount)
+		}
 	}
 	for i := range sampleCount {
-		if offset+ivSize > len(moofData) {
+		if offset+ivSize > len(sencEntries) {
 			return nil, 0, fmt.Errorf("unexpected EOF in senc IVs at sample %d", i)
 		}
-		iv := moofData[offset : offset+ivSize]
+		iv := sencEntries[offset : offset+ivSize]
 		offset += ivSize
 
 		subStart := len(subPool)
 		subLen := 0
 		if hasSubsamples {
-			if offset+2 > len(moofData) {
+			if offset+2 > len(sencEntries) {
 				return nil, 0, fmt.Errorf("unexpected EOF in senc subsamples count at sample %d", i)
 			}
-			subCount := binary.BigEndian.Uint16(moofData[offset : offset+2])
+			subCount := binary.BigEndian.Uint16(sencEntries[offset : offset+2])
 			offset += 2
-			remainingSubBytes := len(moofData) - offset
+			remainingSubBytes := len(sencEntries) - offset
 			if int(subCount) > remainingSubBytes/6 {
 				return nil, 0, fmt.Errorf("invalid subsample count %d at sample %d", subCount, i)
 			}
 			subLen = int(subCount)
 			for range subCount {
-				if offset+6 > len(moofData) {
+				if offset+6 > len(sencEntries) {
 					return nil, 0, fmt.Errorf("unexpected EOF in senc subsample entry")
 				}
-				clearBytes := binary.BigEndian.Uint16(moofData[offset : offset+2])
-				cipherBytes := binary.BigEndian.Uint32(moofData[offset+2 : offset+6])
+				clearBytes := binary.BigEndian.Uint16(sencEntries[offset : offset+2])
+				cipherBytes := binary.BigEndian.Uint32(sencEntries[offset+2 : offset+6])
 				offset += 6
 				subPool = append(subPool, Subsample{
 					ClearBytes:  clearBytes,
@@ -279,34 +413,36 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 			subLen:   subLen,
 		}
 	}
+	if offset != len(sencEntries) {
+		return nil, 0, fmt.Errorf("trailing bytes in senc box: consumed %d of %d", offset, len(sencEntries))
+	}
 
 	// 2. Parse trun box
-	trunIdx := bytes.Index(moofData, []byte("trun"))
-	if trunIdx < 4 {
+	if !hasTrun {
 		return nil, 0, fmt.Errorf("trun box not found in moof")
 	}
-	trunStart := trunIdx - 4
-	if trunStart+16 > len(moofData) {
-		return nil, 0, fmt.Errorf("truncated trun box: need at least 16 bytes, got %d", len(moofData)-trunStart)
+	if len(trunBody) < 8 {
+		return nil, 0, fmt.Errorf("truncated trun box: need at least 8 payload bytes, got %d", len(trunBody))
 	}
-	trunFlags := binary.BigEndian.Uint32(moofData[trunStart+8:trunStart+12]) & 0x00FFFFFF
-	trunSampleCount := binary.BigEndian.Uint32(moofData[trunStart+12 : trunStart+16])
+	trunFlags := binary.BigEndian.Uint32(trunBody[0:4]) & 0x00FFFFFF
+	trunSampleCount := binary.BigEndian.Uint32(trunBody[4:8])
 	if trunSampleCount != sampleCount {
 		return nil, 0, fmt.Errorf("sample count mismatch between senc (%d) and trun (%d)", sampleCount, trunSampleCount)
 	}
-	trunOffset := trunStart + 16
+	trunOffset := 8
 
-	dataOffset := int64(moofSize + 8) // Default fallback to right after moof + mdat header
+	moofTotalLen := len(moofPayload) + 8
+	dataOffset := int64(moofTotalLen + 8) // Default fallback to right after moof + mdat header
 	if (trunFlags & 0x01) != 0 {
-		if trunOffset+4 > len(moofData) {
+		if trunOffset+4 > len(trunBody) {
 			return nil, 0, fmt.Errorf("truncated trun data_offset")
 		}
 		// data_offset is a signed 32-bit integer per ISO/IEC 14496-12
-		dataOffset = int64(int32(binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4]))) //nolint:gosec // G115: ISO/IEC 14496-12 defines data_offset as signed 32-bit
+		dataOffset = int64(int32(binary.BigEndian.Uint32(trunBody[trunOffset : trunOffset+4]))) //nolint:gosec // G115: ISO/IEC 14496-12 defines data_offset as signed 32-bit
 		trunOffset += 4
 	}
 	if (trunFlags & 0x04) != 0 {
-		if trunOffset+4 > len(moofData) {
+		if trunOffset+4 > len(trunBody) {
 			return nil, 0, fmt.Errorf("truncated trun first_sample_flags")
 		}
 		trunOffset += 4 // first_sample_flags
@@ -331,7 +467,7 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 		entrySize += 4
 	}
 
-	if trunOffset+int(sampleCount)*entrySize > len(moofData) {
+	if int64(sampleCount)*int64(entrySize) > int64(len(trunBody)-trunOffset) {
 		return nil, 0, fmt.Errorf("truncated trun sample entries")
 	}
 
@@ -343,7 +479,7 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 			trunOffset += 4
 		}
 		if hasSize {
-			szUint := binary.BigEndian.Uint32(moofData[trunOffset : trunOffset+4])
+			szUint := binary.BigEndian.Uint32(trunBody[trunOffset : trunOffset+4])
 			if szUint > maxSampleSize {
 				return nil, 0, fmt.Errorf("excessive sample %d size %d in trun", i, szUint)
 			}
@@ -364,10 +500,13 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 
 	// 3. Locate mdat and slice samples
 	mdatTarget := int64(moofStart) + dataOffset
-	if mdatTarget < 0 || mdatTarget > int64(len(segData)) {
-		return nil, 0, fmt.Errorf("invalid dataOffset %d: points to %d (seg length %d)", dataOffset, mdatTarget, len(segData))
+	if !hasMdat {
+		return nil, 0, fmt.Errorf("mdat box not found in segment")
 	}
-	mdatData := segData[mdatTarget:]
+	if mdatTarget < int64(mdatPayloadStart) || mdatTarget > int64(mdatEnd) {
+		return nil, 0, fmt.Errorf("invalid dataOffset %d: points to %d (mdat payload [%d, %d])", dataOffset, mdatTarget, mdatPayloadStart, mdatEnd)
+	}
+	mdatData := segData[mdatTarget:mdatEnd]
 	samples := make([]EncryptedSample, sampleCount)
 	currMdatOffset := 0
 

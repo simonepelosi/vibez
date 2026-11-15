@@ -6,9 +6,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -184,5 +191,174 @@ func TestExtractLibraryFromCRX_RejectsOverflowHeaderLen(t *testing.T) {
 	}
 	if err := extractLibraryFromCRX(crxPath, filepath.Join(tmpDir, "out.so")); err == nil {
 		t.Fatal("extractLibraryFromCRX succeeded on overflowing uint32 headerLen, want error")
+	}
+}
+
+func appendProtoBytes(dst []byte, fieldNum uint64, val []byte) []byte {
+	dst = binary.AppendUvarint(dst, (fieldNum<<3)|2)
+	dst = binary.AppendUvarint(dst, uint64(len(val)))
+	return append(dst, val...)
+}
+
+func buildSignedCRX3ForTest(t *testing.T, zipData []byte, priv *ecdsa.PrivateKey, crxIDOverride []byte) []byte {
+	t.Helper()
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	crxID := crxIDOverride
+	if crxID == nil {
+		sum := sha256.Sum256(pubDER)
+		crxID = sum[:16]
+	}
+
+	signedHeaderData := appendProtoBytes(nil, 1, crxID)
+	var lenLE [4]byte
+	binary.LittleEndian.PutUint32(lenLE[:], uint32(len(signedHeaderData))) //nolint:gosec // G115: tiny test header
+
+	h := sha256.New()
+	_, _ = h.Write([]byte("CRX3 SignedData\x00"))
+	_, _ = h.Write(lenLE[:])
+	_, _ = h.Write(signedHeaderData)
+	_, _ = h.Write(zipData)
+	digest := h.Sum(nil)
+
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest)
+	if err != nil {
+		t.Fatalf("ecdsa.SignASN1: %v", err)
+	}
+	_ = crypto.SHA256
+
+	var proofBuf []byte
+	proofBuf = appendProtoBytes(proofBuf, 1, pubDER)
+	proofBuf = appendProtoBytes(proofBuf, 2, sig)
+
+	var headerBuf []byte
+	headerBuf = appendProtoBytes(headerBuf, 3, proofBuf)
+	headerBuf = appendProtoBytes(headerBuf, 10000, signedHeaderData)
+
+	var out bytes.Buffer
+	out.WriteString("Cr24")
+	_ = binary.Write(&out, binary.LittleEndian, uint32(3))
+	_ = binary.Write(&out, binary.LittleEndian, uint32(len(headerBuf))) //nolint:gosec // G115: tiny test header
+	out.Write(headerBuf)
+	out.Write(zipData)
+	return out.Bytes()
+}
+
+func TestVerifyCRX3FileSignature(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("MarshalPKIXPublicKey: %v", err)
+	}
+	keyDigest := sha256.Sum256(pubDER)
+	wantID := keyDigest[:16]
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	f, err := zw.Create("libwidevinecdm.so")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write([]byte("payload"))
+	_ = zw.Close()
+
+	tmpDir := t.TempDir()
+	validPath := filepath.Join(tmpDir, "valid.crx3")
+	signed := buildSignedCRX3ForTest(t, zipBuf.Bytes(), priv, nil)
+	if err := os.WriteFile(validPath, signed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCRX3FileSignature(validPath, wantID); err != nil {
+		t.Fatalf("verifyCRX3FileSignature(valid) = %v, want nil", err)
+	}
+
+	// Wrong expected CRX ID must fail.
+	if err := verifyCRX3FileSignature(validPath, widevineCRXID[:]); err == nil {
+		t.Fatal("verifyCRX3FileSignature accepted mismatched CRX ID")
+	}
+
+	// Tampered ZIP payload must fail.
+	tampered := append([]byte(nil), signed...)
+	tampered[len(tampered)-1] ^= 0xff
+	tamperedPath := filepath.Join(tmpDir, "tampered.crx3")
+	if err := os.WriteFile(tamperedPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyCRX3FileSignature(tamperedPath, wantID); err == nil {
+		t.Fatal("verifyCRX3FileSignature accepted tampered CRX3 payload")
+	}
+}
+
+func TestCDMPathAndCandidateSecurityGuards(t *testing.T) {
+	for _, u := range []string{
+		"https://raw.githubusercontent.com/mozilla-firefox/firefox/main/widevinecdm.json",
+		"https://objects.githubusercontent.com/some/path",
+		"https://hg.mozilla.org/mozilla-central/raw-file/tip/widevinecdm.json",
+	} {
+		if !isAllowedManifestHost(u) {
+			t.Errorf("isAllowedManifestHost(%q) = false, want true", u)
+		}
+	}
+	for _, bad := range []string{
+		"http://raw.githubusercontent.com/x",
+		"https://user@raw.githubusercontent.com/x",
+		"https://evil.example.com/widevinecdm.json",
+		"https://raw.githubusercontent.com/x\r\n",
+	} {
+		if isAllowedManifestHost(bad) {
+			t.Errorf("isAllowedManifestHost(%q) = true, want false", bad)
+		}
+	}
+
+	// Unsetting HOME/USERPROFILE/LOCALAPPDATA must never yield a CWD-relative path.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("LOCALAPPDATA", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	if def := DefaultCDMPath(); def != "" && !filepath.IsAbs(def) {
+		t.Fatalf("DefaultCDMPath() returned relative path %q when env unset", def)
+	}
+	for _, c := range candidatePaths() {
+		if !filepath.IsAbs(c) {
+			t.Fatalf("candidatePaths() returned relative path %q", c)
+		}
+	}
+
+	// FindCDM must reject relative paths, bogus non-executable files, and world-writable binaries.
+	tmpDir := t.TempDir()
+	fakeLib := filepath.Join(tmpDir, "fake-cdm")
+	bigBad := make([]byte, 120000)
+	copy(bigBad, "NOT_A_BINARY")
+	if err := os.WriteFile(fakeLib, bigBad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIBEZ_CDM_PATH", fakeLib)
+	if got := FindCDM(); got == fakeLib {
+		t.Fatalf("FindCDM accepted non-binary file %q", got)
+	}
+
+	if runtime.GOOS == "linux" {
+		copy(bigBad[:4], []byte{0x7f, 'E', 'L', 'F'})
+		// Note: Chmod 0o777 on temp file in tmpDir (umask-independent chmod).
+		if err := os.WriteFile(fakeLib, bigBad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(fakeLib, 0o777); err != nil { //nolint:gosec // G302: intentionally creating world-writable file to test rejection
+			t.Fatal(err)
+		}
+		if got := FindCDM(); got == fakeLib {
+			t.Fatalf("FindCDM accepted world-writable ELF %q", got)
+		}
+		if err := os.Chmod(fakeLib, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := FindCDM(); got != fakeLib {
+			t.Fatalf("FindCDM() = %q, want %q for valid 0600 ELF", got, fakeLib)
+		}
 	}
 }

@@ -16,6 +16,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -35,8 +38,8 @@ type CDM struct {
 
 // New loads the Widevine CDM shared library from the given path.
 func New(libraryPath string) (*CDM, error) {
-	if libraryPath == "" {
-		return nil, errors.New("empty Widevine CDM path")
+	if libraryPath == "" || strings.ContainsRune(libraryPath, 0) || strings.HasPrefix(libraryPath, `\\.\`) || !filepath.IsAbs(libraryPath) {
+		return nil, errors.New("invalid Widevine CDM path")
 	}
 	info, err := os.Stat(libraryPath)
 	if err != nil {
@@ -44,6 +47,9 @@ func New(libraryPath string) (*CDM, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("widevine CDM path %q is not a regular file", libraryPath)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o002 != 0 {
+		return nil, fmt.Errorf("widevine CDM path %q must not be world-writable", libraryPath)
 	}
 
 	cPath := C.CString(libraryPath)
@@ -132,7 +138,7 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if sessionID == "" || len(license) == 0 || len(license) > maxCDMInputBytes {
+	if sessionID == "" || len(sessionID) > 4096 || strings.ContainsRune(sessionID, 0) || len(license) == 0 || len(license) > maxCDMInputBytes {
 		return errors.New("invalid session update payload")
 	}
 	if c.ctx == nil {
@@ -158,6 +164,9 @@ func (c *CDM) UpdateSession(sessionID string, license []byte) error {
 func (c *CDM) CloseSession(sessionID string) error {
 	if c == nil || sessionID == "" {
 		return nil
+	}
+	if len(sessionID) > 4096 || strings.ContainsRune(sessionID, 0) {
+		return errors.New("invalid session ID")
 	}
 
 	c.mu.Lock()

@@ -1,9 +1,11 @@
 #include "cdm_bridge.h"
 #include "content_decryption_module.h"
 
+#include <algorithm>
 #include <atomic>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <vector>
 #include <chrono>
@@ -98,14 +100,26 @@ public:
 
 class Host11Impl : public cdm::Host_11 {
 public:
+    static constexpr uint32_t kMaxSessionIdSize = 4096;
+
     std::mutex cv_m;
     std::condition_variable msg_cv;
     std::condition_variable update_cv;
     std::condition_variable cert_cv;
     std::condition_variable close_cv;
 
+    std::mutex cb_done_m;
+    std::condition_variable cb_done_cv;
+    std::atomic<int> active_callbacks{0};
+
     std::atomic<bool> destroyed{false};
     bool initialized = false;
+    uint32_t next_promise_id = 1;
+    uint32_t cert_promise_id = 0;
+    uint32_t session_promise_id = 0;
+    uint32_t update_promise_id = 0;
+    uint32_t close_promise_id = 0;
+
     std::string sessionId;
     std::vector<uint8_t> sessionMessage;
     bool hasMessage = false;
@@ -114,10 +128,32 @@ public:
     bool updateFailed = false;
     bool certResolved = false;
     bool certFailed = false;
+    std::string activeUpdateSessionId;
     std::string closingSessionId;
     bool closeResolved = false;
     bool closeFailed = false;
     int usableKeys = 0;
+
+    struct CallbackGuard {
+        Host11Impl& host;
+        explicit CallbackGuard(Host11Impl& h) : host(h) {
+            host.active_callbacks.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~CallbackGuard() {
+            if (host.active_callbacks.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> lk(host.cb_done_m);
+                host.cb_done_cv.notify_all();
+            }
+        }
+    };
+
+    uint32_t allocPromiseIdLocked() {
+        uint32_t id = next_promise_id++;
+        if (next_promise_id == 0) {
+            next_promise_id = 1;
+        }
+        return id;
+    }
 
     void markDestroyed() {
         std::lock_guard<std::mutex> lk(cv_m);
@@ -126,13 +162,26 @@ public:
         sessionFailed = true;
         updateFailed = true;
         closeFailed = true;
+        std::fill(sessionMessage.begin(), sessionMessage.end(), static_cast<uint8_t>(0));
+        std::vector<uint8_t>().swap(sessionMessage);
+        std::string().swap(sessionId);
+        std::string().swap(activeUpdateSessionId);
+        std::string().swap(closingSessionId);
         msg_cv.notify_all();
         update_cv.notify_all();
         cert_cv.notify_all();
         close_cv.notify_all();
     }
 
+    void waitCallbacksIdle() {
+        std::unique_lock<std::mutex> lk(cb_done_m);
+        cb_done_cv.wait_for(lk, std::chrono::milliseconds(250), [&] {
+            return active_callbacks.load(std::memory_order_acquire) == 0;
+        });
+    }
+
     cdm::Buffer* Allocate(uint32_t capacity) override {
+        CallbackGuard guard(*this);
         if (destroyed.load(std::memory_order_acquire) || capacity > BufferImpl::kMaxCdmBufferSize) {
             return nullptr;
         }
@@ -146,6 +195,7 @@ public:
     }
 
     void OnInitialized(bool success) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
         if (destroyed.load(std::memory_order_acquire)) return;
         initialized = success;
@@ -154,9 +204,11 @@ public:
     void OnResolveKeyStatusPromise(uint32_t promise_id, cdm::KeyStatus key_status) override {}
 
     void OnResolveNewSessionPromise(uint32_t promise_id, const char* session_id, uint32_t session_id_size) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
         if (destroyed.load(std::memory_order_acquire)) return;
-        if (session_id && session_id_size > 0) {
+        if (session_promise_id == 0 || promise_id != session_promise_id) return;
+        if (session_id && session_id_size > 0 && session_id_size <= kMaxSessionIdSize) {
             sessionId.assign(session_id, session_id_size);
         } else {
             sessionId.clear();
@@ -165,41 +217,51 @@ public:
     }
 
     void OnResolvePromise(uint32_t promise_id) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
-        if (destroyed.load(std::memory_order_acquire)) return;
-        if (promise_id == 1) {
+        if (destroyed.load(std::memory_order_acquire) || promise_id == 0) return;
+        if (promise_id == cert_promise_id) {
             certResolved = true;
             cert_cv.notify_all();
-        } else if (promise_id == 3) {
+        } else if (promise_id == update_promise_id) {
             updateResolved = true;
             update_cv.notify_all();
-        } else if (promise_id == 4) {
+        } else if (promise_id == close_promise_id) {
             closeResolved = true;
             close_cv.notify_all();
         }
     }
 
     void OnRejectPromise(uint32_t promise_id, cdm::Exception exception, uint32_t system_code, const char* error_message, uint32_t error_message_size) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
-        if (destroyed.load(std::memory_order_acquire)) return;
-        if (promise_id == 1) {
+        if (destroyed.load(std::memory_order_acquire) || promise_id == 0) return;
+        if (promise_id == cert_promise_id) {
             certFailed = true;
             cert_cv.notify_all();
-        } else if (promise_id == 2) {
+        } else if (promise_id == session_promise_id) {
             sessionFailed = true;
             msg_cv.notify_all();
-        } else if (promise_id == 3) {
+        } else if (promise_id == update_promise_id) {
             updateFailed = true;
             update_cv.notify_all();
-        } else if (promise_id == 4) {
+        } else if (promise_id == close_promise_id) {
             closeFailed = true;
             close_cv.notify_all();
         }
     }
 
     void OnSessionMessage(const char* session_id, uint32_t session_id_size, cdm::MessageType message_type, const char* message, uint32_t message_size) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
         if (destroyed.load(std::memory_order_acquire)) return;
+        if (session_promise_id == 0) return;
+        if (!sessionId.empty()) {
+            if (!session_id || session_id_size != sessionId.size() ||
+                std::memcmp(sessionId.data(), session_id, session_id_size) != 0) {
+                return;
+            }
+        }
         if (message && message_size > 0 && message_size <= BufferImpl::kMaxCdmBufferSize) {
             sessionMessage.assign(message, message + message_size);
             hasMessage = true;
@@ -211,8 +273,16 @@ public:
     }
 
     void OnSessionKeysChange(const char* session_id, uint32_t session_id_size, bool has_additional_usable_key, const cdm::KeyInformation* keys_info, uint32_t keys_info_count) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
-        if (destroyed.load(std::memory_order_acquire) || !keys_info) return;
+        if (destroyed.load(std::memory_order_acquire) || !keys_info || keys_info_count == 0) return;
+        if (update_promise_id == 0) return;
+        if (!activeUpdateSessionId.empty() && session_id && session_id_size > 0) {
+            if (session_id_size != activeUpdateSessionId.size() ||
+                std::memcmp(activeUpdateSessionId.data(), session_id, session_id_size) != 0) {
+                return;
+            }
+        }
         for (uint32_t i = 0; i < keys_info_count; i++) {
             if (keys_info[i].status == cdm::kUsable) {
                 usableKeys++;
@@ -223,9 +293,11 @@ public:
     void OnExpirationChange(const char* session_id, uint32_t session_id_size, cdm::Time new_expiry_time) override {}
 
     void OnSessionClosed(const char* session_id, uint32_t session_id_size) override {
+        CallbackGuard guard(*this);
         std::lock_guard<std::mutex> lk(cv_m);
         if (destroyed.load(std::memory_order_acquire)) return;
-        if (!closingSessionId.empty() &&
+        if (session_id && session_id_size > 0 &&
+            !closingSessionId.empty() &&
             closingSessionId.size() == session_id_size &&
             std::memcmp(closingSessionId.data(), session_id, session_id_size) == 0) {
             closeResolved = true;
@@ -257,12 +329,33 @@ void* GetCdmHostCallback(int host_interface_version, void* user_data) {
     return nullptr;
 }
 
+size_t bounded_strlen(const char* s, size_t max_len) {
+    if (!s) return 0;
+    size_t n = 0;
+    while (n < max_len && s[n] != '\0') {
+        ++n;
+    }
+    return n;
+}
+
+// Widevine CDM internal worker threads remain alive until process exit (since
+// unload_library is intentionally skipped), so retired Host11Impl shells stay
+// mapped in process-lifetime storage with destroyed=true to eliminate UAF.
+std::mutex retired_hosts_m;
+std::vector<std::unique_ptr<Host11Impl>> retired_hosts;
+
+void retire_host(std::unique_ptr<Host11Impl> host) {
+    if (!host) return;
+    std::lock_guard<std::mutex> lk(retired_hosts_m);
+    retired_hosts.push_back(std::move(host));
+}
+
 } // namespace
 
 struct cdm_context {
     void* lib_handle = nullptr;
     cdm::ContentDecryptionModule_11* cdm11 = nullptr;
-    Host11Impl host;
+    std::unique_ptr<Host11Impl> host;
     // Reusable scratch vector for subsample conversion under Go-side CDM.mu lock.
     std::vector<cdm::SubsampleEntry> scratch_subs;
 };
@@ -296,12 +389,24 @@ cdm_context_t* cdm_context_create(const char* library_path) {
         init_cdm();
     }
 
-    cdm_context_t* ctx = new cdm_context();
+    cdm_context_t* ctx = new (std::nothrow) cdm_context();
+    if (!ctx) {
+        unload_library(handle);
+        return nullptr;
+    }
+    ctx->host.reset(new (std::nothrow) Host11Impl());
+    if (!ctx->host) {
+        delete ctx;
+        unload_library(handle);
+        return nullptr;
+    }
     ctx->lib_handle = handle;
 
     std::string key_system = "com.widevine.alpha";
-    void* raw = create_cdm(11, key_system.data(), static_cast<uint32_t>(key_system.size()), GetCdmHostCallback, &ctx->host);
+    void* raw = create_cdm(11, key_system.c_str(), static_cast<uint32_t>(key_system.size()), GetCdmHostCallback, ctx->host.get());
     if (!raw) {
+        ctx->host->markDestroyed();
+        ctx->host->waitCallbacksIdle();
         delete ctx;
         unload_library(handle);
         return nullptr;
@@ -314,20 +419,24 @@ cdm_context_t* cdm_context_create(const char* library_path) {
 }
 
 int cdm_context_set_server_certificate(cdm_context_t* ctx, const uint8_t* cert_data, uint32_t cert_size) {
-    if (!ctx || !ctx->cdm11 || !cert_data || cert_size == 0) return -1;
+    if (!ctx || !ctx->host || !ctx->cdm11 || !cert_data || cert_size == 0) return -1;
+    uint32_t promise_id = 0;
     {
-        std::lock_guard<std::mutex> lk(ctx->host.cv_m);
-        if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
-        ctx->host.certResolved = false;
-        ctx->host.certFailed = false;
+        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+        promise_id = ctx->host->allocPromiseIdLocked();
+        ctx->host->cert_promise_id = promise_id;
+        ctx->host->certResolved = false;
+        ctx->host->certFailed = false;
     }
-    ctx->cdm11->SetServerCertificate(1, cert_data, cert_size);
+    ctx->cdm11->SetServerCertificate(promise_id, cert_data, cert_size);
     {
-        std::unique_lock<std::mutex> lk(ctx->host.cv_m);
-        bool ok = ctx->host.cert_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host.destroyed.load(std::memory_order_acquire) || ctx->host.certResolved || ctx->host.certFailed;
+        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+        bool ok = ctx->host->cert_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+            return ctx->host->destroyed.load(std::memory_order_acquire) || ctx->host->certResolved || ctx->host->certFailed;
         });
-        if (!ok || ctx->host.certFailed || ctx->host.destroyed.load(std::memory_order_acquire)) {
+        ctx->host->cert_promise_id = 0;
+        if (!ok || ctx->host->certFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
             return -2;
         }
     }
@@ -346,16 +455,19 @@ int cdm_context_generate_challenge(
     *out_challenge = nullptr;
     *out_challenge_size = 0;
     *out_session_id = nullptr;
-    if (!ctx || !ctx->cdm11 || !kid || kid_size != 16) return -1;
+    if (!ctx || !ctx->host || !ctx->cdm11 || !kid || kid_size != 16) return -1;
 
+    uint32_t promise_id = 0;
     // Reset host session state
     {
-        std::lock_guard<std::mutex> lk(ctx->host.cv_m);
-        if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
-        ctx->host.sessionId.clear();
-        ctx->host.sessionMessage.clear();
-        ctx->host.hasMessage = false;
-        ctx->host.sessionFailed = false;
+        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+        promise_id = ctx->host->allocPromiseIdLocked();
+        ctx->host->session_promise_id = promise_id;
+        ctx->host->sessionId.clear();
+        ctx->host->sessionMessage.clear();
+        ctx->host->hasMessage = false;
+        ctx->host->sessionFailed = false;
     }
 
     // Widevine PSSH header box (52 bytes) matching MusicKit v3 generatePSSH:
@@ -378,7 +490,7 @@ int cdm_context_generate_challenge(
     pssh.insert(pssh.end(), kid, kid + kid_size);
 
     ctx->cdm11->CreateSessionAndGenerateRequest(
-        2,
+        promise_id,
         cdm::SessionType::kTemporary,
         cdm::InitDataType::kCenc,
         pssh.data(),
@@ -386,26 +498,27 @@ int cdm_context_generate_challenge(
     );
 
     {
-        std::unique_lock<std::mutex> lk(ctx->host.cv_m);
-        bool ok = ctx->host.msg_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host.destroyed.load(std::memory_order_acquire) ||
-                   (ctx->host.hasMessage && !ctx->host.sessionId.empty()) ||
-                   ctx->host.sessionFailed;
+        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+        bool ok = ctx->host->msg_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+            return ctx->host->destroyed.load(std::memory_order_acquire) ||
+                   (ctx->host->hasMessage && !ctx->host->sessionId.empty()) ||
+                   ctx->host->sessionFailed;
         });
-        if (!ok || ctx->host.sessionFailed || ctx->host.destroyed.load(std::memory_order_acquire)) {
+        ctx->host->session_promise_id = 0;
+        if (!ok || ctx->host->sessionFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
             return -2;
         }
-        if (ctx->host.sessionMessage.empty() || ctx->host.sessionId.empty()) {
+        if (ctx->host->sessionMessage.empty() || ctx->host->sessionId.empty()) {
             return -2;
         }
 
-        const size_t challengeSize = ctx->host.sessionMessage.size();
-        const size_t sidSize = ctx->host.sessionId.size();
+        const size_t challengeSize = ctx->host->sessionMessage.size();
+        const size_t sidSize = ctx->host->sessionId.size();
         *out_challenge = static_cast<uint8_t*>(std::malloc(challengeSize));
         if (!*out_challenge) {
             return -3;
         }
-        std::memcpy(*out_challenge, ctx->host.sessionMessage.data(), challengeSize);
+        std::memcpy(*out_challenge, ctx->host->sessionMessage.data(), challengeSize);
 
         *out_session_id = static_cast<char*>(std::malloc(sidSize + 1));
         if (!*out_session_id) {
@@ -413,7 +526,7 @@ int cdm_context_generate_challenge(
             *out_challenge = nullptr;
             return -4;
         }
-        std::memcpy(*out_session_id, ctx->host.sessionId.c_str(), sidSize + 1);
+        std::memcpy(*out_session_id, ctx->host->sessionId.c_str(), sidSize + 1);
         *out_challenge_size = static_cast<uint32_t>(challengeSize);
     }
 
@@ -426,35 +539,43 @@ int cdm_context_update_session(
     const uint8_t* license_data,
     uint32_t license_size
 ) {
-    if (!ctx || !ctx->cdm11 || !session_id || session_id[0] == '\0' || !license_data || license_size == 0) return -1;
+    if (!ctx || !ctx->host || !ctx->cdm11 || !session_id || !license_data || license_size == 0) return -1;
+    size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
+    if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
 
+    uint32_t promise_id = 0;
     {
-        std::lock_guard<std::mutex> lk(ctx->host.cv_m);
-        if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
-        ctx->host.updateResolved = false;
-        ctx->host.updateFailed = false;
-        ctx->host.usableKeys = 0;
+        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+        promise_id = ctx->host->allocPromiseIdLocked();
+        ctx->host->update_promise_id = promise_id;
+        ctx->host->activeUpdateSessionId.assign(session_id, sid_len);
+        ctx->host->updateResolved = false;
+        ctx->host->updateFailed = false;
+        ctx->host->usableKeys = 0;
     }
 
     ctx->cdm11->UpdateSession(
-        3,
+        promise_id,
         session_id,
-        static_cast<uint32_t>(std::strlen(session_id)),
+        static_cast<uint32_t>(sid_len),
         license_data,
         license_size
     );
 
     {
-        std::unique_lock<std::mutex> lk(ctx->host.cv_m);
-        bool ok = ctx->host.update_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host.destroyed.load(std::memory_order_acquire) ||
-                   ctx->host.updateResolved ||
-                   ctx->host.updateFailed;
+        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+        bool ok = ctx->host->update_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+            return ctx->host->destroyed.load(std::memory_order_acquire) ||
+                   ctx->host->updateResolved ||
+                   ctx->host->updateFailed;
         });
-        if (!ok || ctx->host.updateFailed || ctx->host.destroyed.load(std::memory_order_acquire)) {
+        ctx->host->update_promise_id = 0;
+        ctx->host->activeUpdateSessionId.clear();
+        if (!ok || ctx->host->updateFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
             return -2;
         }
-        if (ctx->host.usableKeys == 0) {
+        if (ctx->host->usableKeys == 0) {
             return -3;
         }
     }
@@ -463,30 +584,36 @@ int cdm_context_update_session(
 }
 
 int cdm_context_close_session(cdm_context_t* ctx, const char* session_id) {
-    if (!ctx || !ctx->cdm11 || !session_id || session_id[0] == '\0') return -1;
+    if (!ctx || !ctx->host || !ctx->cdm11 || !session_id) return -1;
+    size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
+    if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
 
+    uint32_t promise_id = 0;
     {
-        std::lock_guard<std::mutex> lk(ctx->host.cv_m);
-        if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
-        ctx->host.closeResolved = false;
-        ctx->host.closeFailed = false;
-        ctx->host.closingSessionId = session_id;
+        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+        promise_id = ctx->host->allocPromiseIdLocked();
+        ctx->host->close_promise_id = promise_id;
+        ctx->host->closeResolved = false;
+        ctx->host->closeFailed = false;
+        ctx->host->closingSessionId.assign(session_id, sid_len);
     }
 
     ctx->cdm11->CloseSession(
-        4,
+        promise_id,
         session_id,
-        static_cast<uint32_t>(std::strlen(session_id))
+        static_cast<uint32_t>(sid_len)
     );
 
-    std::unique_lock<std::mutex> lk(ctx->host.cv_m);
-    bool ok = ctx->host.close_cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
-        return ctx->host.destroyed.load(std::memory_order_acquire) ||
-               ctx->host.closeResolved ||
-               ctx->host.closeFailed;
+    std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+    bool ok = ctx->host->close_cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
+        return ctx->host->destroyed.load(std::memory_order_acquire) ||
+               ctx->host->closeResolved ||
+               ctx->host->closeFailed;
     });
-    ctx->host.closingSessionId.clear();
-    if (!ok || ctx->host.closeFailed || ctx->host.destroyed.load(std::memory_order_acquire)) {
+    ctx->host->close_promise_id = 0;
+    ctx->host->closingSessionId.clear();
+    if (!ok || ctx->host->closeFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
         return -2;
     }
     return 0;
@@ -508,11 +635,12 @@ static int decrypt_one_sample(
 ) {
     if (!out_size) return -1;
     *out_size = 0;
-    if (!key_id || key_id_size == 0 || !iv || iv_size == 0 ||
-        !in_data || in_size == 0 || !out_decrypted) {
+    if (!ctx || !ctx->host || !ctx->cdm11 ||
+        !key_id || key_id_size == 0 || !iv || iv_size == 0 ||
+        !in_data || in_size == 0 || in_size > BufferImpl::kMaxCdmBufferSize || !out_decrypted) {
         return -1;
     }
-    if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
+    if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
     if (num_subsamples > 65536u) return -1;
     if (num_subsamples > 0 && (!clear_bytes || !cipher_bytes)) return -1;
 
@@ -609,8 +737,8 @@ int cdm_context_decrypt_batch(
     uint8_t* out_decrypted,
     uint32_t* out_sizes
 ) {
-    if (!ctx || !ctx->cdm11 || !key_id || key_id_size == 0) return -1;
-    if (ctx->host.destroyed.load(std::memory_order_acquire)) return -1;
+    if (!ctx || !ctx->host || !ctx->cdm11 || !key_id || key_id_size == 0) return -1;
+    if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
     if (num_samples == 0) return 0;
     if (num_samples > 65536u || !ivs_data || !iv_sizes || !in_sizes || !out_sizes) return -1;
     if (in_total_size > 0 && (!in_data || !out_decrypted)) return -1;
@@ -670,11 +798,18 @@ int cdm_context_decrypt_batch(
 
 void cdm_context_destroy(cdm_context_t* ctx) {
     if (!ctx) return;
-    ctx->host.markDestroyed();
+    if (ctx->host) {
+        ctx->host->markDestroyed();
+    }
     if (ctx->cdm11) {
         ctx->cdm11->Destroy();
         ctx->cdm11 = nullptr;
     }
+    if (ctx->host) {
+        ctx->host->waitCallbacksIdle();
+        retire_host(std::move(ctx->host));
+    }
+    std::vector<cdm::SubsampleEntry>().swap(ctx->scratch_subs);
     // We intentionally do not call unload_library here: Widevine CDM spins up
     // internal threads and TLS destructors that expect the library code to
     // remain mapped until process termination.
