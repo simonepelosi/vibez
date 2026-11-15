@@ -5421,3 +5421,26 @@ func TestVibeCommand_RejectsInvalidModelFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestExecuteCommand_LoginLogoutAndIntroURL(t *testing.T) {
+	m := newModel(nil)
+	m.width = 100
+	m.height = 30
+	reauthCalled := false
+	m.onReauth = func() { reauthCalled = true }
+	_ = m.executeCommand("login")
+	if !reauthCalled {
+		t.Fatal(":login did not invoke onReauth callback")
+	}
+	m.cfg.AppleUserToken = "tok-123"
+	_ = m.executeCommand("logout")
+	if m.cfg.AppleUserToken != "" {
+		t.Fatalf(":logout did not clear AppleUserToken: %q", m.cfg.AppleUserToken)
+	}
+	m.introStep = len("♪ vibez")
+	m.initStatus = "If your browser did not open, visit: http://localhost:7777/login?state=abc123xyz"
+	introOut := ansi.Strip(m.renderIntro())
+	if !strings.Contains(introOut, "http://localhost:7777/login?state=abc123xyz") {
+		t.Fatalf("renderIntro truncated or omitted login URL:\n%s", introOut)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/auth"
@@ -21,7 +22,53 @@ import (
 )
 
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
-	prog := tea.NewProgram(tui.New(cfg, nil, nil, opts))
+	var (
+		prog           *tea.Program
+		activePlayer   atomic.Pointer[browserless.Player]
+		reauthInFlight atomic.Bool
+	)
+
+	tuiAuthLog := func(msg string) {
+		if prog != nil {
+			prog.Send(tui.InitStatusMsg(msg))
+			prog.Send(tui.DebugLogMsg("[auth] " + msg))
+		}
+	}
+
+	triggerReauth := func() {
+		if !reauthInFlight.CompareAndSwap(false, true) {
+			return
+		}
+		if prog != nil {
+			prog.Send(tui.SessionExpiredMsg{})
+		}
+		go func() {
+			defer reauthInFlight.Store(false)
+			if err := auth.LoginWithLogger(cfg, tuiAuthLog); err != nil {
+				if prog != nil {
+					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
+				}
+				return
+			}
+			if onUserToken != nil {
+				onUserToken(cfg.AppleUserToken)
+			}
+			if cfg.StoreFront == "" && onStorefront != nil {
+				if _, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken); sf != "" {
+					onStorefront(sf)
+				}
+			}
+			if p := activePlayer.Load(); p != nil {
+				p.ResetSessionExpired()
+			}
+			if prog != nil {
+				prog.Send(tui.SessionRestoredMsg{})
+			}
+		}()
+	}
+
+	opts.OnReauth = triggerReauth
+	prog = tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)
 	restartExe := make(chan string, 1)
 	scanCtx, cancelScan := context.WithCancel(context.Background())
@@ -30,17 +77,18 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 	go func() {
 		var (
-			exe        string
-			authStatus = auth.TokensValid
-			sf         string
-			wg         sync.WaitGroup
+			exe               string
+			authStatus        = auth.TokensValid
+			sf                string
+			wg                sync.WaitGroup
+			optimisticSession = cfg.AppleUserToken != "" && cfg.StoreFront != "" && !auth.IsDeveloperTokenExpired(cfg.AppleDeveloperToken)
 		)
 		wg.Go(func() {
 			exe = updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
 				prog.Send(tui.InitStatusMsg(msg))
 			})
 		})
-		if cfg.AppleUserToken != "" {
+		if cfg.AppleUserToken != "" && !optimisticSession {
 			prog.Send(tui.InitStatusMsg("Checking Apple Music session..."))
 			wg.Go(func() {
 				authStatus, sf = auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken)
@@ -55,7 +103,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		}
 
 		devTokenRejected := false
-		if cfg.AppleUserToken != "" {
+		if cfg.AppleUserToken != "" && !optimisticSession {
 			switch authStatus {
 			case auth.UserTokenRejected:
 				prog.Send(tui.InitStatusMsg("Session expired - re-authenticating..."))
@@ -81,11 +129,6 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 					onStorefront(sf)
 				}
 			}
-		}
-
-		tuiAuthLog := func(msg string) {
-			prog.Send(tui.InitStatusMsg(msg))
-			prog.Send(tui.DebugLogMsg("[auth] " + msg))
 		}
 
 		if cfg.AppleUserToken == "" {
@@ -118,18 +161,22 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			return
 		}
 		_ = blPlayer.SetAudioBitrate(audioBitrateKbps)
-		blPlayer.OnSessionExpired = func() {
-			prog.Send(tui.SessionExpiredMsg{})
+		activePlayer.Store(blPlayer)
+		blPlayer.OnSessionExpired = triggerReauth
+
+		if optimisticSession {
 			go func() {
-				if err := auth.LoginWithLogger(cfg, tuiAuthLog); err != nil {
-					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
-					return
+				st, freshSF := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken)
+				switch st {
+				case auth.TokensValid:
+					if onStorefront != nil && freshSF != "" {
+						onStorefront(freshSF)
+					}
+				case auth.UserTokenRejected:
+					triggerReauth()
+				case auth.DeveloperTokenRejected:
+					prog.Send(tui.InitStatusMsg(auth.DeveloperTokenStatus))
 				}
-				if onUserToken != nil {
-					onUserToken(cfg.AppleUserToken)
-				}
-				blPlayer.ResetSessionExpired()
-				prog.Send(tui.SessionRestoredMsg{})
 			}()
 		}
 

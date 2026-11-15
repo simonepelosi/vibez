@@ -391,13 +391,14 @@ func TestBrokerTokenWithOptions_AsyncRefreshDoesNotBlockStartup(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	cfg := &config.Config{}
 
-	tok, done, err := brokerTokenWithOptions(srv.URL, "k", cache, now, true)
+	tok, done, err := brokerTokenWithCallback(srv.URL, "k", cache, now, true, cfg.SetRuntimeDeveloperToken)
 	if err != nil {
-		t.Fatalf("brokerTokenWithOptions failed: %v", err)
+		t.Fatalf("brokerTokenWithCallback failed: %v", err)
 	}
-	if tok != initialJWT {
-		t.Errorf("got token %q, want %q", tok, initialJWT)
+	if tok != initialJWT || cfg.AppleDeveloperToken != initialJWT {
+		t.Errorf("got token %q (cfg=%q), want %q", tok, cfg.AppleDeveloperToken, initialJWT)
 	}
 
 	select {
@@ -419,5 +420,8 @@ func TestBrokerTokenWithOptions_AsyncRefreshDoesNotBlockStartup(t *testing.T) {
 	}
 	if updated.Token != freshJWT {
 		t.Errorf("updated cache token = %q, want %q", updated.Token, freshJWT)
+	}
+	if cfg.AppleDeveloperToken != freshJWT {
+		t.Errorf("in-memory cfg.AppleDeveloperToken after async refresh = %q, want %q", cfg.AppleDeveloperToken, freshJWT)
 	}
 }

@@ -7,77 +7,140 @@
   <style nonce="{{.Nonce}}">
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: #1e1e2e;
-      color: #cdd6f4;
+      background: #1a1b26;
+      color: #c0caf5;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       display: flex;
       align-items: center;
       justify-content: center;
       min-height: 100vh;
+      padding: 20px;
     }
     .card {
-      background: #282c34;
-      border: 1px solid #313244;
+      background: #24283b;
+      border: 1px solid #414868;
       border-radius: 16px;
-      padding: 48px 56px;
-      max-width: 460px;
+      padding: 44px 48px;
+      max-width: 480px;
       width: 100%;
       text-align: center;
-      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.55);
+    }
+    .bear {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 1.15rem;
+      color: #e5c07b;
+      margin-bottom: 10px;
+      letter-spacing: 1px;
     }
     .logo {
-      font-size: 2.4rem;
+      font-size: 2.2rem;
       font-weight: 700;
       color: #c678dd;
-      margin-bottom: 8px;
-      letter-spacing: 2px;
+      margin-bottom: 6px;
+      letter-spacing: 1.5px;
     }
     .subtitle {
-      color: #5c6370;
+      color: #787c99;
       font-size: 0.9rem;
-      margin-bottom: 40px;
+      margin-bottom: 32px;
     }
     .btn {
       display: inline-flex;
       align-items: center;
       gap: 10px;
       background: #c678dd;
-      color: #fff;
-      border: none;
+      color: #1a1b26;
+      border: 2px solid transparent;
       border-radius: 10px;
       padding: 14px 28px;
       font-size: 1rem;
-      font-weight: 600;
+      font-weight: 700;
       cursor: pointer;
-      transition: background 0.2s, transform 0.1s;
+      transition: background 0.18s, transform 0.1s, border-color 0.18s;
       width: 100%;
       justify-content: center;
+      outline: none;
     }
-    .btn:hover { background: #b56fcc; }
+    .btn:hover { background: #d48ee8; }
+    .btn:focus-visible { border-color: #e5c07b; box-shadow: 0 0 0 3px rgba(229,192,123,0.25); }
     .btn:active { transform: scale(0.98); }
     .btn:disabled { background: #313244; color: #5c6370; cursor: not-allowed; }
-    .status {
-      margin-top: 24px;
-      font-size: 0.9rem;
-      min-height: 24px;
-      color: #98c379;
+    .kbd-hint {
+      margin-top: 12px;
+      font-size: 0.8rem;
+      color: #787c99;
     }
-    .status.error { color: #e06c75; }
+    .kbd-key {
+      color: #e5c07b;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .status {
+      margin-top: 20px;
+      font-size: 0.9rem;
+      min-height: 22px;
+      color: #a6e3a1;
+    }
+    .status.error { color: #f38ba8; }
     .success-box {
       display: none;
-      margin-top: 24px;
-      background: #1e2a1e;
-      border: 1px solid #98c379;
+      margin-top: 20px;
+      background: #1e2a24;
+      border: 1px solid #a6e3a1;
       border-radius: 10px;
-      padding: 20px;
+      padding: 18px 20px;
       text-align: left;
     }
-    .success-box h3 { color: #98c379; margin-bottom: 8px; }
-    .success-box p { color: #abb2bf; font-size: 0.9rem; line-height: 1.5; }
+    .success-box h3 { color: #a6e3a1; margin-bottom: 6px; font-size: 1rem; }
+    .success-box p { color: #c0caf5; font-size: 0.88rem; line-height: 1.5; }
+    .manual-details {
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 1px solid #32374d;
+      text-align: left;
+      font-size: 0.82rem;
+      color: #787c99;
+    }
+    .manual-details summary {
+      cursor: pointer;
+      color: #7aa2f7;
+      user-select: none;
+      font-weight: 500;
+    }
+    .manual-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .manual-input {
+      flex: 1;
+      background: #1a1b26;
+      border: 1px solid #414868;
+      border-radius: 8px;
+      color: #c0caf5;
+      padding: 9px 12px;
+      font-size: 0.85rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      outline: none;
+    }
+    .manual-input:focus { border-color: #7aa2f7; }
+    .manual-btn {
+      background: #3b4261;
+      color: #c0caf5;
+      border: 1px solid #565f89;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .manual-btn:hover { background: #464f73; }
   </style>
 </head>
 <body>
   <div class="card">
+    <div class="bear">ʕ•ᴥ•ʔ</div>
     <div class="logo">♪ vibez</div>
     <div class="subtitle">vibe-driven music player for your terminal</div>
 
@@ -87,6 +150,7 @@
       </svg>
       <span id="btnLabel">Connect Apple Music</span>
     </button>
+    <div class="kbd-hint" id="kbdHint">Press <span class="kbd-key">Enter</span> or click to open Apple Music sign-in</div>
 
     <div class="status" id="status"></div>
 
@@ -95,6 +159,14 @@
       <p>vibez is now linked to your Apple Music account.<br/>
          Return to your terminal — the app will continue automatically.</p>
     </div>
+
+    <details class="manual-details" id="manualDetails">
+      <summary>Paste token manually (SSH / headless / custom browser)</summary>
+      <div class="manual-row">
+        <input class="manual-input" id="manualTokenInput" type="password" placeholder="Paste media-user-token…" autocomplete="off" />
+        <button class="manual-btn" id="manualSubmitBtn" type="button">Save</button>
+      </div>
+    </details>
   </div>
 
   <script nonce="{{.Nonce}}">
@@ -129,6 +201,11 @@
           return;
         }
         let settled = false;
+        const closePopup = () => {
+          try {
+            if (win && !win.closed) win.close();
+          } catch (_) {}
+        };
         const cleanup = () => {
           window.removeEventListener("message", onMessage);
           clearInterval(pollTimer);
@@ -137,6 +214,8 @@
           if (settled) return;
           settled = true;
           cleanup();
+          closePopup();
+          setTimeout(closePopup, 150);
           fn(val);
         };
         const pollTimer = setInterval(() => {
@@ -178,6 +257,9 @@
               finish(reject, new Error("Apple Music authorization unavailable"));
               break;
             case "close":
+              reply({});
+              closePopup();
+              break;
             case "switchUserId":
               reply({});
               break;
@@ -188,6 +270,31 @@
     }
 
     class PopupBlockedError extends Error {}
+
+    async function submitUserToken(userToken) {
+      const btn = document.getElementById("connectBtn");
+      const btnLabel = document.getElementById("btnLabel");
+      const status = document.getElementById("status");
+      status.className = "status";
+      status.textContent = "Sending token to vibez…";
+      const resp = await fetch("/callback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Vibez-State": callbackState },
+        body: JSON.stringify({ user_token: userToken }),
+      });
+      if (!resp.ok) {
+        throw new Error("Server returned " + resp.status);
+      }
+      status.textContent = "";
+      document.getElementById("kbdHint").style.display = "none";
+      document.getElementById("manualDetails").style.display = "none";
+      document.getElementById("successBox").style.display = "block";
+      btn.disabled = true;
+      btnLabel.textContent = "Connected ✓";
+      setTimeout(() => {
+        try { window.close(); } catch (_) {}
+      }, 1500);
+    }
 
     async function connectAppleMusic(autoStart = false) {
       const btn = document.getElementById("connectBtn");
@@ -201,40 +308,60 @@
 
       try {
         const userToken = await requestAppleMusicUserToken();
-
-        status.textContent = "Sending token to vibez…";
-        const resp = await fetch("/callback", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-Vibez-State": callbackState },
-          body: JSON.stringify({ user_token: userToken }),
-        });
-
-        if (!resp.ok) {
-          throw new Error("Server returned " + resp.status);
-        }
-
-        status.textContent = "";
-        document.getElementById("successBox").style.display = "block";
-        btnLabel.textContent = "Connected ✓";
+        await submitUserToken(userToken);
       } catch (err) {
         if (autoStart && err instanceof PopupBlockedError) {
           status.className = "status";
-          status.textContent = "Click below to open Apple Music sign-in";
+          status.textContent = "";
           btn.disabled = false;
           btnLabel.textContent = "Connect Apple Music";
+          btn.focus();
           return;
         }
         status.className = "status error";
         status.textContent = "Error: " + (err.message || String(err));
         btn.disabled = false;
         btnLabel.textContent = "Try Again";
+        btn.focus();
+      }
+    }
+
+    async function submitManualToken() {
+      const input = document.getElementById("manualTokenInput");
+      const status = document.getElementById("status");
+      const token = (input.value || "").trim();
+      if (!token) {
+        status.className = "status error";
+        status.textContent = "Please paste a valid media-user-token first";
+        input.focus();
+        return;
+      }
+      try {
+        await submitUserToken(token);
+      } catch (err) {
+        status.className = "status error";
+        status.textContent = "Error: " + (err.message || String(err));
       }
     }
 
     document.getElementById("connectBtn").addEventListener("click", () => {
       connectAppleMusic(false);
     });
+    document.getElementById("manualSubmitBtn").addEventListener("click", () => {
+      submitManualToken();
+    });
+    document.getElementById("manualTokenInput").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        submitManualToken();
+      }
+    });
     window.addEventListener("DOMContentLoaded", () => {
+      const btn = document.getElementById("connectBtn");
+      if (navigator.userActivation && !navigator.userActivation.isActive) {
+        btn.focus();
+        return;
+      }
       connectAppleMusic(true);
     });
   </script>
