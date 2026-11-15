@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"unsafe"
 
 	"github.com/Microsoft/go-winio"
@@ -49,7 +50,8 @@ func verifyPipePeerSID(conn net.Conn) error {
 		return errors.New("discord ipc invalid native pipe handle")
 	}
 
-	curUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	curTok := windows.GetCurrentProcessToken()
+	curUser, err := curTok.GetTokenUser()
 	if err != nil || curUser == nil || curUser.User.Sid == nil {
 		return errors.New("discord ipc failed to read current user SID")
 	}
@@ -59,7 +61,10 @@ func verifyPipePeerSID(conn net.Conn) error {
 		return fmt.Errorf("discord ipc pipe owner query: %w", err)
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || !owner.Equals(curUser.User.Sid) {
+	// Elevated processes on Windows create pipes owned by their token's default
+	// owner (typically BUILTIN\Administrators) rather than TokenUser; accept either
+	// and rely on the server process TokenUser check below for exact user identity.
+	if err != nil || owner == nil || (!owner.Equals(curUser.User.Sid) && !tokenOwnerMatches(curTok, owner)) {
 		return errors.New("discord ipc pipe owner SID mismatch")
 	}
 
@@ -85,4 +90,25 @@ func verifyPipePeerSID(conn net.Conn) error {
 		return errors.New("discord ipc pipe server user SID mismatch")
 	}
 	return nil
+}
+
+type winTokenOwner struct {
+	Owner *windows.SID
+}
+
+func tokenOwnerMatches(tok windows.Token, owner *windows.SID) bool {
+	var needed uint32
+	err := windows.GetTokenInformation(tok, windows.TokenOwner, nil, 0, &needed)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || needed < uint32(unsafe.Sizeof(winTokenOwner{})) {
+		return false
+	}
+	buf := make([]byte, needed)
+	if err := windows.GetTokenInformation(tok, windows.TokenOwner, &buf[0], needed, &needed); err != nil {
+		return false
+	}
+	//nolint:gosec // G103: Win32 TOKEN_OWNER struct populated in buf by GetTokenInformation
+	to := (*winTokenOwner)(unsafe.Pointer(&buf[0]))
+	match := to.Owner != nil && owner.Equals(to.Owner)
+	runtime.KeepAlive(buf)
+	return match
 }
