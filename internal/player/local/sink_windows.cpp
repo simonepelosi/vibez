@@ -65,6 +65,18 @@ const MfApi* mfApi() {
     return ok ? &api : nullptr;
 }
 
+// Keep Media Foundation initialized once per process to avoid mfplat.dll
+// work-queue teardown races when sequential sessions re-call MFStartup().
+HRESULT ensureMfStartup(const MfApi& mf) {
+    static std::mutex mu;
+    static bool started = false;
+    std::lock_guard<std::mutex> lk(mu);
+    if (started) return S_OK;
+    const HRESULT hr = mf.startup(MF_VERSION, MFSTARTUP_FULL);
+    if (SUCCEEDED(hr)) started = true;
+    return hr;
+}
+
 template <class T>
 struct Com {
     T* p = nullptr;
@@ -811,10 +823,9 @@ void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::w
         return;
     }
     const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const HRESULT hrMf = mf->startup(MF_VERSION, MFSTARTUP_FULL);
+    const HRESULT hrMf = ensureMfStartup(*mf);
     if (SUCCEEDED(hrMf)) {
         playLoop(*mf, sink, ses, path, openProm);
-        mf->shutdown();
     } else {
         openProm.set_value(OpenResult{false, 0.0, formatHr("Media Foundation failed to start", hrMf)});
     }

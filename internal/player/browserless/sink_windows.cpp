@@ -81,6 +81,19 @@ const MfApi* mfApi() {
     return ok ? &api : nullptr;
 }
 
+// Media Foundation global work queues race or fault inside mfplat.dll when
+// MFShutdown() drops the process refcount to zero and MFStartup() is called
+// again across sequential sessions/tests; initialize once for the process.
+HRESULT ensureMfStartup(const MfApi& mf) {
+    static std::mutex mu;
+    static bool started = false;
+    std::lock_guard<std::mutex> lk(mu);
+    if (started) return S_OK;
+    const HRESULT hr = mf.startup(MF_VERSION, MFSTARTUP_FULL);
+    if (SUCCEEDED(hr)) started = true;
+    return hr;
+}
+
 template <class T>
 struct Com {
     T* p = nullptr;
@@ -354,6 +367,28 @@ bool setOutputType(const MfApi& mf, IMFSourceReader* reader, const GUID& subtype
     return SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, basic.p));
 }
 
+void fallbackWaveOutPCM16(const MfApi& mf, IMFSourceReader* reader, HANDLE ev, HWAVEOUT& hwo, MMRESULT& mm,
+                          SampleFmt& fmt, uint32_t& rate, int& channels, uint32_t& bps) {
+    if (mm == MMSYSERR_NOERROR || fmt != SampleFmt::Float32) return;
+    UINT32 ch = static_cast<UINT32>(channels > 0 ? channels : 2);
+    if (!setOutputType(mf, reader, MFAudioFormat_PCM, 16, ch, rate)) return;
+    Com<IMFMediaType> got16;
+    WAVEFORMATEX* wfx16 = nullptr;
+    UINT32 wfx16Size = 0;
+    if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
+        SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
+        SampleFmt fmt16 = sampleFmtOf(got16.p, wfx16);
+        if (wfx16->nSamplesPerSec > 0 && wfx16->nChannels > 0 && wfx16->nChannels <= 8 && fmt16 != SampleFmt::None) {
+            fmt = fmt16;
+            rate = wfx16->nSamplesPerSec;
+            channels = wfx16->nChannels;
+            bps = wfx16->nAvgBytesPerSec;
+            mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+        }
+        CoTaskMemFree(wfx16);
+    }
+}
+
 bool openSourceReader(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
                       const std::wstring& url, Com<IMFSourceReader>& reader) {
     HRESULT hr = mf.createSourceReader(url.c_str(), nullptr, &reader);
@@ -418,25 +453,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     wchar_t nullEnv[8] = {};
     bool nullOut = GetEnvironmentVariableW(L"VIBEZ_NULL_AUDIO", nullEnv, 8) == 1 && nullEnv[0] == L'1';
     if (mm != MMSYSERR_NOERROR && sampleFmt == SampleFmt::Float32) {
-        UINT32 nativeCh = static_cast<UINT32>(channels > 0 ? channels : 2);
-        if (setOutputType(mf, reader.p, MFAudioFormat_PCM, 16, nativeCh, rate)) {
-            Com<IMFMediaType> got16;
-            WAVEFORMATEX* wfx16 = nullptr;
-            UINT32 wfx16Size = 0;
-            if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
-                SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
-                SampleFmt fmt16 = sampleFmtOf(got16.p, wfx16);
-                if (wfx16->nSamplesPerSec > 0 && wfx16->nChannels > 0 && wfx16->nChannels <= 8 && fmt16 != SampleFmt::None) {
-                    sampleFmt = fmt16;
-                    rate = wfx16->nSamplesPerSec;
-                    channels = wfx16->nChannels;
-                    ses->sampleRate = rate;
-                    ses->bytesPerSec = wfx16->nAvgBytesPerSec;
-                    mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
-                }
-                CoTaskMemFree(wfx16);
-            }
-        }
+        uint32_t bps = ses->bytesPerSec.load();
+        fallbackWaveOutPCM16(mf, reader.p, ev, hwo, mm, sampleFmt, rate, channels, bps);
+        ses->sampleRate = rate;
+        ses->bytesPerSec = bps;
     }
     if (mm != MMSYSERR_NOERROR) {
         if (!nullOut) {
@@ -562,6 +582,9 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                             }
                             HWAVEOUT newHwo = nullptr;
                             MMRESULT nextMm = waveOutOpen(&newHwo, WAVE_MAPPER, nextWfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+                            if (nextMm != MMSYSERR_NOERROR && nextFmt == SampleFmt::Float32) {
+                                fallbackWaveOutPCM16(mf, nextReader.p, ev, newHwo, nextMm, nextFmt, nextRate, nextChannels, nextBps);
+                            }
                             if (nextMm != MMSYSERR_NOERROR) {
                                 CoTaskMemFree(nextWfx);
                                 reportError(sink, ses, "cannot reopen audio output device", static_cast<HRESULT>(nextMm));
@@ -772,10 +795,9 @@ void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::s
         return;
     }
     const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const HRESULT hrMf = mf->startup(MF_VERSION, MFSTARTUP_FULL);
+    const HRESULT hrMf = ensureMfStartup(*mf);
     if (SUCCEEDED(hrMf)) {
         playLoop(*mf, sink, ses, std::move(url));
-        mf->shutdown();
     } else {
         reportError(sink, ses, "Media Foundation failed to start", hrMf);
     }
@@ -935,7 +957,10 @@ double vibez_winsink_position(vibez_winsink_t handle) {
 void vibez_winsink_destroy(vibez_winsink_t handle) {
     if (!handle) return;
     auto* h = static_cast<Handle*>(handle);
-    h->sink->closed = true;
+    {
+        std::lock_guard<std::mutex> wlk(h->sink->workerMu);
+        h->sink->closed = true;
+    }
     h->sink->cbGate.closeAndDrain();
     std::shared_ptr<Session> old;
     {
