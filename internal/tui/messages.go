@@ -24,6 +24,8 @@ type Options struct {
 	ScanNotice string
 	// InitialLogs pre-populates the debug log on launch (e.g. broker token fetch logs).
 	InitialLogs []string
+	// OnReauth optionally triggers an asynchronous Apple Music login/re-auth flow.
+	OnReauth func()
 }
 
 // InitStatusMsg updates the status text shown on the loading screen.

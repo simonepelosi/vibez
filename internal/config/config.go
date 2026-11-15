@@ -138,6 +138,8 @@ func (c *Config) SetRuntimeDeveloperToken(tok string) {
 	if tok == "" {
 		return
 	}
+	saveMu.Lock()
+	defer saveMu.Unlock()
 	c.AppleDeveloperToken = tok
 	c.runtimeAppleDevToken = tok
 }

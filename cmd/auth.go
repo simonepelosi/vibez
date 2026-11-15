@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
@@ -45,15 +46,40 @@ var authStatusCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("loading config: %w", err)
 		}
+		_ = auth.ResolveDeveloperToken(cfg)
+		if exp, ok := auth.DeveloperTokenExpiry(cfg.AppleDeveloperToken); ok {
+			if rem := time.Until(exp).Round(time.Minute); rem > 0 {
+				fmt.Printf("Developer token: valid (expires in %s)\n", rem)
+			} else {
+				fmt.Println("Developer token: expired")
+			}
+		}
 		if cfg.AppleUserToken == "" {
 			fmt.Println("Not authenticated.")
 			return nil
 		}
-		sf := cfg.StoreFront
-		if sf == "" {
-			sf = "auto-detected"
+		status, sf := auth.CheckTokens(cfg.AppleDeveloperToken, cfg.AppleUserToken)
+		switch status {
+		case auth.UserTokenRejected:
+			fmt.Println("Not authenticated (session expired or revoked — run 'vibez auth login').")
+			return nil
+		case auth.DeveloperTokenRejected:
+			fmt.Println(auth.DeveloperTokenHelp)
+			return nil
+		case auth.TokensValid:
+			if sf != "" && sf != cfg.StoreFront {
+				cfg.StoreFront = sf
+				_ = cfg.Save(cfgFile)
+			}
+			if sf == "" {
+				sf = cfg.StoreFront
+			}
+			if sf == "" {
+				sf = "auto-detected"
+			}
+			fmt.Printf("Authenticated with Apple Music (storefront: %s)\n", sf)
+			return nil
 		}
-		fmt.Printf("Authenticated with Apple Music (storefront: %s)\n", sf)
 		return nil
 	},
 }

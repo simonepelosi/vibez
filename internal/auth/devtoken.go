@@ -143,14 +143,14 @@ func resolveDeveloperToken(cfg *config.Config, allowAsyncRefresh bool) (<-chan s
 		}
 		return closedChan(), nil
 	}
-	tok, done, err := brokerTokenWithOptions(tokenURL, clientKey, cachePath(), time.Now(), allowAsyncRefresh)
+	tok, done, err := brokerTokenWithCallback(tokenURL, clientKey, cachePath(), time.Now(), allowAsyncRefresh, cfg.SetRuntimeDeveloperToken)
 	if err != nil {
 		if cfg.AppleDeveloperToken != "" {
 			logBroker(fmt.Sprintf("[broker] falling back to configured apple_developer_token after broker error: %v", err))
 		}
 		return done, err
 	}
-	cfg.SetRuntimeDeveloperToken(tok)
+	_ = tok
 	return done, nil
 }
 
@@ -207,16 +207,26 @@ func brokerToken(endpoint, key, cache string, now time.Time) (string, error) {
 }
 
 func brokerTokenWithOptions(endpoint, key, cache string, now time.Time, allowAsyncRefresh bool) (string, <-chan struct{}, error) {
+	return brokerTokenWithCallback(endpoint, key, cache, now, allowAsyncRefresh, nil)
+}
+
+func brokerTokenWithCallback(endpoint, key, cache string, now time.Time, allowAsyncRefresh bool, onToken func(string)) (string, <-chan struct{}, error) {
 	cached, _ := readCache(cache)
 	if cached.validFor(now, refreshBefore) {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] using cached developer token (valid for %v)", remaining))
+		if onToken != nil {
+			onToken(cached.Token)
+		}
 		return cached.Token, closedChan(), nil
 	}
 
 	if allowAsyncRefresh && cached.validFor(now, asyncRefreshMinMargin) {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] using cached developer token (valid for %v); refreshing in background", remaining))
+		if onToken != nil {
+			onToken(cached.Token)
+		}
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -226,6 +236,10 @@ func brokerTokenWithOptions(endpoint, key, cache string, now time.Time, allowAsy
 				return
 			}
 			_ = writeCache(cache, fetched)
+			if onToken != nil {
+				onToken(fetched.Token)
+			}
+			logBroker("[broker] background refresh updated developer token")
 		}()
 		return cached.Token, done, nil
 	}
@@ -257,12 +271,18 @@ func brokerTokenWithOptions(endpoint, key, cache string, now time.Time, allowAsy
 		validity := time.Unix(fetched.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] fresh developer token received (valid for %v)", validity))
 		_ = writeCache(cache, fetched)
+		if onToken != nil {
+			onToken(fetched.Token)
+		}
 		return fetched.Token, closedChan(), nil
 	}
 
 	if hasFallback {
 		remaining := time.Unix(cached.ExpiresAt, 0).Sub(now).Round(time.Minute)
 		logBroker(fmt.Sprintf("[broker] fetch failed, falling back to unexpired cached token (valid for %v)", remaining))
+		if onToken != nil {
+			onToken(cached.Token)
+		}
 		return cached.Token, closedChan(), nil
 	}
 

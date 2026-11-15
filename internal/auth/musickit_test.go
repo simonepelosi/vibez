@@ -159,6 +159,9 @@ func TestLoginHTML_UsesDirectAppleAuthorizePopupWithoutMusicKitCDN(t *testing.T)
 	if !containsSubstr(body, "window.location.origin + window.location.pathname") || !containsSubstr(body, "replaceState") {
 		t.Error("login.html should scrub ?state= from URL and referrer")
 	}
+	if !containsSubstr(body, "navigator.userActivation") || !containsSubstr(body, "manualTokenInput") {
+		t.Error("login.html should check navigator.userActivation and provide manualTokenInput fallback")
+	}
 	if containsSubstr(body, "innerHTML") || containsSubstr(body, "onclick=") {
 		t.Error("login.html should avoid inline onclick and innerHTML")
 	}

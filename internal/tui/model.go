@@ -444,6 +444,9 @@ type Model struct {
 	// Vibe planner (auto-detected on-device runtime or KeywordAgent fallback).
 	vibePlanner vibe.Planner
 
+	// Optional callback to trigger asynchronous Apple Music login/re-auth.
+	onReauth func()
+
 	// Frame-local render caches for static border/status segments.
 	cachedHorizW     int
 	cachedHoriz      string
@@ -487,6 +490,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		player:         plyr,
 		activePanel:    -1,
 		memProfiling:   opts.MemProfiling,
+		onReauth:       opts.OnReauth,
 		preMuteVol:     -1,
 		artMode:        cfg.AlbumArt,
 		artwork:        artworkCache{rendered: map[art.Size][]string{}},
@@ -1287,6 +1291,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case InitStatusMsg:
 		m.initStatus = provider.Clean(string(msg))
+		if m.introStep == introDone && m.initStatus != "" {
+			m.errMsg = m.initStatus
+			m.errExpiry = time.Now().Add(30 * time.Second)
+		}
 
 	case EngineReadyMsg:
 		m.player = msg.Player
@@ -1410,6 +1418,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SessionRestoredMsg:
 		m.errMsg = "✓ Re-authenticated with Apple Music"
 		m.errExpiry = time.Now().Add(5 * time.Second)
+		if m.provider != nil {
+			cmds = append(cmds, m.library.Init())
+		}
 
 	case RestartMsg:
 		m.flushPendingVolumeSave()
@@ -1713,6 +1724,8 @@ var allCommands = []cmdEntry{
 	{"quality", "quality <high|standard|256|64>", "Set Apple Music AAC bitrate"},
 	{"art", "art", "Toggle album-art view (cover + track info instead of the bar)"},
 	{"mute", "mute", "Toggle mute"},
+	{"login", "login", "Connect or re-authenticate your Apple Music account"},
+	{"logout", "logout", "Log out and clear saved Apple Music user token"},
 	{"about", "about", "Show information about vibez"},
 	{"donate", "donate", "Support vibez development by donating"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
@@ -1871,6 +1884,32 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.preMuteVol = m.playerState.Volume
 		m.appendLog("[vol] muted")
 		return m.playerCmd(func(p player.Player) error { return p.SetVolume(0) })
+
+	case cmd == "login" || cmd == "auth":
+		if m.onReauth != nil {
+			m.errMsg = "✓ Opening browser for Apple Music login…"
+			m.errExpiry = time.Now().Add(30 * time.Second)
+			m.appendLog("[auth] user requested :login")
+			m.onReauth()
+			return nil
+		}
+		m.errMsg = "login is only available in Apple Music mode"
+		m.errExpiry = time.Now().Add(4 * time.Second)
+		return nil
+
+	case cmd == "logout":
+		if m.cfg != nil {
+			m.cfg.AppleUserToken = ""
+			if err := m.cfg.Save(""); err != nil {
+				m.errMsg = fmt.Sprintf("logout save error: %v", err)
+				m.errExpiry = time.Now().Add(4 * time.Second)
+				return nil
+			}
+		}
+		m.appendLog("[auth] logged out of Apple Music")
+		m.errMsg = "✓ Logged out of Apple Music (use :login to reconnect)"
+		m.errExpiry = time.Now().Add(5 * time.Second)
+		return nil
 
 	case strings.HasPrefix(cmd, "quality"):
 		name, arg, _ := strings.Cut(cmd, " ")
@@ -3855,10 +3894,19 @@ func (m *Model) renderIntro() string {
 		if statusText == "" {
 			statusText = "connecting…"
 		}
-		subtitle = "\n" + centerStr(
-			lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(statusText),
-			m.width,
-		)
+		mutedSt := lipgloss.NewStyle().Foreground(styles.ColorMuted)
+		if idx := strings.Index(statusText, "http://"); idx > 0 {
+			prefix := strings.TrimSpace(statusText[:idx])
+			urlPart := strings.TrimSpace(statusText[idx:])
+			subtitle = "\n" +
+				centerStr(mutedSt.Render(prefix), m.width) + "\n" +
+				centerStr(styles.KeyName.Render(urlPart), m.width)
+		} else {
+			subtitle = "\n" + centerStr(
+				mutedSt.Render(statusText),
+				m.width,
+			)
+		}
 	}
 
 	topPad := max(0, (m.height-3)/2)

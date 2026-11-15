@@ -256,4 +256,12 @@ func TestCheckTokens_ExpiredJWTFastPathSkipsNetwork(t *testing.T) {
 	if hits.Load() == 0 {
 		t.Error("expected network probe for non-expired JWT")
 	}
+
+	expTime, ok := DeveloperTokenExpiry(validJWT)
+	if !ok || expTime.Unix() != now.Add(time.Hour).Unix() {
+		t.Errorf("DeveloperTokenExpiry = (%v, %v), want (%v, true)", expTime, ok, now.Add(time.Hour))
+	}
+	if !IsDeveloperTokenExpired("") || !IsDeveloperTokenExpired(expiredJWT) {
+		t.Error("expected empty and expired JWTs to report IsDeveloperTokenExpired=true")
+	}
 }

@@ -174,26 +174,43 @@ func firstResourceID(r io.Reader) string {
 	return id
 }
 
-// jwtExpired reports whether tok is a 3-segment base64url JWT whose numeric
-// "exp" claim is at or before now. Oversized, non-JWT, or unreadable payloads
-// return false so callers fall back to the network probe without decoding large blobs.
-func jwtExpired(tok string, now time.Time) bool {
+// DeveloperTokenExpiry extracts the expiration timestamp ("exp" claim) from a
+// 3-segment base64url JWT developer token. It returns (zero, false) when tok
+// is empty, oversized, malformed, or lacks a numeric "exp" claim.
+func DeveloperTokenExpiry(tok string) (time.Time, bool) {
 	if tok == "" || len(tok) > maxJWTSize {
-		return false
+		return time.Time{}, false
 	}
 	parts := strings.Split(tok, ".")
 	if len(parts) != 3 || parts[1] == "" {
-		return false
+		return time.Time{}, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
 	var claims struct {
 		Exp *int64 `json:"exp"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
+		return time.Time{}, false
+	}
+	return time.Unix(*claims.Exp, 0), true
+}
+
+// IsDeveloperTokenExpired reports whether tok is missing or has an "exp" claim
+// at or before time.Now().
+func IsDeveloperTokenExpired(tok string) bool {
+	return tok == "" || jwtExpired(tok, time.Now())
+}
+
+// jwtExpired reports whether tok is a 3-segment base64url JWT whose numeric
+// "exp" claim is at or before now. Oversized, non-JWT, or unreadable payloads
+// return false so callers fall back to the network probe without decoding large blobs.
+func jwtExpired(tok string, now time.Time) bool {
+	exp, ok := DeveloperTokenExpiry(tok)
+	if !ok {
 		return false
 	}
-	return now.Unix() >= *claims.Exp
+	return !exp.After(now)
 }
