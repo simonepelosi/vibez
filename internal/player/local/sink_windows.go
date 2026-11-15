@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 	"unsafe"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 type nativeEngine struct {
@@ -91,7 +93,7 @@ func vibezLocalWinOnEOS(userData C.uintptr_t, gen C.uint64_t) {
 
 //export vibezLocalWinOnError
 func vibezLocalWinOnError(userData C.uintptr_t, gen C.uint64_t, cErrMsg *C.char) {
-	msg := C.GoString(cErrMsg)
+	msg := provider.Clean(C.GoString(cErrMsg))
 	e := engineFromHandle(userData)
 	if e == nil {
 		return
@@ -195,11 +197,19 @@ func (e *nativeEngine) call(method string, args ...any) (snapshot, error) {
 		path := args[0].(string)
 		gen := args[1].(uint64)
 		autoplay := args[2].(bool)
+		cleanPath, err := verifyRegularAudioPath(path)
+		if err != nil {
+			e.gen = gen
+			e.seq++
+			e.playing = false
+			e.dur = 0
+			return snapshot{Gen: gen, Seq: e.seq, Error: provider.Clean(err.Error())}, nil
+		}
 		autoInt := C.int(0)
 		if autoplay {
 			autoInt = 1
 		}
-		cs := C.CString(path)
+		cs := C.CString(cleanPath)
 		defer C.free(unsafe.Pointer(cs))
 		var dur C.double
 		errBuf := make([]byte, 256)

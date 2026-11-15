@@ -126,19 +126,37 @@ func (p *Player) LoadTracks(tracks []provider.Track) {
 
 // ── player.Player ─────────────────────────────────────────────────────────
 
+func (p *Player) withCmd(fn func(emit func(string)) error) error {
+	var logs []string
+	emit := func(msg string) {
+		if msg != "" {
+			logs = append(logs, msg)
+		}
+	}
+	p.cmdMu.Lock()
+	err := fn(emit)
+	p.cmdMu.Unlock()
+	if p.onLog != nil {
+		for _, msg := range logs {
+			p.onLog(msg)
+		}
+	}
+	return err
+}
+
 // Play resumes the loaded track, or starts the current queue entry when
 // nothing is loaded.
 func (p *Player) Play() error {
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	gen, err := p.loadedGen()
-	if err != nil {
-		return err
-	}
-	if gen == 0 {
-		return p.loadCurrent(true)
-	}
-	return p.command("play")
+	return p.withCmd(func(emit func(string)) error {
+		gen, err := p.loadedGen()
+		if err != nil {
+			return err
+		}
+		if gen == 0 {
+			return p.loadCurrent(true, emit)
+		}
+		return p.command("play")
+	})
 }
 
 func (p *Player) Pause() error {
@@ -165,41 +183,41 @@ func (p *Player) Stop() error {
 // Next skips to the next track. At the end of the queue with repeat off it
 // leaves playback as it is.
 func (p *Player) Next() error {
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if err := p.usableLocked(); err != nil {
+	return p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if err := p.usableLocked(); err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		if !p.q.advance(false) {
+			s := p.state
+			p.mu.Unlock()
+			// The TUI marks itself loading on a skip; tell it nothing changed.
+			p.bcast.Send(s)
+			return nil
+		}
 		p.mu.Unlock()
-		return err
-	}
-	if !p.q.advance(false) {
-		s := p.state
-		p.mu.Unlock()
-		// The TUI marks itself loading on a skip; tell it nothing changed.
-		p.bcast.Send(s)
-		return nil
-	}
-	p.mu.Unlock()
-	return p.loadCurrent(true)
+		return p.loadCurrent(true, emit)
+	})
 }
 
 // Previous restarts a track that has played past restartThreshold and
 // otherwise goes back one.
 func (p *Player) Previous() error {
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if err := p.usableLocked(); err != nil {
+	return p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if err := p.usableLocked(); err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		if p.gen != 0 && p.state.Position > restartThreshold {
+			p.mu.Unlock()
+			return p.command("seek", 0.0)
+		}
+		p.q.previous()
 		p.mu.Unlock()
-		return err
-	}
-	if p.gen != 0 && p.state.Position > restartThreshold {
-		p.mu.Unlock()
-		return p.command("seek", 0.0)
-	}
-	p.q.previous()
-	p.mu.Unlock()
-	return p.loadCurrent(true)
+		return p.loadCurrent(true, emit)
+	})
 }
 
 func (p *Player) Seek(position time.Duration) error {
@@ -254,27 +272,27 @@ func (p *Player) SetQueue(ids []string) error {
 	if len(ids) == 0 {
 		return errors.New("local player: no tracks to play")
 	}
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if p.closed {
+	return p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return errClosed
+		}
+		tracks, err := p.resolveLocked(ids)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		p.q.reset(tracks)
 		p.mu.Unlock()
-		return errClosed
-	}
-	tracks, err := p.resolveLocked(ids)
-	if err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	p.q.reset(tracks)
-	p.mu.Unlock()
-	return p.loadCurrent(true)
+		return p.loadCurrent(true, emit)
+	})
 }
 
 // SetPlaylist fails: the local library has no playlists, and the TUI never
 // offers one in local mode.
 func (p *Player) SetPlaylist(playlistID string, _ int) error {
-	return fmt.Errorf("local player: playlist %q: the local library has no playlists", playlistID)
+	return fmt.Errorf("local player: playlist %q: the local library has no playlists", provider.Clean(playlistID))
 }
 
 // AppendQueue adds library tracks to the end of the queue. If nothing is
@@ -283,25 +301,25 @@ func (p *Player) AppendQueue(ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if p.closed {
+	return p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return errClosed
+		}
+		tracks, err := p.resolveLocked(ids)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		start := p.gen == 0 || p.ended
+		p.q.add(tracks, start)
 		p.mu.Unlock()
-		return errClosed
-	}
-	tracks, err := p.resolveLocked(ids)
-	if err != nil {
-		p.mu.Unlock()
-		return err
-	}
-	start := p.gen == 0 || p.ended
-	p.q.add(tracks, start)
-	p.mu.Unlock()
-	if !start {
-		return nil
-	}
-	return p.loadCurrent(true)
+		if !start {
+			return nil
+		}
+		return p.loadCurrent(true, emit)
+	})
 }
 
 func (p *Player) SetRepeat(mode int) error {
@@ -380,28 +398,28 @@ func (p *Player) applyEqualizer() {
 // over to the entry that takes its place, playing only if it was playing;
 // with none to take over, playback stops.
 func (p *Player) RemoveFromQueue(idx int) error {
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if p.closed {
+	return p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return errClosed
+		}
+		wasCurrent, succeeded, ok := p.q.remove(idx)
+		if !ok {
+			p.mu.Unlock()
+			return fmt.Errorf("local player: queue index %d out of range", idx)
+		}
+		if !wasCurrent || p.gen == 0 {
+			p.mu.Unlock()
+			return nil
+		}
+		autoplay := p.state.Playing || p.state.Loading
 		p.mu.Unlock()
-		return errClosed
-	}
-	wasCurrent, succeeded, ok := p.q.remove(idx)
-	if !ok {
-		p.mu.Unlock()
-		return fmt.Errorf("local player: queue index %d out of range", idx)
-	}
-	if !wasCurrent || p.gen == 0 {
-		p.mu.Unlock()
-		return nil
-	}
-	autoplay := p.state.Playing || p.state.Loading
-	p.mu.Unlock()
-	if succeeded {
-		return p.loadCurrent(autoplay)
-	}
-	return p.unload()
+		if succeeded {
+			return p.loadCurrent(autoplay, emit)
+		}
+		return p.unload()
+	})
 }
 
 // MoveInQueue moves the entry at from to index to without touching playback.
@@ -487,7 +505,7 @@ func (p *Player) resolveLocked(ids []string) ([]provider.Track, error) {
 	for i, id := range ids {
 		t, ok := p.library[id]
 		if !ok {
-			return nil, fmt.Errorf("local player: track %q is not in the local library", id)
+			return nil, fmt.Errorf("local player: track %q is not in the local library", provider.Clean(id))
 		}
 		tracks[i] = t
 	}
@@ -496,7 +514,7 @@ func (p *Player) resolveLocked(ids []string) ([]provider.Track, error) {
 
 // loadCurrent loads the current queue entry under a new generation, which
 // retires every snapshot of the track it replaces. The caller holds cmdMu.
-func (p *Player) loadCurrent(autoplay bool) error {
+func (p *Player) loadCurrent(autoplay bool, emit func(string)) error {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -508,13 +526,14 @@ func (p *Player) loadCurrent(autoplay bool) error {
 		return errEmptyQueue
 	}
 	path, hasPrefix := strings.CutPrefix(t.ID, "local:")
-	if !hasPrefix || path == "" {
+	if !hasPrefix || path == "" || strings.ContainsRune(path, 0) || !filepath.IsAbs(path) || strings.HasPrefix(path, `\\.\`) {
 		p.mu.Unlock()
 		if err := p.unload(); err != nil {
 			return err
 		}
-		return fmt.Errorf("local player: %q is not a local library file", t.ID)
+		return fmt.Errorf("local player: %q is not a valid local library path", provider.Clean(t.ID))
 	}
+	path = filepath.Clean(path)
 	p.lastGen++
 	gen := p.lastGen
 	p.gen = gen
@@ -536,8 +555,8 @@ func (p *Player) loadCurrent(autoplay bool) error {
 	if snap.Error != "" {
 		return fmt.Errorf("local player: cannot play %q: %s", provider.Clean(t.Title), provider.Clean(snap.Error))
 	}
-	if p.onLog != nil && snap.SampleFormat != "" {
-		p.onLog(fmt.Sprintf("[local] audio output: %s (%s)", provider.Clean(snap.SampleFormat), provider.Clean(filepath.Base(path))))
+	if emit != nil && snap.SampleFormat != "" {
+		emit(fmt.Sprintf("[local] audio output: %s (%s)", provider.Clean(snap.SampleFormat), provider.Clean(filepath.Base(path))))
 	}
 	return nil
 }
@@ -672,20 +691,20 @@ func (p *Player) onEvent(snap snapshot) {
 // unless something else has taken over since: another load, or a Play that
 // restarted it.
 func (p *Player) advanceAfterEnd(gen uint64) {
-	p.cmdMu.Lock()
-	defer p.cmdMu.Unlock()
-	p.mu.Lock()
-	if p.closed || p.gen != gen || p.state.Playing || p.state.Loading {
+	if err := p.withCmd(func(emit func(string)) error {
+		p.mu.Lock()
+		if p.closed || p.gen != gen || p.state.Playing || p.state.Loading {
+			p.mu.Unlock()
+			return nil
+		}
+		if !p.q.advance(true) {
+			p.ended = true
+			p.mu.Unlock()
+			return nil
+		}
 		p.mu.Unlock()
-		return
-	}
-	if !p.q.advance(true) {
-		p.ended = true
-		p.mu.Unlock()
-		return
-	}
-	p.mu.Unlock()
-	if err := p.loadCurrent(true); err != nil {
+		return p.loadCurrent(true, emit)
+	}); err != nil {
 		p.sendError(err)
 	}
 }
@@ -722,6 +741,10 @@ func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 func seconds(s float64) time.Duration {
 	if !finite(s) || s <= 0 {
 		return 0
+	}
+	maxSec := float64(math.MaxInt64) / float64(time.Second)
+	if s >= maxSec {
+		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(s * float64(time.Second))
 }

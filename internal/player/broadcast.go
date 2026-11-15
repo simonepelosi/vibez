@@ -93,6 +93,32 @@ func (b *Broadcast) Close() {
 	}
 }
 
+// Unsubscribe stops delivery for the subscription channel returned by
+// Subscribe and closes it. Safe to call more than once or concurrently with Close.
+func (b *Broadcast) Unsubscribe(ch <-chan State) {
+	if ch == nil {
+		return
+	}
+	b.mu.Lock()
+	var target *subscriber
+	if !b.closed {
+		for i, sub := range b.subs {
+			if sub.ch == ch {
+				target = sub
+				last := len(b.subs) - 1
+				b.subs[i] = b.subs[last]
+				b.subs[last] = nil
+				b.subs = b.subs[:last]
+				break
+			}
+		}
+	}
+	b.mu.Unlock()
+	if target != nil {
+		close(target.done)
+	}
+}
+
 // SendLog delivers s to every subscriber carrying msg as a debug log entry.
 // The entry is not dropped if the subscriber is behind; it waits its turn.
 func (b *Broadcast) SendLog(s State, msg string) {
@@ -129,14 +155,17 @@ func (sub *subscriber) push(s State) {
 // trim enforces maxPendingQueue by discarding the oldest entries, counting the
 // log lines lost so the next delivery can say so rather than hide it.
 func (sub *subscriber) trim() {
-	excess := len(sub.queue) - maxPendingQueue
+	oldLen := len(sub.queue)
+	excess := oldLen - maxPendingQueue
 	if excess <= 0 {
 		return
 	}
 	for _, s := range sub.queue[:excess] {
 		sub.dropped += len(s.Logs)
 	}
-	sub.queue = append(sub.queue[:0], sub.queue[excess:]...)
+	copy(sub.queue, sub.queue[excess:])
+	clear(sub.queue[oldLen-excess:])
+	sub.queue = sub.queue[:oldLen-excess]
 }
 
 // deliver drains the queue onto the subscriber's channel, blocking on the send
@@ -164,6 +193,9 @@ func (sub *subscriber) deliver() {
 			s := sub.queue[0]
 			sub.queue[0] = State{} // release the popped entry's track pointer
 			sub.queue = sub.queue[1:]
+			if len(sub.queue) == 0 {
+				sub.queue = sub.queue[:0]
+			}
 			if sub.dropped > 0 {
 				note := fmt.Sprintf("[log] %d earlier entries dropped", sub.dropped)
 				s.Logs = append([]string{note}, s.Logs...)

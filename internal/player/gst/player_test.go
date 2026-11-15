@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -394,10 +395,176 @@ func TestLoopbackHTTPOnlyMatchesLocalHosts(t *testing.T) {
 		{"http://127.0.0.2:8080/a.aac", false},
 		{"http://localhost.evil.com/a.aac", false},
 		{"https://127.0.0.1:8080/a.aac", false},
+		{"http://127.0.0.1:8080/a\r\nX: y", false},
+		{"http://localhost:8080/a\x00b", false},
 	}
 	for _, tc := range cases {
 		if got := uriIsLoopbackHTTP(tc.uri); got != tc.want {
 			t.Errorf("uriIsLoopbackHTTP(%q) = %v, want %v", tc.uri, got, tc.want)
 		}
+	}
+}
+
+func TestIsAllowedPlayURI(t *testing.T) {
+	cases := []struct {
+		uri  string
+		want bool
+	}{
+		{"file:///tmp/tone.wav", true},
+		{"file://localhost/tmp/tone.wav", true},
+		{"https://audio.itunes.apple.com/stream.m4a", true},
+		{"http://127.0.0.1:8080/stream", true},
+		{"http://localhost:8080/stream", true},
+		{"", false},
+		{"/tmp/tone.wav", false},
+		{"rtsp://127.0.0.1/stream", false},
+		{"smb://fileserver/share/a.wav", false},
+		{"fd://0", false},
+		{"data:audio/wav;base64,AAAA", false},
+		{"http://example.com/a.aac", false},
+		{"http://127.0.0.2/a.aac", false},
+		{"file://remotehost/share/a.wav", false},
+		{"file:///tmp/tone.wav\r\n", false},
+		{"https://example.com/\x00evil", false},
+	}
+	for _, tc := range cases {
+		if got := isAllowedPlayURI(tc.uri); got != tc.want {
+			t.Errorf("isAllowedPlayURI(%q) = %v, want %v", tc.uri, got, tc.want)
+		}
+	}
+}
+
+func float32NonFiniteWAV(sampleRate, frames uint32) []byte {
+	const channels uint32 = 2
+	const bitsPerSample uint32 = 32
+	blockAlign := uint16(channels * (bitsPerSample / 8))
+	byteRate := sampleRate * uint32(blockAlign)
+	dataSize := frames * uint32(blockAlign)
+	var b bytes.Buffer
+	b.Grow(int(44 + dataSize))
+	b.WriteString("RIFF")
+	_ = binary.Write(&b, binary.LittleEndian, 36+dataSize)
+	b.WriteString("WAVE")
+	b.WriteString("fmt ")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(3)) // IEEE float
+	_ = binary.Write(&b, binary.LittleEndian, uint16(channels))
+	_ = binary.Write(&b, binary.LittleEndian, sampleRate)
+	_ = binary.Write(&b, binary.LittleEndian, byteRate)
+	_ = binary.Write(&b, binary.LittleEndian, blockAlign)
+	_ = binary.Write(&b, binary.LittleEndian, uint16(bitsPerSample))
+	b.WriteString("data")
+	_ = binary.Write(&b, binary.LittleEndian, dataSize)
+	vals := []float32{
+		float32(math.NaN()),
+		float32(math.Inf(1)),
+		float32(math.Inf(-1)),
+		0.25,
+		-0.25,
+	}
+	for i := range int(frames * channels) {
+		_ = binary.Write(&b, binary.LittleEndian, math.Float32bits(vals[i%len(vals)]))
+	}
+	return b.Bytes()
+}
+
+func TestSetEqualizerNonFiniteAndNonFinitePCM(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	path := filepath.Join(t.TempDir(), "nonfinite.wav")
+	if err := os.WriteFile(path, float32NonFiniteWAV(44100, 4410), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Destroy()
+
+	eosCh := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	p.OnEOS(func() {
+		select {
+		case eosCh <- struct{}{}:
+		default:
+		}
+	})
+	p.OnError(func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+
+	p.SetEqualizer([]float64{math.NaN(), math.Inf(1), math.Inf(-1), 6, -6, 0, 12, -24, 3, -3})
+	// Rejected URIs must be ignored without panicking or erroring.
+	p.PlayURI("http://example.com/disallowed.aac")
+	p.SetNextURI("rtsp://127.0.0.1/disallowed")
+
+	p.PlayURI("file://" + path)
+	select {
+	case <-eosCh:
+	case err := <-errCh:
+		t.Fatalf("unexpected pipeline error: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for EOS on float WAV")
+	}
+}
+
+func TestAACParseOversizeInvalidInputDoesNotHang(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	setElementRank("aacparse", 0)
+	setElementRank("souphttpsrc", 0)
+	setElementRank("curlhttpsrc", 0)
+	t.Cleanup(func() {
+		setElementRank("aacparse", 257)
+		setElementRank("souphttpsrc", 256)
+		setElementRank("curlhttpsrc", 128)
+	})
+
+	payload := bytes.Repeat([]byte{0x55}, 1500*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/aac")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	p, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	eosCh := make(chan struct{}, 1)
+	p.OnError(func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+	p.OnEOS(func() {
+		select {
+		case eosCh <- struct{}{}:
+		default:
+		}
+	})
+
+	p.PlayURI(srv.URL + "/garbage.aac")
+	select {
+	case <-errCh:
+	case <-eosCh:
+	case <-time.After(10 * time.Second):
+		p.Destroy()
+		t.Fatal("timed out on oversize non-ADTS input")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.Destroy()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Destroy timed out after oversize non-ADTS stream")
 	}
 }

@@ -4,6 +4,7 @@ package local
 
 import (
 	"errors"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -494,5 +495,52 @@ func TestLoadReportsAndClearsSampleFormat(t *testing.T) {
 	p.LoadTracks(nil)
 	if got := p.sampleFormat(); got != "" {
 		t.Fatalf("sampleFormat() after unload = %q, want empty", got)
+	}
+}
+
+func TestSecondsOverflowClampedAndPathControlsCleaned(t *testing.T) {
+	if got := seconds(math.NaN()); got != 0 {
+		t.Fatalf("seconds(NaN) = %v, want 0", got)
+	}
+	if got := seconds(-5); got != 0 {
+		t.Fatalf("seconds(-5) = %v, want 0", got)
+	}
+	if got := seconds(1e12); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("seconds(1e12) = %v, want MaxInt64", got)
+	}
+
+	p, eng, _ := newTestPlayer(t)
+	eng.sampleFmt = "F32"
+	err := p.SetQueue([]string{"local:\x1b[31mevil"})
+	if err == nil || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("expected sanitized error for unknown ID, got %v", err)
+	}
+
+	bad := []provider.Track{
+		{ID: "local:relative.mp3", Title: "Rel"},
+		{ID: `local:\\.\NUL`, Title: "Dev"},
+	}
+	p.LoadTracks(bad)
+	for _, tr := range bad {
+		if err := p.SetQueue([]string{tr.ID}); err == nil {
+			t.Fatalf("expected SetQueue to reject %q", tr.ID)
+		}
+	}
+
+	// Verify onLog callback can invoke cmdMu-taking Player methods without deadlocking.
+	good := provider.Track{ID: "local:" + filepath.Join(t.TempDir(), "ok.flac"), Title: "OK"}
+	p.LoadTracks([]provider.Track{good})
+	logged := false
+	p.onLog = func(string) {
+		logged = true
+		if err := p.SetVolume(0.75); err != nil {
+			t.Errorf("SetVolume inside onLog: %v", err)
+		}
+	}
+	if err := p.SetQueue([]string{good.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if !logged {
+		t.Fatal("expected onLog to run")
 	}
 }

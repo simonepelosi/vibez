@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -81,7 +82,9 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (!std::isfinite(fs) || !std::isfinite(f0) || !std::isfinite(gainDb) ||
+            fs <= 0.0 || f0 <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+            resetState();
             active = false;
             return;
         }
@@ -104,9 +107,15 @@ struct Biquad {
     }
 
     double run(double x, int ch) {
+        if (!std::isfinite(x)) x = 0.0;
         const double y = b0 * x + z1[ch];
         z1[ch] = b1 * x - a1 * y + z2[ch];
         z2[ch] = b2 * x - a2 * y;
+        if (!std::isfinite(y) || !std::isfinite(z1[ch]) || !std::isfinite(z2[ch])) {
+            z1[ch] = 0.0;
+            z2[ch] = 0.0;
+            return 0.0;
+        }
         return y;
     }
 };
@@ -144,6 +153,41 @@ struct Session {
     std::atomic<uint64_t> nullFrames{0};
 };
 
+struct CallbackGate {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool closed = false;
+    int inFlight = 0;
+
+    bool enter() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (closed) return false;
+        ++inFlight;
+        return true;
+    }
+
+    void leave() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (--inFlight == 0) cv.notify_all();
+    }
+
+    void closeAndDrain() {
+        std::unique_lock<std::mutex> lk(mu);
+        closed = true;
+        cv.wait(lk, [&] { return inFlight == 0; });
+    }
+};
+
+struct ScopedCallback {
+    CallbackGate& gate;
+    bool entered;
+    explicit ScopedCallback(CallbackGate& g) : gate(g), entered(g.enter()) {}
+    ~ScopedCallback() {
+        if (entered) gate.leave();
+    }
+    explicit operator bool() const { return entered; }
+};
+
 struct Sink {
     uintptr_t user = 0;
     vibez_localsink_eos_cb_t onEos = nullptr;
@@ -155,6 +199,20 @@ struct Sink {
     std::atomic<uint32_t> eqVersion{1};
     std::atomic<double> volume{1.0};
     std::atomic<bool> closed{false};
+    CallbackGate cbGate;
+
+    std::mutex workerMu;
+    std::condition_variable workerCv;
+    int activeWorkers = 0;
+};
+
+struct ScopedWorker {
+    std::shared_ptr<Sink> sink;
+    explicit ScopedWorker(const std::shared_ptr<Sink>& s) : sink(s) {}
+    ~ScopedWorker() {
+        std::lock_guard<std::mutex> lk(sink->workerMu);
+        if (--sink->activeWorkers == 0) sink->workerCv.notify_all();
+    }
 };
 
 struct Handle {
@@ -196,12 +254,12 @@ void cancelSession(const std::shared_ptr<Session>& s) {
 }
 
 void reportError(const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses, const std::string& msg) {
-    if (sink->closed || ses->cancel) return;
-    if (sink->onErr) {
-        std::vector<char> buf(msg.begin(), msg.end());
-        buf.push_back('\0');
-        sink->onErr(sink->user, ses->gen, buf.data());
-    }
+    if (sink->closed || ses->cancel || !sink->onErr) return;
+    ScopedCallback cb(sink->cbGate);
+    if (!cb || sink->closed || ses->cancel) return;
+    std::vector<char> buf(msg.begin(), msg.end());
+    buf.push_back('\0');
+    sink->onErr(sink->user, ses->gen, buf.data());
 }
 
 struct Buf {
@@ -235,6 +293,18 @@ bool readExact(HANDLE h, void* dst, DWORD n) {
     return ReadFile(h, dst, n, &got, nullptr) && got == n;
 }
 
+bool isRegularDiskPath(const std::wstring& path) {
+    if (path.empty() || path.rfind(L"\\\\.\\", 0) == 0) return false;
+    FileHandle f{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
+    if (f.h == INVALID_HANDLE_VALUE) return false;
+    if (GetFileType(f.h) != FILE_TYPE_DISK) return false;
+    BY_HANDLE_FILE_INFORMATION info = {};
+    if (!GetFileInformationByHandle(f.h, &info)) return false;
+    return (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
 // readFlacStreamInfoDuration reads total_samples / sample_rate from a FLAC
 // STREAMINFO block when Media Foundation omits MF_PD_DURATION.
 double readFlacStreamInfoDuration(const std::wstring& path) {
@@ -254,11 +324,14 @@ double readFlacStreamInfoDuration(const std::wstring& path) {
     if (hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') {
         if (!readExact(f.h, hdr + 4, 6)) return 0.0;
         if (((hdr[6] | hdr[7] | hdr[8] | hdr[9]) & 0x80) != 0) return 0.0;
-        const LONGLONG skip =
+        LONGLONG skip =
             (static_cast<LONGLONG>(hdr[6]) << 21) |
             (static_cast<LONGLONG>(hdr[7]) << 14) |
             (static_cast<LONGLONG>(hdr[8]) << 7) |
             static_cast<LONGLONG>(hdr[9]);
+        if (hdr[3] == 4 && (hdr[5] & 0x10) != 0) {
+            skip += 10;
+        }
         if (skip < 0 || skip > kMaxId3Size || skip > fileSize.QuadPart - 14) return 0.0;
         LARGE_INTEGER dist = {};
         dist.QuadPart = skip;
@@ -387,6 +460,7 @@ double readSample(const unsigned char* p, SampleFmt f) {
 }
 
 void writeSample(unsigned char* p, SampleFmt f, double x) {
+    if (!std::isfinite(x)) x = 0.0;
     if (x > 1.0) x = 1.0;
     if (x < -1.0) x = -1.0;
     switch (f) {
@@ -471,6 +545,9 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
     };
 
+    if (!isRegularDiskPath(path)) {
+        return failOpen("cannot open audio file: not a regular file");
+    }
     Com<IMFSourceReader> reader;
     HRESULT hr = mf.createSourceReader(path.c_str(), nullptr, &reader);
     if (FAILED(hr)) return failOpen(formatHr("cannot open audio file", hr));
@@ -719,11 +796,15 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     CloseHandle(ev);
 
     if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) {
-        sink->onEos(sink->user, ses->gen);
+        ScopedCallback cb(sink->cbGate);
+        if (cb && !sink->closed && !ses->cancel) {
+            sink->onEos(sink->user, ses->gen);
+        }
     }
 }
 
 void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::wstring path, std::promise<OpenResult> openProm) {
+    ScopedWorker workerGuard(sink);
     const MfApi* mf = mfApi();
     if (!mf) {
         openProm.set_value(OpenResult{false, 0.0, "Media Foundation is not installed (on Windows N editions install the Media Feature Pack)"});
@@ -770,6 +851,16 @@ int vibez_localsink_load(vibez_localsink_t handle, const char* path_utf8, uint64
     }
     cancelSession(old);
 
+    {
+        std::lock_guard<std::mutex> lk(sink->workerMu);
+        if (sink->closed) {
+            if (err_buf && err_buf_len > 0) {
+                std::snprintf(err_buf, static_cast<size_t>(err_buf_len), "audio sink closed");
+            }
+            return -1;
+        }
+        ++sink->activeWorkers;
+    }
     std::promise<OpenResult> prom;
     auto fut = prom.get_future();
     std::thread(runSession, sink, ses, widen(path_utf8), std::move(prom)).detach();
@@ -964,6 +1055,7 @@ void vibez_localsink_destroy(vibez_localsink_t handle) {
     if (!handle) return;
     auto* h = static_cast<Handle*>(handle);
     h->sink->closed = true;
+    h->sink->cbGate.closeAndDrain();
     std::shared_ptr<Session> old;
     {
         std::lock_guard<std::mutex> lk(h->sink->mu);
@@ -971,6 +1063,10 @@ void vibez_localsink_destroy(vibez_localsink_t handle) {
         h->sink->cur.reset();
     }
     cancelSession(old);
+    {
+        std::unique_lock<std::mutex> lk(h->sink->workerMu);
+        h->sink->workerCv.wait(lk, [&] { return h->sink->activeWorkers == 0; });
+    }
     delete h;
 }
 

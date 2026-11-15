@@ -18,12 +18,26 @@ import (
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
+// gstEngine is the minimal GStreamer backend surface required by Player.
+type gstEngine interface {
+	PlayURI(string)
+	Play()
+	Pause()
+	Stop()
+	Seek(time.Duration)
+	SetVolume(float64)
+	SetEqualizer([]float64)
+	Position() time.Duration
+	Destroy()
+}
+
 // Player implements player.Player for local audio files using GStreamer.
 type Player struct {
-	gst        *gst.Player
+	gst        gstEngine
 	mu         sync.RWMutex
 	state      player.State
-	subs       []chan player.State
+	bcast      player.Broadcast
+	closed     bool
 	queue      []provider.Track
 	allTracks  []provider.Track
 	idx        int
@@ -33,28 +47,33 @@ type Player struct {
 	closeOnce  sync.Once
 }
 
+func newWithEngine(engine gstEngine) *Player {
+	p := &Player{
+		gst:        engine,
+		done:       make(chan struct{}),
+		pollWakeCh: make(chan struct{}, 1),
+	}
+	go p.pollState()
+	return p
+}
+
 // New creates a local Player backed by a GStreamer pipeline.
 func New(_ func(string)) (*Player, error) {
 	gstPlayer, err := gst.New()
 	if err != nil {
 		return nil, fmt.Errorf("local player: %w", err)
 	}
-	p := &Player{
-		gst:        gstPlayer,
-		done:       make(chan struct{}),
-		pollWakeCh: make(chan struct{}, 1),
-	}
-	p.gst.OnEOS(func() {
+	p := newWithEngine(gstPlayer)
+	gstPlayer.OnEOS(func() {
 		_ = p.Next()
 	})
-	p.gst.OnError(func(e error) {
+	gstPlayer.OnError(func(e error) {
 		p.mu.Lock()
-		p.state.Error = e.Error()
+		p.state.Error = provider.Clean(e.Error())
 		s := p.state
 		p.mu.Unlock()
 		p.broadcast(s)
 	})
-	go p.pollState()
 	return p, nil
 }
 
@@ -69,15 +88,14 @@ func (p *Player) signalPoll() {
 }
 
 func (p *Player) broadcast(s player.State) {
-	p.signalPoll()
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, ch := range p.subs {
-		select {
-		case ch <- s:
-		default:
-		}
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
+		return
 	}
+	p.signalPoll()
+	p.bcast.Send(s)
 }
 
 func (p *Player) currentState() player.State {
@@ -98,10 +116,23 @@ func (p *Player) playTrack(t provider.Track) {
 		p.broadcast(s)
 		return
 	}
-	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(rawPath)}).String()
+	cleanPath, err := verifyRegularAudioPath(rawPath)
+	if err != nil {
+		p.mu.Lock()
+		p.state.Track = nil
+		p.state.Playing = false
+		p.state.Position = 0
+		p.state.Error = provider.Clean(err.Error())
+		s := p.state
+		p.mu.Unlock()
+		p.broadcast(s)
+		return
+	}
+	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(cleanPath)}).String()
 	p.gst.PlayURI(uri)
 	p.mu.Lock()
 	p.ended = false
+	p.state.Error = ""
 	p.state.Track = &t
 	p.state.Playing = true
 	p.state.Position = 0
@@ -156,6 +187,9 @@ func (p *Player) Next() error {
 		p.mu.Unlock()
 		return nil
 	}
+	if p.idx < 0 || p.idx >= len(p.queue) {
+		p.idx = 0
+	}
 	if p.state.RepeatMode == player.RepeatModeOne {
 		t := p.queue[p.idx]
 		p.mu.Unlock()
@@ -180,17 +214,22 @@ func (p *Player) Next() error {
 }
 
 func (p *Player) Previous() error {
+	p.mu.RLock()
+	empty := len(p.queue) == 0
+	p.mu.RUnlock()
+	if empty {
+		return nil
+	}
+	if p.gst.Position() > 3*time.Second {
+		p.gst.Seek(0)
+		return nil
+	}
 	p.mu.Lock()
 	if len(p.queue) == 0 {
 		p.mu.Unlock()
 		return nil
 	}
-	if p.gst.Position() > 3*time.Second {
-		p.mu.Unlock()
-		p.gst.Seek(0)
-		return nil
-	}
-	if p.idx == 0 {
+	if p.idx <= 0 || p.idx >= len(p.queue) {
 		p.idx = len(p.queue) - 1
 	} else {
 		p.idx--
@@ -254,22 +293,27 @@ func (p *Player) SetPlaylist(_ string, startIdx int) error {
 }
 
 func (p *Player) AppendQueue(ids []string) error {
+	p.mu.Lock()
 	extra := tracksForIDs(p.allTracks, ids)
 	if len(extra) == 0 {
+		p.mu.Unlock()
 		return nil
 	}
-	p.mu.Lock()
 	wasEmpty := len(p.queue) == 0
 	wasEnded := p.ended && !p.state.Playing
 	firstNewIdx := len(p.queue)
 	p.queue = append(p.queue, extra...)
-	if wasEnded {
+	if wasEmpty {
+		p.idx = 0
+		p.ended = false
+	} else if wasEnded {
 		p.idx = firstNewIdx
 		p.ended = false
 	}
+	t := extra[0]
 	p.mu.Unlock()
 	if wasEmpty || wasEnded {
-		p.playTrack(extra[0])
+		p.playTrack(t)
 	}
 	return nil
 }
@@ -301,19 +345,27 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 
 func (p *Player) RemoveFromQueue(idx int) error {
 	p.mu.Lock()
+	var stopPlayback bool
 	if idx >= 0 && idx < len(p.queue) {
 		p.queue = append(p.queue[:idx], p.queue[idx+1:]...)
 		switch {
 		case idx == p.idx:
 			p.state.Track = nil
 			p.state.Playing = false
-			p.gst.Stop()
+			p.state.Position = 0
+			if len(p.queue) == 0 || p.idx >= len(p.queue) {
+				p.idx = 0
+			}
+			stopPlayback = true
 		case idx < p.idx:
 			p.idx--
 		}
 	}
 	s := p.state
 	p.mu.Unlock()
+	if stopPlayback {
+		p.gst.Stop()
+	}
 	p.broadcast(s)
 	return nil
 }
@@ -360,17 +412,19 @@ func (p *Player) GetState() (*player.State, error) {
 }
 
 func (p *Player) Subscribe() <-chan player.State {
-	ch := make(chan player.State, 8)
-	p.mu.Lock()
-	p.subs = append(p.subs, ch)
-	p.mu.Unlock()
-	return ch
+	return p.bcast.Subscribe()
 }
 
 func (p *Player) Close() error {
 	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 		close(p.done)
-		p.gst.Destroy()
+		p.bcast.Close()
+		if p.gst != nil {
+			p.gst.Destroy()
+		}
 	})
 	return nil
 }
@@ -440,8 +494,11 @@ func (p *Player) pollState() {
 				stopTicker()
 				continue
 			}
+			pos := p.gst.Position()
 			p.mu.Lock()
-			p.state.Position = p.gst.Position()
+			if p.state.Playing {
+				p.state.Position = pos
+			}
 			s := p.state
 			p.mu.Unlock()
 			p.broadcast(s)

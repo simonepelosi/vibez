@@ -5,8 +5,10 @@ package local
 import (
 	"bytes"
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -153,4 +155,83 @@ func TestHiResFilesPlayAtTheirOwnRate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDarwinNonFiniteControlsAndClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tone.wav")
+	writeSilentWAV(t, path)
+	id := "local:" + path
+
+	p, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := p.Subscribe()
+	p.LoadTracks([]provider.Track{{ID: id}})
+	_ = p.SetEqualizer([]player.EQBand{
+		{Frequency: 31, Gain: math.NaN()},
+		{Frequency: 62, Gain: math.Inf(1)},
+		{Frequency: 125, Gain: math.Inf(-1)},
+	})
+	_ = p.SetVolume(math.NaN())
+	_ = p.SetVolume(math.Inf(1))
+	_ = p.SetVolume(math.Inf(-1))
+	_ = p.Seek(-time.Second)
+	_ = p.Seek(time.Duration(math.MaxInt64))
+	_ = p.SetQueue([]string{id})
+	if s, _ := p.GetState(); s.Track != nil {
+		// Ensure queue bounds stay valid after removing active final item.
+		_ = p.RemoveFromQueue(0)
+		_ = p.SetRepeat(player.RepeatModeOne)
+		_ = p.Next()
+		_ = p.Previous()
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case _, ok := <-sub:
+			if !ok {
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for subscription close")
+		}
+	}
+}
+
+func TestDarwinPathValidationAndAppendRace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ok.wav")
+	writeSilentWAV(t, path)
+
+	p, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	badID := "local:" + dir
+	p.LoadTracks([]provider.Track{{ID: badID}})
+	_ = p.SetQueue([]string{badID})
+	s, _ := p.GetState()
+	if s.Error == "" {
+		t.Fatal("expected error for directory track path")
+	}
+
+	goodTrack := provider.Track{ID: "local:" + path}
+	p.LoadTracks([]provider.Track{goodTrack})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 15 {
+				_ = p.AppendQueue([]string{goodTrack.ID})
+				p.LoadTracks([]provider.Track{goodTrack})
+			}
+		})
+	}
+	wg.Wait()
 }
