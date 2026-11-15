@@ -201,6 +201,11 @@
           return;
         }
         let settled = false;
+        const closePopup = () => {
+          try {
+            if (win && !win.closed) win.close();
+          } catch (_) {}
+        };
         const cleanup = () => {
           window.removeEventListener("message", onMessage);
           clearInterval(pollTimer);
@@ -209,6 +214,8 @@
           if (settled) return;
           settled = true;
           cleanup();
+          closePopup();
+          setTimeout(closePopup, 150);
           fn(val);
         };
         const pollTimer = setInterval(() => {
@@ -250,6 +257,9 @@
               finish(reject, new Error("Apple Music authorization unavailable"));
               break;
             case "close":
+              reply({});
+              closePopup();
+              break;
             case "switchUserId":
               reply({});
               break;

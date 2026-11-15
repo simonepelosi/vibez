@@ -156,6 +156,9 @@ func TestLoginHTML_UsesDirectAppleAuthorizePopupWithoutMusicKitCDN(t *testing.T)
 	if !containsSubstr(body, "event.source !== win") {
 		t.Error("login.html missing postMessage event.source validation")
 	}
+	if !containsSubstr(body, "win.close()") {
+		t.Error("login.html should close the Apple Music authorization popup via win.close()")
+	}
 	if !containsSubstr(body, "window.location.origin + window.location.pathname") || !containsSubstr(body, "replaceState") {
 		t.Error("login.html should scrub ?state= from URL and referrer")
 	}
