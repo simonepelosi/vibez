@@ -105,7 +105,8 @@ var (
 		PaddingLeft(1)
 
 	KeyName = lipgloss.NewStyle().
-		Foreground(ColorAccent)
+		Foreground(ColorAccentWarm).
+		Bold(true)
 
 	ErrorStyle = lipgloss.NewStyle().
 			Foreground(ColorError).
@@ -162,7 +163,45 @@ var (
 	BearStyle  = lipgloss.NewStyle().Foreground(ColorBear)
 	NoteStyle  = lipgloss.NewStyle().Foreground(ColorAccentWarm)
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)
+
+	// Card chrome, navigation tabs, and transport pills — updated by Apply().
+	CardBorder         = lipgloss.NewStyle().Foreground(ColorMuted)
+	CardBorderActive   = lipgloss.NewStyle().Foreground(ColorAccent)
+	HeroBorder         = lipgloss.NewStyle().Foreground(ColorAccent)
+	CardTitle          = lipgloss.NewStyle().Foreground(ColorFg).Bold(true)
+	CardTitleActive    = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+	NavTabActive       = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	NavTabKey          = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	NavTabLabel        = lipgloss.NewStyle().Foreground(ColorMuted)
+	BadgeChip          = lipgloss.NewStyle().Background(ColorSurface).Foreground(ColorFg).Padding(0, 1)
+	ControlPillPlaying = lipgloss.NewStyle().Background(ColorActive).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	ControlPillPaused  = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	ControlPillLoading = lipgloss.NewStyle().Background(ColorAccent).Foreground(ColorBg).Bold(true).Padding(0, 1)
+
+	// Per-tab accent palette & derived styles (Home, Library, Queue, Lyrics, Feed, EQ, Search, About).
+	NavTabColors           [NavTabCount]color.Color
+	NavTabActiveStyles     [NavTabCount]lipgloss.Style
+	NavTabKeyStyles        [NavTabCount]lipgloss.Style
+	NavTabLabelStyles      [NavTabCount]lipgloss.Style
+	NavTabCardBorderStyles [NavTabCount]lipgloss.Style
+	NavTabCardTitleStyles  [NavTabCount]lipgloss.Style
 )
+
+const (
+	NavTabHomeIdx = iota
+	NavTabLibraryIdx
+	NavTabQueueIdx
+	NavTabLyricsIdx
+	NavTabFeedIdx
+	NavTabEQIdx
+	NavTabSearchIdx
+	NavTabAboutIdx
+	NavTabCount
+)
+
+func init() {
+	rebuildNavTabStyles()
+}
 
 // GlowPalette drives the "now playing" breathing animation, from dark to bright.
 var GlowPalette = []color.Color{
@@ -237,7 +276,7 @@ func Apply(t Theme) {
 	QueueItemMuted = lipgloss.NewStyle().Foreground(ColorMuted)
 	Border = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorMuted)
 	KeyHint = lipgloss.NewStyle().Foreground(ColorMuted).PaddingLeft(1)
-	KeyName = lipgloss.NewStyle().Foreground(ColorAccent)
+	KeyName = lipgloss.NewStyle().Foreground(ColorAccentWarm).Bold(true)
 	ErrorStyle = lipgloss.NewStyle().Foreground(ColorError).Italic(true).PaddingLeft(1)
 	ArtworkFrame = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(ColorPrimary).Padding(1, 2).Align(lipgloss.Center)
 	TabActive = lipgloss.NewStyle().Foreground(ColorAccent).Underline(true).PaddingLeft(1).PaddingRight(1)
@@ -259,6 +298,94 @@ func Apply(t Theme) {
 	BearStyle = lipgloss.NewStyle().Foreground(ColorBear)
 	NoteStyle = lipgloss.NewStyle().Foreground(ColorAccentWarm)
 	SleepStyle = lipgloss.NewStyle().Foreground(ColorAccent).Faint(true)
+	CardBorder = lipgloss.NewStyle().Foreground(ColorMuted)
+	CardBorderActive = lipgloss.NewStyle().Foreground(ColorAccent)
+	HeroBorder = lipgloss.NewStyle().Foreground(ColorAccent)
+	CardTitle = lipgloss.NewStyle().Foreground(ColorFg).Bold(true)
+	CardTitleActive = lipgloss.NewStyle().Foreground(ColorPrimary).Bold(true)
+	NavTabActive = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	NavTabKey = lipgloss.NewStyle().Foreground(ColorAccent).Bold(true)
+	NavTabLabel = lipgloss.NewStyle().Foreground(ColorMuted)
+	BadgeChip = lipgloss.NewStyle().Background(ColorSurface).Foreground(ColorFg).Padding(0, 1)
+	ControlPillPlaying = lipgloss.NewStyle().Background(ColorActive).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	ControlPillPaused = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	ControlPillLoading = lipgloss.NewStyle().Background(ColorAccent).Foreground(ColorBg).Bold(true).Padding(0, 1)
+	rebuildNavTabStyles()
+}
+
+// NavTabStyles returns the per-tab color-coded styles for tabIdx in [0, NavTabCount).
+func NavTabStyles(idx int) (active, key, label, cardBorder, cardTitle lipgloss.Style) {
+	if idx < 0 || idx >= NavTabCount {
+		idx = NavTabHomeIdx
+	}
+	return NavTabActiveStyles[idx], NavTabKeyStyles[idx], NavTabLabelStyles[idx],
+		NavTabCardBorderStyles[idx], NavTabCardTitleStyles[idx]
+}
+
+func rebuildNavTabStyles() {
+	candidates := [NavTabCount]color.Color{
+		ColorPrimary,    // Home: violet/magenta
+		ColorSubtle,     // Library: sky cyan
+		ColorActive,     // Queue: mint green
+		ColorLove,       // Lyrics: rose pink
+		ColorAccentWarm, // Feed: amber gold
+		LerpColor(ColorActive, ColorSubtle, 0.48), // EQ: teal
+		ColorError,  // Search: coral red
+		ColorAccent, // About: indigo/blue
+	}
+	// Extra distinct fallbacks for themes where Error==Love (e.g. Nord) or custom monochrome themes.
+	fallbacks := [NavTabCount]color.Color{
+		lipgloss.Color("#c084fc"),
+		lipgloss.Color("#38bdf8"),
+		lipgloss.Color("#34d399"),
+		lipgloss.Color("#f472b6"),
+		lipgloss.Color("#fbbf24"),
+		lipgloss.Color("#2dd4bf"),
+		ColorBear,
+		lipgloss.Color("#818cf8"),
+	}
+	altPool := []color.Color{
+		lipgloss.Color("#c084fc"),
+		lipgloss.Color("#38bdf8"),
+		lipgloss.Color("#34d399"),
+		lipgloss.Color("#f472b6"),
+		lipgloss.Color("#fbbf24"),
+		lipgloss.Color("#2dd4bf"),
+		lipgloss.Color("#fb7185"),
+		lipgloss.Color("#818cf8"),
+	}
+
+	seen := make(map[string]bool, NavTabCount)
+	white := lipgloss.Color("#ffffff")
+	for i := range NavTabCount {
+		c := candidates[i]
+		hex := ColorHex(c)
+		if seen[hex] {
+			fb := fallbacks[i]
+			if !seen[ColorHex(fb)] {
+				c = fb
+			} else {
+				for _, alt := range altPool {
+					if !seen[ColorHex(alt)] {
+						c = alt
+						break
+					}
+				}
+			}
+		}
+		seen[ColorHex(c)] = true
+		NavTabColors[i] = c
+
+		fg := ColorBg
+		if contrastRatio(white, c) > contrastRatio(ColorBg, c) {
+			fg = white
+		}
+		NavTabActiveStyles[i] = lipgloss.NewStyle().Background(c).Foreground(fg).Bold(true).Padding(0, 1)
+		NavTabKeyStyles[i] = lipgloss.NewStyle().Foreground(c).Bold(true)
+		NavTabLabelStyles[i] = lipgloss.NewStyle().Foreground(LerpColor(c, ColorFg, 0.30))
+		NavTabCardBorderStyles[i] = lipgloss.NewStyle().Foreground(c)
+		NavTabCardTitleStyles[i] = lipgloss.NewStyle().Foreground(c).Bold(true)
+	}
 }
 
 // ApplyArtworkPalette dynamically tints the Now Playing accent styles and
@@ -296,6 +423,7 @@ func ApplyArtworkPalette(_, text1, text2, text3, text4 string) {
 		Bold(true).
 		Foreground(LerpColor(c1, lipgloss.Color("#ffffff"), 0.35))
 	NowPlayingTime = lipgloss.NewStyle().Foreground(c2)
+	HeroBorder = lipgloss.NewStyle().Foreground(LerpColor(c1, ColorAccent, 0.25))
 	ProgressGradStops = []color.Color{c1, c2, c3}
 }
 
@@ -305,6 +433,7 @@ func ClearArtworkPalette() {
 	NowPlayingTrackArtist = lipgloss.NewStyle().Foreground(ColorPrimary)
 	NowPlayingTitlePlaying = lipgloss.NewStyle().Italic(true).Bold(true).Foreground(ColorGlow7)
 	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
+	HeroBorder = lipgloss.NewStyle().Foreground(ColorAccent)
 	ProgressGradStops = []color.Color{ColorProgress, ColorGlow6, ColorLove}
 }
 

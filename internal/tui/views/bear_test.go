@@ -3,6 +3,8 @@ package views
 import (
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
 )
 
 // --- RenderBearLine ---
@@ -124,5 +126,20 @@ func TestRenderBear_SleepFrameWithAnnotation(t *testing.T) {
 	got := RenderBear(0, false, 40)
 	if got == "" {
 		t.Error("RenderBear(step=0, playing=false) returned empty string")
+	}
+}
+
+func TestBearExpr_And_RenderBearLine_FixedWidth(t *testing.T) {
+	const wantExprW = 5
+	wantLineW := lipgloss.Width(RenderBearLine(0, true))
+	for _, playing := range []bool{false, true} {
+		for step := range 120 {
+			if w := lipgloss.Width(BearExpr(step, playing)); w != wantExprW {
+				t.Fatalf("BearExpr(step=%d, playing=%v) width = %d, want %d", step, playing, w, wantExprW)
+			}
+			if w := lipgloss.Width(RenderBearLine(step, playing)); w != wantLineW {
+				t.Fatalf("RenderBearLine(step=%d, playing=%v) width = %d, want %d", step, playing, w, wantLineW)
+			}
+		}
 	}
 }

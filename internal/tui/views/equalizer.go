@@ -18,7 +18,7 @@ const (
 	eqMaxGain = 12.0
 	eqStep    = 0.5
 
-	eqOverheadRows = 5 // title + blank + gain row + freq label + help line
+	eqOverheadRows = 4 // top blank + gain row + zero separator + freq label
 	eqMinBarH      = 4
 	eqMaxBarH      = 24
 )
@@ -55,6 +55,21 @@ func (m *EQModel) SetSize(w, h int) { m.width = w; m.height = h }
 func (m *EQModel) Bands() []player.EQBand { return m.bands }
 
 func (m *EQModel) Cursor() int { return m.cursor }
+
+// SelectBandAtX selects the EQ band column corresponding to horizontal offset relX
+// inside the rendered panel content width, returning true when a valid band matched.
+func (m *EQModel) SelectBandAtX(relX int) bool {
+	if len(m.bands) == 0 || relX < 0 {
+		return false
+	}
+	colW := max(7, (m.width-2)/len(m.bands))
+	idx := relX / colW
+	if idx < 0 || idx >= len(m.bands) {
+		return false
+	}
+	m.cursor = idx
+	return true
+}
 
 func (m *EQModel) Update(msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
@@ -140,15 +155,6 @@ func (m *EQModel) View() string {
 		return m.cachedView
 	}
 
-	title := lipgloss.NewStyle().
-		Foreground(styles.ColorPrimary).
-		Bold(true).
-		Render("Equalizer")
-
-	help := lipgloss.NewStyle().
-		Foreground(styles.ColorMuted).
-		Render("←/→ band  ↑/↓ gain  0 reset band  r reset all  e close")
-
 	colW := max(7, (m.width-2)/len(m.bands))
 	barH := m.barHeight()
 
@@ -173,10 +179,8 @@ func (m *EQModel) View() string {
 	bands := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
 	rendered := lipgloss.JoinVertical(lipgloss.Left,
-		title,
 		"",
 		bands,
-		help,
 	)
 
 	m.cachedView = rendered

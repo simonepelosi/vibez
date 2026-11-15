@@ -6,7 +6,6 @@ import (
 
 	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/tui/styles"
 )
@@ -25,25 +24,24 @@ func (q queueItem) Description() string {
 func (q queueItem) FilterValue() string { return q.track.Title }
 
 type QueueModel struct {
-	list   list.Model
-	tracks []provider.Track
-	width  int
-	height int
-	sized  bool
+	list     list.Model
+	tracks   []provider.Track
+	width    int
+	height   int
+	sized    bool
+	themeSig listThemeSig
 }
 
 func NewQueue() *QueueModel {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(styles.ColorPrimary)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(styles.ColorSubtle)
-
-	l := list.New(nil, delegate, 0, 0)
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Queue"
-	l.Styles.Title = lipgloss.NewStyle().Foreground(styles.ColorPrimary).Bold(true)
+	l.SetShowTitle(false)
+	l.SetShowHelp(false)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
+	sig := applyListTheme(&l)
 
-	return &QueueModel{list: l}
+	return &QueueModel{list: l, themeSig: sig}
 }
 
 func (m *QueueModel) SetTracks(tracks []provider.Track) {
@@ -87,6 +85,9 @@ func (m *QueueModel) Update(msg tea.KeyPressMsg) {
 }
 
 func (m *QueueModel) View() string {
+	if m.themeSig != currentListThemeSig() {
+		m.themeSig = applyListTheme(&m.list)
+	}
 	if len(m.tracks) == 0 {
 		return "\n" + centerLine(
 			styles.QueueItemMuted.Render("Queue is empty. Browse library or search to add tracks."),

@@ -114,25 +114,26 @@ type LibraryModel struct {
 	drillRequestKind       playlistRequestKind
 	tracksBackPane         libraryPane
 
-	width  int
-	height int
-	sized  bool
+	width    int
+	height   int
+	sized    bool
+	themeSig listThemeSig
 }
 
 func NewLibrary(prov provider.Provider) *LibraryModel {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(styles.ColorPrimary)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(styles.ColorSubtle)
-	l := list.New(nil, delegate, 0, 0)
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.SetShowTitle(false)
+	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
-	drill := list.New(nil, delegate, 0, 0)
+	drill := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	drill.SetShowTitle(false)
+	drill.SetShowHelp(false)
 	drill.SetFilteringEnabled(false)
+	sig := applyListTheme(&l, &drill)
 	sp := spinner.New()
 	sp.Style = styles.Spinner
 	sp.Spinner = spinner.Dot
-	m := &LibraryModel{provider: prov, list: l, drillList: drill, spinner: sp, pane: paneSections}
+	m := &LibraryModel{provider: prov, list: l, drillList: drill, spinner: sp, pane: paneSections, themeSig: sig}
 	m.showSections()
 	return m
 }
@@ -179,6 +180,13 @@ func (m *LibraryModel) Back() bool {
 	}
 }
 
+func (m *LibraryModel) listHeightFor(pane libraryPane) int {
+	if pane == paneSections {
+		return max(0, m.height)
+	}
+	return max(0, m.height-3)
+}
+
 func (m *LibraryModel) SetSize(w, h int) {
 	if m.sized && m.width == w && m.height == h {
 		return
@@ -186,9 +194,8 @@ func (m *LibraryModel) SetSize(w, h int) {
 	m.sized = true
 	m.width = w
 	m.height = h
-	listH := max(0, h-3)
-	m.list.SetSize(w, listH)
-	m.drillList.SetSize(w, listH)
+	m.list.SetSize(w, m.listHeightFor(m.pane))
+	m.drillList.SetSize(w, max(0, h-3))
 }
 
 func (m *LibraryModel) loadLibraryTracks() tea.Cmd {
@@ -560,18 +567,36 @@ func (m *LibraryModel) showPlaylistTrackPane(title string, tracks []provider.Tra
 }
 
 func (m *LibraryModel) View() string {
+	if m.themeSig != currentListThemeSig() {
+		m.themeSig = applyListTheme(&m.list, &m.drillList)
+		m.spinner.Style = styles.Spinner
+	}
 	if m.pane == paneTracks {
 		return m.renderDrillView()
 	}
+	if m.sized {
+		if wantH := m.listHeightFor(m.pane); m.list.Height() != wantH {
+			m.list.SetSize(m.width, wantH)
+		}
+	}
 	header := m.renderHeader()
 	if m.loading {
+		if header == "" {
+			return "\n  " + m.spinner.View() + " " + m.loadingText()
+		}
 		return header + "\n\n  " + m.spinner.View() + " " + m.loadingText()
 	}
 	if m.loadErr != nil && m.pane != paneSections {
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render("Could not load: "+provider.Clean(m.loadErr.Error())), m.width)
 	}
 	if len(m.list.Items()) == 0 {
+		if header == "" {
+			return "\n" + centerLine(styles.QueueItemMuted.Render(m.emptyText()), m.width)
+		}
 		return header + "\n\n" + centerLine(styles.QueueItemMuted.Render(m.emptyText()), m.width)
+	}
+	if header == "" {
+		return m.list.View()
 	}
 	return header + "\n" + m.list.View()
 }
@@ -597,11 +622,10 @@ func (m *LibraryModel) renderDrillView() string {
 }
 
 func (m *LibraryModel) renderHeader() string {
-	title := "Library"
-	if m.pane == paneItems {
-		title = sectionTitle(m.selectedSection)
+	if m.pane == paneSections {
+		return ""
 	}
-	return styles.TabActive.Render(title) + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", max(1, m.width)))
+	return styles.TabActive.Render(sectionTitle(m.selectedSection)) + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", max(1, m.width)))
 }
 
 func (m *LibraryModel) loadingText() string {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"math"
 	"math/rand"
 	"net/http"
 	"slices"
@@ -445,33 +444,23 @@ type Model struct {
 	vibePlanner vibe.Planner
 
 	// Frame-local render caches for static border/status segments.
-	cachedHorizW     int
-	cachedHoriz      string
-	statusNavKey     statusNavCacheKey
-	statusNavCached  []string
-	statusPlayKey    statusPlayCacheKey
-	statusPlayCached []string
-	statusAllCached  []string
+	cachedHorizW    int
+	cachedHoriz     string
+	cardEdges       cardEdgeCache
+	statusBarKey    statusCacheKey
+	statusBarCached []string
+	layoutCache     layoutCacheState
 }
 
-type statusNavCacheKey struct {
-	valid        bool
-	w            int
-	mode         viewMode
-	searchQuery  string
-	searchCursor int
-	cmdBuf       string
-	debugView    bool
-	vibeFocused  bool
-	activePanel  int
-	primary      color.Color
-	fg           color.Color
-	muted        color.Color
-}
-
-type statusPlayCacheKey struct {
+type statusCacheKey struct {
 	valid            bool
 	w                int
+	mode             viewMode
+	searchCtx        string
+	cmdBuf           string
+	debugView        bool
+	vibeFocused      bool
+	activePanel      int
 	discoveryEnabled bool
 	vibePicker       bool
 	radioEnabled     bool
@@ -651,8 +640,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.measureCellAsp != nil {
 			m.artCellAsp = m.measureCellAsp()
 		}
-		inner := max(0, m.width-2)
-		contentW := max(0, inner-2)
+		contentW := m.activePanelInnerWidth()
 		panelH := m.panelHeight()
 		m.library.SetSize(contentW, panelH)
 		m.search.SetSize(contentW, panelH)
@@ -824,8 +812,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Auto-scroll mini-queue to keep the current track visible.
 			for i, t := range m.queueTracks {
 				if t.Title == s.Track.Title {
-					visibleRows := max(0, m.panelHeight()-2)
-					if visibleRows > 0 && (i < m.queueMiniOffset || i >= m.queueMiniOffset+visibleRows) {
+					visibleRows := max(1, m.panelHeight())
+					if i < m.queueMiniOffset || i >= m.queueMiniOffset+visibleRows {
 						m.queueMiniOffset = max(0, i-visibleRows/2)
 					}
 					break
@@ -1297,8 +1285,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// since the new inner LibraryModel starts with zero dimensions.
 		m.search = views.NewSearch(msg.Provider)
 		if m.width > 0 {
-			inner := max(0, m.width-2)
-			contentW := max(0, inner-2)
+			contentW := m.activePanelInnerWidth()
 			panelH := m.panelHeight()
 			m.library.SetSize(contentW, panelH)
 			m.search.SetSize(contentW, panelH)
@@ -1417,6 +1404,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.PasteMsg:
 		cmd := m.handlePaste(msg.Content)
+		cmds = append(cmds, cmd)
+
+	case tea.MouseMsg:
+		cmd := m.handleMouse(msg)
 		cmds = append(cmds, cmd)
 
 	case tea.KeyPressMsg:
@@ -1761,15 +1752,9 @@ func (m *Model) handleCommandKeyMsg(k string, msg tea.KeyPressMsg) tea.Cmd {
 			}
 		}
 	case "up", "ctrl+p":
-		suggs := m.commandSuggestions()
-		if len(suggs) > 0 {
-			m.cmdSuggIdx = max(0, min(len(suggs)-1, m.cmdSuggIdx)-1)
-		}
+		m.moveCmdSuggestion(-1)
 	case "down", "ctrl+n":
-		suggs := m.commandSuggestions()
-		if len(suggs) > 0 {
-			m.cmdSuggIdx = min(len(suggs)-1, m.cmdSuggIdx+1)
-		}
+		m.moveCmdSuggestion(1)
 	case "ctrl+u":
 		m.cmdBuf = ""
 		m.cmdSuggIdx = 0
@@ -1798,6 +1783,15 @@ func (m *Model) handleCommandKeyMsg(k string, msg tea.KeyPressMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *Model) moveCmdSuggestion(delta int) {
+	suggs := m.commandSuggestions()
+	if len(suggs) == 0 {
+		return
+	}
+	idx := min(len(suggs)-1, max(0, m.cmdSuggIdx))
+	m.cmdSuggIdx = min(len(suggs)-1, max(0, idx+delta))
 }
 
 func (m *Model) executeCommand(cmd string) tea.Cmd {
@@ -1860,17 +1854,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		return nil
 
 	case cmd == "mute":
-		if m.preMuteVol >= 0 {
-			// Currently muted — restore previous volume.
-			vol := m.preMuteVol
-			m.preMuteVol = -1
-			m.appendLog(fmt.Sprintf("[vol] unmuted → %.0f%%", vol*100))
-			return m.playerCmd(func(p player.Player) error { return p.SetVolume(vol) })
-		}
-		// Mute: save current volume and set to 0.
-		m.preMuteVol = m.playerState.Volume
-		m.appendLog("[vol] muted")
-		return m.playerCmd(func(p player.Player) error { return p.SetVolume(0) })
+		return m.toggleMute()
 
 	case strings.HasPrefix(cmd, "quality"):
 		name, arg, _ := strings.Cut(cmd, " ")
@@ -2485,26 +2469,10 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		if k == p.NavKey() {
 			if m.activePanel == i {
 				m.activePanel = -1 // toggle off
-			} else {
-				m.activePanel = i
-				// Trigger a feed load when opening the feed panel for the first time.
-				if p == m.feedP && m.feedP.m.NeedsLoad() {
-					m.feedP.m.SetLoading()
-					m.lastKey = ""
-					return m.fetchFeedCmd()
-				}
-				// Lazy-load lyrics when the panel is opened and the current
-				// track hasn't been fetched yet.
-				if p == m.lyricsP && m.lastLyricsTrackID == "" && m.playerState.Track != nil {
-					id := views.PlaybackID(*m.playerState.Track)
-					m.lastLyricsTrackID = id
-					m.lyricsP.m.SetLoading()
-					m.lastKey = ""
-					return m.fetchLyricsCmd(m.playerState.Track)
-				}
+				m.lastKey = ""
+				return nil
 			}
-			m.lastKey = ""
-			return nil
+			return m.activatePanel(i)
 		}
 	}
 
@@ -2525,15 +2493,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 		switch k {
 		case "enter":
 			if idx, t := m.queue.SelectedTrack(); t != nil {
-				ids := m.queueIDs[idx:]
-				m.queueTracks = m.queueTracks[idx:]
-				m.queueIDs = ids
-				m.queue.SetTracks(m.queueTracks)
-				m.appendLog(fmt.Sprintf("[queue] playing from position %d: %s — %s", idx+1, t.Artist, t.Title))
-				m.playerState.Loading = true
-				m.playerState.Playing = false
-				m.playerState.Position = 0
-				return m.playerCmd(func(p player.Player) error { return p.SetQueue(ids) })
+				return m.playQueueFrom(idx)
 			}
 		case "d":
 			if idx, t := m.queue.SelectedTrack(); idx >= 0 {
@@ -2650,26 +2610,11 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 
 	case "r":
 		m.lastKey = ""
-		// Cycle: off → all → one → off
-		next := player.RepeatModeOff
-		switch m.playerState.RepeatMode {
-		case player.RepeatModeOff:
-			next = player.RepeatModeAll
-		case player.RepeatModeAll:
-			next = player.RepeatModeOne
-		case player.RepeatModeOne:
-			next = player.RepeatModeOff
-		}
-		m.playerState.RepeatMode = next
-		m.appendLog(fmt.Sprintf("[player] repeat → %d", next))
-		return m.playerCmd(func(p player.Player) error { return p.SetRepeat(next) })
+		return m.cycleRepeatMode()
 
 	case "s":
 		m.lastKey = ""
-		on := !m.playerState.ShuffleMode
-		m.playerState.ShuffleMode = on
-		m.appendLog(fmt.Sprintf("[player] shuffle → %v", on))
-		return m.playerCmd(func(p player.Player) error { return p.SetShuffle(on) })
+		return m.toggleShuffleMode()
 
 	case "f":
 		m.lastKey = ""
@@ -3652,12 +3597,14 @@ func (m *Model) playNextCmd(label string, tracks []provider.Track, ids []string)
 }
 
 func (m *Model) adjustVolume(delta float64) tea.Cmd {
+	plyr := m.player
+	if plyr == nil {
+		return func() tea.Msg { return errMsg{fmt.Errorf("no player")} }
+	}
+	newVol := clamp(m.playerState.Volume+delta, 0, 1)
+	m.playerState.Volume = newVol
 	return func() tea.Msg {
-		if m.player == nil {
-			return errMsg{fmt.Errorf("no player")}
-		}
-		newVol := clamp(m.playerState.Volume+delta, 0, 1)
-		if err := m.player.SetVolume(newVol); err != nil {
+		if err := plyr.SetVolume(newVol); err != nil {
 			return errMsg{err}
 		}
 		return saveVolumeMsg{newVol}
@@ -3670,6 +3617,7 @@ func (m *Model) View() tea.View {
 	if m.width == 0 {
 		v := tea.NewView("")
 		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
 		return v
 	}
 	var content string
@@ -3679,159 +3627,12 @@ func (m *Model) View() tea.View {
 	case m.introStep != introDone:
 		content = m.renderIntro()
 	default:
-		content = m.renderBoxLayout()
+		content = m.renderModernLayout()
 	}
 	v := tea.NewView(content)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
-}
-
-// renderBoxLayout renders the full boxed UI.
-//
-//	┌─────────────────────────────────────┐
-//	│ ʕ•ᴥ•ʔ vibez ♪               ♪ 72% │
-//	├─────────────────────────────────────┤
-//	│  Now Playing                        │  (nowPlayingHeight lines)
-//	│  …progress bar, controls, bear…     │
-//	├──────────────────┬──────────────────┤
-//	│ Queue            │ Vibe             │  (panelH lines)
-//	├──────────────────┴──────────────────┤
-//	│ ʕ•ᴥ•ʔ > / search  n next  :q quit  │
-//	└─────────────────────────────────────┘
-func (m *Model) renderBoxLayout() string {
-	inner := m.width - 2 // visual width between the │ border chars
-	contentW := inner - 2
-	npH := m.nowPlayingHeight()
-	status := m.statusLines(contentW)
-	panelH := m.panelHeightWithStatus(len(status))
-
-	splitW := inner / 2          // left column inner width (includes padding)
-	rightW := inner - splitW - 1 // right column inner width (-1 for │ divider)
-
-	libraryActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.library
-	queueActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.queue
-	lyricsActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP
-	feedActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP
-	eqActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP
-	aboutActive := m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP
-	fullWidth := libraryActive || queueActive || lyricsActive || feedActive || eqActive || aboutActive || m.mode == modeSearch || m.mode == modeCommand || m.debugView
-
-	if m.cachedHorizW != inner {
-		m.cachedHorizW = inner
-		m.cachedHoriz = strings.Repeat("─", inner)
-	}
-	horiz := m.cachedHoriz
-	var sb strings.Builder
-	sb.Grow(max(512, m.width*m.height*2))
-
-	// ── Top border ──
-	sb.WriteString("┌")
-	sb.WriteString(horiz)
-	sb.WriteString("┐\n")
-
-	// ── Header ──
-	sb.WriteString(m.renderBoxHeader(inner))
-	sb.WriteByte('\n')
-
-	// ── Header divider ──
-	sb.WriteString("├")
-	sb.WriteString(horiz)
-	sb.WriteString("┤\n")
-
-	// ── Now Playing ──
-	for _, line := range m.nowPlayingLines(contentW, npH) {
-		writeBoxRow(&sb, line, contentW)
-	}
-
-	// ── Split or full divider ──
-	if fullWidth {
-		sb.WriteString("├")
-		sb.WriteString(horiz)
-		sb.WriteString("┤\n")
-	} else {
-		sb.WriteString("├")
-		writeRule(&sb, horiz, splitW)
-		sb.WriteString("┬")
-		writeRule(&sb, horiz, rightW)
-		sb.WriteString("┤\n")
-	}
-
-	// ── Panel content ──
-	switch {
-	case m.debugView:
-		for _, line := range m.debugLogLines(contentW, panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case m.mode == modeSearch:
-		for _, line := range m.searchLines(contentW, panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case m.mode == modeCommand:
-		for _, line := range m.commandLines(contentW, panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case libraryActive:
-		m.library.SetSize(contentW, panelH)
-		for _, line := range toLines(m.library.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case queueActive:
-		m.queue.m.SetSize(contentW, panelH)
-		for _, line := range toLines(m.queue.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case lyricsActive:
-		m.lyricsP.SetSize(contentW, panelH)
-		for _, line := range toLines(m.lyricsP.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case feedActive:
-		m.feedP.SetSize(contentW, panelH)
-		for _, line := range toLines(m.feedP.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case eqActive:
-		m.eqP.SetSize(contentW, panelH)
-		for _, line := range toLines(m.eqP.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	case aboutActive:
-		m.aboutP.SetSize(contentW, panelH)
-		for _, line := range toLines(m.aboutP.View(), panelH) {
-			writeBoxRow(&sb, line, contentW)
-		}
-	default:
-		qLines := m.queuePanelLines(splitW-2, panelH)
-		vLines := m.vibe.Lines(rightW-2, panelH, m.glowStep)
-		for i := range panelH {
-			writeSplitBoxRow(&sb, safeIdx(qLines, i), splitW-2, safeIdx(vLines, i), rightW-2)
-		}
-	}
-
-	// ── Join or full divider ──
-	if fullWidth {
-		sb.WriteString("├")
-		sb.WriteString(horiz)
-		sb.WriteString("┤\n")
-	} else {
-		sb.WriteString("├")
-		writeRule(&sb, horiz, splitW)
-		sb.WriteString("┴")
-		writeRule(&sb, horiz, rightW)
-		sb.WriteString("┤\n")
-	}
-
-	// ── Status bar (context/mode then playback, each wrapped as needed) ──
-	for _, line := range status {
-		writeBoxRow(&sb, line, contentW)
-	}
-
-	// ── Bottom border ──
-	sb.WriteString("└")
-	sb.WriteString(horiz)
-	sb.WriteString("┘")
-
-	return sb.String()
 }
 
 func (m *Model) renderIntro() string {
@@ -3867,148 +3668,7 @@ func (m *Model) renderIntro() string {
 		subtitle
 }
 
-// renderBoxHeader builds the header line including the border chars.
-func (m *Model) renderBoxHeader(inner int) string {
-	bear := views.BearExpr(m.glowStep, m.playerState.Playing)
-	title := views.RenderGlowTitle("vibez ♪", m.glowStep)
-
-	vol := int(m.playerState.Volume * 100)
-	var volStr string
-	if m.preMuteVol >= 0 {
-		volStr = styles.Playing.Render("🔇 muted")
-	} else {
-		volStr = styles.QueueItemMuted.Render(fmt.Sprintf("♪ %d%%", vol))
-	}
-
-	if q := qualityLabel(m.playerState.Bitrate); q != "" {
-		volStr = styles.QueueItemMuted.Render(q+" ·") + " " + volStr
-	}
-
-	rightStr := volStr
-	if m.memStats != "" {
-		rightStr = styles.QueueItemMuted.Render(m.memStats) + "  " + volStr
-	}
-
-	bearW := lipgloss.Width(bear)
-	titleW := lipgloss.Width(title)
-	rightW := lipgloss.Width(rightStr)
-	contentW := inner - 2 // for " " padding on each side
-
-	// Place title at the horizontal centre of the header.
-	titleStart := max(bearW+1, (contentW-titleW)/2)
-	leftPad := titleStart - bearW
-	rightPad := max(1, contentW-bearW-leftPad-titleW-rightW)
-
-	var sb strings.Builder
-	sb.Grow(len(bear) + leftPad + len(title) + rightPad + len(rightStr) + 8)
-	sb.WriteString("│ ")
-	sb.WriteString(bear)
-	writeSpaces(&sb, leftPad)
-	sb.WriteString(title)
-	writeSpaces(&sb, rightPad)
-	sb.WriteString(rightStr)
-	sb.WriteString(" │")
-	return sb.String()
-}
-
-// artModeActive reports whether the now-playing panel is currently showing
-// (or loading) the album-art view rather than the progress bar. Art mode
-// falls back to the bar layout when the current track has no artwork, the
-// fetch failed, or the terminal can't show enough colours.
-func (m *Model) artModeActive() bool {
-	if !m.artMode || m.supportsArtColor == nil || !m.supportsArtColor() {
-		return false
-	}
-	t := m.playerState.Track
-	// m.artwork.url must match the current track so a cover left over from
-	// the previous track is never shown while the next one is in flight.
-	return t != nil && t.ArtworkURL != "" && m.artwork.url == t.ArtworkURL && !m.artwork.failed
-}
-
-func (m *Model) nowPlayingHeight() int {
-	if !m.artModeActive() {
-		return 12
-	}
-	// The art view trades panel rows for a bigger cover: grow with the
-	// terminal, but always leave the split panels a usable height.
-	return min(24, max(12, m.height-14))
-}
-
-// nowPlayingLines returns exactly h lines for the Now Playing section.
-func (m *Model) nowPlayingLines(contentW, h int) []string {
-	if m.artModeActive() && h >= 8 {
-		return m.nowPlayingArtLines(contentW, h)
-	}
-	return m.nowPlayingTextLines(contentW, h)
-}
-
-// nowPlayingArtLines renders the album-art view: the cover centred, with the
-// track line and elapsed time beneath it — no progress bar or controls. The
-// bottom four rows hold a separator, "Artist — Title", "Album • elapsed /
-// total", and the status line; the rows above are the cover, vertically
-// centred, sized square via the measured cell aspect ratio. While the cover
-// is still downloading its rows stay blank and it pops in when loaded.
-func (m *Model) nowPlayingArtLines(contentW, h int) []string {
-	t := m.playerState.Track
-	if t == nil {
-		return m.nowPlayingTextLines(contentW, h)
-	}
-
-	aspect := m.artCellAsp
-	if aspect <= 0 {
-		aspect = 2.0
-	}
-	artColsFor := func(rows int) int { return int(math.Round(float64(rows) * aspect)) }
-	artRegion := h - 4
-	artRows := artRegion
-	artCols := artColsFor(artRows)
-	for artRows > 2 && artCols > contentW {
-		artRows--
-		artCols = artColsFor(artRows)
-	}
-	if artRows < 2 || artCols < 4 {
-		return m.nowPlayingTextLines(contentW, h)
-	}
-
-	size := art.Size{Width: artCols, Height: artRows}
-	if m.artwork.rendered == nil {
-		m.artwork.rendered = map[art.Size][]string{}
-	}
-	artLines := m.artwork.rendered[size]
-	if artLines != nil {
-		m.artwork.touchSize(size)
-	} else if m.artwork.img != nil {
-		const maxRenderedArtworkSizes = 16
-		if len(m.artwork.rendered) >= maxRenderedArtworkSizes {
-			if len(m.artwork.renderedOrder) > 0 {
-				oldest := m.artwork.renderedOrder[0]
-				copy(m.artwork.renderedOrder, m.artwork.renderedOrder[1:])
-				m.artwork.renderedOrder = m.artwork.renderedOrder[:len(m.artwork.renderedOrder)-1]
-				delete(m.artwork.rendered, oldest)
-			} else {
-				m.artwork.rendered = map[art.Size][]string{}
-			}
-		}
-		artLines = m.renderArt(m.artwork.img, size)
-		m.artwork.rendered[size] = artLines
-		m.artwork.renderedOrder = append(m.artwork.renderedOrder, size)
-	}
-
-	lines := make([]string, 0, h)
-	artTop := max(0, (artRegion-artRows)/2)
-	for i := range artRegion {
-		if ai := i - artTop; ai >= 0 && ai < len(artLines) {
-			lines = append(lines, centerStr(artLines[ai], contentW))
-		} else {
-			lines = append(lines, "")
-		}
-	}
-
-	trackLine := m.renderTrackTitleLine(t, contentW, true)
-	albumLine := m.renderAlbumMetaLine(t, contentW, true)
-	lines = append(lines, "", trackLine, albumLine, m.statusLine(contentW))
-	return lines
-}
+// renderIntro continues below; card header, hero, and panel layout live in layout.go.
 
 // enrichTrackFromQueue merges catalog metadata (content rating, digital master,
 // release date, artwork palette, genres, audio variants) from the queued provider.Track into
@@ -4097,63 +3757,6 @@ func (m *Model) applyTrackPalette(t *provider.Track) {
 	styles.ApplyArtworkPalette(p.BgColor, p.TextColor1, p.TextColor2, p.TextColor3, p.TextColor4)
 }
 
-func (m *Model) renderTrackTitleLine(t *provider.Track, contentW int, truncate bool) string {
-	muted := styles.QueueItemMuted
-	var titleStr string
-	if m.playerState.Playing || m.playerState.Loading {
-		titleStr = styles.NowPlayingTitlePlaying.Render(t.Title)
-	} else {
-		titleStr = styles.NowPlayingTitle.Render(t.Title)
-	}
-	if strings.EqualFold(t.ContentRating, "explicit") {
-		titleStr += " " + muted.Render("🅴")
-	}
-	line := styles.NowPlayingTrackArtist.Render(t.Artist) + muted.Render(" — ") + titleStr
-	if truncate {
-		line = ansi.Truncate(line, contentW, "…")
-	}
-	return centerStr(line, contentW)
-}
-
-func (m *Model) renderAlbumMetaLine(t *provider.Track, contentW int, truncate bool) string {
-	albumText := t.Album
-	if year := t.ReleaseYear(); year != "" && albumText != "" {
-		albumText += " (" + year + ")"
-	}
-	elapsed := views.FormatDuration(m.playerState.Position)
-	total := views.FormatDuration(t.Duration)
-
-	build := func(withFormat bool) string {
-		line := styles.NowPlayingAlbum.Render(albumText + " • ")
-		if t.IsAppleDigitalMaster {
-			line += styles.NowPlayingLabel.Render("✦ Master") + styles.NowPlayingAlbum.Render(" • ")
-		}
-		if output, catalog := formatBadge(t, m.playerState.Bitrate); withFormat && (output != "" || catalog != "") {
-			if output != "" {
-				line += styles.NowPlayingLabel.Render(output)
-			}
-			if catalog != "" {
-				if output != "" {
-					line += styles.NowPlayingAlbum.Render(" ")
-				}
-				line += styles.NowPlayingAlbum.Render("(catalog: " + catalog + ")")
-			}
-			line += styles.NowPlayingAlbum.Render(" • ")
-		}
-		return line + styles.NowPlayingTime.Render(elapsed+" / "+total)
-	}
-	line := build(true)
-	if truncate {
-		// The format badge is the first thing to go on a narrow panel, so
-		// truncation never eats the time instead.
-		if lipgloss.Width(line) > contentW {
-			line = build(false)
-		}
-		line = ansi.Truncate(line, contentW, "…")
-	}
-	return centerStr(line, contentW)
-}
-
 // formatBadge describes the playing track's audio for the Now Playing panel.
 // output is what vibez is playing: the AAC bitrate for streaming, the file's
 // format for a local file. catalog names what Apple Music holds beyond lossy
@@ -4223,98 +3826,6 @@ func (m *Model) statusLine(contentW int) string {
 	return centerStr(styles.ErrorStyle.Render(prefix+errText), contentW)
 }
 
-func (m *Model) nowPlayingTextLines(contentW, h int) []string {
-	muted := styles.QueueItemMuted
-
-	t := m.playerState.Track
-	if t == nil {
-		lines := make([]string, h)
-		mid := h / 2
-		lines[mid] = centerStr(muted.Render("silence is not a vibe"), contentW)
-		lines[h-2] = centerStr(muted.Render("made with ❤️ by simonepelosi · press ? for about"), contentW)
-		if m.errMsg != "" {
-			// statusLine renders this identically and truncates to the width,
-			// which a message long enough to explain itself needs.
-			lines[max(0, mid-2)] = m.statusLine(contentW)
-		}
-		return lines
-	}
-
-	trackLine := m.renderTrackTitleLine(t, contentW, false)
-	albumLine := m.renderAlbumMetaLine(t, contentW, false)
-
-	// Progress bar — centred, slightly narrower than full width
-	barW := max(10, contentW-8)
-	progressLine := centerStr(views.RenderProgressBar(m.playerState.Position, t.Duration, barW), contentW)
-
-	// Controls: ↺  ⇄  ▶/⏸  ♡/♥
-	var playIcon string
-	var playStyle lipgloss.Style
-	switch {
-	case m.playerState.Loading:
-		spinnerFrames := [10]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		playIcon = spinnerFrames[m.glowStep%10]
-		playStyle = styles.ControlActive
-	case m.playerState.Playing:
-		playIcon = "⏸"
-		playStyle = styles.ControlActive
-	default:
-		playIcon = "▶"
-		playStyle = styles.Paused
-	}
-
-	repeatIcon, repeatStyle := "↺", muted
-	switch m.playerState.RepeatMode {
-	case player.RepeatModeAll:
-		repeatIcon, repeatStyle = "↺", styles.ControlActive
-	case player.RepeatModeOne:
-		repeatIcon, repeatStyle = "↻", styles.ControlActive
-	}
-	shuffleStyle := muted
-	if m.playerState.ShuffleMode {
-		shuffleStyle = styles.ControlActive
-	}
-
-	rating := m.trackRating(t)
-	heartIcon, heartStyle := ratingIcon(rating), muted
-	switch rating {
-	case provider.RatingLoved:
-		heartStyle = styles.FavoriteActive
-	case provider.RatingDisliked:
-		heartStyle = styles.DislikeActive
-	}
-
-	controls := centerStr(
-		repeatStyle.Render(repeatIcon)+"   "+
-			shuffleStyle.Render("⇄")+"   "+
-			playStyle.Render(playIcon)+"   "+
-			heartStyle.Render(heartIcon),
-		contentW,
-	)
-
-	errLine := m.statusLine(contentW)
-
-	lines := []string{
-		"",
-		centerStr(styles.NowPlayingLabel.Render("Now Playing"), contentW),
-		centerStr(muted.Render(strings.Repeat("─", 11)), contentW),
-		trackLine,
-		albumLine,
-		"",
-		progressLine,
-		"",
-		"",
-		controls,
-		"",
-		errLine,
-	}
-
-	for len(lines) < h {
-		lines = append(lines, "")
-	}
-	return lines[:h]
-}
-
 // playingQueueIdx returns the queue position of the track the player reports as
 // playing, or -1 if it isn't in the queue. Identity comes first, the way
 // dropQueueAfter matches: a queue can hold the same song twice, or two
@@ -4340,66 +3851,6 @@ func playingQueueIdx(tracks []provider.Track, playing *provider.Track) int {
 	return -1
 }
 
-// queuePanelLines returns the Queue panel lines for the left split.
-func (m *Model) queuePanelLines(w, h int) []string {
-	total := len(m.queue.m.Tracks())
-
-	// Header: "Queue  12 tracks"
-	var headerLabel string
-	if total > 0 {
-		countStr := styles.QueueItemMuted.Render(fmt.Sprintf("  %d tracks", total))
-		headerLabel = styles.Header.Render("Queue") + countStr
-	} else {
-		headerLabel = styles.Header.Render("Queue")
-	}
-	sep := styles.QueueItemMuted.Render(strings.Repeat("─", 5))
-
-	indexW := len(fmt.Sprintf("%d", total)) // digit width for index numbers
-	tracks := m.queue.m.Tracks()
-	playingIdx := playingQueueIdx(tracks, m.playerState.Track)
-
-	// header + sep occupy 2 lines; remaining rows hold track entries.
-	visibleRows := max(0, h-2)
-
-	var trackLines []string
-	if total == 0 {
-		m.queueMiniOffset = 0
-		trackLines = []string{styles.QueueItemMuted.Render("  Queue is empty")}
-		if visibleRows == 0 {
-			trackLines = nil
-		}
-	} else {
-		maxOffset := max(0, total-visibleRows)
-		if m.queueMiniOffset > maxOffset {
-			m.queueMiniOffset = maxOffset
-		}
-		end := min(total, m.queueMiniOffset+visibleRows)
-		trackLines = make([]string, 0, end-m.queueMiniOffset)
-		for i := m.queueMiniOffset; i < end; i++ {
-			t := tracks[i]
-			idx := fmt.Sprintf("%*d. ", indexW, i+1)
-			label := t.Artist + " — " + t.Title
-			if i == playingIdx {
-				numStr := styles.ControlActive.Render(idx)
-				line := truncateStr(label, w-2-indexW-2)
-				trackLines = append(trackLines, numStr+styles.ControlActive.Render("▶ "+line))
-			} else {
-				numStr := styles.QueueItemMuted.Render(idx)
-				line := truncateStr(label, w-2-indexW-2)
-				trackLines = append(trackLines, numStr+styles.QueueItem.Render(line))
-			}
-		}
-	}
-
-	result := make([]string, 0, max(2, h))
-	result = append(result, headerLabel, sep)
-	result = append(result, trackLines...)
-	for len(result) < h {
-		result = append(result, "")
-	}
-	return result
-}
-
 // searchLines renders the search popup inline (full-width in the split area).
 func (m *Model) searchLines(contentW, h int) []string {
 	accent := lipgloss.NewStyle().Foreground(styles.ColorAccent)
@@ -4415,8 +3866,8 @@ func (m *Model) searchLines(contentW, h int) []string {
 	inputLine := accent.Render("/") + "  " + before + cursor + after
 	sep := muted.Render(strings.Repeat("─", contentW))
 
-	// Reserve input(1) + sep(1) + footerSep(1) + footer(1) = 4 lines.
-	listH := max(1, h-4)
+	// Reserve input(1) + sep(1) = 2 lines; search actions live in statusLines.
+	listH := max(1, h-2)
 	m.search.SetSize(contentW, listH)
 	listView := m.search.View()
 	if listView == "" && !m.search.Loading() && m.searchQuery != "" {
@@ -4424,115 +3875,123 @@ func (m *Model) searchLines(contentW, h int) []string {
 	}
 
 	listLines := toLines(listView, listH)
-	footerSep := muted.Render(strings.Repeat("─", contentW))
-
-	// Make the footer hints context-sensitive to the selected item kind.
-	kind := "track"
-	if m.search.SelectedAlbum() != nil {
-		kind = "album"
-	} else if m.search.SelectedPlaylist() != nil {
-		kind = "playlist"
-	}
-	esc := " close"
-	if m.search.InArtist() {
-		esc = " back"
-	}
-	footer := "  " + accent.Render("Enter") + muted.Render(" play "+kind) +
-		"  ·  " + accent.Render("Tab") + muted.Render(" add to queue") +
-		"  ·  " + accent.Render("Shift+Tab") + muted.Render(" play next") +
-		"  ·  " + accent.Render("ctrl+p") + muted.Render(" add to playlist")
-	if m.search.SelectedArtist() != nil {
-		footer = "  " + accent.Render("Enter") + muted.Render(" open artist")
-	}
-	if m.search.SectionCount() > 1 {
-		footer += "  ·  " + accent.Render("ctrl+↑/↓") + muted.Render(" section")
-	}
-	footer += "  ·  " + accent.Render("Esc") + muted.Render(esc)
-
 	result := append([]string{inputLine, sep}, listLines...)
-	result = append(result, footerSep, footer)
 	for len(result) < h {
 		result = append(result, "")
 	}
 	return result[:h]
 }
 
-// statusNavLines is the top status line: mode chip + context-aware shortcuts,
-// wrapped to fit width w.
-func (m *Model) statusNavLines(w int) []string {
+// searchFooterContext describes the currently highlighted search item kind and
+// available actions for the bottom status bar and its cache key.
+func (m *Model) searchFooterContext() (sig, kind, esc string, multiSection, isArtist bool) {
+	kind = "track"
+	switch {
+	case m.search.SelectedArtist() != nil:
+		isArtist = true
+	case m.search.SelectedAlbum() != nil:
+		kind = "album"
+	case m.search.SelectedPlaylist() != nil:
+		kind = "playlist"
+	}
+	esc = " close"
+	if m.search.InArtist() {
+		esc = " back"
+	}
+	multiSection = m.search.SectionCount() > 1
+	sig = fmt.Sprintf("%s|%s|%t|%t", kind, esc, multiSection, isArtist)
+	return sig, kind, esc, multiSection, isArtist
+}
+
+// statusLines renders a single unified footer line (wrapping only when narrow)
+// with context-sensitive shortcuts and no legacy mode badges.
+func (m *Model) statusLines(w int) []string {
 	vibeFocused := m.vibe != nil && m.vibe.IsFocused()
-	key := statusNavCacheKey{
-		valid:       true,
-		w:           w,
-		mode:        m.mode,
-		debugView:   m.debugView,
-		vibeFocused: vibeFocused,
-		activePanel: m.activePanel,
-		primary:     styles.ColorPrimary,
-		fg:          styles.ColorFg,
-		muted:       styles.ColorMuted,
+	vibePicker := m.vibe != nil && m.vibe.PickerActive()
+	var searchCtx, searchKind, searchEsc string
+	var searchMulti, searchArtist bool
+	if m.mode == modeSearch {
+		searchCtx, searchKind, searchEsc, searchMulti, searchArtist = m.searchFooterContext()
 	}
-	switch m.mode {
-	case modeSearch:
-		key.searchQuery = m.searchQuery
-		key.searchCursor = m.searchCursor
-	case modeCommand:
-		key.cmdBuf = m.cmdBuf
+
+	key := statusCacheKey{
+		valid:            true,
+		w:                w,
+		mode:             m.mode,
+		searchCtx:        searchCtx,
+		cmdBuf:           m.cmdBuf,
+		debugView:        m.debugView,
+		vibeFocused:      vibeFocused,
+		activePanel:      m.activePanel,
+		discoveryEnabled: m.discovery.enabled,
+		vibePicker:       vibePicker,
+		radioEnabled:     m.radio.enabled,
+		primary:          styles.ColorPrimary,
+		fg:               styles.ColorFg,
+		muted:            styles.ColorMuted,
 	}
-	if m.statusNavKey == key {
-		return m.statusNavCached[:len(m.statusNavCached):len(m.statusNavCached)]
+	if m.statusBarKey == key {
+		return m.statusBarCached[:len(m.statusBarCached):len(m.statusBarCached)]
 	}
 
 	muted := styles.QueueItemMuted
 	accent := styles.KeyName
-	dot := muted.Render("  ·  ")
+	dot := muted.Render(" · ")
 
 	var res []string
 	switch m.mode {
 	case modeSearch:
-		runes := []rune(m.searchQuery)
-		cur := min(max(m.searchCursor, 0), len(runes))
-		before := styles.Header.Render(string(runes[:cur]))
-		after := styles.Header.Render(string(runes[cur:]))
-		parts := []string{
-			styles.ModeSearch.Render("SEARCH") + "  " +
-				accent.Render("/") + before + accent.Render("█") + after,
-			accent.Render("Ctrl+U") + muted.Render(" clear"),
+		var parts []string
+		if searchArtist {
+			parts = append(parts, accent.Render("Enter")+muted.Render(" open artist"))
+		} else {
+			parts = append(parts,
+				accent.Render("Enter")+muted.Render(" play "+searchKind),
+				accent.Render("Tab")+muted.Render(" queue"),
+				accent.Render("Shift+Tab")+muted.Render(" next"),
+				accent.Render("ctrl+p")+muted.Render(" playlist"),
+			)
 		}
+		if searchMulti {
+			parts = append(parts, accent.Render("ctrl+↑/↓")+muted.Render(" section"))
+		}
+		parts = append(parts,
+			accent.Render("Ctrl+U")+muted.Render(" clear"),
+			accent.Render("Esc")+muted.Render(searchEsc),
+		)
 		res = wrapFit(parts, dot, w)
 	case modeCommand:
-		res = []string{styles.ModeCommand.Render("CMD") + "  " +
-			muted.Render(":") + m.cmdBuf + accent.Render("_") +
-			muted.Render("  Tab complete · ↑/↓ navigate · Esc cancel")}
+		res = wrapFit([]string{
+			muted.Render(":") + m.cmdBuf + accent.Render("_"),
+			accent.Render("Tab") + muted.Render(" complete"),
+			accent.Render("↑/↓") + muted.Render(" navigate"),
+			accent.Render("Esc") + muted.Render(" cancel"),
+		}, dot, w)
 	default:
 		var parts []string
 		switch {
 		case m.debugView:
 			parts = []string{
-				styles.ModeNormal.Render("DEBUG"),
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
 		case vibeFocused:
 			parts = []string{
-				styles.ModeNormal.Render("VIBE"),
 				accent.Render("Enter") + muted.Render(" search"),
 				accent.Render("esc") + muted.Render(" cancel"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.queue:
 			parts = []string{
-				styles.ModeNormal.Render("QUEUE"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("d") + muted.Render(" remove"),
 				accent.Render("Shift+↑/↓ / K/J") + muted.Render(" move"),
-				accent.Render("p") + muted.Render(" add to playlist"),
+				accent.Render("p") + muted.Render(" playlist"),
 				accent.Render("c") + muted.Render(" clear"),
 				accent.Render("s") + muted.Render(" :save"),
 				accent.Render("esc") + muted.Render(" close"),
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.library:
 			parts = []string{
-				styles.ModeNormal.Render("LIBRARY"),
 				accent.Render("Enter") + muted.Render(" browse/play"),
 				accent.Render("Tab") + muted.Render(" queue"),
 				accent.Render("Shift+Tab") + muted.Render(" next"),
@@ -4540,7 +3999,6 @@ func (m *Model) statusNavLines(w int) []string {
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.lyricsP:
 			parts = []string{
-				styles.ModeNormal.Render("LYRICS"),
 				accent.Render("Enter") + muted.Render(" seek"),
 				accent.Render("j/k") + muted.Render(" scroll"),
 				accent.Render("g/G") + muted.Render(" top/bottom"),
@@ -4548,7 +4006,6 @@ func (m *Model) statusNavLines(w int) []string {
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.feedP:
 			parts = []string{
-				styles.ModeNormal.Render("FEED"),
 				accent.Render("Enter") + muted.Render(" play"),
 				accent.Render("Tab") + muted.Render(" queue"),
 				accent.Render("Shift+Tab") + muted.Render(" next"),
@@ -4558,7 +4015,6 @@ func (m *Model) statusNavLines(w int) []string {
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.eqP:
 			parts = []string{
-				styles.ModeNormal.Render("EQUALIZER"),
 				accent.Render("←/→") + muted.Render(" band"),
 				accent.Render("↑/↓") + muted.Render(" gain"),
 				accent.Render("0") + muted.Render(" reset band"),
@@ -4567,92 +4023,46 @@ func (m *Model) statusNavLines(w int) []string {
 			}
 		case m.activePanel >= 0 && m.panels[m.activePanel] == m.aboutP:
 			parts = []string{
-				styles.ModeNormal.Render("ABOUT"),
 				accent.Render("Enter/d") + muted.Render(" donate"),
 				accent.Render("esc/?") + muted.Render(" close"),
 			}
 		default:
+			discoverHint := accent.Render("d") + muted.Render(" metric")
+			if m.discovery.enabled {
+				discoverHint = accent.Render("d") + styles.Playing.Render(" ● discovery")
+			} else if vibePicker {
+				discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
+			}
+			radioHint := accent.Render("R") + muted.Render(" radio")
+			if m.radio.enabled {
+				radioHint = accent.Render("R") + styles.Playing.Render(" 📻 radio")
+			}
 			parts = []string{
-				styles.ModeNormal.Render("NORMAL"),
 				accent.Render(":") + muted.Render(" command"),
-				accent.Render("/") + muted.Render(" search"),
-				accent.Render("l") + muted.Render(" library"),
-				accent.Render("q") + muted.Render(" queue"),
-				accent.Render("y") + muted.Render(" lyrics"),
-				accent.Render("F") + muted.Render(" feed"),
-				accent.Render("e") + muted.Render(" equalizer"),
 				accent.Render("v") + muted.Render(" vibe"),
-				accent.Render("?") + muted.Render(" about"),
+				accent.Render("spc") + muted.Render(" play"),
+				accent.Render("n/p") + muted.Render(" skip"),
+				accent.Render("←/→") + muted.Render(" ±10s"),
+				accent.Render("f") + muted.Render(" fav"),
+				accent.Render("x") + muted.Render(" less"),
+				accent.Render("s") + muted.Render(" shuffle"),
+				accent.Render("r") + muted.Render(" repeat"),
+				discoverHint,
+				radioHint,
 				accent.Render(":q") + muted.Render(" quit"),
 			}
 		}
 		res = wrapFit(parts, dot, w)
 	}
 
-	m.statusNavKey = key
-	m.statusNavCached = res[:len(res):len(res)]
-	m.statusAllCached = nil
-	return m.statusNavCached
-}
-
-// statusPlayLines is the bottom status line: always shows playback controls,
-// wrapped to fit width w.
-func (m *Model) statusPlayLines(w int) []string {
-	vibePicker := m.vibe != nil && m.vibe.PickerActive()
-	key := statusPlayCacheKey{
-		valid:            true,
-		w:                w,
-		discoveryEnabled: m.discovery.enabled,
-		vibePicker:       vibePicker,
-		radioEnabled:     m.radio.enabled,
-		primary:          styles.ColorPrimary,
-		fg:               styles.ColorFg,
-		muted:            styles.ColorMuted,
-	}
-	if m.statusPlayKey == key {
-		return m.statusPlayCached[:len(m.statusPlayCached):len(m.statusPlayCached)]
-	}
-
-	muted := styles.QueueItemMuted
-	accent := styles.KeyName
-	dot := muted.Render("  ·  ")
-
-	discoverHint := accent.Render("d") + muted.Render(" metric")
-	if m.discovery.enabled {
-		discoverHint = accent.Render("d") + styles.Playing.Render(" ● discovery")
-	} else if vibePicker {
-		discoverHint = accent.Render("d") + styles.Playing.Render(" picking…")
-	}
-
-	radioHint := accent.Render("R") + muted.Render(" radio")
-	if m.radio.enabled {
-		radioHint = accent.Render("R") + styles.Playing.Render(" 📻 radio")
-	}
-
-	parts := []string{
-		accent.Render("spc") + muted.Render(" play/pause"),
-		accent.Render("n/p") + muted.Render(" next/prev"),
-		accent.Render("←/→") + muted.Render(" seek ±10s"),
-		accent.Render("f") + muted.Render(" fav"),
-		accent.Render("x") + muted.Render(" suggest less"),
-		accent.Render("s") + muted.Render(" shuffle"),
-		accent.Render("r") + muted.Render(" repeat"),
-		discoverHint,
-		radioHint,
-	}
-	res := wrapFit(parts, dot, w)
-	m.statusPlayKey = key
-	m.statusPlayCached = res[:len(res):len(res)]
-	m.statusAllCached = nil
-	return m.statusPlayCached
+	m.statusBarKey = key
+	m.statusBarCached = res[:len(res):len(res)]
+	return m.statusBarCached
 }
 
 // commandLines renders the command palette in the panel area when CMD mode is active.
 func (m *Model) commandLines(_ int, h int) []string {
 	muted := styles.QueueItemMuted
-	accent := styles.KeyName
-	header := accent.Render("Commands")
-	sep := muted.Render(strings.Repeat("─", 8))
 
 	suggs := m.commandSuggestions()
 	var rows []string
@@ -4673,57 +4083,16 @@ func (m *Model) commandLines(_ int, h int) []string {
 		rows = []string{"  " + muted.Render("no matching commands")}
 	}
 
-	result := append([]string{"", header, sep, ""}, rows...)
+	result := append([]string{""}, rows...)
 	for len(result) < h {
 		result = append(result, "")
 	}
 	return result[:h]
 }
 
-// statusLines returns every status row — nav hints then playback controls —
-// each already wrapped to fit width w. The count varies with terminal width,
-// so panelHeight consults it rather than assuming a fixed two rows.
-func (m *Model) statusLines(w int) []string {
-	nav := m.statusNavLines(w)
-	play := m.statusPlayLines(w)
-	if m.statusAllCached != nil {
-		return m.statusAllCached
-	}
-	all := make([]string, len(nav)+len(play))
-	copy(all, nav)
-	copy(all[len(nav):], play)
-	m.statusAllCached = all[:len(all):len(all)]
-	return m.statusAllCached
-}
-
-// panelHeight returns the number of rows available for the split panel section.
-// Fixed overhead = top(1)+hdr(1)+hdrdiv(1)+splitdiv(1)+joindiv(1)+bottom(1) = 6,
-// plus the now-playing section, which grows in art mode, and the status rows,
-// which grow as hints wrap on a narrow terminal — so both are measured rather
-// than assumed.
-func (m *Model) panelHeight() int {
-	return m.panelHeightWithStatus(len(m.statusLines(m.width - 4)))
-}
-
-func (m *Model) panelHeightWithStatus(statusCount int) int {
-	fixedOverhead := 6 + m.nowPlayingHeight() + statusCount
-	return max(3, m.height-fixedOverhead)
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 const spaceChunk = "                                                                "
-
-func writeRule(sb *strings.Builder, horiz string, cols int) {
-	if cols <= 0 {
-		return
-	}
-	if n := cols * 3; n <= len(horiz) {
-		sb.WriteString(horiz[:n])
-		return
-	}
-	sb.WriteString(strings.Repeat("─", cols))
-}
 
 func writeSpaces(sb *strings.Builder, n int) {
 	for n >= len(spaceChunk) {
@@ -4749,20 +4118,6 @@ func writePadded(sb *strings.Builder, s string, w int) {
 		sb.WriteString(s)
 		writeSpaces(sb, w-sw)
 	}
-}
-
-func writeBoxRow(sb *strings.Builder, line string, w int) {
-	sb.WriteString("│ ")
-	writePadded(sb, line, w)
-	sb.WriteString(" │\n")
-}
-
-func writeSplitBoxRow(sb *strings.Builder, left string, lw int, right string, rw int) {
-	sb.WriteString("│ ")
-	writePadded(sb, left, lw)
-	sb.WriteString(" │ ")
-	writePadded(sb, right, rw)
-	sb.WriteString(" │\n")
 }
 
 // padRight pads s on the right with spaces to reach visual width w, and clips

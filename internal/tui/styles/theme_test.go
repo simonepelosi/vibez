@@ -187,10 +187,16 @@ func TestApplyArtworkPalette_AndClear(t *testing.T) {
 	if got := styles.ColorHex(styles.ProgressGradStops[1]); got != "#acc1e1" {
 		t.Errorf("ProgressGradStops[1] after ApplyArtworkPalette = %q, want #acc1e1", got)
 	}
+	if got := styles.ColorHex(styles.HeroBorder.GetForeground()); got == styles.ColorHex(styles.CardBorderActive.GetForeground()) {
+		t.Errorf("HeroBorder foreground = %q, expected tint from artwork palette", got)
+	}
 
 	styles.ClearArtworkPalette()
 	if got := styles.ColorHex(styles.ProgressGradStops[0]); got != defStop0 {
 		t.Errorf("ProgressGradStops[0] after ClearArtworkPalette = %q, want %q", got, defStop0)
+	}
+	if got, want := styles.ColorHex(styles.HeroBorder.GetForeground()), styles.ColorHex(styles.CardBorderActive.GetForeground()); got != want {
+		t.Errorf("HeroBorder after ClearArtworkPalette = %q, want %q", got, want)
 	}
 }
 
@@ -240,6 +246,37 @@ func TestLoadTheme_RejectsPathTraversalAndSymlink(t *testing.T) {
 	if err := os.Symlink(secret, link); err == nil {
 		if _, err := styles.LoadTheme("sym", dir); err == nil {
 			t.Error("LoadTheme(sym) followed symlink, expected error")
+		}
+	}
+}
+
+func TestApply_NavTabsHaveDistinctColorsForAllBuiltinThemes(t *testing.T) {
+	t.Cleanup(func() { styles.Apply(styles.DefaultTheme()) })
+	themes := map[string]styles.Theme{
+		"default": styles.DefaultTheme(),
+		"dracula": styles.DraculaTheme(),
+		"gruvbox": styles.GruvboxTheme(),
+		"nord":    styles.NordTheme(),
+	}
+	for name, th := range themes {
+		styles.Apply(th)
+		seen := make(map[string]bool, styles.NavTabCount)
+		for i := range styles.NavTabCount {
+			hex := styles.ColorHex(styles.NavTabColors[i])
+			if seen[hex] {
+				t.Errorf("theme %s: duplicate tab color %s at tab %d", name, hex, i)
+			}
+			seen[hex] = true
+			act, key, lbl, _, _ := styles.NavTabStyles(i)
+			if act.GetBackground() == nil || key.GetForeground() == nil || lbl.GetForeground() == nil {
+				t.Errorf("theme %s: missing derived tab style at index %d", name, i)
+			}
+		}
+		keyFg := styles.ColorHex(styles.KeyName.GetForeground())
+		accentFg := styles.ColorHex(styles.ColorAccent)
+		mutedFg := styles.ColorHex(styles.ColorMuted)
+		if keyFg == "" || keyFg == accentFg || keyFg == mutedFg {
+			t.Errorf("theme %s: KeyName foreground %q should be distinct from ColorAccent %q and ColorMuted %q", name, keyFg, accentFg, mutedFg)
 		}
 	}
 }
