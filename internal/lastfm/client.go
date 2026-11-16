@@ -13,6 +13,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 const (
@@ -172,24 +175,33 @@ func stripURLQuery(err error) error {
 	return err
 }
 
+const maxAPIErrorMsgBytes = 512
+
 func checkAPIError(body []byte) error {
 	var apiErr struct {
 		Error   int    `json:"error"`
 		Message string `json:"message"`
 	}
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Error != 0 {
-		return fmt.Errorf("last.fm API error %d: %s", apiErr.Error, sanitizeControl(apiErr.Message))
+		msg := truncateUTF8Bytes(provider.Clean(apiErr.Message), maxAPIErrorMsgBytes)
+		return fmt.Errorf("last.fm API error %d: %s", apiErr.Error, msg)
 	}
 	return nil
 }
 
-func sanitizeControl(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	cut := 0
+	for i, r := range s {
+		n := utf8.RuneLen(r)
+		if n < 0 || i+n > maxBytes {
+			break
 		}
-		return r
-	}, s)
+		cut = i + n
+	}
+	return s[:cut]
 }
 
 // ── Authentication ────────────────────────────────────────────────────────

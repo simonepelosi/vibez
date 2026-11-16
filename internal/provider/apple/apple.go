@@ -266,8 +266,8 @@ type storefrontResponse struct {
 // session check saved to config, or failing that the value reported by Apple's
 // /v1/me/storefront endpoint, fetched once and cached safely across goroutines.
 func (a *AppleProvider) storefront(ctx context.Context) (string, error) {
-	if a.cfg.StoreFront != "" {
-		return validateStorefront(a.cfg.StoreFront)
+	if sf := a.cfg.Storefront(); sf != "" {
+		return validateStorefront(sf)
 	}
 	a.sfMu.RLock()
 	cached := a.sf
@@ -312,7 +312,14 @@ func (a *AppleProvider) SetBaseURL(url string) {
 }
 
 func (a *AppleProvider) IsAuthenticated() bool {
-	return a.cfg.AppleDeveloperToken != "" && a.cfg.AppleUserToken != ""
+	devTok, userTok := a.cfg.GetAppleTokens()
+	return devTok != "" && userTok != ""
+}
+
+func (a *AppleProvider) setAuthHeaders(req *http.Request) {
+	devTok, userTok := a.cfg.GetAppleTokens()
+	req.Header.Set("Authorization", "Bearer "+devTok)
+	req.Header.Set("Music-User-Token", userTok)
 }
 
 func (a *AppleProvider) newRequest(ctx context.Context, method, endpoint string) (*http.Request, error) {
@@ -332,8 +339,7 @@ func (a *AppleProvider) newRequestWithBody(ctx context.Context, method, endpoint
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	a.setAuthHeaders(req)
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -358,8 +364,7 @@ func (a *AppleProvider) newCatalogRequest(ctx context.Context, method, endpoint 
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+a.cfg.AppleDeveloperToken)
-	req.Header.Set("Music-User-Token", a.cfg.AppleUserToken)
+	a.setAuthHeaders(req)
 	req.Header.Set("Origin", "https://music.apple.com")
 	return req, nil
 }
@@ -1585,11 +1590,17 @@ func (a *AppleProvider) GetArtistAlbums(ctx context.Context, artistID string) ([
 }
 
 func (a *AppleProvider) GetLibraryAlbumTracks(ctx context.Context, albumID string) ([]provider.Track, error) {
+	if err := validateResourceID(albumID); err != nil {
+		return nil, fmt.Errorf("GetLibraryAlbumTracks: %w", err)
+	}
 	endpoint := fmt.Sprintf("/me/library/albums/%s/tracks?limit=100", url.PathEscape(albumID))
 	return a.fetchSongsPaginated(ctx, endpoint, false)
 }
 
 func (a *AppleProvider) GetCatalogPlaylistTracks(ctx context.Context, playlistID string) ([]provider.Track, error) {
+	if err := validateResourceID(playlistID); err != nil {
+		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)
+	}
 	sf, err := a.storefront(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetCatalogPlaylistTracks: %w", err)

@@ -1,6 +1,7 @@
 package lastfm
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -137,5 +138,26 @@ func TestClient_TransportErrorRedactsQuery(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret-tok-123") || strings.Contains(err.Error(), "api_sig=") {
 		t.Errorf("error leaked sensitive query params: %v", err)
+	}
+}
+
+func TestCheckAPIError_SanitizesBiDiC1ANSIAndCapsLength(t *testing.T) {
+	msg := "\x1b[31mred\x1b[0m\u009b2Jbad\u202espoof" + strings.Repeat("a", 900)
+	body, err := json.Marshal(map[string]any{"error": 6, "message": msg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = checkAPIError(body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	got := err.Error()
+	for _, forbidden := range []string{"\x1b", "\u009b", "\u202e"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("error message retained unsafe control/bidi %q: %q", forbidden, got)
+		}
+	}
+	if len(got) > 560 {
+		t.Errorf("error length %d exceeds bounded limit", len(got))
 	}
 }
