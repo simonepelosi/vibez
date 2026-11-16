@@ -53,8 +53,10 @@ release: check-deps
 	@test -n "$$LASTFM_API_KEY"    || { echo "LASTFM_API_KEY is not set";    exit 1; }
 	@test -n "$$LASTFM_API_SECRET" || { echo "LASTFM_API_SECRET is not set"; exit 1; }
 	@set -e; \
+	echo "Verifying Go modules..."; \
+	go mod verify; \
 	echo "Building release binary..."; \
-	go build \
+	go build -mod=readonly \
 		-ldflags "-s -w \
 		          -X 'github.com/simone-vibes/vibez/internal/auth.tokenURL=$$VIBEZ_TOKEN_URL' \
 		          -X 'github.com/simone-vibes/vibez/internal/auth.clientKey=$$VIBEZ_CLIENT_KEY' \

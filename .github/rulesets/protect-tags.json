@@ -17,13 +17,16 @@
   ],
   "rules": [
     {
+      "type": "creation"
+    },
+    {
       "type": "deletion"
     },
     {
-      "type": "non_fast_forward"
+      "type": "update"
     },
     {
-      "type": "required_linear_history"
+      "type": "non_fast_forward"
     }
   ]
 }

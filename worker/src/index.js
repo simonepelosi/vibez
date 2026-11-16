@@ -59,12 +59,14 @@ export async function signToken({ keyId, teamId, privateKeyPem, now = Date.now()
   return { token: `${signingInput}.${b64url(new Uint8Array(sig))}`, exp };
 }
 
-function timingSafeEqual(a, b) {
-  const x = enc.encode(a);
-  const y = enc.encode(b);
-  if (x.length !== y.length) return false;
-  let diff = 0;
-  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+export function timingSafeEqual(a, b) {
+  const x = enc.encode(String(a ?? ""));
+  const y = enc.encode(String(b ?? ""));
+  const len = Math.max(x.length, y.length);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < len; i++) {
+    diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  }
   return diff === 0;
 }
 

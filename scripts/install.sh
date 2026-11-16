@@ -50,7 +50,7 @@ download() {
     if command -v curl >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -sSfL -o "${dst}" "${url}"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "${dst}" "${url}"
+        wget --https-only --secure-protocol=TLSv1_2 -qO "${dst}" "${url}"
     else
         die "Neither curl nor wget found — install one and try again."
     fi
@@ -62,7 +62,7 @@ fetch() {
     if command -v curl >/dev/null 2>&1; then
         curl --proto '=https' --tlsv1.2 -sSf "${url}"
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "${url}"
+        wget --https-only --secure-protocol=TLSv1_2 -qO- "${url}"
     else
         die "Neither curl nor wget found — install one and try again."
     fi
@@ -121,6 +121,8 @@ VERSION="$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
     | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
 
 [ -n "${VERSION}" ] || die "Could not determine latest version from GitHub API."
+printf '%s\n' "${VERSION}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$' \
+    || die "Refusing unexpected release version tag format: ${VERSION}"
 
 success "Latest: ${VERSION}"
 
@@ -186,6 +188,14 @@ elif [ "${ACTUAL}" != "${EXPECTED}" ]; then
     die "Checksum mismatch — the download may be corrupted. Please retry."
 else
     success "Checksum OK"
+fi
+
+if [ "${VIBEZ_VERIFY_ATTESTATION:-0}" = "1" ]; then
+    need_cmd gh
+    step "Verifying GitHub build provenance attestation…"
+    gh attestation verify "${TMP}/${ARCHIVE}" --repo "${REPO}" \
+        || die "Build provenance attestation verification failed."
+    success "Build provenance attestation OK"
 fi
 
 # ── install ───────────────────────────────────────────────────────────────────
