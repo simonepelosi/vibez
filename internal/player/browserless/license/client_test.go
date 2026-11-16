@@ -213,3 +213,35 @@ func TestValidateAppleServiceURL_AndRogueLicenseRejection(t *testing.T) {
 		t.Fatal("FetchPlaybackInfo accepted non-Apple hls-key-server-url, want error")
 	}
 }
+
+func TestValidateURLs_StrictProductionRejectsLoopbackAndBypass(t *testing.T) {
+	strictBad := []string{
+		"http://127.0.0.1:8080/seg.mp4",
+		"http://localhost/license",
+		"http://[::1]:8080/cert",
+		"https://127.0.0.1/seg.mp4",
+		"https://100.64.0.1/seg.mp4",
+		"https://[::1%25lo]/seg.mp4",
+		"https://2130706433/seg.mp4",
+		"https://sub.localhost/seg.mp4",
+	}
+	for _, u := range strictBad {
+		if err := validateUpstreamURL(u, false); err == nil {
+			t.Errorf("validateUpstreamURL(%q, false) = nil, want error", u)
+		}
+		if err := validateAppleServiceURL(u, false); err == nil {
+			t.Errorf("validateAppleServiceURL(%q, false) = nil, want error", u)
+		}
+	}
+
+	origURL, _ := url.Parse("https://play.itunes.apple.com/license")
+	origReq := &http.Request{URL: origURL}
+	evilURL, _ := url.Parse("https://cdn.evil.example/license")
+	if err := redirectPolicy(true)(&http.Request{URL: evilURL}, []*http.Request{origReq}); err == nil {
+		t.Fatal("redirectPolicy(true) allowed redirect to non-Apple host")
+	}
+	appleSubURL, _ := url.Parse("https://mzstatic.apple.com/license")
+	if err := redirectPolicy(true)(&http.Request{URL: appleSubURL}, []*http.Request{origReq}); err != nil {
+		t.Fatalf("redirectPolicy(true) rejected valid Apple subdomain redirect: %v", err)
+	}
+}

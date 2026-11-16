@@ -8,13 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/simone-vibes/vibez/internal/config"
+	"github.com/simone-vibes/vibez/internal/netguard"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
 
@@ -55,79 +55,69 @@ func NewClient(cfg *config.Config) *Client {
 	return NewClientWithHTTP(cfg, nil)
 }
 
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 func isAppleServiceHost(host string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host == "apple.com" || strings.HasSuffix(host, ".apple.com")
 }
 
-// ValidateUpstreamURL ensures an upstream media/license URL has an allowed scheme
-// (HTTPS, or loopback HTTP for local/test playback), a host, and no embedded
-// userinfo or control bytes.
+// ValidateUpstreamURL ensures an upstream media/playback URL uses public HTTPS
+// (with loopback HTTP/HTTPS allowed only under `go test` harnesses), a valid
+// non-SSRF host, and no userinfo or control/format runes.
 func ValidateUpstreamURL(rawURL string) error {
-	if rawURL == "" || strings.ContainsAny(rawURL, "\r\n\x00") {
-		return errors.New("empty or control-character upstream URL")
+	return validateUpstreamURL(rawURL, testing.Testing())
+}
+
+func validateUpstreamURL(rawURL string, allowLoopback bool) error {
+	if _, err := netguard.ParseSafeURL(rawURL, 0, allowLoopback); err != nil {
+		return fmt.Errorf("disallowed upstream URL: %w", err)
 	}
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid upstream URL: %w", err)
-	}
-	if u.Host == "" || u.User != nil {
-		return errors.New("upstream URL must include host without userinfo")
-	}
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		if isLoopbackHost(u.Hostname()) {
-			return nil
-		}
-		return fmt.Errorf("disallowed insecure upstream scheme %q for non-loopback host", u.Scheme)
-	default:
-		return fmt.Errorf("disallowed upstream URL scheme %q", u.Scheme)
-	}
+	return nil
 }
 
 // ValidateAppleServiceURL ensures credential-bearing license/certificate URLs
-// point strictly to Apple domains over HTTPS (or loopback in tests) so Apple
-// Music credentials cannot be exfiltrated to arbitrary upstream hosts.
+// point strictly to *.apple.com over public HTTPS (or loopback in tests).
 func ValidateAppleServiceURL(rawURL string) error {
-	if err := ValidateUpstreamURL(rawURL); err != nil {
-		return err
+	return validateAppleServiceURL(rawURL, testing.Testing())
+}
+
+func validateAppleServiceURL(rawURL string, allowLoopback bool) error {
+	u, err := netguard.ParseSafeURL(rawURL, 0, allowLoopback)
+	if err != nil {
+		return fmt.Errorf("disallowed Apple service URL: %w", err)
 	}
-	u, _ := url.Parse(rawURL)
 	host := u.Hostname()
-	if isLoopbackHost(host) || isAppleServiceHost(host) {
+	if (allowLoopback && netguard.IsLoopbackHost(host)) || isAppleServiceHost(host) {
 		return nil
 	}
 	return fmt.Errorf("refusing non-Apple license/certificate host %q", host)
 }
 
-func safeRedirectPolicy(req *http.Request, via []*http.Request) error {
-	if len(via) >= 5 {
-		return errors.New("stopped after 5 redirects")
-	}
-	if err := ValidateUpstreamURL(req.URL.String()); err != nil {
-		return fmt.Errorf("disallowed redirect target: %w", err)
-	}
-	if len(via) > 0 {
-		orig := via[0].URL
-		if req.URL.Scheme != orig.Scheme || !strings.EqualFold(req.URL.Host, orig.Host) {
-			req.Header.Del("Authorization")
-			req.Header.Del("X-Apple-Music-User-Token")
-			req.Header.Del("Music-User-Token")
-			req.Header.Del("Cookie")
+func redirectPolicy(requireAppleService bool) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("stopped after 5 redirects")
 		}
+		if requireAppleService {
+			if err := ValidateAppleServiceURL(req.URL.String()); err != nil {
+				return fmt.Errorf("disallowed Apple service redirect target: %w", err)
+			}
+		} else if err := ValidateUpstreamURL(req.URL.String()); err != nil {
+			return fmt.Errorf("disallowed redirect target: %w", err)
+		}
+		if len(via) > 0 {
+			orig := via[0].URL
+			if req.URL.Scheme != orig.Scheme || !strings.EqualFold(req.URL.Host, orig.Host) {
+				req.Header.Del("Authorization")
+				req.Header.Del("X-Apple-Music-User-Token")
+				req.Header.Del("Music-User-Token")
+				req.Header.Del("Cookie")
+			}
+		}
+		return nil
 	}
-	return nil
 }
+
+var safeRedirectPolicy = redirectPolicy(false)
 
 // NewClientWithHTTP constructs a license Client using a custom *http.Client
 // (or a default pooled 15s-timeout client when httpClient is nil).
@@ -145,6 +135,7 @@ func defaultHTTPClient() *http.Client {
 	var rt http.RoundTripper
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		tr := base.Clone()
+		tr.DialContext = netguard.NewSafeDialContext(5*time.Second, testing.Testing())
 		tr.MaxIdleConnsPerHost = 16
 		rt = tr
 	}
@@ -153,6 +144,15 @@ func defaultHTTPClient() *http.Client {
 		Transport:     rt,
 		CheckRedirect: safeRedirectPolicy,
 	}
+}
+
+// appleServiceHTTPClient returns a shallow clone of c.HTTPClient() enforcing
+// strict Apple-domain redirect validation without cloning connection pools.
+func (c *Client) appleServiceHTTPClient() *http.Client {
+	base := c.HTTPClient()
+	clone := *base
+	clone.CheckRedirect = redirectPolicy(true)
+	return &clone
 }
 
 // HTTPClient returns the underlying *http.Client used for upstream requests.
@@ -184,7 +184,7 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 	}
 	c.setHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.appleServiceHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("webPlayback request failed: %w", err)
 	}
@@ -277,7 +277,7 @@ func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (st
 	}
 	c.setHeaders(req)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.appleServiceHTTPClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("webPlayback request failed: %w", err)
 	}
@@ -321,7 +321,7 @@ func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.appleServiceHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching widevine certificate: %w", err)
 	}
@@ -367,7 +367,7 @@ func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challeng
 	c.setHeaders(req)
 	req.Header.Set("X-Apple-Renewal", "true")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.appleServiceHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("acquire license HTTP failed: %w", err)
 	}
