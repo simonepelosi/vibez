@@ -138,14 +138,14 @@ func resolveDeveloperToken(cfg *config.Config, allowAsyncRefresh bool) (<-chan s
 		return closedChan(), nil
 	}
 	if tokenURL == "" {
-		if cfg.AppleDeveloperToken != "" {
+		if cfg.DeveloperToken() != "" {
 			logBroker("[broker] using developer token from config file")
 		}
 		return closedChan(), nil
 	}
 	tok, done, err := brokerTokenWithCallback(tokenURL, clientKey, cachePath(), time.Now(), allowAsyncRefresh, cfg.SetRuntimeDeveloperToken)
 	if err != nil {
-		if cfg.AppleDeveloperToken != "" {
+		if cfg.DeveloperToken() != "" {
 			logBroker(fmt.Sprintf("[broker] falling back to configured apple_developer_token after broker error: %v", err))
 		}
 		return done, err

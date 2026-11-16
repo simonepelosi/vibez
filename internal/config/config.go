@@ -20,7 +20,8 @@ type Config struct {
 	// path remembers where this config was loaded from. It is deliberately not
 	// serialized; it only ensures that Save("") persists back to the selected
 	// --config file instead of silently falling back to the default profile.
-	path string
+	path    string
+	tokenMu sync.RWMutex
 
 	// Runtime-injected credentials (embedded via ldflags or fetched from a token
 	// broker) and the values read from disk, so Save() never writes ephemeral or
@@ -132,21 +133,69 @@ func (c *Config) SetVolume(v float64) {
 	c.Volume = &v
 }
 
+// IsVibeLocalOnly reports whether vibe_privacy explicitly restricts Vibe Mode
+// to on-device runtimes with external CLI agents disabled.
+func (c *Config) IsVibeLocalOnly() bool {
+	return c != nil && strings.EqualFold(strings.TrimSpace(c.VibePrivacy), "local-only")
+}
+
+// DeveloperToken returns the configured or runtime Apple developer token safely.
+func (c *Config) DeveloperToken() string {
+	if c == nil {
+		return ""
+	}
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.AppleDeveloperToken
+}
+
+// UserToken returns the saved Apple Music user token safely.
+func (c *Config) UserToken() string {
+	if c == nil {
+		return ""
+	}
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.AppleUserToken
+}
+
+// GetAppleTokens returns both the developer token and user token atomically.
+func (c *Config) GetAppleTokens() (devToken, userToken string) {
+	if c == nil {
+		return "", ""
+	}
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.AppleDeveloperToken, c.AppleUserToken
+}
+
+// SetUserToken updates the Apple Music user token in memory safely.
+func (c *Config) SetUserToken(tok string) {
+	if c == nil {
+		return
+	}
+	c.tokenMu.Lock()
+	c.AppleUserToken = tok
+	c.tokenMu.Unlock()
+}
+
 // SetRuntimeDeveloperToken stores an embedded or broker-fetched developer
 // token in memory so subsequent Save calls do not persist it into config.json.
 func (c *Config) SetRuntimeDeveloperToken(tok string) {
 	if tok == "" {
 		return
 	}
-	saveMu.Lock()
-	defer saveMu.Unlock()
+	c.tokenMu.Lock()
 	c.AppleDeveloperToken = tok
 	c.runtimeAppleDevToken = tok
+	c.tokenMu.Unlock()
 }
 
 // SetRuntimeLastfmCredentials stores build-time Last.fm credentials in memory
 // so subsequent Save calls do not persist them into config.json.
 func (c *Config) SetRuntimeLastfmCredentials(apiKey, apiSecret string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
 	if apiKey != "" {
 		c.LastfmAPIKey = apiKey
 		c.runtimeLastfmKey = apiKey
@@ -157,8 +206,36 @@ func (c *Config) SetRuntimeLastfmCredentials(apiKey, apiSecret string) {
 	}
 }
 
-func (c *Config) forPersistence() Config {
-	out := *c
+func (c *Config) forPersistence() *Config {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	out := &Config{
+		AppleDeveloperToken: c.AppleDeveloperToken,
+		AppleUserToken:      c.AppleUserToken,
+		AppleKeyID:          c.AppleKeyID,
+		AppleTeamID:         c.AppleTeamID,
+		StoreFront:          c.StoreFront,
+		AuthPort:            c.AuthPort,
+		Provider:            c.Provider,
+		Theme:               c.Theme,
+		AudioQuality:        c.AudioQuality,
+		Volume:              c.Volume,
+		LastfmAPIKey:        c.LastfmAPIKey,
+		LastfmAPISecret:     c.LastfmAPISecret,
+		LastfmSessionKey:    c.LastfmSessionKey,
+		EQBands:             c.EQBands,
+		WSL:                 c.WSL,
+		AlbumArt:            c.AlbumArt,
+		MusicDir:            c.MusicDir,
+		HybridPlayback:      c.HybridPlayback,
+		DiscordRPC:          c.DiscordRPC,
+		DiscordClientID:     c.DiscordClientID,
+		VibeBackend:         c.VibeBackend,
+		VibePrivacy:         c.VibePrivacy,
+		VibeModel:           c.VibeModel,
+		VibeEndpoint:        c.VibeEndpoint,
+		VibeTimeout:         c.VibeTimeout,
+	}
 	if c.runtimeAppleDevToken != "" && c.AppleDeveloperToken == c.runtimeAppleDevToken {
 		out.AppleDeveloperToken = c.diskAppleDevToken
 	}
@@ -290,7 +367,7 @@ func (c *Config) save(path string) error {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 	toSave := c.forPersistence()
-	data, err := json.MarshalIndent(&toSave, "", "  ")
+	data, err := json.MarshalIndent(toSave, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshalling config: %w", err)
 	}
@@ -325,9 +402,11 @@ func (c *Config) save(path string) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replacing config: %w", err)
 	}
+	c.tokenMu.Lock()
 	c.diskAppleDevToken = toSave.AppleDeveloperToken
 	c.diskLastfmKey = toSave.LastfmAPIKey
 	c.diskLastfmSecret = toSave.LastfmAPISecret
+	c.tokenMu.Unlock()
 	cleanup = false
 	return nil
 }

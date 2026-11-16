@@ -472,3 +472,40 @@ func TestVibe_Lines_BearFixedWidthNoCombiningMarks(t *testing.T) {
 		v.SetResult(0, errors.New("none"))
 	}, "no results")
 }
+
+func TestVibe_Lines_NarrowWidthsNeverPanic(t *testing.T) {
+	widths := []int{0, 1, 2, 4, 8, 16}
+	heights := []int{1, 3, 8}
+	for _, w := range widths {
+		for _, h := range heights {
+			v := NewVibe()
+			v.SetSearching()
+			v.lastQ = "extremely long vibe query string"
+			_ = v.Lines(w, h, 0)
+
+			v.SetResult(3, nil)
+			v.explanation = "warm ambient electronic mix"
+			v.SetUsage("384 tok (290↑ 94↓)")
+			_ = v.Lines(w, h, 1)
+
+			v.SetResult(0, errors.New("none"))
+			_ = v.Lines(w, h, 2)
+
+			v.SetDiscovery(DiscoveryInfo{
+				Active:     true,
+				SeedArtist: "Boards of Canada",
+				SeedTitle:  "Roygbiv",
+				Similarity: -0.5,
+			})
+			_ = v.Lines(w, h, 3)
+
+			v.SetDiscovery(DiscoveryInfo{
+				Active:     true,
+				SeedArtist: "Boards of Canada",
+				SeedTitle:  "Roygbiv",
+				Similarity: 2.0,
+			})
+			_ = v.Lines(w, h, 4)
+		}
+	}
+}

@@ -2,7 +2,9 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -594,5 +596,39 @@ func TestLoginWithLogger_CapturesStatusMessages(t *testing.T) {
 	}
 	if !containsSubstr(string(loginHTML), "DOMContentLoaded") || !containsSubstr(string(loginHTML), "PopupBlockedError") {
 		t.Error("login.html missing auto-connect DOMContentLoaded fallback handling")
+	}
+}
+
+func TestLoginWithContext_CancelAbortsLogin(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+
+	cfg := &config.Config{ //nolint:gosec // G101: test value, not a real credential
+		AppleDeveloperToken: "cancel-test-dev-token",
+		AuthPort:            0,
+	}
+	origOpen := openBrowser
+	opened := make(chan struct{}, 1)
+	openBrowser = func(string) error {
+		select {
+		case opened <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	t.Cleanup(func() { openBrowser = origOpen })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		<-opened
+		cancel()
+	}()
+
+	err := LoginWithContext(ctx, cfg, func(string) {})
+	if !errors.Is(err, ErrLoginCancelled) {
+		t.Fatalf("LoginWithContext err = %v, want ErrLoginCancelled", err)
+	}
+	if cfg.UserToken() != "" {
+		t.Fatalf("cancelled login set UserToken = %q, want empty", cfg.UserToken())
 	}
 }

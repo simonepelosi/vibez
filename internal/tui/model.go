@@ -444,8 +444,9 @@ type Model struct {
 	// Vibe planner (auto-detected on-device runtime or KeywordAgent fallback).
 	vibePlanner vibe.Planner
 
-	// Optional callback to trigger asynchronous Apple Music login/re-auth.
+	// Optional callbacks to trigger or tear down Apple Music login/re-auth.
 	onReauth func()
+	onLogout func()
 
 	// Frame-local render caches for static border/status segments.
 	cachedHorizW    int
@@ -481,6 +482,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		activePanel:    -1,
 		memProfiling:   opts.MemProfiling,
 		onReauth:       opts.OnReauth,
+		onLogout:       opts.OnLogout,
 		preMuteVol:     -1,
 		artMode:        cfg.AlbumArt,
 		artwork:        artworkCache{rendered: map[art.Size][]string{}},
@@ -1887,16 +1889,30 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 
 	case cmd == "logout":
 		if m.cfg != nil {
-			m.cfg.AppleUserToken = ""
+			m.cfg.SetUserToken("")
 			if err := m.cfg.Save(""); err != nil {
 				m.errMsg = fmt.Sprintf("logout save error: %v", err)
 				m.errExpiry = time.Now().Add(4 * time.Second)
 				return nil
 			}
 		}
+		if m.onLogout != nil {
+			m.onLogout()
+		}
+		m.queueTracks = nil
+		m.playerState.Track = nil
+		m.playerState.Playing = false
+		m.playerState.Loading = false
+		m.lastLyricsTrackID = ""
+		m.artwork = artworkCache{rendered: map[art.Size][]string{}}
+		clear(m.artworkLRU)
+		clear(m.checkedRatings)
 		m.appendLog("[auth] logged out of Apple Music")
 		m.errMsg = "✓ Logged out of Apple Music (use :login to reconnect)"
 		m.errExpiry = time.Now().Add(5 * time.Second)
+		if m.player != nil {
+			return m.playerCmd(func(p player.Player) error { return p.Stop() })
+		}
 		return nil
 
 	case strings.HasPrefix(cmd, "quality"):
@@ -2029,6 +2045,11 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 				return nil
 			}
 			backend = vibe.NormalizeCLIAgent(backend)
+			if m.cfg.IsVibeLocalOnly() {
+				m.errMsg = fmt.Sprintf(":vibe %s blocked by vibe_privacy=local-only", backend)
+				m.errExpiry = time.Now().Add(4 * time.Second)
+				return nil
+			}
 		}
 		if m.cfg != nil {
 			m.cfg.VibeBackend = backend
@@ -2815,16 +2836,29 @@ func (m *Model) scheduleSearch(query string) tea.Cmd {
 	}
 }
 
-// detectVibePlannerCmd asynchronously probes configured on-device runtimes
-// (Ollama / LM Studio / custom endpoint) and falls back to KeywordAgent.
-func (m *Model) detectVibePlannerCmd() tea.Cmd {
+func (m *Model) vibeDetectOptions() (vibe.DetectOptions, time.Duration) {
 	var opts vibe.DetectOptions
+	planTimeout := vibe.DefaultPlanTimeout
 	if m.cfg != nil {
 		opts.Backend = m.cfg.VibeBackend
 		opts.Model = m.cfg.VibeModel
 		opts.Endpoint = m.cfg.VibeEndpoint
+		if custom := m.cfg.VibePlanTimeout(); custom > 0 {
+			planTimeout = custom
+		}
 		opts.PlanTimeout = m.cfg.VibePlanTimeout()
+		if m.cfg.IsVibeLocalOnly() {
+			opts.AllowRemote = false
+			opts.DisableCLI = true
+		}
 	}
+	return opts, planTimeout
+}
+
+// detectVibePlannerCmd asynchronously probes configured on-device runtimes
+// (Ollama / LM Studio / custom endpoint) and falls back to KeywordAgent.
+func (m *Model) detectVibePlannerCmd() tea.Cmd {
+	opts, _ := m.vibeDetectOptions()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
 		defer cancel()
@@ -2839,17 +2873,8 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 func (m *Model) runVibeSearch(query string) tea.Cmd {
 	prov := m.provider
 	planner := m.vibePlanner
-	var detectOpts vibe.DetectOptions
-	planTimeout := vibe.DefaultPlanTimeout
-	if m.cfg != nil {
-		detectOpts.Backend = m.cfg.VibeBackend
-		detectOpts.Model = m.cfg.VibeModel
-		detectOpts.Endpoint = m.cfg.VibeEndpoint
-		if custom := m.cfg.VibePlanTimeout(); custom > 0 {
-			planTimeout = custom
-		}
-		detectOpts.PlanTimeout = planTimeout
-	}
+	detectOpts, planTimeout := m.vibeDetectOptions()
+	detectOpts.PlanTimeout = planTimeout
 
 	playerIdle := m.playerState.Track == nil && len(m.queueTracks) == 0 && !m.playerState.Playing && !m.playerState.Loading
 	var nowPlaying string
@@ -3925,7 +3950,7 @@ func (m *Model) searchLines(contentW, h int) []string {
 	after := textStyle.Render(string(runes[cur:]))
 
 	inputLine := accent.Render("/") + "  " + before + cursor + after
-	sep := muted.Render(strings.Repeat("─", contentW))
+	sep := muted.Render(strings.Repeat("─", max(1, contentW)))
 
 	// Reserve input(1) + sep(1) = 2 lines; search actions live in statusLines.
 	listH := max(1, h-2)
@@ -4443,7 +4468,8 @@ func (m *Model) pickerWindow() (start, end int) {
 
 // renderPlaylistPickerModal renders the centered "Add to playlist" modal.
 func (m *Model) renderPlaylistPickerModal() string {
-	innerW := min(46, m.width-8)
+	innerW := max(1, min(46, m.width-8))
+	labelMaxW := max(1, innerW-3)
 	sep := styles.QueueItemMuted.Render(strings.Repeat("─", innerW))
 
 	var lines []string
@@ -4451,7 +4477,7 @@ func (m *Model) renderPlaylistPickerModal() string {
 	// Title line
 	title := "Add to playlist"
 	if m.playlistPickerTrack != nil {
-		title = "+ " + truncateStr(m.playlistPickerTrack.Title, innerW-3)
+		title = "+ " + truncateStr(m.playlistPickerTrack.Title, labelMaxW)
 	}
 	lines = append(lines, styles.NowPlayingTitlePlaying.Render(title))
 	lines = append(lines, sep)
@@ -4467,7 +4493,7 @@ func (m *Model) renderPlaylistPickerModal() string {
 			lines = append(lines, styles.QueueItemMuted.Render(fmt.Sprintf("  ↑ %d more", start)))
 		}
 		for i := start; i < end; i++ {
-			name := truncateStr(m.playlistPickerItems[i].Name, innerW-3)
+			name := truncateStr(m.playlistPickerItems[i].Name, labelMaxW)
 			if i == m.playlistPickerCursor {
 				lines = append(lines, styles.Playing.Render("▶ "+name))
 			} else {

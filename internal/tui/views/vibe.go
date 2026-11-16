@@ -355,7 +355,9 @@ func (v *VibeModel) selectPickerOption(idx int) tea.Cmd {
 // similarityBar returns a styled block-progress bar and a label for the similarity value.
 // The bar interpolates from blue (adventurous/different) to purple (similar/focused).
 func similarityBar(similarity float64, barWidth int) (string, string) {
-	filled := min(int(similarity*float64(barWidth)), barWidth)
+	similarity = max(0.0, min(1.0, similarity))
+	barWidth = max(1, barWidth)
+	filled := max(0, min(int(similarity*float64(barWidth)), barWidth))
 
 	// Colour of the filled portion: blue at 0.0 → purple at 1.0
 	barColor := styles.LerpColor(styles.ColorProgress, styles.ColorPrimary, similarity)
@@ -400,12 +402,16 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 
 	clip := func(s string, maxLen int) string {
 		if maxLen <= 0 {
-			maxLen = w - 4
+			maxLen = max(w-4, 1)
 		}
-		if len([]rune(s)) > maxLen {
-			return string([]rune(s)[:maxLen-1]) + "…"
+		runes := []rune(s)
+		if len(runes) <= maxLen {
+			return s
 		}
-		return s
+		if maxLen <= 1 {
+			return "…"
+		}
+		return string(runes[:maxLen-1]) + "…"
 	}
 
 	var lines []string

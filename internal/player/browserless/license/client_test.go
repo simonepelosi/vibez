@@ -162,3 +162,54 @@ func TestFetchPlaybackInfo_ValidatesURLsAndSanitizesErrorBody(t *testing.T) {
 		t.Errorf("error message contains unsanitized control/BiDi chars: %q", msg)
 	}
 }
+
+func TestValidateAppleServiceURL_AndRogueLicenseRejection(t *testing.T) {
+	good := []string{
+		"https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense",
+		"https://music.apple.com/license",
+		"https://apple.com/cert",
+		"http://127.0.0.1:8080/license",
+		"http://[::1]:8080/cert",
+	}
+	for _, u := range good {
+		if err := ValidateAppleServiceURL(u); err != nil {
+			t.Errorf("ValidateAppleServiceURL(%q) = %v, want nil", u, err)
+		}
+	}
+	bad := []string{
+		"https://evil.example.com/license",
+		"https://apple.com.evil.com/license",
+		"https://notapple.com/cert",
+		"http://play.itunes.apple.com/cert",
+		"https://user:pass@play.itunes.apple.com/cert",
+	}
+	for _, u := range bad {
+		if err := ValidateAppleServiceURL(u); err == nil {
+			t.Errorf("ValidateAppleServiceURL(%q) = nil, want error", u)
+		}
+	}
+
+	called := false
+	c := NewClient(&config.Config{
+		AppleDeveloperToken: "secret-dev-token",
+		AppleUserToken:      "secret-user-token",
+	})
+	c.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("should not contact rogue host")
+	})
+
+	if _, err := c.AcquireLicense(context.Background(), "https://evil.example.com/license", []byte("req"), "skd://1", "123"); err == nil || called {
+		t.Fatalf("AcquireLicense rogue host: err=%v called=%v, want error without network call", err, called)
+	}
+	if _, err := c.FetchServerCertificate(context.Background(), "https://apple.com.evil.com/cert"); err == nil || called {
+		t.Fatalf("FetchServerCertificate rogue host: err=%v called=%v, want error without network call", err, called)
+	}
+
+	c.httpClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(`{"songList":[{"songId":"123","hls-key-server-url":"https://evil.example.com/key","assets":[{"flavor":"28:ctrp256","URL":"https://cdn.example.com/stream.m3u8"}]}]}`), nil
+	})
+	if _, err := c.FetchPlaybackInfo(context.Background(), "123", true); err == nil {
+		t.Fatal("FetchPlaybackInfo accepted non-Apple hls-key-server-url, want error")
+	}
+}

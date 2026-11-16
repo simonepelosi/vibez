@@ -63,6 +63,11 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func isAppleServiceHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return host == "apple.com" || strings.HasSuffix(host, ".apple.com")
+}
+
 // ValidateUpstreamURL ensures an upstream media/license URL has an allowed scheme
 // (HTTPS, or loopback HTTP for local/test playback), a host, and no embedded
 // userinfo or control bytes.
@@ -90,6 +95,21 @@ func ValidateUpstreamURL(rawURL string) error {
 	}
 }
 
+// ValidateAppleServiceURL ensures credential-bearing license/certificate URLs
+// point strictly to Apple domains over HTTPS (or loopback in tests) so Apple
+// Music credentials cannot be exfiltrated to arbitrary upstream hosts.
+func ValidateAppleServiceURL(rawURL string) error {
+	if err := ValidateUpstreamURL(rawURL); err != nil {
+		return err
+	}
+	u, _ := url.Parse(rawURL)
+	host := u.Hostname()
+	if isLoopbackHost(host) || isAppleServiceHost(host) {
+		return nil
+	}
+	return fmt.Errorf("refusing non-Apple license/certificate host %q", host)
+}
+
 func safeRedirectPolicy(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return errors.New("stopped after 5 redirects")
@@ -102,6 +122,8 @@ func safeRedirectPolicy(req *http.Request, via []*http.Request) error {
 		if req.URL.Scheme != orig.Scheme || !strings.EqualFold(req.URL.Host, orig.Host) {
 			req.Header.Del("Authorization")
 			req.Header.Del("X-Apple-Music-User-Token")
+			req.Header.Del("Music-User-Token")
+			req.Header.Del("Cookie")
 		}
 	}
 	return nil
@@ -216,12 +238,12 @@ func (c *Client) FetchPlaybackInfo(ctx context.Context, songID string, prefer256
 		return nil, fmt.Errorf("invalid HLS playlist URL: %w", err)
 	}
 	if item.HLSKeyServerURL != "" {
-		if err := ValidateUpstreamURL(item.HLSKeyServerURL); err != nil {
+		if err := ValidateAppleServiceURL(item.HLSKeyServerURL); err != nil {
 			return nil, fmt.Errorf("invalid HLS key server URL: %w", err)
 		}
 	}
 	if item.WidevineCertURL != "" {
-		if err := ValidateUpstreamURL(item.WidevineCertURL); err != nil {
+		if err := ValidateAppleServiceURL(item.WidevineCertURL); err != nil {
 			return nil, fmt.Errorf("invalid Widevine cert URL: %w", err)
 		}
 	}
@@ -290,7 +312,7 @@ func (c *Client) FetchLibraryAssetURL(ctx context.Context, libraryID string) (st
 func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]byte, error) {
 	if certURL == "" {
 		certURL = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/widevineCert"
-	} else if err := ValidateUpstreamURL(certURL); err != nil {
+	} else if err := ValidateAppleServiceURL(certURL); err != nil {
 		return nil, fmt.Errorf("invalid widevine cert URL: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, certURL, nil)
@@ -323,7 +345,7 @@ func (c *Client) FetchServerCertificate(ctx context.Context, certURL string) ([]
 func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challenge []byte, keyURI, songID string) ([]byte, error) {
 	if licenseURL == "" {
 		licenseURL = "https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense"
-	} else if err := ValidateUpstreamURL(licenseURL); err != nil {
+	} else if err := ValidateAppleServiceURL(licenseURL); err != nil {
 		return nil, fmt.Errorf("invalid license server URL: %w", err)
 	}
 
@@ -381,8 +403,9 @@ func (c *Client) AcquireLicense(ctx context.Context, licenseURL string, challeng
 }
 
 func (c *Client) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+c.cfg.AppleDeveloperToken)
-	req.Header.Set("X-Apple-Music-User-Token", c.cfg.AppleUserToken)
+	devTok, usrTok := c.cfg.GetAppleTokens()
+	req.Header.Set("Authorization", "Bearer "+devTok)
+	req.Header.Set("X-Apple-Music-User-Token", usrTok)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Origin", "https://music.apple.com")

@@ -169,11 +169,11 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	}
 	opts.InitialLogs = brokerLogs
 
-	if tokenErr != nil && cfg.AppleDeveloperToken == "" {
+	if tokenErr != nil && cfg.DeveloperToken() == "" {
 		return tokenErr
 	}
 
-	if cfg.AppleDeveloperToken == "" {
+	if cfg.DeveloperToken() == "" {
 		return fmt.Errorf("apple developer token not set.\n\nSet apple_developer_token in %s\nor run: go run ./scripts/gen-devtoken", cfgPath)
 	}
 
@@ -186,7 +186,7 @@ func runTUI(_ *cobra.Command, _ []string) error {
 	opts.IconPath = iconPath
 
 	onUserToken := func(token string) {
-		cfg.AppleUserToken = token
+		cfg.SetUserToken(token)
 		if saveErr := cfg.Save(""); saveErr != nil && debug {
 			fmt.Fprintf(os.Stderr, "debug: saving user token: %v\n", saveErr)
 		}

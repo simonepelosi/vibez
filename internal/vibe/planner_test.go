@@ -575,3 +575,15 @@ func TestTokenUsage_FormatAndPlanners(t *testing.T) {
 		t.Errorf("OpenAICompatPlanner Usage = %+v, want 250/75/325 exact", oaPlan.Usage)
 	}
 }
+
+func TestExtractJSONObject_BalancedAndStringEscapes(t *testing.T) {
+	raw := "Thinking {trace}\n```json\n{\"action\":\"play_now\",\"explanation\":\"use {braces} and \\\"quotes\\\"\",\"search_queries\":[\"jazz\"]}\n```\nDone {\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}"
+	got := extractJSONObject(raw)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatalf("extractJSONObject failed to yield valid JSON (%q): %v", got, err)
+	}
+	if m["action"] != "play_now" {
+		t.Fatalf("extracted unexpected object: %v", m)
+	}
+}

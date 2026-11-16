@@ -607,7 +607,7 @@ func (m *LibraryModel) renderDrillView() string {
 		name = styles.SidebarActive.Render("Tracks")
 	}
 	hint := styles.QueueItemMuted.Render("  b/esc back · enter play · tab queue · shift+tab next")
-	header := name + hint + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", m.width))
+	header := name + hint + "\n" + lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(strings.Repeat("─", max(1, m.width)))
 	if m.drillLoading {
 		return header + "\n\n  " + m.spinner.View() + " Loading tracks…"
 	}

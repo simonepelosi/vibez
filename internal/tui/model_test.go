@@ -50,6 +50,7 @@ type mockPlayer struct {
 	state              player.State
 	playCalled         bool
 	pauseCalled        bool
+	stopCalled         bool
 	nextCalled         bool
 	prevCalled         bool
 	closeCalled        bool
@@ -70,7 +71,7 @@ func newMockPlayer() *mockPlayer {
 
 func (m *mockPlayer) Play() error     { m.playCalled = true; return m.err }
 func (m *mockPlayer) Pause() error    { m.pauseCalled = true; return m.err }
-func (m *mockPlayer) Stop() error     { return m.err }
+func (m *mockPlayer) Stop() error     { m.stopCalled = true; return m.err }
 func (m *mockPlayer) Next() error     { m.nextCalled = true; return m.err }
 func (m *mockPlayer) Previous() error { m.prevCalled = true; return m.err }
 func (m *mockPlayer) Seek(pos time.Duration) error {
@@ -5457,5 +5458,51 @@ func TestExecuteCommand_LoginLogoutAndIntroURL(t *testing.T) {
 	introOut := ansi.Strip(m.renderIntro())
 	if !strings.Contains(introOut, "http://localhost:7777/login?state=abc123xyz") {
 		t.Fatalf("renderIntro truncated or omitted login URL:\n%s", introOut)
+	}
+}
+
+func TestLogout_TearsDownSessionAndPlaylistPickerNarrowWidth(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	logoutCalled := false
+	m.onLogout = func() { logoutCalled = true }
+	m.cfg.SetUserToken("secret-tok")
+	m.queueTracks = []provider.Track{{ID: "t1", Title: "Song"}}
+	m.playerState.Track = &provider.Track{ID: "t1", Title: "Song"}
+	m.playerState.Playing = true
+	m.checkedRatings["t1"] = true
+
+	cmd := m.executeCommand("logout")
+	if !logoutCalled {
+		t.Fatal(":logout did not invoke onLogout callback")
+	}
+	if m.cfg.UserToken() != "" {
+		t.Fatalf(":logout left UserToken = %q", m.cfg.UserToken())
+	}
+	if len(m.queueTracks) != 0 || m.playerState.Playing || m.playerState.Track != nil || len(m.checkedRatings) != 0 {
+		t.Fatalf(":logout left playback/cache state populated: queue=%d playing=%v", len(m.queueTracks), m.playerState.Playing)
+	}
+	if cmd == nil {
+		t.Fatal(":logout with active player did not return Stop command")
+	}
+	_ = cmd()
+	if !mp.stopCalled {
+		t.Fatal(":logout did not call player.Stop()")
+	}
+
+	m.playlistPickerTrack = &provider.Track{ID: "t1", Title: "Very Long Song Title"}
+	m.playlistPickerItems = []provider.Playlist{{ID: "p1", Name: "Very Long Playlist Name"}}
+	for _, w := range []int{0, 1, 5, 8, 9, 12} {
+		m.width = w
+		_ = m.renderPlaylistPickerModal()
+	}
+
+	m.cfg.VibePrivacy = "local-only"
+	if cmd := m.executeCommand("vibe claude"); cmd != nil {
+		t.Fatal("expected :vibe claude to be blocked under vibe_privacy=local-only")
+	}
+	opts, _ := m.vibeDetectOptions()
+	if opts.AllowRemote || !opts.DisableCLI {
+		t.Fatalf("vibeDetectOptions with local-only = %+v, want AllowRemote=false DisableCLI=true", opts)
 	}
 }
