@@ -3,8 +3,11 @@ package player
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/simone-vibes/vibez/internal/provider"
 )
 
 // collectLogs reads log entries from ch until it has want of them or the read
@@ -292,4 +295,53 @@ func TestBroadcastTrimClearsEvictedBackingSlots(t *testing.T) {
 			t.Fatalf("spare backing slot %d retained non-zero State: %+v", i, s)
 		}
 	}
+}
+
+func TestBroadcastConcurrentSendUnsubscribeAndTrackIsolation(t *testing.T) {
+	var b Broadcast
+	subA := b.Subscribe()
+	subB := b.Subscribe()
+	defer b.Close()
+
+	orig := &provider.Track{
+		ID:            "track-1",
+		Title:         "Original",
+		Genres:        []string{"Rock"},
+		AudioVariants: []string{"lossless"},
+	}
+	b.Send(State{Track: orig, Playing: true})
+	// Mutating sender state after Send must not race or mutate delivered snapshots.
+	orig.Title = "Mutated"
+	orig.Genres[0] = "Pop"
+	orig.AudioVariants[0] = "dolby-atmos"
+
+	gotA := <-subA
+	gotB := <-subB
+	if gotA.Track == gotB.Track {
+		t.Fatal("subscribers shared *provider.Track pointer")
+	}
+	if gotA.Track.Title != "Original" || gotA.Track.Genres[0] != "Rock" || gotA.Track.AudioVariants[0] != "lossless" {
+		t.Fatalf("subA observed caller mutation: %+v", gotA.Track)
+	}
+	gotA.Track.Title = "SubAMutated"
+	if gotB.Track.Title != "Original" {
+		t.Fatalf("subB observed subA mutation: %+v", gotB.Track)
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range 200 {
+			tr := &provider.Track{ID: fmt.Sprintf("id-%d", i), Genres: []string{"Jazz"}}
+			b.Send(State{Track: tr, Bitrate: i})
+		}
+	})
+	for range 4 {
+		wg.Go(func() {
+			for range 50 {
+				ch := b.Subscribe()
+				b.Unsubscribe(ch)
+			}
+		})
+	}
+	wg.Wait()
 }

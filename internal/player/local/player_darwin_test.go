@@ -235,3 +235,51 @@ func TestDarwinPathValidationAndAppendRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestDarwinConcurrentTransportControls(t *testing.T) {
+	dir := t.TempDir()
+	tracks := make([]provider.Track, 2)
+	ids := make([]string, 2)
+	for i, name := range []string{"t1.wav", "t2.wav"} {
+		path := filepath.Join(dir, name)
+		writeSilentWAV(t, path)
+		id := "local:" + path
+		tracks[i] = provider.Track{ID: id}
+		ids[i] = id
+	}
+
+	p, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+	p.LoadTracks(tracks)
+	_ = p.SetRepeat(player.RepeatModeAll)
+	_ = p.SetQueue(ids)
+
+	var wg sync.WaitGroup
+	for i := range 6 {
+		wg.Go(func() {
+			for j := range 25 {
+				switch (i + j) % 7 {
+				case 0:
+					_ = p.Play()
+				case 1:
+					_ = p.Pause()
+				case 2:
+					_ = p.Seek(time.Duration(j*10) * time.Millisecond)
+				case 3:
+					_ = p.Next()
+				case 4:
+					_ = p.Previous()
+				case 5:
+					_ = p.SetVolume(0.5)
+				case 6:
+					_, _ = p.GetState()
+				}
+			}
+		})
+	}
+	wg.Wait()
+	_ = p.Stop()
+}

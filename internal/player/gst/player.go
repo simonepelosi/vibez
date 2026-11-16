@@ -423,12 +423,31 @@ static gboolean vibez_uri_is_loopback_http(const gchar* uri) {
         if ((unsigned char)*q < 0x20 || (unsigned char)*q == 0x7f) return FALSE;
     }
     const gchar* hp = uri + 7;
-    return (strncmp(hp, "127.0.0.1:", 10) == 0 ||
-            strncmp(hp, "127.0.0.1/", 10) == 0 ||
-            strcmp(hp, "127.0.0.1") == 0 ||
-            strncmp(hp, "localhost:", 10) == 0 ||
-            strncmp(hp, "localhost/", 10) == 0 ||
-            strcmp(hp, "localhost") == 0);
+    const gchar* auth_end = hp;
+    while (*auth_end != '\0' && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') {
+        if (*auth_end == '@') return FALSE;
+        auth_end++;
+    }
+    size_t auth_len = (size_t)(auth_end - hp);
+    if (auth_len == 0 || auth_len >= 128) return FALSE;
+
+    char hostport[128];
+    memcpy(hostport, hp, auth_len);
+    hostport[auth_len] = '\0';
+
+    char* colon = strchr(hostport, ':');
+    if (colon) {
+        *colon = '\0';
+        const char* port_str = colon + 1;
+        if (port_str[0] == '\0') return FALSE;
+        char* endptr = NULL;
+        errno = 0;
+        long port = strtol(port_str, &endptr, 10);
+        if (errno != 0 || !endptr || *endptr != '\0' || port <= 0 || port > 65535) {
+            return FALSE;
+        }
+    }
+    return strcmp(hostport, "127.0.0.1") == 0 || g_ascii_strcasecmp(hostport, "localhost") == 0;
 }
 
 static gboolean vibez_http_src_uri_set_uri(GstURIHandler* handler, const gchar* uri, GError** error) {
@@ -774,20 +793,6 @@ static void vibez_gst_state_free(VibezGstState* st) {
     g_mutex_clear(&st->mu);
     g_free(st);
 }
-static void vibez_gst_init(void) {
-    if (!gst_is_initialized())
-        gst_init(NULL, NULL);
-    // vibezaacparse outranks aacparse (PRIMARY + 1). aacparse stays in
-    // lost-sync mode after a stream starts and drops a whole frame whenever a
-    // read ends a few bytes into the next ADTS header, which loses several
-    // 23 ms frames at the start of every track. Our stream always comes from
-    // our own server as clean ADTS, which vibezaacparse frames exactly.
-    gst_element_register(NULL, "vibezaacparse", GST_RANK_PRIMARY + 2, vibez_aac_parse_get_type());
-    // Prefer vibezhttpsrc over souphttpsrc for local loopback streams so GStreamer
-    // does not dlopen libgstsoup/libsoup/libgnutls/libsqlite3 on the loopback path.
-    gst_element_register(NULL, "vibezhttpsrc", GST_RANK_PRIMARY + 1, vibez_http_src_get_type());
-}
-
 static int vibez_gst_has_element(const char* name) {
     GstElementFactory* f = gst_element_factory_find(name);
     if (f) {
@@ -802,6 +807,34 @@ static void vibez_gst_set_element_rank(const char* name, int rank) {
     if (f) {
         gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE(f), (guint)rank);
         gst_object_unref(f);
+    }
+}
+
+static int vibez_gst_get_element_rank(const char* name) {
+    GstElementFactory* f = gst_element_factory_find(name);
+    if (!f) return -1;
+    guint r = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(f));
+    gst_object_unref(f);
+    return (int)r;
+}
+
+static void vibez_gst_init(void) {
+    if (!gst_is_initialized())
+        gst_init(NULL, NULL);
+    // vibezaacparse outranks aacparse (PRIMARY + 1). aacparse stays in
+    // lost-sync mode after a stream starts and drops a whole frame whenever a
+    // read ends a few bytes into the next ADTS header, which loses several
+    // 23 ms frames at the start of every track. Our stream always comes from
+    // our own server as clean ADTS, which vibezaacparse frames exactly.
+    gst_element_register(NULL, "vibezaacparse", GST_RANK_PRIMARY + 2, vibez_aac_parse_get_type());
+    // Prefer vibezhttpsrc over souphttpsrc for local loopback streams so GStreamer
+    // does not dlopen libgstsoup/libsoup/libgnutls/libsqlite3 on the loopback path.
+    gst_element_register(NULL, "vibezhttpsrc", GST_RANK_PRIMARY + 1, vibez_http_src_get_type());
+    // Disable remote HTTP sources and adaptive playlist demuxers so GStreamer
+    // can never issue outbound network requests or parse nested remote manifests.
+    const char* disabled[] = {"hlsdemux", "dashdemux", "mssdemux", "souphttpsrc", "curlhttpsrc", "neonhttpsrc", NULL};
+    for (int i = 0; disabled[i] != NULL; i++) {
+        vibez_gst_set_element_rank(disabled[i], GST_RANK_NONE);
     }
 }
 
@@ -1142,6 +1175,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1221,6 +1255,13 @@ func setElementRank(name string, rank int) {
 	C.vibez_gst_set_element_rank(cs, C.int(rank))
 }
 
+func getElementRank(name string) int {
+	once.Do(func() { C.vibez_gst_init() })
+	cs := C.CString(name)
+	defer C.free(unsafe.Pointer(cs))
+	return int(C.vibez_gst_get_element_rank(cs))
+}
+
 func hasElement(name string) bool {
 	once.Do(func() { C.vibez_gst_init() })
 	cs := C.CString(name)
@@ -1247,15 +1288,28 @@ func isAllowedPlayURI(raw string) bool {
 		}
 	}
 	u, err := url.Parse(raw)
-	if err != nil || !u.IsAbs() {
+	if err != nil || !u.IsAbs() || u.User != nil {
 		return false
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "file":
 		return (u.Host == "" || strings.EqualFold(u.Host, "localhost")) && u.Path != ""
-	case "https":
-		return u.Host != ""
 	case "http":
+		host := u.Hostname()
+		if host != "127.0.0.1" && !strings.EqualFold(host, "localhost") {
+			return false
+		}
+		if port := u.Port(); port != "" {
+			n, perr := strconv.Atoi(port)
+			if perr != nil || n < 1 || n > 65535 {
+				return false
+			}
+			if u.Host != host+":"+port {
+				return false
+			}
+		} else if u.Host != host {
+			return false
+		}
 		return uriIsLoopbackHTTP(raw)
 	default:
 		return false
@@ -1302,7 +1356,7 @@ func (p *Player) SetNextURI(uri string) {
 	p.mu.Unlock()
 }
 
-// PlayURI loads the given URI (https://, file://, or loopback http://) and starts playback.
+// PlayURI loads the given URI (file:// or loopback http://) and starts playback.
 func (p *Player) PlayURI(uri string) {
 	if !isAllowedPlayURI(uri) {
 		return

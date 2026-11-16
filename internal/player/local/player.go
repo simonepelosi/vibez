@@ -116,7 +116,7 @@ func (p *Player) playTrack(t provider.Track) {
 		p.broadcast(s)
 		return
 	}
-	cleanPath, err := verifyRegularAudioPath(rawPath)
+	cleanPath, err := VerifyRegularAudioPath(rawPath)
 	if err != nil {
 		p.mu.Lock()
 		p.state.Track = nil

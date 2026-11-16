@@ -14,12 +14,29 @@ func TestVerifyRegularAudioPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := verifyRegularAudioPath(regFile)
+	got, err := VerifyRegularAudioPath(regFile)
 	if err != nil {
-		t.Fatalf("verifyRegularAudioPath(regular file) unexpected error: %v", err)
+		t.Fatalf("VerifyRegularAudioPath(regular file) unexpected error: %v", err)
 	}
 	if got != filepath.Clean(regFile) {
 		t.Fatalf("got %q, want %q", got, filepath.Clean(regFile))
+	}
+
+	for _, badWin := range []string{
+		`\\evil.example\share\song.flac`,
+		`//evil.example/share/song.flac`,
+		`\\.\PhysicalDrive0`,
+		`\??\C:\music\song.flac`,
+		`//./PhysicalDrive0`,
+		`C:relative.flac`,
+		`music\song.flac`,
+	} {
+		if isSafeAudioPathForOS(badWin, "windows") {
+			t.Errorf("isSafeAudioPathForOS(%q, windows) = true, want false", badWin)
+		}
+	}
+	if !isSafeAudioPathForOS(`C:\Music\song.flac`, "windows") {
+		t.Error("isSafeAudioPathForOS rejected valid Windows drive path")
 	}
 
 	cases := []struct {
@@ -40,8 +57,8 @@ func TestVerifyRegularAudioPath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := verifyRegularAudioPath(tc.path); err == nil {
-				t.Fatalf("verifyRegularAudioPath(%q) unexpectedly succeeded", tc.path)
+			if _, err := VerifyRegularAudioPath(tc.path); err == nil {
+				t.Fatalf("VerifyRegularAudioPath(%q) unexpectedly succeeded", tc.path)
 			}
 		})
 	}
@@ -52,8 +69,17 @@ func TestVerifyRegularAudioPath(t *testing.T) {
 			if err := os.Symlink(dir, link); err != nil {
 				t.Skipf("symlink unavailable: %v", err)
 			}
-			if _, err := verifyRegularAudioPath(link); err == nil {
-				t.Fatal("verifyRegularAudioPath(symlink to dir) unexpectedly succeeded")
+			if _, err := VerifyRegularAudioPath(link); err == nil {
+				t.Fatal("VerifyRegularAudioPath(symlink to dir) unexpectedly succeeded")
+			}
+		})
+		t.Run("symlink to regular file", func(t *testing.T) {
+			link := filepath.Join(dir, "filelink.flac")
+			if err := os.Symlink(regFile, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			if _, err := VerifyRegularAudioPath(link); err == nil {
+				t.Fatal("VerifyRegularAudioPath(symlink to file) unexpectedly succeeded")
 			}
 		})
 	}

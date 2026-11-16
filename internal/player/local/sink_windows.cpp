@@ -295,6 +295,18 @@ bool waitFree(Buf& b, HWAVEOUT hwo, HANDLE ev, const Session& ses) {
 
 struct FileHandle {
     HANDLE h = INVALID_HANDLE_VALUE;
+    FileHandle() = default;
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+    FileHandle(FileHandle&& other) noexcept : h(other.h) { other.h = INVALID_HANDLE_VALUE; }
+    FileHandle& operator=(FileHandle&& other) noexcept {
+        if (this != &other) {
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            h = other.h;
+            other.h = INVALID_HANDLE_VALUE;
+        }
+        return *this;
+    }
     ~FileHandle() {
         if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
@@ -305,26 +317,42 @@ bool readExact(HANDLE h, void* dst, DWORD n) {
     return ReadFile(h, dst, n, &got, nullptr) && got == n;
 }
 
-bool isRegularDiskPath(const std::wstring& path) {
-    if (path.empty() || path.rfind(L"\\\\.\\", 0) == 0) return false;
+bool openVerifiedRegularDiskHandle(const std::wstring& path, FileHandle& out) {
+    if (path.empty() || path.rfind(L"\\\\", 0) == 0 || path.rfind(L"//", 0) == 0 ||
+        path.rfind(L"\\??\\", 0) == 0) {
+        return false;
+    }
+    // Omit FILE_SHARE_DELETE so another process cannot unlink, rename, or
+    // re-link path while Media Foundation opens it.
     FileHandle f{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_EXISTING,
+                             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
     if (f.h == INVALID_HANDLE_VALUE) return false;
     if (GetFileType(f.h) != FILE_TYPE_DISK) return false;
     BY_HANDLE_FILE_INFORMATION info = {};
     if (!GetFileInformationByHandle(f.h, &info)) return false;
-    return (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    if ((info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        return false;
+    }
+    out = std::move(f);
+    return true;
 }
 
 // readFlacStreamInfoDuration reads total_samples / sample_rate from a FLAC
 // STREAMINFO block when Media Foundation omits MF_PD_DURATION.
 double readFlacStreamInfoDuration(const std::wstring& path) {
     FileHandle f{CreateFileW(path.c_str(), GENERIC_READ,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
     if (f.h == INVALID_HANDLE_VALUE) return 0.0;
     if (GetFileType(f.h) != FILE_TYPE_DISK) return 0.0;
+    BY_HANDLE_FILE_INFORMATION fi = {};
+    if (!GetFileInformationByHandle(f.h, &fi) ||
+        (fi.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        return 0.0;
+    }
 
     LARGE_INTEGER fileSize = {};
     if (!GetFileSizeEx(f.h, &fileSize) || fileSize.QuadPart < 42) return 0.0;
@@ -557,11 +585,13 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
     };
 
-    if (!isRegularDiskPath(path)) {
+    FileHandle lockHandle;
+    if (!openVerifiedRegularDiskHandle(path, lockHandle)) {
         return failOpen("cannot open audio file: not a regular file");
     }
     Com<IMFSourceReader> reader;
     HRESULT hr = mf.createSourceReader(path.c_str(), nullptr, &reader);
+    lockHandle = FileHandle{};
     if (FAILED(hr)) return failOpen(formatHr("cannot open audio file", hr));
 
     reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);

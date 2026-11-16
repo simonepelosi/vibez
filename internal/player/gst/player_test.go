@@ -40,8 +40,8 @@ func TestEmbeddedGoodPluginsFallback(t *testing.T) {
 	setElementRank("autoaudiosink", 0)
 	t.Cleanup(func() {
 		setElementRank("aacparse", 257)
-		setElementRank("souphttpsrc", 256)
-		setElementRank("curlhttpsrc", 128)
+		setElementRank("souphttpsrc", 0)
+		setElementRank("curlhttpsrc", 0)
 		setElementRank("equalizer-10bands", 0)
 		setElementRank("autoaudiosink", 256)
 	})
@@ -412,7 +412,7 @@ func TestIsAllowedPlayURI(t *testing.T) {
 	}{
 		{"file:///tmp/tone.wav", true},
 		{"file://localhost/tmp/tone.wav", true},
-		{"https://audio.itunes.apple.com/stream.m4a", true},
+		{"https://audio.itunes.apple.com/stream.m4a", false},
 		{"http://127.0.0.1:8080/stream", true},
 		{"http://localhost:8080/stream", true},
 		{"", false},
@@ -423,7 +423,11 @@ func TestIsAllowedPlayURI(t *testing.T) {
 		{"data:audio/wav;base64,AAAA", false},
 		{"http://example.com/a.aac", false},
 		{"http://127.0.0.2/a.aac", false},
+		{"http://127.0.0.1:8080@evil.example/stream", false},
+		{"http://127.0.0.1:99999/stream", false},
+		{"http://127.0.0.1:/stream", false},
 		{"file://remotehost/share/a.wav", false},
+		{"file://user@localhost/tmp/tone.wav", false},
 		{"file:///tmp/tone.wav\r\n", false},
 		{"https://example.com/\x00evil", false},
 	}
@@ -518,8 +522,8 @@ func TestAACParseOversizeInvalidInputDoesNotHang(t *testing.T) {
 	setElementRank("curlhttpsrc", 0)
 	t.Cleanup(func() {
 		setElementRank("aacparse", 257)
-		setElementRank("souphttpsrc", 256)
-		setElementRank("curlhttpsrc", 128)
+		setElementRank("souphttpsrc", 0)
+		setElementRank("curlhttpsrc", 0)
 	})
 
 	payload := bytes.Repeat([]byte{0x55}, 1500*1024)
@@ -566,5 +570,14 @@ func TestAACParseOversizeInvalidInputDoesNotHang(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Destroy timed out after oversize non-ADTS stream")
+	}
+}
+
+func TestNetworkPluginsDisabledAtInit(t *testing.T) {
+	for _, name := range []string{"hlsdemux", "dashdemux", "mssdemux", "souphttpsrc", "curlhttpsrc", "neonhttpsrc"} {
+		rank := getElementRank(name)
+		if rank > 0 {
+			t.Errorf("element %q has rank %d after vibez_gst_init, want 0 (disabled)", name, rank)
+		}
 	}
 }

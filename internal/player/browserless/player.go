@@ -19,6 +19,7 @@ import (
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
 	"github.com/simone-vibes/vibez/internal/player/browserless/license"
+	localplayer "github.com/simone-vibes/vibez/internal/player/local"
 	"github.com/simone-vibes/vibez/internal/provider"
 	"github.com/simone-vibes/vibez/internal/provider/apple"
 	"github.com/simone-vibes/vibez/internal/provider/local"
@@ -498,32 +499,34 @@ func (p *Player) scheduleNextPrefetch() {
 				}
 			}
 			if matched {
-				nextTrack.LocalPath = match.Path
-				nextTrack.LocalFormat = match.Format
-				localURI := localFileURI(match.Path)
-				p.mu.Lock()
-				if p.closed || p.prefetchGen != gen || ctx.Err() != nil {
+				if cleanPath, err := localplayer.VerifyRegularAudioPath(match.Path); err == nil {
+					nextTrack.LocalPath = cleanPath
+					nextTrack.LocalFormat = match.Format
+					localURI := localFileURI(cleanPath)
+					p.mu.Lock()
+					if p.closed || p.prefetchGen != gen || ctx.Err() != nil {
+						p.mu.Unlock()
+						return
+					}
+					if nextIdx >= 0 && nextIdx < len(p.queue) && p.queue[nextIdx].ID == nextTrack.ID {
+						p.queue[nextIdx].LocalPath = cleanPath
+						p.queue[nextIdx].LocalFormat = match.Format
+					}
+					prep := &preparedNext{
+						idx:       nextIdx,
+						track:     nextTrack,
+						streamURL: localURI,
+						duration:  nextTrack.Duration,
+					}
+					p.nextPrep = prep
+					if p.stagedPreps == nil {
+						p.stagedPreps = make(map[string]*preparedNext)
+					}
+					p.stagedPreps[localURI] = prep
 					p.mu.Unlock()
+					p.withSink(func(s audioSink) { s.SetNextURI(localURI) })
 					return
 				}
-				if nextIdx >= 0 && nextIdx < len(p.queue) && p.queue[nextIdx].ID == nextTrack.ID {
-					p.queue[nextIdx].LocalPath = match.Path
-					p.queue[nextIdx].LocalFormat = match.Format
-				}
-				prep := &preparedNext{
-					idx:       nextIdx,
-					track:     nextTrack,
-					streamURL: localURI,
-					duration:  nextTrack.Duration,
-				}
-				p.nextPrep = prep
-				if p.stagedPreps == nil {
-					p.stagedPreps = make(map[string]*preparedNext)
-				}
-				p.stagedPreps[localURI] = prep
-				p.mu.Unlock()
-				p.withSink(func(s audioSink) { s.SetNextURI(localURI) })
-				return
 			}
 		}
 		if streamer == nil {
@@ -665,34 +668,36 @@ func (p *Player) playTrack(t provider.Track) {
 				}
 			}
 			if matched {
-				t.LocalPath = match.Path
-				t.LocalFormat = match.Format
-				localURI := localFileURI(match.Path)
-				p.mu.Lock()
-				if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
+				if cleanPath, err := localplayer.VerifyRegularAudioPath(match.Path); err == nil {
+					t.LocalPath = cleanPath
+					t.LocalFormat = match.Format
+					localURI := localFileURI(cleanPath)
+					p.mu.Lock()
+					if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
+						p.mu.Unlock()
+						return
+					}
+					if p.idx >= 0 && p.idx < len(p.queue) && p.queue[p.idx].ID == t.ID {
+						p.queue[p.idx].LocalPath = cleanPath
+						p.queue[p.idx].LocalFormat = match.Format
+					}
+					p.curStream = ""
+					p.curStreamURL = localURI
+					p.streamErr = ""
+					p.seekOffset = 0
+					p.ended = false
+					p.state.Loading = false
+					p.state.Playing = true
+					tCopy := t
+					p.state.Track = &tCopy
+					s = p.state
 					p.mu.Unlock()
+					p.signalPoll()
+					p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
+					p.logHybridTrack(s, tCopy)
+					p.scheduleNextPrefetch()
 					return
 				}
-				if p.idx >= 0 && p.idx < len(p.queue) && p.queue[p.idx].ID == t.ID {
-					p.queue[p.idx].LocalPath = match.Path
-					p.queue[p.idx].LocalFormat = match.Format
-				}
-				p.curStream = ""
-				p.curStreamURL = localURI
-				p.streamErr = ""
-				p.seekOffset = 0
-				p.ended = false
-				p.state.Loading = false
-				p.state.Playing = true
-				tCopy := t
-				p.state.Track = &tCopy
-				s = p.state
-				p.mu.Unlock()
-				p.signalPoll()
-				p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
-				p.logHybridTrack(s, tCopy)
-				p.scheduleNextPrefetch()
-				return
 			}
 		}
 

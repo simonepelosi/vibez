@@ -197,7 +197,7 @@ func (e *nativeEngine) call(method string, args ...any) (snapshot, error) {
 		path := args[0].(string)
 		gen := args[1].(uint64)
 		autoplay := args[2].(bool)
-		cleanPath, err := verifyRegularAudioPath(path)
+		cleanPath, err := VerifyRegularAudioPath(path)
 		if err != nil {
 			e.gen = gen
 			e.seq++
