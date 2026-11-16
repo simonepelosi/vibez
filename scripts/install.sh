@@ -204,24 +204,30 @@ success "${INSTALL_DIR}/${BIN}"
 if [ "${OS}" = "linux" ]; then
     step "Installing desktop integration…"
 
-    RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
     APP_ID="io.github.simonepelosi.vibez"
+    DESKTOP_SRC="${TMP}/flatpak/${APP_ID}.desktop"
+    ICON_SRC="${TMP}/assets/logo.png"
 
-    DESKTOP_DIR="${HOME}/.local/share/applications"
-    ICON_DIR="${HOME}/.local/share/icons/hicolor/512x512/apps"
+    if [ -f "${DESKTOP_SRC}" ] && [ ! -L "${DESKTOP_SRC}" ] && [ -f "${ICON_SRC}" ] && [ ! -L "${ICON_SRC}" ]; then
+        DESKTOP_DIR="${HOME}/.local/share/applications"
+        ICON_DIR="${HOME}/.local/share/icons/hicolor/512x512/apps"
 
-    mkdir -p "${DESKTOP_DIR}" "${ICON_DIR}"
+        mkdir -p "${DESKTOP_DIR}" "${ICON_DIR}"
 
-    download "${RAW_BASE}/flatpak/${APP_ID}.desktop" "${DESKTOP_DIR}/${APP_ID}.desktop"
-    download "${RAW_BASE}/assets/logo.png"            "${ICON_DIR}/${APP_ID}.png"
+        cp "${DESKTOP_SRC}" "${DESKTOP_DIR}/${APP_ID}.desktop"
+        cp "${ICON_SRC}"    "${ICON_DIR}/${APP_ID}.png"
+        chmod 0644 "${DESKTOP_DIR}/${APP_ID}.desktop" "${ICON_DIR}/${APP_ID}.png"
 
-    # Refresh desktop and icon caches so the DE picks up the new entries immediately.
-    command -v update-desktop-database >/dev/null 2>&1 \
-        && update-desktop-database "${DESKTOP_DIR}" 2>/dev/null || true
-    command -v gtk-update-icon-cache >/dev/null 2>&1 \
-        && gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+        # Refresh desktop and icon caches so the DE picks up the new entries immediately.
+        command -v update-desktop-database >/dev/null 2>&1 \
+            && update-desktop-database "${DESKTOP_DIR}" 2>/dev/null || true
+        command -v gtk-update-icon-cache >/dev/null 2>&1 \
+            && gtk-update-icon-cache -f -t "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
 
-    success "Desktop file and icon installed"
+        success "Desktop file and icon installed"
+    else
+        warn "Desktop file or icon missing from verified release archive — skipping desktop integration"
+    fi
 fi
 
 

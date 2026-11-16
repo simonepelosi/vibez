@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -67,20 +68,55 @@ func parseReleasePubKey(raw string) (ed25519.PublicKey, bool, error) {
 	return nil, true, errors.New("invalid embedded release public key")
 }
 
+func parseTrustedHTTPSURL(raw string) (*url.URL, string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	if u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Opaque != "" {
+		return nil, "", fmt.Errorf("refusing untrusted URL %q", raw)
+	}
+	if hasPathTraversal(u) {
+		return nil, "", fmt.Errorf("refusing URL with path traversal: %q", u.Path)
+	}
+	return u, strings.ToLower(u.Hostname()), nil
+}
+
+func hasPathTraversal(u *url.URL) bool {
+	if strings.ContainsRune(u.Path, '\\') || strings.ContainsRune(u.EscapedPath(), '\\') {
+		return true
+	}
+	for _, p := range []string{u.Path, u.EscapedPath()} {
+		lower := strings.ToLower(p)
+		if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+			return true
+		}
+		for seg := range strings.SplitSeq(p, "/") {
+			if seg == "." || seg == ".." {
+				return true
+			}
+			// Reject percent-encoded dot segments before normalization.
+			decoded := strings.ReplaceAll(strings.ToLower(seg), "%2e", ".")
+			if decoded == "." || decoded == ".." {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkAPIURL accepts only HTTPS GitHub release API URLs for this repository.
 func checkAPIURL(raw string) error {
-	u, err := url.Parse(raw)
+	u, host, err := parseTrustedHTTPSURL(raw)
 	if err != nil {
 		return err
 	}
-	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
-		return fmt.Errorf("refusing untrusted API URL %q", raw)
-	}
-	host := strings.ToLower(u.Hostname())
 	if host != "api.github.com" {
 		return fmt.Errorf("refusing API URL on unexpected host %q", host)
 	}
-	if !strings.HasPrefix(u.Path, "/repos/"+repo+"/releases") {
+	clean := path.Clean(u.Path)
+	wantPrefix := "/repos/" + repo + "/releases"
+	if clean != wantPrefix && !strings.HasPrefix(clean, wantPrefix+"/") {
 		return fmt.Errorf("refusing API URL outside repository releases path: %q", u.Path)
 	}
 	return nil
@@ -89,17 +125,14 @@ func checkAPIURL(raw string) error {
 // checkAssetURL accepts only HTTPS release asset URLs belonging to this
 // repository or GitHub's release asset CDN hosts.
 func checkAssetURL(raw string) error {
-	u, err := url.Parse(raw)
+	u, host, err := parseTrustedHTTPSURL(raw)
 	if err != nil {
 		return err
 	}
-	if u.Scheme != "https" || u.User != nil || u.Port() != "" {
-		return fmt.Errorf("refusing non-https URL %q", raw)
-	}
-	host := strings.ToLower(u.Hostname())
 	switch host {
 	case "github.com":
-		if !strings.HasPrefix(u.Path, "/"+repo+"/releases/download/") {
+		clean := path.Clean(u.Path)
+		if !strings.HasPrefix(clean, "/"+repo+"/releases/download/") {
 			return fmt.Errorf("refusing GitHub asset URL outside repository releases path: %q", u.Path)
 		}
 		return nil

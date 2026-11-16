@@ -1106,19 +1106,9 @@ func (a *AppleProvider) fetchSongsPaginated(ctx context.Context, baseEndpoint st
 		return tracks, nil
 	}
 
-	pageSize := len(firstPage.Data)
-	if pageSize == 0 {
-		return nil, nil
-	}
-	tracks := make([]provider.Track, total)
-	for i, s := range firstPage.Data {
-		if i < total {
-			tracks[i] = toTrack(s)
-		}
-	}
-
-	if total <= pageSize {
-		return tracks[:pageSize], nil
+	tracks, pageSize, done := initPaginatedPage(firstPage.Data, total, maxPaginatedItems, toTrack)
+	if done {
+		return tracks, nil
 	}
 
 	offsets := []int{}
@@ -1248,6 +1238,24 @@ func (a *AppleProvider) GetLibraryTracks(ctx context.Context) ([]provider.Track,
 	return tracks, nil
 }
 
+// initPaginatedPage allocates the output slice for offset pagination and copies
+// the first page safely even when meta.total underreports len(first).
+func initPaginatedPage[R, T any](first []R, total, maxItems int, convert func(R) T) ([]T, int, bool) {
+	pageSize := len(first)
+	if pageSize == 0 {
+		return nil, 0, true
+	}
+	firstCount := min(pageSize, maxItems)
+	out := make([]T, max(max(total, 0), firstCount))
+	for i := range firstCount {
+		out[i] = convert(first[i])
+	}
+	if total <= pageSize {
+		return out[:firstCount], pageSize, true
+	}
+	return out, pageSize, false
+}
+
 func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoint string) ([]provider.Playlist, error) {
 	req, err := a.newRequest(ctx, http.MethodGet, baseEndpoint)
 	if err != nil {
@@ -1306,19 +1314,9 @@ func (a *AppleProvider) fetchPlaylistsPaginated(ctx context.Context, baseEndpoin
 		return playlists, nil
 	}
 
-	pageSize := len(firstPage.Data)
-	if pageSize == 0 {
-		return nil, nil
-	}
-	playlists := make([]provider.Playlist, total)
-	for i, r := range firstPage.Data {
-		if i < total {
-			playlists[i] = toPlaylist(r)
-		}
-	}
-
-	if total <= pageSize {
-		return playlists[:pageSize], nil
+	playlists, pageSize, done := initPaginatedPage(firstPage.Data, total, maxPaginatedItems, toPlaylist)
+	if done {
+		return playlists, nil
 	}
 
 	offsets := []int{}

@@ -38,7 +38,23 @@
         "strict_required_status_checks_policy": false,
         "required_status_checks": [
           {
-            "context": "test",
+            "context": "pre-commit",
+            "integration_id": null
+          },
+          {
+            "context": "build-vet-test-linux",
+            "integration_id": null
+          },
+          {
+            "context": "build-vet-test-macos",
+            "integration_id": null
+          },
+          {
+            "context": "build-vet-test-windows",
+            "integration_id": null
+          },
+          {
+            "context": "security-checks",
             "integration_id": null
           }
         ]
