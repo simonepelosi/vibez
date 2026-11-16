@@ -55,8 +55,9 @@ type trackStream struct {
 	raw       bool
 	rawFormat rawFormat
 
-	seg0Mu  sync.Mutex
-	seg0AAC []byte
+	seg0Mu   sync.Mutex
+	seg0AAC  []byte
+	released bool
 }
 
 const (
@@ -67,6 +68,7 @@ const (
 	maxHLSSegments      = 20000    // bounded segment count per playlist (~55h at 10s/segment)
 	maxRetainedStreams  = 3
 	maxStreamAge        = 30 * time.Minute
+	streamStallTimeout  = 30 * time.Second
 )
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
@@ -404,7 +406,7 @@ func (s *StreamServer) prepareRawTrack(ctx context.Context, libraryID string) (s
 	}
 	format, ok := sniffRawFormat(head, size)
 	if !ok {
-		return "", 0, fmt.Errorf("%w: unsupported upload format (library item %s)", license.ErrTrackUnavailable, libraryID)
+		return "", 0, fmt.Errorf("%w: unsupported upload format (library item %s)", license.ErrTrackUnavailable, provider.Clean(libraryID))
 	}
 
 	var segments []segmentRef
@@ -540,9 +542,9 @@ func (s *StreamServer) releaseStreams(evicted []evictedStream) {
 	for _, ev := range evicted {
 		if ev.stream != nil {
 			ev.stream.seg0Mu.Lock()
+			ev.stream.released = true
 			ev.stream.seg0AAC = nil
 			ev.stream.seg0Mu.Unlock()
-			ev.stream.segments = nil
 		}
 		if ev.sessionID != "" && s.cdmEngine != nil {
 			_ = s.cdmEngine.CloseSession(ev.sessionID)
@@ -569,12 +571,16 @@ func (s *StreamServer) register(ctx context.Context, streamID string, st *trackS
 	s.touchStreamLocked(st)
 	s.streams[streamID] = st
 	evicted := s.collectEvictableStreamsLocked(time.Now())
-	shouldWarm := !s.closed && len(st.segments) > 0 && st.segments[0].length <= maxMediaSegmentSize && (st.raw || s.cdmEngine != nil)
+	shouldWarm := !s.closed && len(st.segments) > 0 &&
+		(!st.raw || st.rawFormat.seekable) &&
+		st.segments[0].length <= maxMediaSegmentSize &&
+		(st.raw || s.cdmEngine != nil)
 	baseCtx := ctx
 	if s.closeCtx != nil {
 		baseCtx = s.closeCtx
 	}
 	if shouldWarm {
+		st.activeReaders++
 		s.bgWg.Add(1)
 	}
 	s.mu.Unlock()
@@ -585,7 +591,14 @@ func (s *StreamServer) register(ctx context.Context, streamID string, st *trackS
 	// without waiting for an upstream CDN round-trip.
 	if shouldWarm {
 		go func() {
-			defer s.bgWg.Done()
+			defer func() {
+				s.mu.Lock()
+				st.activeReaders--
+				ev := s.collectEvictableStreamsLocked(time.Now())
+				s.mu.Unlock()
+				s.releaseStreams(ev)
+				s.bgWg.Done()
+			}()
 			if ctx.Err() != nil {
 				return
 			}
@@ -611,8 +624,9 @@ func streamIDFromURL(streamURL string) string {
 // index and that segment's exact starting time offset within the track.
 func (s *StreamServer) SeekTarget(streamID string, target time.Duration) (int, time.Duration, bool) {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	st, ok := s.streams[streamID]
-	s.mu.RUnlock()
 	if !ok || len(st.segments) == 0 {
 		return 0, 0, false
 	}
@@ -754,6 +768,18 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		panic(http.ErrAbortHandler)
 	}
 
+	// Stream non-seekable raw uploads (e.g. large M4A mixes) chunk-by-chunk
+	// instead of buffering up to maxRawUploadSize on heap.
+	if st.raw && !st.rawFormat.seekable && len(st.segments) == 1 && startSeg == 0 {
+		if stage, err := s.streamRawUpload(ctx, client, st, st.segments[0], w, flusher); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fail(0, stage, err)
+		}
+		return
+	}
+
 	type segResult struct {
 		aacData []byte
 		stage   string
@@ -829,12 +855,155 @@ func (s *StreamServer) getOrFetchSegment0(ctx context.Context, client *http.Clie
 	if len(st.seg0AAC) > 0 {
 		return st.seg0AAC, "", nil
 	}
+	if st.released || len(st.segments) == 0 {
+		return nil, "fetch", errors.New("stream released")
+	}
 	aacData, stage, err := s.fetchAndDecryptSegment(ctx, client, st, st.segments[0])
 	if err != nil {
 		return nil, stage, err
 	}
+	if st.released {
+		return nil, "fetch", errors.New("stream released")
+	}
 	st.seg0AAC = aacData
 	return aacData, "", nil
+}
+
+func (s *StreamServer) streamRawUpload(
+	ctx context.Context,
+	client *http.Client,
+	st *trackStream,
+	seg segmentRef,
+	w http.ResponseWriter,
+	flusher http.Flusher,
+) (string, error) {
+	segURL, err := resolveUpstreamURL(st.baseURI, seg.uri)
+	if err != nil {
+		return "build request", err
+	}
+
+	maxBytes := int64(maxRawUploadSize)
+	if seg.length > 0 {
+		maxBytes = min(seg.length, int64(maxRawUploadSize))
+	}
+
+	// Keep an overall client free of total-duration cutoff on long mixes, while
+	// bounding response headers and inter-chunk reads with streamStallTimeout.
+	streamClient := client
+	if client != nil && client.Timeout > 0 {
+		cCopy := *client
+		cCopy.Timeout = 0
+		streamClient = &cCopy
+	}
+
+	var lastStage string
+	var lastErr error
+	var buf [32 << 10]byte
+
+	for attempt := 0; attempt <= len(segmentRetryBackoffs); attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(segmentRetryBackoffs[attempt-1])
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return lastStage, ctx.Err()
+			case <-timer.C:
+			}
+		}
+
+		reqCtx, cancelReq := context.WithCancel(ctx)
+		stallTimer := time.AfterFunc(streamStallTimeout, cancelReq)
+
+		req, reqErr := http.NewRequestWithContext(reqCtx, http.MethodGet, segURL, nil)
+		if reqErr != nil {
+			stallTimer.Stop()
+			cancelReq()
+			return "build request", reqErr
+		}
+		if seg.length > 0 && seg.offset >= 0 && seg.offset <= math.MaxInt64-seg.length {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.offset, seg.offset+seg.length-1))
+		}
+
+		resp, doErr := streamClient.Do(req)
+		if doErr != nil {
+			stallTimer.Stop()
+			cancelReq()
+			lastStage = "fetch"
+			lastErr = doErr
+			if ctx.Err() != nil {
+				return lastStage, lastErr
+			}
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+			_ = resp.Body.Close()
+			stallTimer.Stop()
+			cancelReq()
+			lastStage = "fetch"
+			lastErr = fmt.Errorf("status %s", resp.Status)
+			if resp.StatusCode != http.StatusRequestTimeout &&
+				resp.StatusCode != http.StatusTooManyRequests &&
+				resp.StatusCode < http.StatusInternalServerError {
+				return lastStage, lastErr
+			}
+			continue
+		}
+
+		var totalWritten int64
+		var writeErr error
+		var readErr error
+		lr := io.LimitReader(resp.Body, maxBytes+1)
+		for {
+			n, rErr := lr.Read(buf[:])
+			if n > 0 {
+				stallTimer.Reset(streamStallTimeout)
+				totalWritten += int64(n)
+				if totalWritten > maxBytes {
+					readErr = fmt.Errorf("segment exceeds maximum size (%d bytes)", maxBytes)
+					break
+				}
+				if _, wErr := w.Write(buf[:n]); wErr != nil {
+					writeErr = wErr
+					break
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rErr != nil {
+				if rErr != io.EOF {
+					readErr = rErr
+				}
+				break
+			}
+		}
+
+		_ = resp.Body.Close()
+		stallTimer.Stop()
+		cancelReq()
+
+		if writeErr != nil {
+			if ctx.Err() == nil && s.onLog != nil {
+				s.onLog(fmt.Sprintf("browserless stream: %s: segment 1/1: write: %v", st.trackID, writeErr))
+			}
+			return "", nil
+		}
+		if readErr != nil {
+			if totalWritten == 0 && ctx.Err() == nil {
+				lastStage = "read"
+				lastErr = readErr
+				continue
+			}
+			return "read", readErr
+		}
+		if totalWritten == 0 || (seg.length > 0 && totalWritten != seg.length) {
+			return "read", io.ErrUnexpectedEOF
+		}
+		return "", nil
+	}
+
+	return lastStage, lastErr
 }
 
 func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.Client, st *trackStream, seg segmentRef) ([]byte, string, error) {
@@ -844,20 +1013,11 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 	}
 
 	maxBytes := int64(maxMediaSegmentSize)
-	reqClient := client
 	if st.raw && seg.length > 0 {
-		// Non-seekable uploads (e.g. M4A mixes/live sets) go out as a single
-		// segment the size of the file; cap at the HEAD-reported length (up to
-		// maxRawUploadSize) rather than the 64 MiB per-HLS-segment bound.
-		maxBytes = min(seg.length, int64(maxRawUploadSize))
-		if seg.length > maxMediaSegmentSize && client != nil && client.Timeout > 0 {
-			cCopy := *client
-			cCopy.Timeout = 0
-			reqClient = &cCopy
-		}
+		maxBytes = min(seg.length, int64(maxMediaSegmentSize))
 	}
 
-	segData, stage, err := fetchSegmentWithRetryMax(ctx, reqClient, segURL, seg.offset, seg.length, maxBytes)
+	segData, stage, err := fetchSegmentWithRetryMax(ctx, client, segURL, seg.offset, seg.length, maxBytes)
 	if err != nil {
 		return nil, stage, err
 	}

@@ -346,3 +346,55 @@ func TestDecryptSegmentMultiSamplePreservesOrder(t *testing.T) {
 		t.Fatal("DecryptSegmentBatch allowed sample exceeding 13-bit ADTS frame limit")
 	}
 }
+
+func TestDecryptSegmentIgnoresBoxTagsInsideMdatAndRejectsBadSencSize(t *testing.T) {
+	cfg := AudioConfig{ObjectType: 2, FreqIndex: 4, ChanConfig: 2}
+	// Fake "moof", "senc", "trun" bytes embedded inside preceding mdat must be skipped by box walker.
+	fakeMdatPayload := append([]byte("moofsenc trun padding bytes "), []byte("RealEncryptedAACFramePayload")...)
+	mdatBox := makeBox("mdat", fakeMdatPayload)
+
+	samplePayload := []byte("RealEncryptedAACFramePayload")
+	var senc bytes.Buffer
+	senc.Write([]byte{0x00, 0x00, 0x00, 0x00}) // flags=0
+	senc.Write([]byte{0x00, 0x00, 0x00, 0x01}) // sample_count=1
+	senc.Write(bytes.Repeat([]byte{0x07}, 8))
+	sencBox := makeBox("senc", senc.Bytes())
+
+	var trun bytes.Buffer
+	trun.Write([]byte{0x00, 0x00, 0x02, 0x01})
+	trun.Write([]byte{0x00, 0x00, 0x00, 0x01})
+	offPos := trun.Len()
+	trun.Write([]byte{0, 0, 0, 0})
+	var sz [4]byte
+	binary.BigEndian.PutUint32(sz[:], uint32(len(samplePayload))) //nolint:gosec // G115: small fixed test slice
+	trun.Write(sz[:])
+	trunBox := makeBox("trun", trun.Bytes())
+
+	moofBox := makeBox("moof", makeBox("traf", append(sencBox, trunBox...)))
+	// Point data_offset to RealEncryptedAACFramePayload inside preceding mdatBox.
+	payloadRelOffset := 8 + len("moofsenc trun padding bytes ")
+	dataOffset := int32(payloadRelOffset - len(mdatBox)) //nolint:gosec // G115: test size fits int32
+	trunIdx := bytes.Index(moofBox, []byte("trun"))
+	binary.BigEndian.PutUint32(moofBox[trunIdx+4+offPos:trunIdx+8+offPos], uint32(dataOffset)) //nolint:gosec // G115: signed-to-unsigned wire encoding
+
+	seg := append(append([]byte(nil), mdatBox...), moofBox...)
+	got, err := DecryptSegment(seg, make([]byte, 16), cfg, func(_, _, input []byte, _ []Subsample) ([]byte, error) {
+		return input, nil
+	})
+	if err != nil {
+		t.Fatalf("DecryptSegment with box tags inside mdat failed: %v", err)
+	}
+	if !bytes.Equal(got[7:], samplePayload) {
+		t.Fatalf("decrypted payload = %q, want %q", got[7:], samplePayload)
+	}
+
+	// Corrupt senc box size (< 16 bytes) must be rejected instead of silently clamped.
+	badSeg := append([]byte(nil), seg...)
+	sencInMoof := bytes.LastIndex(badSeg, []byte("senc")) - 4
+	binary.BigEndian.PutUint32(badSeg[sencInMoof:sencInMoof+4], 12)
+	if _, err := DecryptSegment(badSeg, make([]byte, 16), cfg, func(_, _, input []byte, _ []Subsample) ([]byte, error) {
+		return input, nil
+	}); err == nil {
+		t.Fatal("DecryptSegment accepted corrupted senc box size 12, want error")
+	}
+}

@@ -6,7 +6,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/sha512"
+	"crypto/subtle"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -18,15 +24,24 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
 
 const (
-	maxManifestBytes = 1 << 20  // 1 MiB
-	maxCRXBytes      = 64 << 20 // 64 MiB
-	maxCDMBytes      = 64 << 20 // 64 MiB
+	maxManifestBytes  = 1 << 20  // 1 MiB
+	maxCRXHeaderBytes = 1 << 20  // 1 MiB
+	maxCRXBytes       = 64 << 20 // 64 MiB
+	maxCDMBytes       = 64 << 20 // 64 MiB
 )
+
+// widevineCRXID is the decoded 16-byte Chrome extension ID for Widevine CDM
+// ("oimompecagnajdejgnnjijobebaeigek").
+var widevineCRXID = [16]byte{
+	0xe8, 0xce, 0xcf, 0x42, 0x06, 0xd0, 0x93, 0x49,
+	0x6d, 0x33, 0x89, 0xe1, 0x41, 0x04, 0x86, 0x4a,
+}
 
 var widevineManifestURLs = []string{
 	"https://raw.githubusercontent.com/mozilla-firefox/firefox/refs/heads/main/toolkit/content/gmp-sources/widevinecdm.json",
@@ -71,17 +86,24 @@ var mozillaPlatformKeys = map[string]string{
 	"windows_amd64": "WINNT_x86_64-msvc",
 }
 
-func isAllowedCDMHost(rawURL string) bool {
+func isAllowedHTTPSHost(rawURL string, allowedHosts ...string) bool {
+	if rawURL == "" || strings.ContainsAny(rawURL, "\r\n\x00") {
+		return false
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" || u.User != nil {
 		return false
 	}
-	switch u.Hostname() {
-	case "edgedl.me.gvt1.com", "www.google.com", "dl.google.com":
-		return true
-	default:
-		return false
-	}
+	host := strings.ToLower(u.Hostname())
+	return slices.Contains(allowedHosts, host)
+}
+
+func isAllowedCDMHost(rawURL string) bool {
+	return isAllowedHTTPSHost(rawURL, "edgedl.me.gvt1.com", "www.google.com", "dl.google.com")
+}
+
+func isAllowedManifestHost(rawURL string) bool {
+	return isAllowedHTTPSHost(rawURL, "raw.githubusercontent.com", "objects.githubusercontent.com", "hg.mozilla.org")
 }
 
 func isValidSHA512Hex(s string) bool {
@@ -123,8 +145,8 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 			if len(via) >= 5 {
 				return errors.New("too many redirects fetching widevine manifest")
 			}
-			if req.URL.Scheme != "https" {
-				return errors.New("insecure redirect scheme fetching widevine manifest")
+			if !isAllowedManifestHost(req.URL.String()) {
+				return fmt.Errorf("disallowed redirect target fetching widevine manifest: %s", req.URL.Hostname())
 			}
 			return nil
 		},
@@ -141,9 +163,9 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 			}
 			continue
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes))
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes+1))
 		_ = resp.Body.Close()
-		if readErr != nil {
+		if readErr != nil || len(body) > maxManifestBytes {
 			continue
 		}
 
@@ -164,7 +186,8 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 				p.FileURL != "" &&
 				isAllowedCDMHost(p.FileURL) &&
 				strings.EqualFold(manifest.HashFunction, "sha512") &&
-				isValidSHA512Hex(p.HashValue) {
+				isValidSHA512Hex(p.HashValue) &&
+				p.FileSize >= 0 && p.FileSize <= maxCRXBytes {
 				return cdmPackageSpec{
 					url:      p.FileURL,
 					sha512:   p.HashValue,
@@ -178,8 +201,13 @@ func resolveDownloadSpec(ctx context.Context) (cdmPackageSpec, error) {
 }
 
 // DownloadCDM downloads the official Google Widevine CRX3 package, verifies its
-// SHA-512 digest, and extracts only the standalone shared library into destPath.
+// SHA-512 digest and CRX3 signature, and extracts only the standalone shared
+// library into destPath.
 func DownloadCDM(ctx context.Context, destPath string, progress ...func(string)) (string, error) {
+	if !isSafeAbsCDMPath(destPath) {
+		return "", errors.New("invalid destination path for Widevine CDM")
+	}
+
 	var report func(string)
 	if len(progress) > 0 && progress[0] != nil {
 		report = progress[0]
@@ -191,6 +219,13 @@ func DownloadCDM(ctx context.Context, destPath string, progress ...func(string))
 	spec, err := resolveDownloadSpec(ctx)
 	if err != nil {
 		return "", err
+	}
+	if !isValidSHA512Hex(spec.sha512) {
+		return "", errors.New("missing or malformed expected widevine CRX3 SHA-512 digest")
+	}
+	wantDigest, err := hex.DecodeString(spec.sha512)
+	if err != nil || len(wantDigest) != 64 {
+		return "", errors.New("invalid expected widevine CRX3 SHA-512 digest")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(destPath), 0750); err != nil {
@@ -230,23 +265,6 @@ func DownloadCDM(ctx context.Context, destPath string, progress ...func(string))
 		return "", fmt.Errorf("downloading widevine cdm failed (HTTP %d)", resp.StatusCode)
 	}
 
-	crxBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxCRXBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("reading cdm package: %w", err)
-	}
-	if len(crxBytes) > maxCRXBytes {
-		return "", fmt.Errorf("downloaded CRX3 exceeds %d bytes limit", maxCRXBytes)
-	}
-
-	if !isValidSHA512Hex(spec.sha512) {
-		return "", errors.New("missing or malformed expected widevine CRX3 SHA-512 digest")
-	}
-	sum := sha512.Sum512(crxBytes)
-	gotHash := hex.EncodeToString(sum[:])
-	if !strings.EqualFold(gotHash, spec.sha512) {
-		return "", fmt.Errorf("widevine CRX3 SHA-512 mismatch: got %s, want %s", gotHash, spec.sha512)
-	}
-
 	tmpCRX, err := os.CreateTemp(filepath.Dir(destPath), "widevine-*.crx3")
 	if err != nil {
 		return "", fmt.Errorf("creating temp file for cdm download: %w", err)
@@ -257,13 +275,31 @@ func DownloadCDM(ctx context.Context, destPath string, progress ...func(string))
 		_ = os.Remove(tmpCRXPath)
 	}()
 
-	if _, err := tmpCRX.Write(crxBytes); err != nil {
-		return "", fmt.Errorf("writing cdm package: %w", err)
+	hasher := sha512.New()
+	written, err := io.Copy(io.MultiWriter(tmpCRX, hasher), io.LimitReader(resp.Body, maxCRXBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("reading cdm package: %w", err)
 	}
-	_ = tmpCRX.Close()
+	if written > maxCRXBytes {
+		return "", fmt.Errorf("downloaded CRX3 exceeds %d bytes limit", maxCRXBytes)
+	}
+	if spec.fileSize > 0 && written != spec.fileSize {
+		return "", fmt.Errorf("downloaded CRX3 size mismatch: got %d, want %d", written, spec.fileSize)
+	}
+	if err := tmpCRX.Close(); err != nil {
+		return "", fmt.Errorf("closing cdm temp package: %w", err)
+	}
+
+	gotDigest := hasher.Sum(nil)
+	if subtle.ConstantTimeCompare(gotDigest, wantDigest) != 1 {
+		return "", fmt.Errorf("widevine CRX3 SHA-512 mismatch: got %x, want %s", gotDigest, spec.sha512)
+	}
+	if err := verifyCRX3FileSignature(tmpCRXPath, widevineCRXID[:]); err != nil {
+		return "", fmt.Errorf("verifying CRX3 package signature: %w", err)
+	}
 
 	report(fmt.Sprintf("Extracting %s...", filepath.Base(destPath)))
-	if err := extractLibraryFromCRX(tmpCRXPath, destPath); err != nil {
+	if err := extractLibraryFromCRXWithCheck(tmpCRXPath, destPath, 1024*1024, true); err != nil {
 		return "", fmt.Errorf("extracting cdm library: %w", err)
 	}
 
@@ -316,9 +352,229 @@ func extractCDMFromCRX3(crx []byte) ([]byte, error) {
 	return nil, errors.New("widevine cdm library not found inside CRX3 archive")
 }
 
+type crxAsymmetricProof struct {
+	publicKey []byte
+	signature []byte
+	isECDSA   bool
+}
+
+func readProtoField(b []byte) (fieldNum uint64, wireType uint8, valBytes []byte, rest []byte, err error) {
+	tag, n := binary.Uvarint(b)
+	if n <= 0 {
+		return 0, 0, nil, nil, errors.New("malformed protobuf tag")
+	}
+	b = b[n:]
+	fieldNum = tag >> 3
+	wireType = uint8(tag & 0x07) //nolint:gosec // G115: masked to 3 bits
+	switch wireType {
+	case 0: // varint
+		_, vn := binary.Uvarint(b)
+		if vn <= 0 {
+			return 0, 0, nil, nil, errors.New("malformed protobuf varint")
+		}
+		return fieldNum, wireType, nil, b[vn:], nil
+	case 1: // 64-bit
+		if len(b) < 8 {
+			return 0, 0, nil, nil, errors.New("truncated 64-bit protobuf field")
+		}
+		return fieldNum, wireType, b[:8], b[8:], nil
+	case 2: // length-delimited
+		sz, ln := binary.Uvarint(b)
+		if ln <= 0 || ln > len(b) {
+			return 0, 0, nil, nil, errors.New("truncated length-delimited protobuf field")
+		}
+		b = b[ln:]
+		if sz > uint64(len(b)) { //nolint:gosec // G115: len(b) >= 0 on slice
+			return 0, 0, nil, nil, errors.New("truncated length-delimited protobuf field")
+		}
+		end := int(sz) //nolint:gosec // G115: bounded <= len(b)
+		return fieldNum, wireType, b[:end], b[end:], nil
+	case 5: // 32-bit
+		if len(b) < 4 {
+			return 0, 0, nil, nil, errors.New("truncated 32-bit protobuf field")
+		}
+		return fieldNum, wireType, b[:4], b[4:], nil
+	default:
+		return 0, 0, nil, nil, fmt.Errorf("unsupported protobuf wire type %d", wireType)
+	}
+}
+
+func parseCRXProof(msg []byte, isECDSA bool) (crxAsymmetricProof, error) {
+	proof := crxAsymmetricProof{isECDSA: isECDSA}
+	for len(msg) > 0 {
+		num, wt, val, rest, err := readProtoField(msg)
+		if err != nil {
+			return proof, err
+		}
+		msg = rest
+		if wt == 2 {
+			switch num {
+			case 1:
+				proof.publicKey = val
+			case 2:
+				proof.signature = val
+			}
+		}
+	}
+	return proof, nil
+}
+
+func parseCRXSignedID(signedHeaderData []byte) ([]byte, error) {
+	var crxID []byte
+	msg := signedHeaderData
+	for len(msg) > 0 {
+		num, wt, val, rest, err := readProtoField(msg)
+		if err != nil {
+			return nil, err
+		}
+		msg = rest
+		if num == 1 && wt == 2 {
+			crxID = val
+		}
+	}
+	if len(crxID) != 16 {
+		return nil, fmt.Errorf("invalid CRX3 signed crx_id length: %d", len(crxID))
+	}
+	return crxID, nil
+}
+
+func verifyCRX3ProofSignature(digest []byte, proof crxAsymmetricProof) error {
+	pubAny, err := x509.ParsePKIXPublicKey(proof.publicKey)
+	if err != nil {
+		return err
+	}
+	if proof.isECDSA {
+		ecPub, ok := pubAny.(*ecdsa.PublicKey)
+		if !ok {
+			return errors.New("expected ECDSA public key")
+		}
+		if !ecdsa.VerifyASN1(ecPub, digest, proof.signature) {
+			return errors.New("invalid ECDSA signature")
+		}
+		return nil
+	}
+	rsaPub, ok := pubAny.(*rsa.PublicKey)
+	if !ok {
+		return errors.New("expected RSA public key")
+	}
+	return rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, digest, proof.signature)
+}
+
+func verifyCRX3FileSignature(crxPath string, expectedCRXID []byte) error {
+	f, err := os.Open(crxPath) //nolint:gosec // G304: verified temp file in user cache dir
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	fileSize := stat.Size()
+	if fileSize < 16 {
+		return errors.New("crx file too small")
+	}
+
+	var prefix [12]byte
+	if _, err := io.ReadFull(f, prefix[:]); err != nil {
+		return err
+	}
+	if string(prefix[0:4]) != "Cr24" {
+		return errors.New("invalid crx format: missing Cr24 magic")
+	}
+	if ver := binary.LittleEndian.Uint32(prefix[4:8]); ver != 3 {
+		return fmt.Errorf("unsupported crx version: %d", ver)
+	}
+	headerLen := binary.LittleEndian.Uint32(prefix[8:12])
+	if headerLen == 0 || headerLen > maxCRXHeaderBytes {
+		return fmt.Errorf("invalid crx header length: %d", headerLen)
+	}
+	zipOffset := int64(12) + int64(headerLen)
+	if zipOffset >= fileSize {
+		return errors.New("truncated crx3 header")
+	}
+
+	headerBytes := make([]byte, headerLen)
+	if _, err := io.ReadFull(f, headerBytes); err != nil {
+		return err
+	}
+
+	var proofs []crxAsymmetricProof
+	var signedHeaderData []byte
+	msg := headerBytes
+	for len(msg) > 0 {
+		num, wt, val, rest, err := readProtoField(msg)
+		if err != nil {
+			return fmt.Errorf("parsing CRX3 header: %w", err)
+		}
+		msg = rest
+		if wt != 2 {
+			continue
+		}
+		switch num {
+		case 2:
+			proof, perr := parseCRXProof(val, false)
+			if perr != nil {
+				return perr
+			}
+			proofs = append(proofs, proof)
+		case 3:
+			proof, perr := parseCRXProof(val, true)
+			if perr != nil {
+				return perr
+			}
+			proofs = append(proofs, proof)
+		case 10000:
+			signedHeaderData = val
+		}
+	}
+	if len(signedHeaderData) == 0 {
+		return errors.New("CRX3 header missing signed_header_data")
+	}
+	crxID, err := parseCRXSignedID(signedHeaderData)
+	if err != nil {
+		return err
+	}
+	if len(expectedCRXID) > 0 && !bytes.Equal(crxID, expectedCRXID) {
+		return fmt.Errorf("unexpected CRX3 ID %x", crxID)
+	}
+
+	// CRX3 signed preimage: "CRX3 SignedData\x00" + LE32(len(signedHeaderData)) + signedHeaderData + ZIP payload
+	h := sha256.New()
+	_, _ = h.Write([]byte("CRX3 SignedData\x00"))
+	var lenLE [4]byte
+	binary.LittleEndian.PutUint32(lenLE[:], uint32(len(signedHeaderData))) //nolint:gosec // G115: bounded <= maxCRXHeaderBytes
+	_, _ = h.Write(lenLE[:])
+	_, _ = h.Write(signedHeaderData)
+	zipSize := fileSize - zipOffset
+	if _, err := io.CopyBuffer(h, io.NewSectionReader(f, zipOffset, zipSize), make([]byte, 32<<10)); err != nil {
+		return err
+	}
+	digest := h.Sum(nil)
+
+	for _, proof := range proofs {
+		if len(proof.publicKey) == 0 || len(proof.signature) == 0 {
+			continue
+		}
+		keyDigest := sha256.Sum256(proof.publicKey)
+		if !bytes.Equal(keyDigest[:16], crxID) {
+			continue
+		}
+		if verifyCRX3ProofSignature(digest, proof) == nil {
+			return nil
+		}
+	}
+	return errors.New("no valid CRX3 publisher proof matched crx_id")
+}
+
 // extractLibraryFromCRX reads a Chromium CRX3 package, locates the ZIP archive
 // after the header, and extracts the target library.
 func extractLibraryFromCRX(crxPath, destPath string) error {
+	return extractLibraryFromCRXWithCheck(crxPath, destPath, 0, false)
+}
+
+func extractLibraryFromCRXWithCheck(crxPath, destPath string, minBytes int64, checkMagic bool) error {
 	f, err := os.Open(crxPath) //nolint:gosec // crxPath is created in user cache directory
 	if err != nil {
 		return err
@@ -349,6 +605,9 @@ func extractLibraryFromCRX(crxPath, destPath string) error {
 	}
 
 	headerLen := binary.LittleEndian.Uint32(headerPrefix[8:12])
+	if headerLen > maxCRXHeaderBytes {
+		return fmt.Errorf("invalid crx header length: %d", headerLen)
+	}
 	zipOffset := int64(12) + int64(headerLen)
 	if zipOffset >= fileSize {
 		return errors.New("invalid crx header length")
@@ -378,9 +637,15 @@ func extractLibraryFromCRX(crxPath, destPath string) error {
 				return err
 			}
 			tmpDest := out.Name()
+			cleanup := true
+			defer func() {
+				if cleanup {
+					_ = out.Close()
+					_ = os.Remove(tmpDest)
+				}
+			}()
+
 			if err := out.Chmod(0700); err != nil {
-				_ = out.Close()
-				_ = os.Remove(tmpDest)
 				return err
 			}
 
@@ -388,18 +653,28 @@ func extractLibraryFromCRX(crxPath, destPath string) error {
 			limited := io.LimitReader(rc, maxCDMBytes+1)
 			written, err := io.Copy(out, limited) //nolint:gosec
 			if err != nil {
-				_ = out.Close()
-				_ = os.Remove(tmpDest)
 				return err
 			}
 			if written > maxCDMBytes {
-				_ = out.Close()
-				_ = os.Remove(tmpDest)
 				return fmt.Errorf("extracted %s exceeds %d bytes limit", targetName, maxCDMBytes)
 			}
-			_ = out.Close()
-
-			return os.Rename(tmpDest, destPath)
+			if minBytes > 0 && written < minBytes {
+				return fmt.Errorf("extracted %s is unexpectedly small (%d bytes)", targetName, written)
+			}
+			if err := out.Sync(); err != nil {
+				return err
+			}
+			if err := out.Close(); err != nil {
+				return err
+			}
+			if checkMagic && !verifyCDMBinaryMagic(tmpDest) {
+				return fmt.Errorf("extracted %s has invalid executable binary header", targetName)
+			}
+			if err := os.Rename(tmpDest, destPath); err != nil {
+				return err
+			}
+			cleanup = false
+			return nil
 		}
 	}
 

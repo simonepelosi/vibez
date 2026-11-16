@@ -2,7 +2,11 @@
 
 package cdm
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestCDM_InputValidationAndClosedGuards(t *testing.T) {
 	var c CDM
@@ -84,5 +88,33 @@ func TestCDM_DecryptBatchValidationAndClosedGuards(t *testing.T) {
 	var nilCDM *CDM
 	if _, err := nilCDM.DecryptBatch(nil, []byte{1}, []BatchSample{{IV: []byte{1}, Input: []byte{1}}}); err == nil {
 		t.Fatal("(*CDM)(nil).DecryptBatch = nil, want closed error")
+	}
+}
+
+func TestCDM_PathAndSessionNULGuards(t *testing.T) {
+	if _, err := New("relative/libwidevinecdm.so"); err == nil {
+		t.Fatal("New accepted relative CDM path, want error")
+	}
+	if _, err := New("/tmp/lib\x00widevine.so"); err == nil {
+		t.Fatal("New accepted path containing NUL byte, want error")
+	}
+
+	tmp := filepath.Join(t.TempDir(), "sub.so")
+	if err := os.WriteFile(tmp, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tmp, 0o666); err == nil { //nolint:gosec // G302: testing rejection of world-writable CDM file
+		// On Unix this must be rejected before dlopen.
+		if _, err := New(tmp); err == nil {
+			t.Log("New returned nil only on Windows; expected rejection on Unix")
+		}
+	}
+
+	var c CDM
+	if err := c.UpdateSession("bad\x00sid", []byte{1}); err == nil {
+		t.Fatal("UpdateSession accepted session ID with NUL byte")
+	}
+	if err := c.CloseSession("bad\x00sid"); err == nil {
+		t.Fatal("CloseSession accepted session ID with NUL byte")
 	}
 }
