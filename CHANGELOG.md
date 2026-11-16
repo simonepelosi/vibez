@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] — 2026-11-16
+
+### Security
+- **Playback pipeline, native audio sinks, and GStreamer hardening (#247)** — restricts GStreamer URIs to `https://` and loopback (`127.0.0.1` / `::1`), bounds `vibez_aac_parse_chain` adapter growth, synchronizes `GST_PAD_STREAM_LOCK` and CGO callback teardown across Linux GStreamer, macOS Core Audio, and Windows Media Foundation/`waveOut`, rejects relative/device/symlink/directory paths in `verifyRegularAudioPath` (`FILE_TYPE_DISK` on Windows), hardens `player.Broadcast` against leaked subscribers, and sanitizes `NaN`/`Inf` audio and EQ inputs.
+- **Widevine CDM, C++ bridge, streamer, and ISO BMFF/CENC parser hardening (#248)** — enforces absolute non-world-writable regular paths and ELF/Mach-O/PE magic checks for CDM binaries, validates CRX3 publisher proofs (`widevineCRXID`), manifest redirect allowlists, and streaming SHA-512 checksums, drains/retires `Host11Impl` callbacks safely on teardown, eliminates `trackStream` LRU/warmup data races, bounds non-seekable `.m4a` upload streaming (`streamRawUpload`), and replaces raw pattern scans with structural MP4 box walking.
+- **Local provider, scan cache, duration/ISRC matching, and terminal sanitization (#249)** — wraps `dhowden/tag` parsing with panic recovery, a 32 MiB read limit, and FLAC metadata validation, hardens the incremental scan cache with full 256-bit SHA-256 keys, path/permission/format verification, and metadata sanitization, enforces unique tag agreement in ISRC matching, caps recursive MP4 box walking, scrubs invalid UTF-8 and combining-mark DoS after ANSI stripping, and sanitizes scan notices.
+- **Desktop IPC (MPRIS, Windows SMTC, Discord) hardening (#250)** — restricts MPRIS/SMTC artwork URLs to public `https://` endpoints (blocking SSRF), prevents integer overflow/underflow on seek events and volume control, serializes MPRIS property updates and hardens SMTC `GetMessageW`/WinRT teardown, verifies Discord named pipe owner and server process user SIDs on Windows, and fails closed on non-Windows platforms without peer credential checks.
+- **Apple provider, self-updater, installer asset integrity, and CI rulesets (#251)** — prevents out-of-bounds pagination slice allocation in `initPaginatedPage` when `meta.total` is underreported, unifies strict HTTPS/no-userinfo/no-traversal URL checks in the updater, installs `.desktop` and `logo.png` directly from the SHA-256-verified release archive in `scripts/install.sh` instead of fetching from `main`, and aligns `.github/rulesets` required status checks.
+- **Credentials concurrency, session logout teardown, license SSRF, TUI bounds, and Vibe CLI hardening (#252)** — protects Apple/Last.fm config tokens with `tokenMu sync.RWMutex` and lock-safe persistence, adds `LoginWithContext` cancellation and full `:logout` teardown/reauth suppression, restricts FairPlay/Widevine license URLs to `*.apple.com` and strips sensitive headers across redirects, enforces `VibePrivacy == "local-only"` in both backend detection and `:vibe <backend>`, moves `gemini`/`copilot` prompts onto `stdin` with string-aware JSON extraction, and guards TUI narrow-width rendering against negative slice/repeat bounds.
+
+### Fixed
+- **Windows Media Foundation initialization & gapless fallback (#247)** — keeps `MFStartup` initialized once per process (`ensureMfStartup`) to prevent `mfplat.dll` teardown races across sequential playback sessions and shares the `fallbackWaveOutPCM16` path across initial and gapless audio device reopens.
+
 ## [2.2.0] — 2026-11-15
 
 ### Added
@@ -852,7 +865,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.1...HEAD
+[2.2.1]: https://github.com/simonepelosi/vibez/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/simonepelosi/vibez/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/simonepelosi/vibez/compare/v2.0.8...v2.1.0
 [2.0.8]: https://github.com/simonepelosi/vibez/compare/v2.0.7...v2.0.8
