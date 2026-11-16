@@ -31,8 +31,9 @@ void* load_library(const char* utf8_path) {
     if (n <= 0) return nullptr;
     std::vector<wchar_t> wide(static_cast<size_t>(n));
     MultiByteToWideChar(CP_UTF8, 0, utf8_path, -1, wide.data(), n);
-    // LOAD_WITH_ALTERED_SEARCH_PATH resolves the DLL's own dependencies from its directory.
-    return reinterpret_cast<void*>(LoadLibraryExW(wide.data(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH));
+    // Restrict implicit dependency resolution to System32 so CWD, PATH, and
+    // writable DLL directories cannot hijack non-KnownDLL dependencies.
+    return reinterpret_cast<void*>(LoadLibraryExW(wide.data(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
 }
 void* load_symbol(void* lib, const char* name) {
     return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(lib), name));
@@ -65,8 +66,15 @@ public:
 
     explicit BufferImpl(uint32_t cap) {
         if (cap > 0 && cap <= kMaxCdmBufferSize) {
-            data_.resize(cap);
+            try {
+                data_.resize(cap);
+            } catch (...) {
+                data_.clear();
+            }
         }
+    }
+    bool allocatedOK(uint32_t expectedCap) const {
+        return expectedCap == 0 || (expectedCap <= kMaxCdmBufferSize && data_.size() == expectedCap);
     }
     void Destroy() override { delete this; }
     uint32_t Capacity() const override { return static_cast<uint32_t>(data_.capacity()); }
@@ -76,7 +84,11 @@ public:
             data_.clear();
             return;
         }
-        data_.resize(s);
+        try {
+            data_.resize(s);
+        } catch (...) {
+            data_.clear();
+        }
     }
     uint32_t Size() const override { return static_cast<uint32_t>(data_.size()); }
 };
@@ -185,7 +197,17 @@ public:
         if (destroyed.load(std::memory_order_acquire) || capacity > BufferImpl::kMaxCdmBufferSize) {
             return nullptr;
         }
-        return new (std::nothrow) BufferImpl(capacity);
+        try {
+            auto* buf = new (std::nothrow) BufferImpl(capacity);
+            if (!buf) return nullptr;
+            if (!buf->allocatedOK(capacity)) {
+                delete buf;
+                return nullptr;
+            }
+            return buf;
+        } catch (...) {
+            return nullptr;
+        }
     }
 
     void SetTimer(int64_t delay_ms, void* context) override {}
@@ -364,83 +386,90 @@ extern "C" {
 
 cdm_context_t* cdm_context_create(const char* library_path) {
     if (!library_path) return nullptr;
+    try {
+        void* handle = load_library(library_path);
+        if (!handle) {
+            return nullptr;
+        }
 
-    void* handle = load_library(library_path);
-    if (!handle) {
+        using InitFunc = void (*)(void);
+        using CreateFunc = void* (*)(int, const char*, uint32_t, GetCdmHostFunc, void*);
+
+        InitFunc init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule_4"));
+        CreateFunc create_cdm = reinterpret_cast<CreateFunc>(load_symbol(handle, "CreateCdmInstance"));
+
+        if (!init_cdm) {
+            init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule"));
+        }
+
+        if (!create_cdm) {
+            unload_library(handle);
+            return nullptr;
+        }
+
+        if (init_cdm) {
+            init_cdm();
+        }
+
+        cdm_context_t* ctx = new (std::nothrow) cdm_context();
+        if (!ctx) {
+            unload_library(handle);
+            return nullptr;
+        }
+        ctx->host.reset(new (std::nothrow) Host11Impl());
+        if (!ctx->host) {
+            delete ctx;
+            unload_library(handle);
+            return nullptr;
+        }
+        ctx->lib_handle = handle;
+
+        std::string key_system = "com.widevine.alpha";
+        void* raw = create_cdm(11, key_system.c_str(), static_cast<uint32_t>(key_system.size()), GetCdmHostCallback, ctx->host.get());
+        if (!raw) {
+            ctx->host->markDestroyed();
+            ctx->host->waitCallbacksIdle();
+            delete ctx;
+            unload_library(handle);
+            return nullptr;
+        }
+
+        ctx->cdm11 = static_cast<cdm::ContentDecryptionModule_11*>(raw);
+        ctx->cdm11->Initialize(true, false, false);
+
+        return ctx;
+    } catch (...) {
         return nullptr;
     }
-
-    using InitFunc = void (*)(void);
-    using CreateFunc = void* (*)(int, const char*, uint32_t, GetCdmHostFunc, void*);
-
-    InitFunc init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule_4"));
-    CreateFunc create_cdm = reinterpret_cast<CreateFunc>(load_symbol(handle, "CreateCdmInstance"));
-
-    if (!init_cdm) {
-        init_cdm = reinterpret_cast<InitFunc>(load_symbol(handle, "InitializeCdmModule"));
-    }
-
-    if (!create_cdm) {
-        unload_library(handle);
-        return nullptr;
-    }
-
-    if (init_cdm) {
-        init_cdm();
-    }
-
-    cdm_context_t* ctx = new (std::nothrow) cdm_context();
-    if (!ctx) {
-        unload_library(handle);
-        return nullptr;
-    }
-    ctx->host.reset(new (std::nothrow) Host11Impl());
-    if (!ctx->host) {
-        delete ctx;
-        unload_library(handle);
-        return nullptr;
-    }
-    ctx->lib_handle = handle;
-
-    std::string key_system = "com.widevine.alpha";
-    void* raw = create_cdm(11, key_system.c_str(), static_cast<uint32_t>(key_system.size()), GetCdmHostCallback, ctx->host.get());
-    if (!raw) {
-        ctx->host->markDestroyed();
-        ctx->host->waitCallbacksIdle();
-        delete ctx;
-        unload_library(handle);
-        return nullptr;
-    }
-
-    ctx->cdm11 = static_cast<cdm::ContentDecryptionModule_11*>(raw);
-    ctx->cdm11->Initialize(true, false, false);
-
-    return ctx;
 }
 
 int cdm_context_set_server_certificate(cdm_context_t* ctx, const uint8_t* cert_data, uint32_t cert_size) {
     if (!ctx || !ctx->host || !ctx->cdm11 || !cert_data || cert_size == 0) return -1;
-    uint32_t promise_id = 0;
-    {
-        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
-        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
-        promise_id = ctx->host->allocPromiseIdLocked();
-        ctx->host->cert_promise_id = promise_id;
-        ctx->host->certResolved = false;
-        ctx->host->certFailed = false;
-    }
-    ctx->cdm11->SetServerCertificate(promise_id, cert_data, cert_size);
-    {
-        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
-        bool ok = ctx->host->cert_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host->destroyed.load(std::memory_order_acquire) || ctx->host->certResolved || ctx->host->certFailed;
-        });
-        ctx->host->cert_promise_id = 0;
-        if (!ok || ctx->host->certFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
-            return -2;
+    try {
+        uint32_t promise_id = 0;
+        {
+            std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+            if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+            promise_id = ctx->host->allocPromiseIdLocked();
+            ctx->host->cert_promise_id = promise_id;
+            ctx->host->certResolved = false;
+            ctx->host->certFailed = false;
         }
+        ctx->cdm11->SetServerCertificate(promise_id, cert_data, cert_size);
+        {
+            std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+            bool ok = ctx->host->cert_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+                return ctx->host->destroyed.load(std::memory_order_acquire) || ctx->host->certResolved || ctx->host->certFailed;
+            });
+            ctx->host->cert_promise_id = 0;
+            if (!ok || ctx->host->certFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
+                return -2;
+            }
+        }
+        return 0;
+    } catch (...) {
+        return -1;
     }
-    return 0;
 }
 
 int cdm_context_generate_challenge(
@@ -457,80 +486,93 @@ int cdm_context_generate_challenge(
     *out_session_id = nullptr;
     if (!ctx || !ctx->host || !ctx->cdm11 || !kid || kid_size != 16) return -1;
 
-    uint32_t promise_id = 0;
-    // Reset host session state
-    {
-        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
-        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
-        promise_id = ctx->host->allocPromiseIdLocked();
-        ctx->host->session_promise_id = promise_id;
-        ctx->host->sessionId.clear();
-        ctx->host->sessionMessage.clear();
-        ctx->host->hasMessage = false;
-        ctx->host->sessionFailed = false;
-    }
-
-    // Widevine PSSH header box (52 bytes) matching MusicKit v3 generatePSSH:
-    //   [0..3]   size = 52 (32-byte box header + 4-byte protobuf prefix + 16-byte KID)
-    //   [4..7]   "pssh"
-    //   [8..11]  version = 0, flags = 0
-    //   [12..27] Widevine SystemID: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
-    //   [28..31] data_size = 20 (4 + 16)
-    //   [32..35] WidevinePsshData protobuf: 0x08 0x01 (algorithm=AESCTR) 0x12 0x10 (key_id, len=16)
-    //   [36..51] 16-byte Key ID
-    std::vector<uint8_t> pssh = {
-        0x00, 0x00, 0x00, 0x34,
-        'p',  's',  's',  'h',
-        0x00, 0x00, 0x00, 0x00,
-        0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
-        0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
-        0x00, 0x00, 0x00, 0x14,
-        0x08, 0x01, 0x12, 0x10
-    };
-    pssh.insert(pssh.end(), kid, kid + kid_size);
-
-    ctx->cdm11->CreateSessionAndGenerateRequest(
-        promise_id,
-        cdm::SessionType::kTemporary,
-        cdm::InitDataType::kCenc,
-        pssh.data(),
-        static_cast<uint32_t>(pssh.size())
-    );
-
-    {
-        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
-        bool ok = ctx->host->msg_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host->destroyed.load(std::memory_order_acquire) ||
-                   (ctx->host->hasMessage && !ctx->host->sessionId.empty()) ||
-                   ctx->host->sessionFailed;
-        });
-        ctx->host->session_promise_id = 0;
-        if (!ok || ctx->host->sessionFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
-            return -2;
-        }
-        if (ctx->host->sessionMessage.empty() || ctx->host->sessionId.empty()) {
-            return -2;
+    try {
+        uint32_t promise_id = 0;
+        // Reset host session state
+        {
+            std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+            if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+            promise_id = ctx->host->allocPromiseIdLocked();
+            ctx->host->session_promise_id = promise_id;
+            ctx->host->sessionId.clear();
+            ctx->host->sessionMessage.clear();
+            ctx->host->hasMessage = false;
+            ctx->host->sessionFailed = false;
         }
 
-        const size_t challengeSize = ctx->host->sessionMessage.size();
-        const size_t sidSize = ctx->host->sessionId.size();
-        *out_challenge = static_cast<uint8_t*>(std::malloc(challengeSize));
-        if (!*out_challenge) {
-            return -3;
-        }
-        std::memcpy(*out_challenge, ctx->host->sessionMessage.data(), challengeSize);
+        // Widevine PSSH header box (52 bytes) matching MusicKit v3 generatePSSH:
+        //   [0..3]   size = 52 (32-byte box header + 4-byte protobuf prefix + 16-byte KID)
+        //   [4..7]   "pssh"
+        //   [8..11]  version = 0, flags = 0
+        //   [12..27] Widevine SystemID: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
+        //   [28..31] data_size = 20 (4 + 16)
+        //   [32..35] WidevinePsshData protobuf: 0x08 0x01 (algorithm=AESCTR) 0x12 0x10 (key_id, len=16)
+        //   [36..51] 16-byte Key ID
+        std::vector<uint8_t> pssh = {
+            0x00, 0x00, 0x00, 0x34,
+            'p',  's',  's',  'h',
+            0x00, 0x00, 0x00, 0x00,
+            0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce,
+            0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+            0x00, 0x00, 0x00, 0x14,
+            0x08, 0x01, 0x12, 0x10
+        };
+        pssh.insert(pssh.end(), kid, kid + kid_size);
 
-        *out_session_id = static_cast<char*>(std::malloc(sidSize + 1));
-        if (!*out_session_id) {
+        ctx->cdm11->CreateSessionAndGenerateRequest(
+            promise_id,
+            cdm::SessionType::kTemporary,
+            cdm::InitDataType::kCenc,
+            pssh.data(),
+            static_cast<uint32_t>(pssh.size())
+        );
+
+        {
+            std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+            bool ok = ctx->host->msg_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+                return ctx->host->destroyed.load(std::memory_order_acquire) ||
+                       (ctx->host->hasMessage && !ctx->host->sessionId.empty()) ||
+                       ctx->host->sessionFailed;
+            });
+            ctx->host->session_promise_id = 0;
+            if (!ok || ctx->host->sessionFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
+                return -2;
+            }
+            if (ctx->host->sessionMessage.empty() || ctx->host->sessionId.empty()) {
+                return -2;
+            }
+
+            const size_t challengeSize = ctx->host->sessionMessage.size();
+            const size_t sidSize = ctx->host->sessionId.size();
+            *out_challenge = static_cast<uint8_t*>(std::malloc(challengeSize));
+            if (!*out_challenge) {
+                return -3;
+            }
+            std::memcpy(*out_challenge, ctx->host->sessionMessage.data(), challengeSize);
+
+            *out_session_id = static_cast<char*>(std::malloc(sidSize + 1));
+            if (!*out_session_id) {
+                std::free(*out_challenge);
+                *out_challenge = nullptr;
+                return -4;
+            }
+            std::memcpy(*out_session_id, ctx->host->sessionId.c_str(), sidSize + 1);
+            *out_challenge_size = static_cast<uint32_t>(challengeSize);
+        }
+
+        return 0;
+    } catch (...) {
+        if (*out_challenge) {
             std::free(*out_challenge);
             *out_challenge = nullptr;
-            return -4;
         }
-        std::memcpy(*out_session_id, ctx->host->sessionId.c_str(), sidSize + 1);
-        *out_challenge_size = static_cast<uint32_t>(challengeSize);
+        if (*out_session_id) {
+            std::free(*out_session_id);
+            *out_session_id = nullptr;
+        }
+        *out_challenge_size = 0;
+        return -1;
     }
-
-    return 0;
 }
 
 int cdm_context_update_session(
@@ -540,83 +582,91 @@ int cdm_context_update_session(
     uint32_t license_size
 ) {
     if (!ctx || !ctx->host || !ctx->cdm11 || !session_id || !license_data || license_size == 0) return -1;
-    size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
-    if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
+    try {
+        size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
+        if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
 
-    uint32_t promise_id = 0;
-    {
-        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
-        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
-        promise_id = ctx->host->allocPromiseIdLocked();
-        ctx->host->update_promise_id = promise_id;
-        ctx->host->activeUpdateSessionId.assign(session_id, sid_len);
-        ctx->host->updateResolved = false;
-        ctx->host->updateFailed = false;
-        ctx->host->usableKeys = 0;
-    }
-
-    ctx->cdm11->UpdateSession(
-        promise_id,
-        session_id,
-        static_cast<uint32_t>(sid_len),
-        license_data,
-        license_size
-    );
-
-    {
-        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
-        bool ok = ctx->host->update_cv.wait_for(lk, std::chrono::seconds(5), [&]{
-            return ctx->host->destroyed.load(std::memory_order_acquire) ||
-                   ctx->host->updateResolved ||
-                   ctx->host->updateFailed;
-        });
-        ctx->host->update_promise_id = 0;
-        ctx->host->activeUpdateSessionId.clear();
-        if (!ok || ctx->host->updateFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
-            return -2;
+        uint32_t promise_id = 0;
+        {
+            std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+            if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+            promise_id = ctx->host->allocPromiseIdLocked();
+            ctx->host->update_promise_id = promise_id;
+            ctx->host->activeUpdateSessionId.assign(session_id, sid_len);
+            ctx->host->updateResolved = false;
+            ctx->host->updateFailed = false;
+            ctx->host->usableKeys = 0;
         }
-        if (ctx->host->usableKeys == 0) {
-            return -3;
-        }
-    }
 
-    return 0;
+        ctx->cdm11->UpdateSession(
+            promise_id,
+            session_id,
+            static_cast<uint32_t>(sid_len),
+            license_data,
+            license_size
+        );
+
+        {
+            std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+            bool ok = ctx->host->update_cv.wait_for(lk, std::chrono::seconds(5), [&]{
+                return ctx->host->destroyed.load(std::memory_order_acquire) ||
+                       ctx->host->updateResolved ||
+                       ctx->host->updateFailed;
+            });
+            ctx->host->update_promise_id = 0;
+            ctx->host->activeUpdateSessionId.clear();
+            if (!ok || ctx->host->updateFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
+                return -2;
+            }
+            if (ctx->host->usableKeys == 0) {
+                return -3;
+            }
+        }
+
+        return 0;
+    } catch (...) {
+        return -1;
+    }
 }
 
 int cdm_context_close_session(cdm_context_t* ctx, const char* session_id) {
     if (!ctx || !ctx->host || !ctx->cdm11 || !session_id) return -1;
-    size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
-    if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
+    try {
+        size_t sid_len = bounded_strlen(session_id, Host11Impl::kMaxSessionIdSize + 1);
+        if (sid_len == 0 || sid_len > Host11Impl::kMaxSessionIdSize) return -1;
 
-    uint32_t promise_id = 0;
-    {
-        std::lock_guard<std::mutex> lk(ctx->host->cv_m);
-        if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
-        promise_id = ctx->host->allocPromiseIdLocked();
-        ctx->host->close_promise_id = promise_id;
-        ctx->host->closeResolved = false;
-        ctx->host->closeFailed = false;
-        ctx->host->closingSessionId.assign(session_id, sid_len);
+        uint32_t promise_id = 0;
+        {
+            std::lock_guard<std::mutex> lk(ctx->host->cv_m);
+            if (ctx->host->destroyed.load(std::memory_order_acquire)) return -1;
+            promise_id = ctx->host->allocPromiseIdLocked();
+            ctx->host->close_promise_id = promise_id;
+            ctx->host->closeResolved = false;
+            ctx->host->closeFailed = false;
+            ctx->host->closingSessionId.assign(session_id, sid_len);
+        }
+
+        ctx->cdm11->CloseSession(
+            promise_id,
+            session_id,
+            static_cast<uint32_t>(sid_len)
+        );
+
+        std::unique_lock<std::mutex> lk(ctx->host->cv_m);
+        bool ok = ctx->host->close_cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
+            return ctx->host->destroyed.load(std::memory_order_acquire) ||
+                   ctx->host->closeResolved ||
+                   ctx->host->closeFailed;
+        });
+        ctx->host->close_promise_id = 0;
+        ctx->host->closingSessionId.clear();
+        if (!ok || ctx->host->closeFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
+            return -2;
+        }
+        return 0;
+    } catch (...) {
+        return -1;
     }
-
-    ctx->cdm11->CloseSession(
-        promise_id,
-        session_id,
-        static_cast<uint32_t>(sid_len)
-    );
-
-    std::unique_lock<std::mutex> lk(ctx->host->cv_m);
-    bool ok = ctx->host->close_cv.wait_for(lk, std::chrono::milliseconds(500), [&] {
-        return ctx->host->destroyed.load(std::memory_order_acquire) ||
-               ctx->host->closeResolved ||
-               ctx->host->closeFailed;
-    });
-    ctx->host->close_promise_id = 0;
-    ctx->host->closingSessionId.clear();
-    if (!ok || ctx->host->closeFailed || ctx->host->destroyed.load(std::memory_order_acquire)) {
-        return -2;
-    }
-    return 0;
 }
 
 static int decrypt_one_sample(
@@ -712,11 +762,16 @@ int cdm_context_decrypt(
         if (out_size) *out_size = 0;
         return -1;
     }
-    return decrypt_one_sample(
-        ctx, key_id, key_id_size, iv, iv_size,
-        in_data, in_size, clear_bytes, cipher_bytes,
-        num_subsamples, out_decrypted, out_size
-    );
+    try {
+        return decrypt_one_sample(
+            ctx, key_id, key_id_size, iv, iv_size,
+            in_data, in_size, clear_bytes, cipher_bytes,
+            num_subsamples, out_decrypted, out_size
+        );
+    } catch (...) {
+        if (out_size) *out_size = 0;
+        return -1;
+    }
 }
 
 int cdm_context_decrypt_batch(
@@ -744,72 +799,79 @@ int cdm_context_decrypt_batch(
     if (in_total_size > 0 && (!in_data || !out_decrypted)) return -1;
     if (total_subsamples > 0 && (!clear_bytes || !cipher_bytes)) return -1;
 
-    uint64_t iv_pos = 0;
-    uint64_t in_pos = 0;
-    uint64_t sub_pos = 0;
-    uint64_t out_pos = 0;
+    try {
+        uint64_t iv_pos = 0;
+        uint64_t in_pos = 0;
+        uint64_t sub_pos = 0;
+        uint64_t out_pos = 0;
 
-    for (uint32_t s = 0; s < num_samples; ++s) {
-        uint32_t iv_sz = iv_sizes[s];
-        uint32_t in_sz = in_sizes[s];
-        uint32_t n_sub = sub_counts ? sub_counts[s] : 0;
+        for (uint32_t s = 0; s < num_samples; ++s) {
+            uint32_t iv_sz = iv_sizes[s];
+            uint32_t in_sz = in_sizes[s];
+            uint32_t n_sub = sub_counts ? sub_counts[s] : 0;
 
-        if (iv_sz == 0 || iv_pos + iv_sz > ivs_total_size) return -1;
-        if (in_pos + in_sz > in_total_size) return -1;
-        if (n_sub > 65536u || sub_pos + n_sub > total_subsamples) return -1;
+            if (iv_sz == 0 || iv_pos + iv_sz > ivs_total_size) return -1;
+            if (in_pos + in_sz > in_total_size) return -1;
+            if (n_sub > 65536u || sub_pos + n_sub > total_subsamples) return -1;
 
-        if (in_sz == 0) {
-            out_sizes[s] = 0;
+            if (in_sz == 0) {
+                out_sizes[s] = 0;
+                iv_pos += iv_sz;
+                sub_pos += n_sub;
+                continue;
+            }
+            if (out_pos + in_sz > in_total_size) return -1;
+
+            uint32_t out_sz = 0;
+            const uint16_t* sub_clr = n_sub > 0 ? (clear_bytes + sub_pos) : nullptr;
+            const uint32_t* sub_cip = n_sub > 0 ? (cipher_bytes + sub_pos) : nullptr;
+            int rc = decrypt_one_sample(
+                ctx,
+                key_id,
+                key_id_size,
+                ivs_data + iv_pos,
+                iv_sz,
+                in_data + in_pos,
+                in_sz,
+                sub_clr,
+                sub_cip,
+                n_sub,
+                out_decrypted + out_pos,
+                &out_sz
+            );
+            if (rc != 0) {
+                return rc;
+            }
+            out_sizes[s] = out_sz;
             iv_pos += iv_sz;
+            in_pos += in_sz;
             sub_pos += n_sub;
-            continue;
+            out_pos += out_sz;
         }
-        if (out_pos + in_sz > in_total_size) return -1;
 
-        uint32_t out_sz = 0;
-        const uint16_t* sub_clr = n_sub > 0 ? (clear_bytes + sub_pos) : nullptr;
-        const uint32_t* sub_cip = n_sub > 0 ? (cipher_bytes + sub_pos) : nullptr;
-        int rc = decrypt_one_sample(
-            ctx,
-            key_id,
-            key_id_size,
-            ivs_data + iv_pos,
-            iv_sz,
-            in_data + in_pos,
-            in_sz,
-            sub_clr,
-            sub_cip,
-            n_sub,
-            out_decrypted + out_pos,
-            &out_sz
-        );
-        if (rc != 0) {
-            return rc;
-        }
-        out_sizes[s] = out_sz;
-        iv_pos += iv_sz;
-        in_pos += in_sz;
-        sub_pos += n_sub;
-        out_pos += out_sz;
+        return 0;
+    } catch (...) {
+        return -1;
     }
-
-    return 0;
 }
 
 void cdm_context_destroy(cdm_context_t* ctx) {
     if (!ctx) return;
-    if (ctx->host) {
-        ctx->host->markDestroyed();
+    try {
+        if (ctx->host) {
+            ctx->host->markDestroyed();
+        }
+        if (ctx->cdm11) {
+            ctx->cdm11->Destroy();
+            ctx->cdm11 = nullptr;
+        }
+        if (ctx->host) {
+            ctx->host->waitCallbacksIdle();
+            retire_host(std::move(ctx->host));
+        }
+        std::vector<cdm::SubsampleEntry>().swap(ctx->scratch_subs);
+    } catch (...) {
     }
-    if (ctx->cdm11) {
-        ctx->cdm11->Destroy();
-        ctx->cdm11 = nullptr;
-    }
-    if (ctx->host) {
-        ctx->host->waitCallbacksIdle();
-        retire_host(std::move(ctx->host));
-    }
-    std::vector<cdm::SubsampleEntry>().swap(ctx->scratch_subs);
     // We intentionally do not call unload_library here: Widevine CDM spins up
     // internal threads and TLS destructors that expect the library code to
     // remain mapped until process termination.

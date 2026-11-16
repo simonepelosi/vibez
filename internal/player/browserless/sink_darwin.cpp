@@ -236,6 +236,11 @@ struct Session : public std::enable_shared_from_this<Session> {
                 AudioQueueDispose(queue, true);
                 queue = nullptr;
             }
+            std::lock_guard<std::mutex> blk(bufferMutex);
+            freeBuffers.clear();
+            curBuf = nullptr;
+            curBufBytes = 0;
+            curPacketDescs.clear();
         }
         if (converter) {
             AudioConverterDispose(converter);
@@ -622,25 +627,51 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
 }
 
 static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& pcm) {
-    std::lock_guard<std::mutex> qlk(ses->queueMutex);
-    if (ses->queue &&
-        (ses->pcmAsbd.mSampleRate != pcm.mSampleRate ||
-         ses->pcmAsbd.mChannelsPerFrame != pcm.mChannelsPerFrame)) {
-        ses->flushCurrentBufferLocked();
+    bool needsDrain = false;
+    {
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (ses->queue &&
+            (ses->pcmAsbd.mSampleRate != pcm.mSampleRate ||
+             ses->pcmAsbd.mChannelsPerFrame != pcm.mChannelsPerFrame)) {
+            ses->flushCurrentBufferLocked();
+            // Ensure an unstarted single-buffer queue drains before waiting (when not paused).
+            if (!ses->started.load() && ses->enqueuedCount.load() > 0 && !ses->paused.load()) {
+                AudioQueueStart(ses->queue, NULL);
+                ses->started = true;
+            }
+            needsDrain = true;
+        }
+    }
+    if (needsDrain) {
+        // Wait with queueMutex unlocked so Play(), Position(), Pause(), and Stop()
+        // never deadlock with buffer draining or user resume while paused.
         {
             std::unique_lock<std::mutex> lock(ses->bufferMutex);
             ses->bufferCond.wait(lock, [ses] {
                 return ses->enqueuedCount.load() == 0 || ses->cancelled.load();
             });
+        }
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (ses->queue) {
+            AudioQueueDispose(ses->queue, true);
+            ses->queue = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(ses->bufferMutex);
             ses->freeBuffers.clear();
         }
-        AudioQueueDispose(ses->queue, true);
-        ses->queue = nullptr;
+        ses->curBuf = nullptr;
+        ses->curBufBytes = 0;
+        ses->curPacketDescs.clear();
         ses->started = false;
         ses->enqueuedFrames = 0;
         ses->baseSampleTime = 0.0;
         ses->eqSeen = 0;
     }
+    if (ses->cancelled.load()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
     ses->pcmAsbd = pcm;
     if (!ses->queue && !ses->nullOut.load()) {
         OSStatus err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
@@ -742,8 +773,15 @@ static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::stri
             if (target > 1e8) target = 1e8;
             SInt64 targetFrame = static_cast<SInt64>(target * rate);
             ExtAudioFileSeek(extFile, targetFrame);
-            ses->curBufBytes = 0;
             std::lock_guard<std::mutex> qlk(ses->queueMutex);
+            if (ses->curBuf) {
+                std::lock_guard<std::mutex> blk(ses->bufferMutex);
+                ses->freeBuffers.push_back(ses->curBuf);
+                ses->bufferCond.notify_one();
+                ses->curBuf = nullptr;
+            }
+            ses->curBufBytes = 0;
+            ses->curPacketDescs.clear();
             if (ses->queue) {
                 AudioQueueReset(ses->queue);
                 ses->enqueuedFrames = static_cast<uint64_t>(targetFrame);
@@ -1114,178 +1152,218 @@ vibez_darwinsink_t vibez_darwinsink_create(
     vibez_darwinsink_eos_cb_t on_eos,
     vibez_darwinsink_err_cb_t on_err,
     vibez_darwinsink_stream_start_cb_t on_stream_start) {
-    auto* h = new SinkHandle();
-    h->sink = std::make_shared<Sink>();
-    h->sink->user = user_data;
-    h->sink->onEos = on_eos;
-    h->sink->onErr = on_err;
-    h->sink->onStreamStart = on_stream_start;
-    return static_cast<vibez_darwinsink_t>(h);
+    try {
+        auto* h = new SinkHandle();
+        h->sink = std::make_shared<Sink>();
+        h->sink->user = user_data;
+        h->sink->onEos = on_eos;
+        h->sink->onErr = on_err;
+        h->sink->onStreamStart = on_stream_start;
+        return static_cast<vibez_darwinsink_t>(h);
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     if (!handle || !uri) return;
-    auto sink = static_cast<SinkHandle*>(handle)->sink;
-    if (!sink || sink->closed.load()) return;
+    try {
+        auto sink = static_cast<SinkHandle*>(handle)->sink;
+        if (!sink || sink->closed.load()) return;
 
-    auto newSession = std::make_shared<Session>();
-    newSession->parentSink = sink;
-    newSession->userData = sink->user;
-    newSession->onEos = sink->onEos;
-    newSession->onErr = sink->onErr;
-    newSession->onStreamStart = sink->onStreamStart;
-    newSession->initialVolume = sink->volume.load();
-    std::shared_ptr<Session> oldSession;
-    {
-        std::lock_guard<std::mutex> lock(sink->mu);
-        sink->nextURI.clear();
-        oldSession = sink->curSession;
-        sink->curSession = newSession;
-    }
+        auto newSession = std::make_shared<Session>();
+        newSession->parentSink = sink;
+        newSession->userData = sink->user;
+        newSession->onEos = sink->onEos;
+        newSession->onErr = sink->onErr;
+        newSession->onStreamStart = sink->onStreamStart;
+        newSession->initialVolume = sink->volume.load();
+        std::shared_ptr<Session> oldSession;
+        {
+            std::lock_guard<std::mutex> lock(sink->mu);
+            sink->nextURI.clear();
+            oldSession = sink->curSession;
+            sink->curSession = newSession;
+        }
 
-    if (oldSession) {
-        oldSession->cancel();
-    }
+        if (oldSession) {
+            oldSession->cancel();
+        }
 
-    std::string urlStr(uri);
-    {
-        std::lock_guard<std::mutex> wlk(sink->workerMu);
-        if (sink->closed.load()) return;
-        ++sink->activeWorkers;
+        std::string urlStr(uri);
+        {
+            std::lock_guard<std::mutex> wlk(sink->workerMu);
+            if (sink->closed.load()) return;
+            ++sink->activeWorkers;
+        }
+        try {
+            // Own shared references to both Sink and Session so an unwinding worker
+            // never touches freed Sink memory after vibez_darwinsink_destroy.
+            std::thread([sink, newSession, urlStr]() {
+                runSession(sink, newSession, urlStr);
+            }).detach();
+        } catch (...) {
+            std::lock_guard<std::mutex> wlk(sink->workerMu);
+            if (--sink->activeWorkers == 0) sink->workerCv.notify_all();
+        }
+    } catch (...) {
     }
-    // Own shared references to both Sink and Session so an unwinding worker
-    // never touches freed Sink memory after vibez_darwinsink_destroy.
-    std::thread([sink, newSession, urlStr]() {
-        runSession(sink, newSession, urlStr);
-    }).detach();
 }
 
 void vibez_darwinsink_set_next_uri(vibez_darwinsink_t handle, const char* uri) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    std::lock_guard<std::mutex> lock(sink->mu);
-    sink->nextURI = uri ? uri : "";
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        std::lock_guard<std::mutex> lock(sink->mu);
+        sink->nextURI = uri ? uri : "";
+    } catch (...) {
+    }
 }
 
 void vibez_darwinsink_play(vibez_darwinsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    auto ses = sink->currentSession();
-    if (!ses) return;
-    ses->paused = false;
-    std::lock_guard<std::mutex> qlk(ses->queueMutex);
-    if (ses->queue && ses->started.load()) {
-        AudioQueueStart(ses->queue, NULL);
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        auto ses = sink->currentSession();
+        if (!ses) return;
+        ses->paused = false;
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (ses->queue && ses->started.load()) {
+            AudioQueueStart(ses->queue, NULL);
+        }
+    } catch (...) {
     }
 }
 
 void vibez_darwinsink_pause(vibez_darwinsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    auto ses = sink->currentSession();
-    if (!ses) return;
-    ses->paused = true;
-    std::lock_guard<std::mutex> qlk(ses->queueMutex);
-    if (ses->queue && ses->started.load()) {
-        AudioQueuePause(ses->queue);
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        auto ses = sink->currentSession();
+        if (!ses) return;
+        ses->paused = true;
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (ses->queue && ses->started.load()) {
+            AudioQueuePause(ses->queue);
+        }
+    } catch (...) {
     }
 }
 
 void vibez_darwinsink_stop(vibez_darwinsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink) return;
-    std::shared_ptr<Session> old;
-    {
-        std::lock_guard<std::mutex> lock(sink->mu);
-        sink->nextURI.clear();
-        old = sink->curSession;
-        sink->curSession.reset();
-    }
-    if (old) {
-        old->cancel();
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink) return;
+        std::shared_ptr<Session> old;
+        {
+            std::lock_guard<std::mutex> lock(sink->mu);
+            sink->nextURI.clear();
+            old = sink->curSession;
+            sink->curSession.reset();
+        }
+        if (old) {
+            old->cancel();
+        }
+    } catch (...) {
     }
 }
 
 void vibez_darwinsink_seek(vibez_darwinsink_t handle, double seconds) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    auto ses = sink->currentSession();
-    if (!ses) return;
-    if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
-    if (seconds > 1e8) seconds = 1e8;
-    ses->seekTarget.store(seconds);
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        auto ses = sink->currentSession();
+        if (!ses) return;
+        if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
+        if (seconds > 1e8) seconds = 1e8;
+        ses->seekTarget.store(seconds);
+    } catch (...) {
+    }
 }
 
 void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    if (std::isnan(volume) || volume < 0.0f) volume = 0.0f;
-    if (volume > 1.0f) volume = 1.0f;
-    sink->volume = volume;
-    auto ses = sink->currentSession();
-    if (!ses) return;
-    ses->initialVolume = volume;
-    std::lock_guard<std::mutex> qlk(ses->queueMutex);
-    if (ses->queue) {
-        AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, volume);
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        if (std::isnan(volume) || volume < 0.0f) volume = 0.0f;
+        if (volume > 1.0f) volume = 1.0f;
+        sink->volume = volume;
+        auto ses = sink->currentSession();
+        if (!ses) return;
+        ses->initialVolume = volume;
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (ses->queue) {
+            AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, volume);
+        }
+    } catch (...) {
     }
 }
 
 void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, int count) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    {
-        std::lock_guard<std::mutex> lock(sink->mu);
-        for (int i = 0; i < kBands; ++i) {
-            double g = (gains_db && i < count) ? gains_db[i] : 0.0;
-            if (!std::isfinite(g)) g = 0.0;
-            if (g > 24.0) g = 24.0;
-            if (g < -24.0) g = -24.0;
-            sink->eq[i] = g;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        {
+            std::lock_guard<std::mutex> lock(sink->mu);
+            for (int i = 0; i < kBands; ++i) {
+                double g = (gains_db && i < count) ? gains_db[i] : 0.0;
+                if (!std::isfinite(g)) g = 0.0;
+                if (g > 24.0) g = 24.0;
+                if (g < -24.0) g = -24.0;
+                sink->eq[i] = g;
+            }
         }
+        sink->eqVersion++;
+    } catch (...) {
     }
-    sink->eqVersion++;
 }
 
 double vibez_darwinsink_position(vibez_darwinsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return 0.0;
-    auto ses = sink->currentSession();
-    if (!ses || !ses->started.load()) return 0.0;
-    if (ses->nullOut.load()) return ses->lastPosition.load();
-    std::lock_guard<std::mutex> qlk(ses->queueMutex);
-    if (!ses->queue) return 0.0;
-    AudioTimeStamp ts{};
-    OSStatus err = AudioQueueGetCurrentTime(ses->queue, NULL, &ts, NULL);
-    if (err == noErr && (ts.mFlags & kAudioTimeStampSampleTimeValid) && ses->pcmAsbd.mSampleRate > 0) {
-        double relSamples = ts.mSampleTime - ses->baseSampleTime.load();
-        double sec = relSamples / ses->pcmAsbd.mSampleRate;
-        if (sec >= 0.0) {
-            ses->lastPosition = sec;
-            return sec;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return 0.0;
+        auto ses = sink->currentSession();
+        if (!ses || !ses->started.load()) return 0.0;
+        if (ses->nullOut.load()) return ses->lastPosition.load();
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (!ses->queue) return 0.0;
+        AudioTimeStamp ts{};
+        OSStatus err = AudioQueueGetCurrentTime(ses->queue, NULL, &ts, NULL);
+        if (err == noErr && (ts.mFlags & kAudioTimeStampSampleTimeValid) && ses->pcmAsbd.mSampleRate > 0) {
+            double relSamples = ts.mSampleTime - ses->baseSampleTime.load();
+            double sec = relSamples / ses->pcmAsbd.mSampleRate;
+            if (sec >= 0.0) {
+                ses->lastPosition = sec;
+                return sec;
+            }
         }
+        return ses->lastPosition.load();
+    } catch (...) {
+        return 0.0;
     }
-    return ses->lastPosition.load();
 }
 
 void vibez_darwinsink_destroy(vibez_darwinsink_t handle) {
     if (!handle) return;
     auto* h = static_cast<SinkHandle*>(handle);
-    if (h->sink) {
-        h->sink->closed = true;
-        h->sink->cbGate.closeAndDrain();
-        std::shared_ptr<Session> old;
-        {
-            std::lock_guard<std::mutex> lock(h->sink->mu);
-            h->sink->nextURI.clear();
-            old = h->sink->curSession;
-            h->sink->curSession.reset();
+    try {
+        if (h->sink) {
+            h->sink->closed = true;
+            h->sink->cbGate.closeAndDrain();
+            std::shared_ptr<Session> old;
+            {
+                std::lock_guard<std::mutex> lock(h->sink->mu);
+                h->sink->nextURI.clear();
+                old = h->sink->curSession;
+                h->sink->curSession.reset();
+            }
+            if (old) {
+                old->cancel();
+            }
+            std::unique_lock<std::mutex> wlk(h->sink->workerMu);
+            h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
         }
-        if (old) {
-            old->cancel();
-        }
-        std::unique_lock<std::mutex> wlk(h->sink->workerMu);
-        h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
+    } catch (...) {
     }
     delete h;
 }

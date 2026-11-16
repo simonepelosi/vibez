@@ -15,9 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -36,20 +33,11 @@ type CDM struct {
 	certSet bool
 }
 
-// New loads the Widevine CDM shared library from the given path.
+// New loads the Widevine CDM shared library from the given path after validating
+// path safety, permissions, ownership, and regular file identity.
 func New(libraryPath string) (*CDM, error) {
-	if libraryPath == "" || strings.ContainsRune(libraryPath, 0) || strings.HasPrefix(libraryPath, `\\.\`) || !filepath.IsAbs(libraryPath) {
-		return nil, errors.New("invalid Widevine CDM path")
-	}
-	info, err := os.Stat(libraryPath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Widevine CDM path: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("widevine CDM path %q is not a regular file", libraryPath)
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o002 != 0 {
-		return nil, fmt.Errorf("widevine CDM path %q must not be world-writable", libraryPath)
+	if _, err := ValidateLibraryPath(libraryPath); err != nil {
+		return nil, err
 	}
 
 	cPath := C.CString(libraryPath)

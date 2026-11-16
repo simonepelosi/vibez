@@ -11,12 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
+
+	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
 )
 
 func isSafeAbsCDMPath(p string) bool {
-	return p != "" && !strings.ContainsRune(p, 0) && !strings.HasPrefix(p, `\\.\`) && filepath.IsAbs(p)
+	return cdm.IsSafeAbsPath(p)
 }
 
 func hasValidCDMBinaryMagicForOS(hdr []byte, targetOS string) bool {
@@ -42,11 +43,15 @@ func hasValidCDMBinaryMagicForOS(hdr []byte, targetOS string) bool {
 }
 
 func verifyCDMBinaryMagic(path string) bool {
-	f, err := os.Open(path) //nolint:gosec // G304: verified candidate path
+	f, err := cdm.OpenRegularNoFollow(path)
 	if err != nil {
 		return false
 	}
 	defer func() { _ = f.Close() }()
+	return verifyCDMBinaryMagicFile(f)
+}
+
+func verifyCDMBinaryMagicFile(f *os.File) bool {
 	var hdr [4]byte
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return false
@@ -55,33 +60,33 @@ func verifyCDMBinaryMagic(path string) bool {
 }
 
 func isValidCDMCandidate(path string) (os.FileInfo, bool) {
-	if !isSafeAbsCDMPath(path) {
+	fi, err := cdm.ValidateLibraryPath(path)
+	if err != nil || fi.Size() <= 100000 {
 		return nil, false
 	}
-	fi, err := os.Stat(path) //nolint:gosec // G703: path validated via isSafeAbsCDMPath for VIBEZ_CDM_PATH and OS candidate paths
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() <= 100000 {
+	f, err := cdm.OpenRegularNoFollow(path)
+	if err != nil {
 		return nil, false
 	}
-	if runtime.GOOS != "windows" {
-		if fi.Mode().Perm()&0o002 != 0 {
-			return nil, false
-		}
-		if dirInfo, derr := os.Stat(filepath.Dir(path)); derr != nil || (dirInfo.Mode().Perm()&0o002 != 0 && dirInfo.Mode()&os.ModeSticky == 0) { //nolint:gosec // G703: path validated via isSafeAbsCDMPath
-			return nil, false
-		}
-	}
-	if !verifyCDMBinaryMagic(path) {
+	defer func() { _ = f.Close() }()
+	if !verifyCDMBinaryMagicFile(f) {
 		return nil, false
 	}
 	return fi, true
 }
 
 func copyCDMFileAtomic(srcPath, destPath string) error {
-	src, err := os.Open(srcPath) //nolint:gosec // G304: validated regular file in user config dir
+	src, err := cdm.OpenRegularNoFollow(srcPath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = src.Close() }()
+	if !verifyCDMBinaryMagicFile(src) {
+		return errors.New("source CDM file failed binary magic check")
+	}
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(destPath), filepath.Base(destPath)+".tmp-*")
 	if err != nil {

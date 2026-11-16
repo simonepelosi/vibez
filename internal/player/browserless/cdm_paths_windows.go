@@ -5,18 +5,19 @@ package browserless
 import (
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/simone-vibes/vibez/internal/player/browserless/cdm"
 )
 
 const cdmLibName = "widevinecdm.dll"
 
 func absEnvPath(name string) string {
 	val := os.Getenv(name)
-	if val == "" || strings.ContainsRune(val, 0) || strings.HasPrefix(val, `\\.\`) {
+	if !cdm.IsSafeAbsPath(val) {
 		return ""
 	}
 	cleaned := filepath.Clean(val)
-	if !filepath.IsAbs(cleaned) {
+	if !cdm.IsSafeAbsPath(cleaned) {
 		return ""
 	}
 	return cleaned
@@ -71,7 +72,7 @@ func candidatePaths() []string {
 	for _, pattern := range patterns {
 		if matches, err := filepath.Glob(pattern); err == nil {
 			for _, m := range matches {
-				if filepath.IsAbs(m) && !strings.HasPrefix(m, `\\.\`) {
+				if cdm.IsSafeAbsPath(m) {
 					res = append(res, m)
 				}
 			}
@@ -86,13 +87,13 @@ func candidatePaths() []string {
 // DefaultCDMPath returns the destination path for the cached standalone CDM library on Windows.
 // Returns "" if no user-scoped cache or profile directory can be resolved safely.
 func DefaultCDMPath() string {
-	if dir, err := os.UserCacheDir(); err == nil && dir != "" && !strings.ContainsRune(dir, 0) && !strings.HasPrefix(dir, `\\.\`) {
-		if cleaned := filepath.Clean(dir); filepath.IsAbs(cleaned) {
+	if dir, err := os.UserCacheDir(); err == nil && cdm.IsSafeAbsPath(dir) {
+		if cleaned := filepath.Clean(dir); cdm.IsSafeAbsPath(cleaned) {
 			return filepath.Join(cleaned, "vibez", "cdm", cdmLibName)
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" && !strings.ContainsRune(home, 0) && !strings.HasPrefix(home, `\\.\`) {
-		if cleaned := filepath.Clean(home); filepath.IsAbs(cleaned) {
+	if home, err := os.UserHomeDir(); err == nil && cdm.IsSafeAbsPath(home) {
+		if cleaned := filepath.Clean(home); cdm.IsSafeAbsPath(cleaned) {
 			return filepath.Join(cleaned, "AppData", "Local", "vibez", "cdm", cdmLibName)
 		}
 	}
