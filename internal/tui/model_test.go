@@ -5623,3 +5623,97 @@ func TestCreatePlaylistCmd_NilProviderReturnsErrMsg(t *testing.T) {
 		t.Fatalf("createPlaylistCmd with nil provider = %T, want errMsg", msg)
 	}
 }
+
+func extractPlayerStateMsgs(cmd tea.Cmd) []playerStateMsg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	switch m := msg.(type) {
+	case playerStateMsg:
+		return []playerStateMsg{m}
+	case tea.BatchMsg:
+		var out []playerStateMsg
+		for _, sub := range m {
+			out = append(out, extractPlayerStateMsgs(sub)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func TestLogoutThenLogin_ReArmsStateChannelAndFencesPreLogoutMessages(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	stateCh := make(chan player.State, 4)
+	m.stateCh = stateCh
+	m.onReauth = func() {}
+
+	trBefore := provider.Track{ID: "t1", Title: "Before"}
+	_, _ = m.Update(playerStateMsg{Track: &trBefore, Playing: true})
+	if m.playerState.Track == nil || !m.playerState.Playing {
+		t.Fatal("initial playerStateMsg was not applied")
+	}
+
+	staleAuthGen := m.authGen
+	_ = m.executeCommand("logout")
+
+	// Simulated Stop() state arrives while loggedOut is true: must keep logged-out
+	// track empty AND re-arm waitForState(m.stateCh).
+	_, cmd := m.Update(playerStateMsg{Track: &trBefore, Playing: true})
+	if m.playerState.Track != nil || m.playerState.Playing {
+		t.Fatal("loggedOut playerStateMsg populated track/playing")
+	}
+	if cmd == nil {
+		t.Fatal("loggedOut playerStateMsg dropped waitForState listener instead of re-arming")
+	}
+
+	// Pre-logout search response stays fenced even across interactive :login + SessionRestoredMsg.
+	_ = m.executeCommand("login")
+	_, _ = m.Update(SessionRestoredMsg{})
+	_, _ = m.Update(searchResultMsg{
+		query:   "stale",
+		result:  &provider.SearchResult{Tracks: []provider.Track{trBefore}},
+		authGen: staleAuthGen,
+	})
+	if len(m.search.Results()) != 0 {
+		t.Fatal("stale searchResultMsg survived logout -> login cycle")
+	}
+
+	// Subsequent player states pushed after login must reach the TUI through the re-armed command.
+	trAfter := provider.Track{ID: "t2", Title: "After"}
+	stateCh <- player.State{Track: &trAfter, Playing: true, Position: 12 * time.Second}
+	msgs := extractPlayerStateMsgs(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d playerStateMsgs from re-armed cmd, want 1", len(msgs))
+	}
+	_, _ = m.Update(msgs[0])
+	if m.playerState.Track == nil || m.playerState.Track.ID != "t2" || !m.playerState.Playing {
+		t.Fatalf("post-login playerStateMsg did not update TUI state: %+v", m.playerState)
+	}
+}
+
+func TestSessionRestoredAndLogin_DoNotOrphanInFlightRadioRefill(t *testing.T) {
+	m := newModel(nil)
+	m.onReauth = func() {}
+	m.radio.enabled = true
+	m.radio.refilling = true
+	m.radio.generation = 7
+	capturedAuthGen := m.authGen
+
+	// Concurrent background re-auth / interactive :login without logout must not bump authGen.
+	_, _ = m.Update(SessionExpiredMsg{})
+	_ = m.executeCommand("login")
+	_, _ = m.Update(SessionRestoredMsg{})
+
+	_, _ = m.Update(vibeResultMsg{
+		radio:    true,
+		radioGen: 7,
+		authGen:  capturedAuthGen,
+		tracks:   []provider.Track{{ID: "next-1", Title: "Next Track"}},
+	})
+	if m.radio.refilling {
+		t.Fatal("radio.refilling remained stuck true after SessionRestoredMsg/:login")
+	}
+}

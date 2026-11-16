@@ -710,6 +710,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				RepeatMode:  s.RepeatMode,
 				ShuffleMode: s.ShuffleMode,
 			}
+			if m.stateCh != nil {
+				cmds = append(cmds, waitForState(m.stateCh))
+			}
 			break
 		}
 		for _, line := range s.Logs {
@@ -1475,7 +1478,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case SessionRestoredMsg:
 		m.loggedOut = false
-		m.authGen++
 		m.errMsg = "✓ Re-authenticated with Apple Music"
 		m.errExpiry = time.Now().Add(5 * time.Second)
 		if m.provider != nil {
@@ -1944,8 +1946,6 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 
 	case cmd == "login" || cmd == "auth":
 		if m.onReauth != nil {
-			m.loggedOut = false
-			m.authGen++
 			m.errMsg = "✓ Opening browser for Apple Music login…"
 			m.errExpiry = time.Now().Add(30 * time.Second)
 			m.appendLog("[auth] user requested :login")
