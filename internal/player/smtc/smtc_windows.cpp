@@ -234,6 +234,7 @@ public:
 struct Pending {
     bool hasMetadata = false;
     std::wstring title, artist, album, artworkUrl;
+    bool allowLoopbackArtwork = false;
     bool hasStatus = false;
     int status = VIBEZ_SMTC_STATUS_CLOSED;
     bool hasTimeline = false;
@@ -273,6 +274,7 @@ public:
                 pending_.artist = widen(u.artist);
                 pending_.album = widen(u.album);
                 pending_.artworkUrl = widen(u.artwork_url);
+                pending_.allowLoopbackArtwork = (u.allow_loopback_artwork != 0);
             }
             if (u.has_status) {
                 pending_.hasStatus = true;
@@ -555,13 +557,13 @@ private:
         if (SUCCEEDED(music->QueryInterface(abi::kIID_IMusicDisplayProperties2, music2.putVoid()))) {
             check("put_AlbumTitle", music2->put_AlbumTitle(album.get()));
         }
-        applyThumbnail(p.artworkUrl);
+        applyThumbnail(p.artworkUrl, p.allowLoopbackArtwork);
         check("DisplayUpdater::Update", updater_->Update());
     }
 
-    void applyThumbnail(const std::wstring& url) {
-        // Require HTTPS in C++, allowing loopback test URLs for Windows SMTC integration fixtures.
-        bool web = url.rfind(L"https://", 0) == 0 || url.rfind(L"http://127.0.0.1:", 0) == 0;
+    void applyThumbnail(const std::wstring& url, bool allowLoopback) {
+        // Require HTTPS in C++, allowing loopback test URLs only when explicitly flagged by Go tests.
+        bool web = url.rfind(L"https://", 0) == 0 || (allowLoopback && url.rfind(L"http://127.0.0.1:", 0) == 0);
         if (!web || !uriFactory_ || !streamRefs_) {
             check("put_Thumbnail", updater_->put_Thumbnail(nullptr));
             return;

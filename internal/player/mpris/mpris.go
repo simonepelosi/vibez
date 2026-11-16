@@ -4,14 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/simone-vibes/vibez/internal/netguard"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
@@ -210,26 +208,10 @@ func sanitizeVolume(v float64) (float64, bool) {
 }
 
 func isSafeArtworkURL(raw string) bool {
-	if raw == "" || len(raw) > maxMPRISArtworkURLLen || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+	if raw == "" || !netguard.IsSafePublicHTTPSURL(raw, maxMPRISArtworkURLLen, false) {
 		return false
 	}
-	if provider.Clean(raw) != raw {
-		return false
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	if host == "" || host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
-			return false
-		}
-	}
-	return true
+	return provider.Clean(raw) == raw
 }
 
 // parseMetadataMap converts a raw MPRIS metadata map into a Track.

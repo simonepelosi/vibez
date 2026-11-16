@@ -26,6 +26,7 @@ static inline vibez_smtc_create_result_t vibez_smtc_create_go(uintptr_t userData
 
 static inline void vibez_smtc_update_go(vibez_smtc_t handle,
                                         int hasMetadata, char* title, char* artist, char* album, char* artworkURL,
+                                        int allowLoopbackArtwork,
                                         int hasStatus, int status,
                                         int hasTimeline, int64_t positionHns, int64_t durationHns) {
     vibez_smtc_update_t u = {0};
@@ -34,6 +35,7 @@ static inline void vibez_smtc_update_go(vibez_smtc_t handle,
     u.artist = artist;
     u.album = album;
     u.artwork_url = artworkURL;
+    u.allow_loopback_artwork = allowLoopbackArtwork;
     u.has_status = hasStatus;
     u.status = status;
     u.has_timeline = hasTimeline;
@@ -48,6 +50,7 @@ import (
 	"fmt"
 	"runtime/cgo"
 	"sync"
+	"testing"
 	"time"
 	"unsafe"
 )
@@ -143,13 +146,16 @@ func durationToHns(d time.Duration) int64 {
 
 func (b *nativeBridge) apply(u update) {
 	var (
-		hasMeta, hasStatus, hasTimeline C.int
-		title, artist, album, artwork   *C.char
-		status                          C.int
-		pos, dur                        C.int64_t
+		hasMeta, allowLoopback, hasStatus, hasTimeline C.int
+		title, artist, album, artwork                  *C.char
+		status                                         C.int
+		pos, dur                                       C.int64_t
 	)
 	if m := u.Metadata; m != nil {
 		hasMeta = 1
+		if allowLoopbackArtworkHTTP && testing.Testing() {
+			allowLoopback = 1
+		}
 		title = cstr(sanitizeSMTCString(m.Title))
 		artist = cstr(sanitizeSMTCString(m.Artist))
 		album = cstr(sanitizeSMTCString(m.Album))
@@ -171,7 +177,7 @@ func (b *nativeBridge) apply(u update) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.handle != nil {
-		C.vibez_smtc_update_go(b.handle, hasMeta, title, artist, album, artwork, hasStatus, status, hasTimeline, pos, dur)
+		C.vibez_smtc_update_go(b.handle, hasMeta, title, artist, album, artwork, allowLoopback, hasStatus, status, hasTimeline, pos, dur)
 	}
 }
 

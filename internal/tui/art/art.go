@@ -25,10 +25,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
+	"testing"
 	"time"
 
 	"github.com/charmbracelet/colorprofile"
+	"github.com/simone-vibes/vibez/internal/netguard"
 )
 
 const (
@@ -58,42 +59,23 @@ func SupportsColor() bool {
 }
 
 func isUnsafeIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+	return netguard.IsUnsafeIP(ip)
 }
 
 // NewSafeHTTPClient returns an HTTP client for fetching external artwork that
-// refuses dialing loopback, private, link-local, or multicast IP addresses and
-// blocks HTTPS-to-HTTP downgrades or userinfo in redirects.
+// refuses dialing loopback, private, CGNAT, transition, link-local, or
+// multicast IP addresses and enforces HTTPS redirects in production builds.
 func NewSafeHTTPClient(timeout time.Duration) *http.Client {
-	dialer := &net.Dialer{
-		Timeout: timeout,
-		Control: func(_, address string, _ syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(address)
-			if err != nil {
-				return err
-			}
-			if isUnsafeIP(net.ParseIP(host)) {
-				return fmt.Errorf("fetch artwork: refusing connection to non-public address")
-			}
-			return nil
-		},
+	tr := &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		TLSHandshakeTimeout: timeout,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     60 * time.Second,
 	}
 	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext:         dialer.DialContext,
-			TLSHandshakeTimeout: timeout,
-			MaxIdleConns:        16,
-			MaxIdleConnsPerHost: 8,
-			IdleConnTimeout:     60 * time.Second,
-		},
+		Timeout:   timeout,
+		Transport: netguard.NewSafeRoundTripper(tr, timeout, false),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("fetch artwork: stopped after 5 redirects")
@@ -101,10 +83,11 @@ func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 			if req.URL.User != nil {
 				return fmt.Errorf("fetch artwork: refusing redirect with userinfo")
 			}
-			if req.URL.Scheme != "https" && req.URL.Scheme != "http" {
+			scheme := strings.ToLower(req.URL.Scheme)
+			if scheme != "https" && (!testing.Testing() || scheme != "http") {
 				return fmt.Errorf("fetch artwork: refusing redirect to scheme %q", req.URL.Scheme)
 			}
-			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+			if len(via) > 0 && strings.EqualFold(via[0].URL.Scheme, "https") && scheme != "https" {
 				return fmt.Errorf("fetch artwork: refusing HTTPS-to-HTTP redirect downgrade")
 			}
 			return nil
@@ -118,6 +101,10 @@ func Decode(r io.Reader) (image.Image, error) {
 }
 
 func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxBytes int64) (image.Image, error) {
+	return fetchAndDecode(ctx, client, url, maxBytes, testing.Testing())
+}
+
+func fetchAndDecode(ctx context.Context, client *http.Client, url string, maxBytes int64, allowPlainHTTP bool) (image.Image, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("fetch artwork: nil context")
 	}
@@ -137,10 +124,14 @@ func FetchAndDecode(ctx context.Context, client *http.Client, url string, maxByt
 	if err != nil {
 		return nil, err
 	}
-	switch parsed.Scheme {
-	case "http", "https":
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
 		if parsed.User != nil || parsed.Hostname() == "" {
 			return nil, fmt.Errorf("fetch artwork: invalid URL authority")
+		}
+	case "http":
+		if !allowPlainHTTP || parsed.User != nil || parsed.Hostname() == "" {
+			return nil, fmt.Errorf("fetch artwork: refusing cleartext HTTP URL")
 		}
 	case "data":
 		return decodeDataURL(url, maxBytes)

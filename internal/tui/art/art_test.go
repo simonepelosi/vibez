@@ -176,7 +176,10 @@ func TestDecodeBounded_RejectsOversizedDimensions(t *testing.T) {
 }
 
 func TestIsUnsafeIP(t *testing.T) {
-	unsafe := []string{"127.0.0.1", "::1", "169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.1.1", "fc00::1", "fe80::1", "0.0.0.0"}
+	unsafe := []string{
+		"127.0.0.1", "::1", "169.254.169.254", "10.0.0.1", "172.16.0.1", "192.168.1.1",
+		"fc00::1", "fe80::1", "0.0.0.0", "0.1.2.3", "100.64.0.1", "198.18.0.1", "255.255.255.255",
+	}
 	for _, s := range unsafe {
 		if !isUnsafeIP(net.ParseIP(s)) {
 			t.Errorf("isUnsafeIP(%s) = false, want true", s)
@@ -184,6 +187,13 @@ func TestIsUnsafeIP(t *testing.T) {
 	}
 	if isUnsafeIP(net.ParseIP("93.184.216.34")) {
 		t.Error("isUnsafeIP(93.184.216.34) = true, want false")
+	}
+}
+
+func TestFetchAndDecode_RejectsPlaintextHTTPWhenStrict(t *testing.T) {
+	c := NewSafeHTTPClient(time.Second)
+	if _, err := fetchAndDecode(t.Context(), c, "http://is1-ssl.mzstatic.com/a.jpg", 1<<20, false); err == nil {
+		t.Fatal("fetchAndDecode(allowPlainHTTP=false) allowed cleartext http:// URL")
 	}
 }
 
