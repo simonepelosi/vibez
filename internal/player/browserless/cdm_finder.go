@@ -59,20 +59,28 @@ func verifyCDMBinaryMagicFile(f *os.File) bool {
 	return hasValidCDMBinaryMagicForOS(hdr[:], runtime.GOOS)
 }
 
-func isValidCDMCandidate(path string) (os.FileInfo, bool) {
+func validateCDMCandidate(path string) (os.FileInfo, error) {
 	fi, err := cdm.ValidateLibraryPath(path)
-	if err != nil || fi.Size() <= 100000 {
-		return nil, false
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() <= 100000 {
+		return nil, fmt.Errorf("candidate file too small (%d bytes)", fi.Size())
 	}
 	f, err := cdm.OpenRegularNoFollow(path)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
 	if !verifyCDMBinaryMagicFile(f) {
-		return nil, false
+		return nil, errors.New("not a recognized CDM binary")
 	}
-	return fi, true
+	return fi, nil
+}
+
+func isValidCDMCandidate(path string) (os.FileInfo, bool) {
+	fi, err := validateCDMCandidate(path)
+	return fi, err == nil
 }
 
 func copyCDMFileAtomic(srcPath, destPath string) error {
@@ -127,9 +135,20 @@ func copyCDMFileAtomic(srcPath, destPath string) error {
 // FindCDM searches the host for an existing Widevine CDM library binary and
 // returns the newest valid candidate so revoked older copies are skipped.
 func FindCDM() string {
+	p, _ := findCDM(nil)
+	return p
+}
+
+func findCDM(report func(string)) (string, string) {
+	var ignoredNotice string
 	if envPath := os.Getenv("VIBEZ_CDM_PATH"); envPath != "" {
-		if _, ok := isValidCDMCandidate(envPath); ok {
-			return envPath
+		if _, err := validateCDMCandidate(envPath); err == nil {
+			return envPath, ""
+		} else {
+			ignoredNotice = fmt.Sprintf("ignoring VIBEZ_CDM_PATH (%v); falling back to CDM discovery", err)
+			if report != nil {
+				report(ignoredNotice)
+			}
 		}
 	}
 
@@ -145,13 +164,19 @@ func FindCDM() string {
 			bestMod = fi.ModTime()
 		}
 	}
-	return bestPath
+	return bestPath, ignoredNotice
 }
 
 // EnsureCDM returns an existing CDM library path, or automatically downloads
 // and extracts the official standalone Widevine CDM component into the user cache directory.
 func EnsureCDM(progress ...func(string)) (string, error) {
-	if p := FindCDM(); p != "" {
+	var report func(string)
+	if len(progress) > 0 && progress[0] != nil {
+		report = progress[0]
+	}
+
+	p, ignoredNotice := findCDM(report)
+	if p != "" {
 		return p, nil
 	}
 
@@ -180,6 +205,9 @@ func EnsureCDM(progress ...func(string)) (string, error) {
 
 	downloaded, err := DownloadCDM(ctx, dest, progress...)
 	if err != nil {
+		if ignoredNotice != "" {
+			return "", fmt.Errorf("%s; %s not found and auto-download failed: %w (place %s manually in %s)", ignoredNotice, libName, err, libName, dest)
+		}
 		return "", fmt.Errorf("%s not found and auto-download failed: %w (place %s manually in %s)", libName, err, libName, dest)
 	}
 	return downloaded, nil
