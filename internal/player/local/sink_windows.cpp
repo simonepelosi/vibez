@@ -296,6 +296,7 @@ bool waitFree(Buf& b, HWAVEOUT hwo, HANDLE ev, const Session& ses) {
 struct FileHandle {
     HANDLE h = INVALID_HANDLE_VALUE;
     FileHandle() = default;
+    explicit FileHandle(HANDLE handle) noexcept : h(handle) {}
     FileHandle(const FileHandle&) = delete;
     FileHandle& operator=(const FileHandle&) = delete;
     FileHandle(FileHandle&& other) noexcept : h(other.h) { other.h = INVALID_HANDLE_VALUE; }
