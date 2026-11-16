@@ -68,12 +68,13 @@ var authStatusCmd = &cobra.Command{
 			fmt.Println(auth.DeveloperTokenHelp)
 			return nil
 		case auth.TokensValid:
-			if sf != "" && sf != cfg.StoreFront {
-				cfg.StoreFront = sf
+			curSF := cfg.Storefront()
+			if sf != "" && sf != curSF {
+				cfg.SetStorefront(sf)
 				_ = cfg.Save(cfgFile)
 			}
 			if sf == "" {
-				sf = cfg.StoreFront
+				sf = curSF
 			}
 			if sf == "" {
 				sf = "auto-detected"
