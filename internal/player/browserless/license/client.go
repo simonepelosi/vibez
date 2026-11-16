@@ -132,16 +132,16 @@ func NewClientWithHTTP(cfg *config.Config, httpClient *http.Client) *Client {
 }
 
 func defaultHTTPClient() *http.Client {
-	var rt http.RoundTripper
-	if base, ok := http.DefaultTransport.(*http.Transport); ok {
-		tr := base.Clone()
-		tr.DialContext = netguard.NewSafeDialContext(5*time.Second, testing.Testing())
-		tr.MaxIdleConnsPerHost = 16
-		rt = tr
+	var base *http.Transport
+	if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+		base = tr.Clone()
+	} else {
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
+	base.MaxIdleConnsPerHost = 16
 	return &http.Client{
 		Timeout:       15 * time.Second,
-		Transport:     rt,
+		Transport:     netguard.NewSafeRoundTripper(base, 5*time.Second, testing.Testing()),
 		CheckRedirect: safeRedirectPolicy,
 	}
 }

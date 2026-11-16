@@ -66,15 +66,16 @@ func isUnsafeIP(ip net.IP) bool {
 // refuses dialing loopback, private, CGNAT, transition, link-local, or
 // multicast IP addresses and enforces HTTPS redirects in production builds.
 func NewSafeHTTPClient(timeout time.Duration) *http.Client {
+	tr := &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		TLSHandshakeTimeout: timeout,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     60 * time.Second,
+	}
 	return &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			DialContext:         netguard.NewSafeDialContext(timeout, false),
-			TLSHandshakeTimeout: timeout,
-			MaxIdleConns:        16,
-			MaxIdleConnsPerHost: 8,
-			IdleConnTimeout:     60 * time.Second,
-		},
+		Timeout:   timeout,
+		Transport: netguard.NewSafeRoundTripper(tr, timeout, false),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return fmt.Errorf("fetch artwork: stopped after 5 redirects")

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -16,38 +17,50 @@ import (
 	"unicode/utf8"
 )
 
-var unsafePrefixes = mustParsePrefixes([]string{
-	// IPv4 special-use & non-routable ranges
-	"0.0.0.0/8",      // "This" network (routed to loopback on Linux/BSD)
-	"10.0.0.0/8",     // RFC 1918 private
-	"100.64.0.0/10",  // RFC 6598 Shared Address Space / CGNAT / overlay VPNs
-	"127.0.0.0/8",    // Loopback
-	"169.254.0.0/16", // Link-local / cloud metadata
-	"172.16.0.0/12",  // RFC 1918 private
-	"192.0.0.0/24",   // IETF protocol assignments
-	"192.0.2.0/24",   // TEST-NET-1
-	"192.88.99.0/24", // Deprecated 6to4 relay
-	"192.168.0.0/16", // RFC 1918 private
-	"198.18.0.0/15",  // Benchmarking
-	"198.51.100.0/24",
-	"203.0.113.0/24",
-	"224.0.0.0/4", // Multicast
-	"240.0.0.0/4", // Reserved & 255.255.255.255 limited broadcast
-	"::/128",      // Unspecified
-	"::1/128",     // Loopback
-	"::/96",       // Deprecated IPv4-compatible IPv6
-	"64:ff9b::/96",
-	"64:ff9b:1::/48",
-	"100::/64",    // Discard-only
-	"2001::/32",   // Teredo
-	"2001:2::/48", // Benchmarking
-	"2001:db8::/32",
-	"2002::/16", // 6to4
-	"fc00::/7",  // Unique local addresses (ULA)
-	"fe80::/10", // Link-local unicast
-	"fec0::/10", // Deprecated site-local
-	"ff00::/8",  // Multicast
-})
+var (
+	nat64WellKnownPrefix = netip.MustParsePrefix("64:ff9b::/96")
+
+	// literalOnlyUnsafePrefixes blocks address ranges that never appear as
+	// literal hosts in public URLs, while remaining permitted after DNS
+	// resolution for clash/sing-box TUN fake-IP (198.18.0.0/15) and NAT64
+	// DNS64-synthesized IPv6 (64:ff9b::/96, whose embedded IPv4 is still checked
+	// by IsUnsafeAddr).
+	literalOnlyUnsafePrefixes = mustParsePrefixes([]string{
+		"198.18.0.0/15", // Benchmarking / TUN fake-IP
+		"64:ff9b::/96",  // NAT64 well-known prefix (RFC 6052)
+	})
+
+	unsafePrefixes = mustParsePrefixes([]string{
+		// IPv4 special-use & non-routable ranges
+		"0.0.0.0/8",      // "This" network (routed to loopback on Linux/BSD)
+		"10.0.0.0/8",     // RFC 1918 private
+		"100.64.0.0/10",  // RFC 6598 Shared Address Space / CGNAT / overlay VPNs
+		"127.0.0.0/8",    // Loopback
+		"169.254.0.0/16", // Link-local / cloud metadata
+		"172.16.0.0/12",  // RFC 1918 private
+		"192.0.0.0/24",   // IETF protocol assignments
+		"192.0.2.0/24",   // TEST-NET-1
+		"192.88.99.0/24", // Deprecated 6to4 relay
+		"192.168.0.0/16", // RFC 1918 private
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"224.0.0.0/4", // Multicast
+		"240.0.0.0/4", // Reserved & 255.255.255.255 limited broadcast
+		"::/128",      // Unspecified
+		"::1/128",     // Loopback
+		"::/96",       // Deprecated IPv4-compatible IPv6
+		"64:ff9b:1::/48",
+		"100::/64",    // Discard-only
+		"2001::/32",   // Teredo
+		"2001:2::/48", // Benchmarking
+		"2001:db8::/32",
+		"2002::/16", // 6to4
+		"fc00::/7",  // Unique local addresses (ULA)
+		"fe80::/10", // Link-local unicast
+		"fec0::/10", // Deprecated site-local
+		"ff00::/8",  // Multicast
+	})
+)
 
 func mustParsePrefixes(raw []string) []netip.Prefix {
 	out := make([]netip.Prefix, 0, len(raw))
@@ -58,8 +71,10 @@ func mustParsePrefixes(raw []string) []netip.Prefix {
 }
 
 // IsUnsafeAddr reports whether addr is invalid, has an IPv6 zone identifier, or
-// belongs to any non-public, loopback, private, CGNAT, transition, link-local,
-// multicast, or reserved address range.
+// belongs to a non-public, loopback, private, CGNAT, transition, link-local,
+// multicast, or reserved address range at dial time. TUN fake-IP (198.18.0.0/15)
+// and NAT64 well-known prefix (64:ff9b::/96 when wrapping a public IPv4) are
+// allowed at dial time so TUN proxies and DNS64 networks keep working.
 func IsUnsafeAddr(addr netip.Addr) bool {
 	if !addr.IsValid() || addr.Zone() != "" {
 		return true
@@ -75,6 +90,11 @@ func IsUnsafeAddr(addr netip.Addr) bool {
 		addr.IsUnspecified() {
 		return true
 	}
+	if nat64WellKnownPrefix.Contains(addr) {
+		raw := addr.As16()
+		embedded := netip.AddrFrom4([4]byte(raw[12:16]))
+		return IsUnsafeAddr(embedded)
+	}
 	for _, pfx := range unsafePrefixes {
 		if pfx.Contains(addr) {
 			return true
@@ -83,7 +103,25 @@ func IsUnsafeAddr(addr netip.Addr) bool {
 	return false
 }
 
-// IsUnsafeIP reports whether ip is nil or not globally routable.
+// IsUnsafeLiteralAddr reports whether addr is unsafe either at dial time or as
+// an explicit URL literal (additionally rejecting TUN fake-IP 198.18.0.0/15
+// and NAT64 64:ff9b::/96 literals that should never appear in public URLs).
+func IsUnsafeLiteralAddr(addr netip.Addr) bool {
+	if IsUnsafeAddr(addr) {
+		return true
+	}
+	if addr.IsValid() {
+		addr = addr.Unmap()
+	}
+	for _, pfx := range literalOnlyUnsafePrefixes {
+		if pfx.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsUnsafeIP reports whether ip is nil or unsafe as an explicit URL address.
 func IsUnsafeIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -92,7 +130,7 @@ func IsUnsafeIP(ip net.IP) bool {
 	if !ok {
 		return true
 	}
-	return IsUnsafeAddr(addr)
+	return IsUnsafeLiteralAddr(addr)
 }
 
 func isNumericIPv4Label(label string) bool {
@@ -167,7 +205,7 @@ func IsBlockedHostname(host string) bool {
 		return true
 	}
 	if addr, err := netip.ParseAddr(h); err == nil {
-		return IsUnsafeAddr(addr)
+		return IsUnsafeLiteralAddr(addr)
 	}
 	return IsNonCanonicalIPv4Host(h)
 }
@@ -269,4 +307,107 @@ func NewSafeDialContext(timeout time.Duration, allowLoopback bool) func(ctx cont
 		Control: SafeDialControl(allowLoopback),
 	}
 	return dialer.DialContext
+}
+
+type allowedProxyContextKey struct{}
+
+type safeRoundTripper struct {
+	base          *http.Transport
+	allowLoopback bool
+}
+
+// NewSafeRoundTripper returns an http.RoundTripper cloned from base that
+// validates each request URL via ParseSafeURL and enforces SafeDialControl on
+// non-proxied TCP dials while exempting only the explicitly configured proxy
+// target returned by base.Proxy (for example HTTP_PROXY/HTTPS_PROXY on
+// loopback, LAN RFC 1918, or CGNAT Tailscale hosts).
+func NewSafeRoundTripper(base *http.Transport, dialTimeout time.Duration, allowLoopback bool) http.RoundTripper {
+	var tr *http.Transport
+	if base != nil {
+		tr = base.Clone()
+	} else {
+		tr = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	if dialTimeout <= 0 {
+		dialTimeout = 5 * time.Second
+	}
+	directDialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+	safeDialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: 30 * time.Second,
+		Control:   SafeDialControl(allowLoopback),
+	}
+	tr.DialTLSContext = nil
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if allowedProxy, ok := ctx.Value(allowedProxyContextKey{}).(string); ok && allowedProxy != "" && sameDialTarget(addr, allowedProxy) {
+			return directDialer.DialContext(ctx, network, addr)
+		}
+		return safeDialer.DialContext(ctx, network, addr)
+	}
+	return &safeRoundTripper{
+		base:          tr,
+		allowLoopback: allowLoopback,
+	}
+}
+
+func (s *safeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil || req.URL == nil {
+		return nil, fmt.Errorf("netguard: nil request or URL")
+	}
+	if _, err := ParseSafeURL(req.URL.String(), 0, s.allowLoopback); err != nil {
+		return nil, err
+	}
+	if s.base.Proxy != nil {
+		proxyURL, err := s.base.Proxy(req)
+		if err != nil {
+			return nil, err
+		}
+		if proxyAddr := canonicalProxyAddr(proxyURL); proxyAddr != "" {
+			req = req.Clone(context.WithValue(req.Context(), allowedProxyContextKey{}, proxyAddr))
+		}
+	}
+	return s.base.RoundTrip(req)
+}
+
+func (s *safeRoundTripper) CloseIdleConnections() {
+	s.base.CloseIdleConnections()
+}
+
+func canonicalProxyAddr(proxyURL *url.URL) string {
+	if proxyURL == nil {
+		return ""
+	}
+	host := proxyURL.Hostname()
+	if host == "" {
+		return ""
+	}
+	port := proxyURL.Port()
+	if port == "" {
+		switch strings.ToLower(proxyURL.Scheme) {
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func sameDialTarget(a, b string) bool {
+	ha, pa, errA := net.SplitHostPort(a)
+	hb, pb, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil || pa != pb {
+		return false
+	}
+	if addrA, err := netip.ParseAddr(ha); err == nil {
+		if addrB, err := netip.ParseAddr(hb); err == nil {
+			return addrA.Unmap() == addrB.Unmap()
+		}
+	}
+	return strings.EqualFold(ha, hb)
 }
