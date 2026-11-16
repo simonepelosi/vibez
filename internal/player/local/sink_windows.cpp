@@ -3,6 +3,10 @@
 #include "sink_windows.h"
 
 #define WIN32_LEAN_AND_MEAN
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #include <mmsystem.h>
 #include <mfapi.h>
@@ -29,6 +33,12 @@ namespace {
 
 #ifndef MF_E_TOPO_CODEC_NOT_FOUND
 #define MF_E_TOPO_CODEC_NOT_FOUND ((HRESULT)0xC00D5212L)
+#endif
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT ((DWORD)0xA0000003L)
+#endif
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK ((DWORD)0xA000000CL)
 #endif
 
 constexpr int kBands = 10;
@@ -318,13 +328,22 @@ bool readExact(HANDLE h, void* dst, DWORD n) {
     return ReadFile(h, dst, n, &got, nullptr) && got == n;
 }
 
+bool isSymlinkOrMountReparsePoint(HANDLE h) {
+    FILE_ATTRIBUTE_TAG_INFO tagInfo = {};
+    if (!GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tagInfo, sizeof(tagInfo))) {
+        return true; // fail closed if reparse tag cannot be inspected
+    }
+    return tagInfo.ReparseTag == IO_REPARSE_TAG_SYMLINK ||
+           tagInfo.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT;
+}
+
 bool openVerifiedRegularDiskHandle(const std::wstring& path, FileHandle& out) {
     if (path.empty() || path.rfind(L"\\\\", 0) == 0 || path.rfind(L"//", 0) == 0 ||
         path.rfind(L"\\??\\", 0) == 0) {
         return false;
     }
     // Omit FILE_SHARE_DELETE so another process cannot unlink, rename, or
-    // re-link path while Media Foundation opens it.
+    // re-link path while Media Foundation or FLAC probing opens it.
     FileHandle f{CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
                              FILE_SHARE_READ | FILE_SHARE_WRITE,
                              nullptr, OPEN_EXISTING,
@@ -333,7 +352,9 @@ bool openVerifiedRegularDiskHandle(const std::wstring& path, FileHandle& out) {
     if (GetFileType(f.h) != FILE_TYPE_DISK) return false;
     BY_HANDLE_FILE_INFORMATION info = {};
     if (!GetFileInformationByHandle(f.h, &info)) return false;
-    if ((info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) return false;
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+        isSymlinkOrMountReparsePoint(f.h)) {
         return false;
     }
     out = std::move(f);
@@ -343,17 +364,14 @@ bool openVerifiedRegularDiskHandle(const std::wstring& path, FileHandle& out) {
 // readFlacStreamInfoDuration reads total_samples / sample_rate from a FLAC
 // STREAMINFO block when Media Foundation omits MF_PD_DURATION.
 double readFlacStreamInfoDuration(const std::wstring& path) {
+    FileHandle lockHandle;
+    if (!openVerifiedRegularDiskHandle(path, lockHandle)) return 0.0;
     FileHandle f{CreateFileW(path.c_str(), GENERIC_READ,
                              FILE_SHARE_READ | FILE_SHARE_WRITE,
                              nullptr, OPEN_EXISTING,
-                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+                             FILE_ATTRIBUTE_NORMAL, nullptr)};
     if (f.h == INVALID_HANDLE_VALUE) return 0.0;
     if (GetFileType(f.h) != FILE_TYPE_DISK) return 0.0;
-    BY_HANDLE_FILE_INFORMATION fi = {};
-    if (!GetFileInformationByHandle(f.h, &fi) ||
-        (fi.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-        return 0.0;
-    }
 
     LARGE_INTEGER fileSize = {};
     if (!GetFileSizeEx(f.h, &fileSize) || fileSize.QuadPart < 42) return 0.0;
