@@ -90,3 +90,19 @@ func TestDialIPC_WithoutDiscordFailsFast(t *testing.T) {
 		t.Fatalf("DialIPC took %v to report no Discord pipe, want well under %v", elapsed, defaultTimeout)
 	}
 }
+
+type dummyNonHandleConn struct{ net.Conn }
+
+func TestVerifyPipePeerSID_RejectsNonHandleConn(t *testing.T) {
+	if err := verifyPipePeerSID(dummyNonHandleConn{}); err == nil {
+		t.Fatal("expected verifyPipePeerSID to reject connection without native pipe handle")
+	}
+}
+
+func TestVerifyPipePeerSID_AcceptsOwnServerPipe(t *testing.T) {
+	path, _ := mockDiscordServer(t)
+	conn := dialTestIPC(t, path)
+	if err := verifyPipePeerSID(conn); err != nil {
+		t.Fatalf("verifyPipePeerSID on own server pipe: %v", err)
+	}
+}

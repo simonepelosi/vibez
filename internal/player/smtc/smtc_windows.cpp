@@ -285,12 +285,28 @@ public:
             }
             wake = wake && !pending_.empty();
         }
-        if (wake) PostMessageW(hwnd_, kMsgApply, 0, 0);
+        if (wake) {
+            if (HWND h = hwnd_.load()) PostMessageW(h, kMsgApply, 0, 0);
+        }
     }
 
     void stop() {
         cb_.gate->close();
-        PostMessageW(hwnd_, kMsgClose, 0, 0);
+        closing_.store(true);
+        bool posted = false;
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            HWND h = hwnd_.load();
+            if (!h) break;
+            if (PostMessageW(h, kMsgClose, 0, 0) != 0) {
+                posted = true;
+                break;
+            }
+            Sleep(5);
+        }
+        if (!posted && threadId_ != 0) {
+            // Wake GetMessageW directly if PostMessageW failed (e.g. full queue) so join() cannot hang.
+            PostThreadMessageW(threadId_, WM_QUIT, 0, 0);
+        }
         if (thread_.joinable()) thread_.join();
     }
 
@@ -303,10 +319,19 @@ private:
         auto* s = reinterpret_cast<Session*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         switch (msg) {
         case kMsgApply:
-            if (s) s->apply();
+            if (s && !s->closed_) s->apply();
             return 0;
         case kMsgClose:
-            if (s) s->teardown();
+            if (s) {
+                s->closed_ = true;
+                if (s->applying_) {
+                    // Defer teardown/DestroyWindow until outer COM/WinRT apply() unwinds.
+                    s->closePending_ = true;
+                    return 0;
+                }
+                s->teardown();
+                s->hwnd_.store(nullptr);
+            }
             DestroyWindow(hwnd);
             return 0;
         case WM_CLOSE:
@@ -329,6 +354,7 @@ private:
     }
 
     void run() {
+        threadId_ = GetCurrentThreadId();
         HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (FAILED(hr)) {
             finishInit(hr, "CoInitializeEx");
@@ -338,7 +364,7 @@ private:
         hr = init(&stage);
         if (FAILED(hr)) {
             teardown();
-            if (hwnd_) DestroyWindow(hwnd_);
+            if (HWND h = hwnd_.exchange(nullptr)) DestroyWindow(h);
             CoUninitialize();
             finishInit(hr, stage);
             return;
@@ -350,6 +376,8 @@ private:
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if (!tornDown_) teardown();
+        if (HWND h = hwnd_.exchange(nullptr)) DestroyWindow(h);
         CoUninitialize();
     }
 
@@ -368,12 +396,13 @@ private:
             *stage = "RegisterClassExW";
             return HRESULT_FROM_WIN32(GetLastError());
         }
-        hwnd_ = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"vibez", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
+        HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kWindowClass, L"vibez", WS_OVERLAPPED, 0, 0, 0, 0, nullptr,
                                 nullptr, inst, this);
-        if (!hwnd_) {
+        if (!hwnd) {
             *stage = "CreateWindowExW";
             return HRESULT_FROM_WIN32(GetLastError());
         }
+        hwnd_.store(hwnd);
 
         Com<abi::ISystemMediaTransportControlsInterop> interop;
         HString cls(abi::kClassSystemMediaTransportControls);
@@ -383,7 +412,7 @@ private:
             *stage = "RoGetActivationFactory(SystemMediaTransportControls)";
             return hr;
         }
-        hr = interop->GetForWindow(hwnd_, abi::kIID_ISystemMediaTransportControls, smtc_.putVoid());
+        hr = interop->GetForWindow(hwnd, abi::kIID_ISystemMediaTransportControls, smtc_.putVoid());
         if (FAILED(hr)) {
             *stage = "ISystemMediaTransportControlsInterop::GetForWindow";
             return hr;
@@ -439,6 +468,8 @@ private:
     }
 
     void teardown() {
+        if (tornDown_) return;
+        tornDown_ = true;
         if (smtc_) {
             smtc_->put_PlaybackStatus(abi::MediaPlaybackStatus_Closed);
             smtc_->put_IsEnabled(false);
@@ -473,28 +504,40 @@ private:
     }
 
     void apply() {
-        Pending p;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            p = std::move(pending_);
-            pending_ = Pending{};
-        }
-        if (!smtc_) return;
+        // STA COM calls pump inner message loops; guard against reentrant kMsgApply / kMsgClose.
+        if (applying_ || closed_ || tornDown_) return;
+        applying_ = true;
+        for (;;) {
+            if (closed_ || tornDown_ || closing_.load()) break;
+            Pending p;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (pending_.empty()) break;
+                p = std::move(pending_);
+                pending_ = Pending{};
+            }
+            if (!smtc_) break;
 
-        if (p.hasStatus && p.status == VIBEZ_SMTC_STATUS_CLOSED) {
-            check("put_PlaybackStatus", smtc_->put_PlaybackStatus(abi::MediaPlaybackStatus_Closed));
-            check("ClearAll", updater_->ClearAll());
-            check("Update", updater_->Update());
-            check("put_IsEnabled", smtc_->put_IsEnabled(false));
-            return;
+            if (p.hasStatus && p.status == VIBEZ_SMTC_STATUS_CLOSED) {
+                check("put_PlaybackStatus", smtc_->put_PlaybackStatus(abi::MediaPlaybackStatus_Closed));
+                check("ClearAll", updater_->ClearAll());
+                check("Update", updater_->Update());
+                check("put_IsEnabled", smtc_->put_IsEnabled(false));
+                continue;
+            }
+            if (p.hasStatus) check("put_IsEnabled", smtc_->put_IsEnabled(true));
+            if (p.hasMetadata) applyMetadata(p);
+            if (p.hasStatus) {
+                check("put_PlaybackStatus",
+                      smtc_->put_PlaybackStatus(static_cast<abi::MediaPlaybackStatus>(p.status)));
+            }
+            if (p.hasTimeline) applyTimeline(p.positionHns, p.durationHns);
         }
-        if (p.hasStatus) check("put_IsEnabled", smtc_->put_IsEnabled(true));
-        if (p.hasMetadata) applyMetadata(p);
-        if (p.hasStatus) {
-            check("put_PlaybackStatus",
-                  smtc_->put_PlaybackStatus(static_cast<abi::MediaPlaybackStatus>(p.status)));
+        applying_ = false;
+        if (closePending_ && !tornDown_) {
+            teardown();
+            if (HWND h = hwnd_.exchange(nullptr)) DestroyWindow(h);
         }
-        if (p.hasTimeline) applyTimeline(p.positionHns, p.durationHns);
     }
 
     void applyMetadata(const Pending& p) {
@@ -517,7 +560,8 @@ private:
     }
 
     void applyThumbnail(const std::wstring& url) {
-        bool web = url.rfind(L"https://", 0) == 0 || url.rfind(L"http://", 0) == 0;
+        // Require HTTPS in C++, allowing loopback test URLs for Windows SMTC integration fixtures.
+        bool web = url.rfind(L"https://", 0) == 0 || url.rfind(L"http://127.0.0.1:", 0) == 0;
         if (!web || !uriFactory_ || !streamRefs_) {
             check("put_Thumbnail", updater_->put_Thumbnail(nullptr));
             return;
@@ -567,7 +611,9 @@ private:
 
     Callbacks cb_;
     std::thread thread_;
-    HWND hwnd_ = nullptr;
+    std::atomic<HWND> hwnd_{nullptr};
+    std::atomic<bool> closing_{false};
+    DWORD threadId_ = 0;
 
     std::mutex initMu_;
     std::condition_variable initCv_;
@@ -578,7 +624,11 @@ private:
     std::mutex mu_;
     Pending pending_;
 
-    // Owned by the bridge thread.
+    // Owned by the bridge thread (STA-only).
+    bool applying_ = false;
+    bool closePending_ = false;
+    bool closed_ = false;
+    bool tornDown_ = false;
     Com<abi::ISystemMediaTransportControls> smtc_;
     Com<abi::ISystemMediaTransportControls2> smtc2_;
     Com<abi::ISystemMediaTransportControlsDisplayUpdater> updater_;

@@ -49,8 +49,9 @@ type properties struct {
 	conn *dbus.Conn
 	path dbus.ObjectPath
 
-	mu sync.RWMutex
-	m  map[string]map[string]*propSpec
+	setMu sync.Mutex // serializes client Set + onSet + emitChanged ordering
+	mu    sync.RWMutex
+	m     map[string]map[string]*propSpec
 }
 
 // newProperties exports org.freedesktop.DBus.Properties for path and returns
@@ -102,6 +103,9 @@ func (p *properties) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error)
 // Shuffle are writable; both route to the player before the value is stored,
 // so a rejected control action does not leave the property lying about state.
 func (p *properties) Set(iface, name string, v dbus.Variant) *dbus.Error {
+	p.setMu.Lock()
+	defer p.setMu.Unlock()
+
 	p.mu.Lock()
 	props, ok := p.m[iface]
 	if !ok {
@@ -124,8 +128,8 @@ func (p *properties) Set(iface, name string, v dbus.Variant) *dbus.Error {
 	onSet := spec.onSet
 	p.mu.Unlock()
 
-	// Outside the lock: the callback calls into the player, which must never
-	// run while this store is locked.
+	// Outside p.mu: the callback calls into the player, while setMu keeps
+	// consecutive Set mutations and PropertiesChanged signals in order.
 	if onSet != nil {
 		if err := onSet(v); err != nil {
 			return err
@@ -172,6 +176,9 @@ func (p *properties) store(iface, name string, value any) {
 func (p *properties) emitChanged(iface string, changed map[string]dbus.Variant) error {
 	if len(changed) == 0 {
 		return nil
+	}
+	if p.conn == nil {
+		return dbus.ErrClosed
 	}
 	return p.conn.Emit(p.path, propertiesIface+".PropertiesChanged", iface, changed, []string{})
 }

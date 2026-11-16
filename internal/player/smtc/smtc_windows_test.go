@@ -222,6 +222,8 @@ func requireFound(t *testing.T, r readerResult, what string) {
 // image itself when the display is updated.
 func artworkServer(t *testing.T) (url string, body []byte, hits *atomic.Int32) {
 	t.Helper()
+	allowLoopbackArtworkHTTP = true
+	t.Cleanup(func() { allowLoopbackArtworkHTTP = false })
 	img := image.NewRGBA(image.Rect(0, 0, 32, 32))
 	for x := range 32 {
 		for y := range 32 {

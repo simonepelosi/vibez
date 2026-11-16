@@ -3,9 +3,13 @@ package mpris
 import (
 	"errors"
 	"fmt"
+	"math"
+	"net"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/simone-vibes/vibez/internal/player"
@@ -113,18 +117,25 @@ func (m *MPRISPlayer) SetQueue(_ []string) error {
 }
 
 func (m *MPRISPlayer) Seek(pos time.Duration) error {
+	pos = max(pos, 0)
 	// MPRIS Seek moves relative to current position; use SetPosition for absolute.
 	// We use the track ID from metadata for SetPosition.
 	meta, err := m.metadata()
 	if err != nil {
 		return err
 	}
-	trackID, _ := meta["mpris:trackid"].Value().(dbus.ObjectPath)
+	trackID, ok := meta["mpris:trackid"].Value().(dbus.ObjectPath)
+	if !ok || !trackID.IsValid() {
+		return errors.New("mpris: missing or invalid track id")
+	}
 	return m.obj.Call(mprisInterface+".SetPosition", 0, trackID, pos.Microseconds()).Err
 }
 
 func (m *MPRISPlayer) SetVolume(v float64) error {
-	return m.setProperty("Volume", v)
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return errors.New("mpris: invalid volume")
+	}
+	return m.setProperty("Volume", min(max(v, 0), 1))
 }
 
 func (m *MPRISPlayer) GetState() (*player.State, error) {
@@ -165,36 +176,92 @@ func (m *MPRISPlayer) Close() error {
 
 // --- Internal helpers ---
 
+const (
+	maxMPRISMetadataRunes  = 512
+	maxMPRISArtists        = 64
+	maxMPRISArtworkURLLen  = 2048
+	maxMPRISPositionMicros = int64(math.MaxInt64 / int64(time.Microsecond))
+)
+
+func sanitizeMPRISString(s string) string {
+	s = provider.Clean(s)
+	runes := []rune(s)
+	if len(runes) > maxMPRISMetadataRunes {
+		return string(runes[:maxMPRISMetadataRunes])
+	}
+	return s
+}
+
+func microsToDuration(us int64) time.Duration {
+	if us <= 0 || us > maxMPRISPositionMicros {
+		return 0
+	}
+	return time.Duration(us) * time.Microsecond
+}
+
+func sanitizeVolume(v float64) (float64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+		return 0, false
+	}
+	if v > 1.5 {
+		return 1.5, true
+	}
+	return v, true
+}
+
+func isSafeArtworkURL(raw string) bool {
+	if raw == "" || len(raw) > maxMPRISArtworkURLLen || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+		return false
+	}
+	if provider.Clean(raw) != raw {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "" || host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+			return false
+		}
+	}
+	return true
+}
+
 // parseMetadataMap converts a raw MPRIS metadata map into a Track.
 func parseMetadataMap(meta map[string]dbus.Variant) *provider.Track {
 	t := &provider.Track{}
 	if v, ok := meta["xesam:title"]; ok {
 		s, _ := v.Value().(string)
-		t.Title = provider.Clean(s)
+		t.Title = sanitizeMPRISString(s)
 	}
 	if v, ok := meta["xesam:album"]; ok {
 		s, _ := v.Value().(string)
-		t.Album = provider.Clean(s)
+		t.Album = sanitizeMPRISString(s)
 	}
 	if v, ok := meta["mpris:artUrl"]; ok {
-		if s, ok := v.Value().(string); ok {
-			s = provider.Clean(s)
-			if len(s) <= 4096 && (strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://")) {
-				t.ArtworkURL = s
-			}
+		if s, ok := v.Value().(string); ok && isSafeArtworkURL(s) {
+			t.ArtworkURL = s
 		}
 	}
 	if v, ok := meta["mpris:length"]; ok {
-		if dur, ok := v.Value().(int64); ok && dur > 0 {
-			t.Duration = time.Duration(dur) * time.Microsecond
+		if dur, ok := v.Value().(int64); ok {
+			t.Duration = microsToDuration(dur)
 		}
 	}
 	if v, ok := meta["xesam:artist"]; ok {
 		artists, _ := v.Value().([]string)
 		if len(artists) > 0 {
+			if len(artists) > maxMPRISArtists {
+				artists = artists[:maxMPRISArtists]
+			}
 			cleaned := make([]string, 0, len(artists))
 			for _, a := range artists {
-				cleaned = append(cleaned, provider.Clean(a))
+				cleaned = append(cleaned, sanitizeMPRISString(a))
 			}
 			t.Artist = strings.Join(cleaned, ", ")
 		}
@@ -244,6 +311,7 @@ func (m *MPRISPlayer) readState() (*player.State, error) {
 		volV, _ = m.getProperty("Volume")
 	}
 	vol, _ := volV.Value().(float64)
+	validVol, _ := sanitizeVolume(vol)
 
 	var meta map[string]dbus.Variant
 	if metaV, hasMeta := props["Metadata"]; hasMeta {
@@ -254,8 +322,8 @@ func (m *MPRISPlayer) readState() (*player.State, error) {
 
 	state := &player.State{
 		Playing:  status == "Playing",
-		Position: time.Duration(posUs) * time.Microsecond,
-		Volume:   vol,
+		Position: microsToDuration(posUs),
+		Volume:   validVol,
 	}
 
 	if meta != nil {
@@ -315,7 +383,9 @@ func applyPropertiesSignal(last player.State, sig *dbus.Signal) (player.State, b
 	}
 	if v, ok := changed["Volume"]; ok {
 		if vol, ok := v.Value().(float64); ok {
-			next.Volume = vol
+			if validVol, valid := sanitizeVolume(vol); valid {
+				next.Volume = validVol
+			}
 		}
 	}
 	if v, ok := changed["Metadata"]; ok {
