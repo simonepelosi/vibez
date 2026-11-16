@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -80,6 +81,19 @@ const MfApi* mfApi() {
     return ok ? &api : nullptr;
 }
 
+// Media Foundation global work queues race or fault inside mfplat.dll when
+// MFShutdown() drops the process refcount to zero and MFStartup() is called
+// again across sequential sessions/tests; initialize once for the process.
+HRESULT ensureMfStartup(const MfApi& mf) {
+    static std::mutex mu;
+    static bool started = false;
+    std::lock_guard<std::mutex> lk(mu);
+    if (started) return S_OK;
+    const HRESULT hr = mf.startup(MF_VERSION, MFSTARTUP_FULL);
+    if (SUCCEEDED(hr)) started = true;
+    return hr;
+}
+
 template <class T>
 struct Com {
     T* p = nullptr;
@@ -98,7 +112,10 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (!std::isfinite(fs) || !std::isfinite(f0) || !std::isfinite(gainDb) ||
+            fs <= 0.0 || f0 <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+            z1[0] = z1[1] = 0.0;
+            z2[0] = z2[1] = 0.0;
             active = false;
             return;
         }
@@ -116,41 +133,112 @@ struct Biquad {
     }
 
     double run(double x, int ch) {
+        if (!std::isfinite(x)) x = 0.0;
         const double y = b0 * x + z1[ch];
         z1[ch] = b1 * x - a1 * y + z2[ch];
         z2[ch] = b2 * x - a2 * y;
+        if (!std::isfinite(y) || !std::isfinite(z1[ch]) || !std::isfinite(z2[ch])) {
+            z1[ch] = 0.0;
+            z2[ch] = 0.0;
+            return 0.0;
+        }
         return y;
     }
+};
+
+struct CallbackGate {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool closed = false;
+    int inFlight = 0;
+
+    bool enter() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (closed) return false;
+        ++inFlight;
+        return true;
+    }
+
+    void leave() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (--inFlight == 0) cv.notify_all();
+    }
+
+    void closeAndDrain() {
+        std::unique_lock<std::mutex> lk(mu);
+        closed = true;
+        cv.wait(lk, [&] { return inFlight == 0; });
+    }
+};
+
+struct ScopedCallback {
+    CallbackGate& gate;
+    bool entered;
+    explicit ScopedCallback(CallbackGate& g) : gate(g), entered(g.enter()) {}
+    ~ScopedCallback() {
+        if (entered) gate.leave();
+    }
+    explicit operator bool() const { return entered; }
 };
 
 struct Session {
     std::atomic<bool> cancel{false};
     std::atomic<bool> paused{false};
-    std::mutex mu;  // guards hwo
+    std::mutex mu;  // guards hwo and 32->64 wrap trackers
     HWAVEOUT hwo = nullptr;
+    uint32_t lastSample32 = 0;
+    uint64_t sampleHigh = 0;
+    uint32_t lastByte32 = 0;
+    uint64_t byteHigh = 0;
     std::atomic<uint32_t> sampleRate{0};
     std::atomic<uint32_t> bytesPerSec{0};
     std::atomic<uint64_t> nullFrames{0};
-    std::atomic<uint32_t> baseSamples{0};
-    std::atomic<uint32_t> baseBytes{0};
+    std::atomic<uint64_t> baseSamples{0};
+    std::atomic<uint64_t> baseBytes{0};
     std::atomic<double> seekBaseSec{0.0};
     std::atomic<double> seekTarget{-1.0};
     std::atomic<double> endPosition{-1.0};
+
+    void resetDeviceCountersLocked() {
+        lastSample32 = 0;
+        sampleHigh = 0;
+        lastByte32 = 0;
+        byteHigh = 0;
+    }
+
+    uint64_t extendSampleLocked(uint32_t cur) {
+        if (cur < lastSample32 && (lastSample32 - cur) > (1u << 31)) {
+            sampleHigh += (1ULL << 32);
+        }
+        lastSample32 = cur;
+        return sampleHigh + static_cast<uint64_t>(cur);
+    }
+
+    uint64_t extendByteLocked(uint32_t cur) {
+        if (cur < lastByte32 && (lastByte32 - cur) > (1u << 31)) {
+            byteHigh += (1ULL << 32);
+        }
+        lastByte32 = cur;
+        return byteHigh + static_cast<uint64_t>(cur);
+    }
 };
 
-double devicePosition(const Session& ses) {
+// Caller holds ses.mu.
+double devicePosition(Session& ses) {
     MMTIME t;
     std::memset(&t, 0, sizeof(t));
     t.wType = TIME_SAMPLES;
     if (waveOutGetPosition(ses.hwo, &t, sizeof(t)) != MMSYSERR_NOERROR) return ses.seekBaseSec.load();
     if (t.wType == TIME_SAMPLES && ses.sampleRate > 0) {
-        const uint32_t base = ses.baseSamples.load();
-        const uint32_t rel = t.u.sample >= base ? (t.u.sample - base) : 0;
+        const uint64_t full = ses.extendSampleLocked(t.u.sample);
+        const uint64_t base = ses.baseSamples.load();
+        const uint64_t rel = full >= base ? (full - base) : 0;
         return ses.seekBaseSec.load() + static_cast<double>(rel) / static_cast<double>(ses.sampleRate);
     }
     if (t.wType == TIME_BYTES && ses.bytesPerSec > 0) {
-        const uint32_t base = ses.baseBytes.load();
-        const uint32_t rel = t.u.cb >= base ? (t.u.cb - base) : 0;
+        const uint64_t full = ses.extendByteLocked(t.u.cb);
+        const uint64_t base = ses.baseBytes.load();
+        const uint64_t rel = full >= base ? (full - base) : 0;
         return ses.seekBaseSec.load() + static_cast<double>(rel) / static_cast<double>(ses.bytesPerSec);
     }
     return ses.seekBaseSec.load();
@@ -169,6 +257,19 @@ struct Sink {
     std::atomic<uint32_t> eqVersion{1};
     std::atomic<double> volume{1.0};
     std::atomic<bool> closed{false};
+    CallbackGate cbGate;
+    std::mutex workerMu;
+    std::condition_variable workerCv;
+    int activeWorkers = 0;
+};
+
+struct ScopedWorker {
+    std::shared_ptr<Sink> sink;
+    explicit ScopedWorker(const std::shared_ptr<Sink>& s) : sink(s) {}
+    ~ScopedWorker() {
+        std::lock_guard<std::mutex> lk(sink->workerMu);
+        if (--sink->activeWorkers == 0) sink->workerCv.notify_all();
+    }
 };
 
 struct Handle {
@@ -195,7 +296,9 @@ void cancelSession(const std::shared_ptr<Session>& s) {
 }
 
 void reportError(const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses, const char* what, HRESULT hr) {
-    if (sink->closed || ses->cancel) return;
+    if (sink->closed || ses->cancel || !sink->onErr) return;
+    ScopedCallback cb(sink->cbGate);
+    if (!cb || sink->closed || ses->cancel) return;
     char msg[256];
     if (hr == MF_E_TOPO_CODEC_NOT_FOUND) {
         std::snprintf(msg, sizeof(msg),
@@ -203,7 +306,7 @@ void reportError(const std::shared_ptr<Sink>& sink, const std::shared_ptr<Sessio
     } else {
         std::snprintf(msg, sizeof(msg), "%s (0x%08lx)", what, static_cast<unsigned long>(hr));
     }
-    if (sink->onErr) sink->onErr(sink->user, msg);
+    sink->onErr(sink->user, msg);
 }
 
 struct Buf {
@@ -264,6 +367,28 @@ bool setOutputType(const MfApi& mf, IMFSourceReader* reader, const GUID& subtype
     return SUCCEEDED(reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, basic.p));
 }
 
+void fallbackWaveOutPCM16(const MfApi& mf, IMFSourceReader* reader, HANDLE ev, HWAVEOUT& hwo, MMRESULT& mm,
+                          SampleFmt& fmt, uint32_t& rate, int& channels, uint32_t& bps) {
+    if (mm == MMSYSERR_NOERROR || fmt != SampleFmt::Float32) return;
+    UINT32 ch = static_cast<UINT32>(channels > 0 ? channels : 2);
+    if (!setOutputType(mf, reader, MFAudioFormat_PCM, 16, ch, rate)) return;
+    Com<IMFMediaType> got16;
+    WAVEFORMATEX* wfx16 = nullptr;
+    UINT32 wfx16Size = 0;
+    if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
+        SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
+        SampleFmt fmt16 = sampleFmtOf(got16.p, wfx16);
+        if (wfx16->nSamplesPerSec > 0 && wfx16->nChannels > 0 && wfx16->nChannels <= 8 && fmt16 != SampleFmt::None) {
+            fmt = fmt16;
+            rate = wfx16->nSamplesPerSec;
+            channels = wfx16->nChannels;
+            bps = wfx16->nAvgBytesPerSec;
+            mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+        }
+        CoTaskMemFree(wfx16);
+    }
+}
+
 bool openSourceReader(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::shared_ptr<Session>& ses,
                       const std::wstring& url, Com<IMFSourceReader>& reader) {
     HRESULT hr = mf.createSourceReader(url.c_str(), nullptr, &reader);
@@ -307,8 +432,8 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     hr = mf.createWaveFormat(got.p, &wfx, &wfxSize, MFWaveFormatExConvertFlag_Normal);
     if (FAILED(hr) || !wfx) return reportError(sink, ses, "cannot build wave format", hr);
 
-    const uint32_t rate = wfx->nSamplesPerSec;
-    const int channels = wfx->nChannels;
+    uint32_t rate = wfx->nSamplesPerSec;
+    int channels = wfx->nChannels;
     SampleFmt sampleFmt = sampleFmtOf(got.p, wfx);
     if (rate == 0 || channels <= 0 || channels > 8 || sampleFmt == SampleFmt::None) {
         CoTaskMemFree(wfx);
@@ -328,23 +453,10 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     wchar_t nullEnv[8] = {};
     bool nullOut = GetEnvironmentVariableW(L"VIBEZ_NULL_AUDIO", nullEnv, 8) == 1 && nullEnv[0] == L'1';
     if (mm != MMSYSERR_NOERROR && sampleFmt == SampleFmt::Float32) {
-        UINT32 nativeCh = static_cast<UINT32>(channels > 0 ? channels : 2);
-        if (setOutputType(mf, reader.p, MFAudioFormat_PCM, 16, nativeCh, rate)) {
-            Com<IMFMediaType> got16;
-            WAVEFORMATEX* wfx16 = nullptr;
-            UINT32 wfx16Size = 0;
-            if (SUCCEEDED(reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &got16)) &&
-                SUCCEEDED(mf.createWaveFormat(got16.p, &wfx16, &wfx16Size, MFWaveFormatExConvertFlag_Normal)) && wfx16) {
-                SampleFmt fmt16 = sampleFmtOf(got16.p, wfx16);
-                if (wfx16->nSamplesPerSec > 0 && wfx16->nChannels > 0 && wfx16->nChannels <= 8 && fmt16 != SampleFmt::None) {
-                    sampleFmt = fmt16;
-                    ses->sampleRate = wfx16->nSamplesPerSec;
-                    ses->bytesPerSec = wfx16->nAvgBytesPerSec;
-                    mm = waveOutOpen(&hwo, WAVE_MAPPER, wfx16, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
-                }
-                CoTaskMemFree(wfx16);
-            }
-        }
+        uint32_t bps = ses->bytesPerSec.load();
+        fallbackWaveOutPCM16(mf, reader.p, ev, hwo, mm, sampleFmt, rate, channels, bps);
+        ses->sampleRate = rate;
+        ses->bytesPerSec = bps;
     }
     if (mm != MMSYSERR_NOERROR) {
         if (!nullOut) {
@@ -369,8 +481,8 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
     int next = 0;
     bool endOfStream = false;
     size_t trimRemaining = isWholeTrackURI(curURI) ? kAACPrimingFrames : 0;
-    uint32_t enqueuedSamples = 0;
-    uint32_t enqueuedBytes = 0;
+    uint64_t enqueuedSamples = 0;
+    uint64_t enqueuedBytes = 0;
     for (;;) {
         if (ses->cancel) break;
 
@@ -379,6 +491,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             if (std::isnan(target) || std::isinf(target)) target = 0.0;
             if (target > 1e8) target = 1e8;
             if (!nullOut && hwo) {
+                std::lock_guard<std::mutex> lk(ses->mu);
                 waveOutReset(hwo);
                 for (auto& b : bufs) {
                     if (b.queued) {
@@ -386,6 +499,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                         b.queued = false;
                     }
                 }
+                ses->resetDeviceCountersLocked();
                 if (ses->paused) waveOutPause(hwo);
             }
             PROPVARIANT pos;
@@ -427,6 +541,75 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
             if (!nextURI.empty()) {
                 Com<IMFSourceReader> nextReader;
                 if (openSourceReader(mf, sink, ses, widen(nextURI.c_str()), nextReader)) {
+                    Com<IMFMediaType> nextMt;
+                    WAVEFORMATEX* nextWfx = nullptr;
+                    UINT32 nextWfxSize = 0;
+                    if (FAILED(nextReader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, &nextMt)) ||
+                        FAILED(mf.createWaveFormat(nextMt.p, &nextWfx, &nextWfxSize, MFWaveFormatExConvertFlag_Normal)) ||
+                        !nextWfx) {
+                        reportError(sink, ses, "cannot read gapless audio format", E_FAIL);
+                        break;
+                    }
+                    SampleFmt nextFmt = sampleFmtOf(nextMt.p, nextWfx);
+                    uint32_t nextRate = nextWfx->nSamplesPerSec;
+                    int nextChannels = nextWfx->nChannels;
+                    uint32_t nextBps = nextWfx->nAvgBytesPerSec;
+                    if (nextRate == 0 || nextChannels <= 0 || nextChannels > 8 || nextFmt == SampleFmt::None) {
+                        CoTaskMemFree(nextWfx);
+                        reportError(sink, ses, "unsupported gapless audio format", E_FAIL);
+                        break;
+                    }
+                    const bool formatChanged = (nextRate != rate || nextChannels != channels || nextFmt != sampleFmt);
+                    if (formatChanged) {
+                        for (auto& bq : bank) {
+                            bq.z1[0] = bq.z1[1] = 0.0;
+                            bq.z2[0] = bq.z2[1] = 0.0;
+                        }
+                        eqSeen = 0;
+                        if (!nullOut && hwo) {
+                            for (auto& b : bufs) {
+                                while (b.queued && !ses->cancel && !(b.hdr.dwFlags & WHDR_DONE)) {
+                                    WaitForSingleObject(ev, 50);
+                                }
+                                if (b.queued) {
+                                    waveOutUnprepareHeader(hwo, &b.hdr, sizeof(WAVEHDR));
+                                    b.queued = false;
+                                }
+                            }
+                            if (ses->cancel) {
+                                CoTaskMemFree(nextWfx);
+                                break;
+                            }
+                            HWAVEOUT newHwo = nullptr;
+                            MMRESULT nextMm = waveOutOpen(&newHwo, WAVE_MAPPER, nextWfx, reinterpret_cast<DWORD_PTR>(ev), 0, CALLBACK_EVENT);
+                            if (nextMm != MMSYSERR_NOERROR && nextFmt == SampleFmt::Float32) {
+                                fallbackWaveOutPCM16(mf, nextReader.p, ev, newHwo, nextMm, nextFmt, nextRate, nextChannels, nextBps);
+                            }
+                            if (nextMm != MMSYSERR_NOERROR) {
+                                CoTaskMemFree(nextWfx);
+                                reportError(sink, ses, "cannot reopen audio output device", static_cast<HRESULT>(nextMm));
+                                break;
+                            }
+                            {
+                                std::lock_guard<std::mutex> lk(ses->mu);
+                                waveOutReset(hwo);
+                                waveOutClose(hwo);
+                                hwo = newHwo;
+                                ses->hwo = newHwo;
+                                ses->resetDeviceCountersLocked();
+                                if (ses->paused) waveOutPause(newHwo);
+                            }
+                        }
+                        rate = nextRate;
+                        channels = nextChannels;
+                        sampleFmt = nextFmt;
+                        ses->sampleRate = rate;
+                        ses->bytesPerSec = nextBps;
+                        enqueuedSamples = 0;
+                        enqueuedBytes = 0;
+                    }
+                    CoTaskMemFree(nextWfx);
+
                     if (reader.p) reader.p->Release();
                     reader.p = nextReader.p;
                     nextReader.p = nullptr;
@@ -436,10 +619,13 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                     ses->baseBytes = enqueuedBytes;
                     ses->seekBaseSec = 0.0;
                     ses->nullFrames = 0;
-                    if (sink->onStreamStart) {
-                        std::vector<char> u(curURI.begin(), curURI.end());
-                        u.push_back('\0');
-                        sink->onStreamStart(sink->user, u.data());
+                    if (sink->onStreamStart && !sink->closed && !ses->cancel) {
+                        ScopedCallback cb(sink->cbGate);
+                        if (cb && !sink->closed && !ses->cancel) {
+                            std::vector<char> u(curURI.begin(), curURI.end());
+                            u.push_back('\0');
+                            sink->onStreamStart(sink->user, u.data());
+                        }
                     }
                     continue;
                 }
@@ -507,12 +693,14 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                     for (size_t f = 0; f < frames; ++f) {
                         for (int c = 0; c < channels; ++c) {
                             double x = s[f * channels + c];
+                            if (!std::isfinite(x)) x = 0.0;
                             if (eqOn) {
                                 for (int i = 0; i < kBands; ++i) {
                                     if (bank[i].active) x = bank[i].run(x, c);
                                 }
                             }
                             x *= vol;
+                            if (!std::isfinite(x)) x = 0.0;
                             if (x > 1.0) x = 1.0;
                             if (x < -1.0) x = -1.0;
                             s[f * channels + c] = static_cast<float>(x);
@@ -529,6 +717,7 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
                                 }
                             }
                             x *= vol;
+                            if (!std::isfinite(x)) x = 0.0;
                             if (x > 32767.0) x = 32767.0;
                             if (x < -32768.0) x = -32768.0;
                             s[f * channels + c] = static_cast<int16_t>(x);
@@ -552,8 +741,8 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         }
 
         const size_t bufFrames = frameBytes > 0 ? b.data.size() / frameBytes : 0;
-        enqueuedSamples += static_cast<uint32_t>(bufFrames);
-        enqueuedBytes += static_cast<uint32_t>(b.data.size());
+        enqueuedSamples += static_cast<uint64_t>(bufFrames);
+        enqueuedBytes += static_cast<uint64_t>(b.data.size());
         b.hdr.lpData = b.data.data();
         b.hdr.dwBufferLength = static_cast<DWORD>(b.data.size());
         b.hdr.dwFlags = 0;
@@ -590,10 +779,14 @@ void playLoop(const MfApi& mf, const std::shared_ptr<Sink>& sink, const std::sha
         waveOutClose(hwo);
     }
     CloseHandle(ev);
-    if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) sink->onEos(sink->user);
+    if (endOfStream && !ses->cancel && !sink->closed && sink->onEos) {
+        ScopedCallback cb(sink->cbGate);
+        if (cb && !sink->closed && !ses->cancel) sink->onEos(sink->user);
+    }
 }
 
 void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::string url) {
+    ScopedWorker workerGuard(sink);
     const MfApi* mf = mfApi();
     if (!mf) {
         reportError(sink, ses,
@@ -602,10 +795,9 @@ void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::s
         return;
     }
     const HRESULT hrCo = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const HRESULT hrMf = mf->startup(MF_VERSION, MFSTARTUP_FULL);
+    const HRESULT hrMf = ensureMfStartup(*mf);
     if (SUCCEEDED(hrMf)) {
         playLoop(*mf, sink, ses, std::move(url));
-        mf->shutdown();
     } else {
         reportError(sink, ses, "Media Foundation failed to start", hrMf);
     }
@@ -644,6 +836,11 @@ void vibez_winsink_play_uri(vibez_winsink_t handle, const char* uri_utf8) {
         sink->cur = ses;
     }
     cancelSession(old);
+    {
+        std::lock_guard<std::mutex> wlk(sink->workerMu);
+        if (sink->closed.load()) return;
+        ++sink->activeWorkers;
+    }
     // The worker owns shared references to the sink and session, so a stale
     // session blocked on the network can finish by itself after it is replaced.
     std::thread(runSession, sink, ses, std::string(uri_utf8)).detach();
@@ -726,7 +923,7 @@ void vibez_winsink_set_eq(vibez_winsink_t handle, const double* gains_db, int co
         std::lock_guard<std::mutex> lk(sink->mu);
         for (int i = 0; i < kBands; ++i) {
             double g = i < count ? gains_db[i] : 0.0;
-            if (std::isnan(g)) g = 0.0;
+            if (!std::isfinite(g)) g = 0.0;
             if (g > 24.0) g = 24.0;
             if (g < -24.0) g = -24.0;
             sink->eq[i] = g;
@@ -760,7 +957,11 @@ double vibez_winsink_position(vibez_winsink_t handle) {
 void vibez_winsink_destroy(vibez_winsink_t handle) {
     if (!handle) return;
     auto* h = static_cast<Handle*>(handle);
-    h->sink->closed = true;
+    {
+        std::lock_guard<std::mutex> wlk(h->sink->workerMu);
+        h->sink->closed = true;
+    }
+    h->sink->cbGate.closeAndDrain();
     std::shared_ptr<Session> old;
     {
         std::lock_guard<std::mutex> lk(h->sink->mu);
@@ -768,6 +969,10 @@ void vibez_winsink_destroy(vibez_winsink_t handle) {
         h->sink->cur.reset();
     }
     cancelSession(old);
+    {
+        std::unique_lock<std::mutex> wlk(h->sink->workerMu);
+        h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
+    }
     delete h;
 }
 

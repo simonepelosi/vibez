@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
@@ -52,7 +53,10 @@ struct Biquad {
     bool active = false;
 
     void design(double fs, double f0, double gainDb) {
-        if (std::isnan(gainDb) || std::isinf(gainDb) || fs <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+        if (!std::isfinite(fs) || !std::isfinite(f0) || !std::isfinite(gainDb) ||
+            fs <= 0.0 || f0 <= 0.0 || std::fabs(gainDb) < 0.01 || f0 >= fs * 0.45) {
+            z1[0] = z1[1] = 0.0;
+            z2[0] = z2[1] = 0.0;
             active = false;
             return;
         }
@@ -70,11 +74,52 @@ struct Biquad {
     }
 
     double run(double x, int ch) {
+        if (!std::isfinite(x)) x = 0.0;
         const double y = b0 * x + z1[ch];
         z1[ch] = b1 * x - a1 * y + z2[ch];
         z2[ch] = b2 * x - a2 * y;
+        if (!std::isfinite(y) || !std::isfinite(z1[ch]) || !std::isfinite(z2[ch])) {
+            z1[ch] = 0.0;
+            z2[ch] = 0.0;
+            return 0.0;
+        }
         return y;
     }
+};
+
+struct CallbackGate {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool closed = false;
+    int inFlight = 0;
+
+    bool enter() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (closed) return false;
+        ++inFlight;
+        return true;
+    }
+
+    void leave() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (--inFlight == 0) cv.notify_all();
+    }
+
+    void closeAndDrain() {
+        std::unique_lock<std::mutex> lk(mu);
+        closed = true;
+        cv.wait(lk, [&] { return inFlight == 0; });
+    }
+};
+
+struct ScopedCallback {
+    CallbackGate& gate;
+    bool entered;
+    explicit ScopedCallback(CallbackGate& g) : gate(g), entered(g.enter()) {}
+    ~ScopedCallback() {
+        if (entered) gate.leave();
+    }
+    explicit operator bool() const { return entered; }
 };
 
 struct Session;
@@ -98,6 +143,8 @@ static void audioQueueCallback(
     AudioQueueRef inAQ,
     AudioQueueBufferRef inBuffer);
 
+static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& pcm);
+
 struct Session : public std::enable_shared_from_this<Session> {
     static constexpr int kNumBuffers = 6;
     // 8192 stereo float32 frames, about 186 ms at 44.1 kHz per buffer.
@@ -120,6 +167,7 @@ struct Session : public std::enable_shared_from_this<Session> {
     int sock = -1;
     std::mutex sockMutex;
     AudioFileStreamID streamID = nullptr;
+    std::mutex queueMutex; // Lock hierarchy: queueMutex -> bufferMutex
     AudioQueueRef queue = nullptr;
     AudioConverterRef converter = nullptr;
     AudioStreamBasicDescription asbd{};
@@ -167,22 +215,27 @@ struct Session : public std::enable_shared_from_this<Session> {
     }
 
     void cancel() {
-        bool wasCancelled = cancelled.exchange(true);
-        if (wasCancelled) return;
+        {
+            std::lock_guard<std::mutex> lock(bufferMutex);
+            if (cancelled.exchange(true)) return;
+            bufferCond.notify_all();
+        }
 
         closeSock(true);
 
-        bufferCond.notify_all();
-
+        std::lock_guard<std::mutex> qlk(queueMutex);
         if (queue) {
             AudioQueueStop(queue, true);
         }
     }
 
     void cleanup() {
-        if (queue) {
-            AudioQueueDispose(queue, true);
-            queue = nullptr;
+        {
+            std::lock_guard<std::mutex> qlk(queueMutex);
+            if (queue) {
+                AudioQueueDispose(queue, true);
+                queue = nullptr;
+            }
         }
         if (converter) {
             AudioConverterDispose(converter);
@@ -210,7 +263,7 @@ struct Session : public std::enable_shared_from_this<Session> {
         return buf;
     }
 
-    void flushCurrentBuffer() {
+    void flushCurrentBufferLocked() {
         if (!curBuf || curBufBytes == 0 || !queue) return;
 
         curBuf->mAudioDataByteSize = curBufBytes;
@@ -235,6 +288,11 @@ struct Session : public std::enable_shared_from_this<Session> {
             }
         }
     }
+
+    void flushCurrentBuffer() {
+        std::lock_guard<std::mutex> qlk(queueMutex);
+        flushCurrentBufferLocked();
+    }
 };
 
 struct Sink {
@@ -245,6 +303,10 @@ struct Sink {
 
     std::atomic<float> volume{1.0f};
     std::atomic<bool> closed{false};
+    CallbackGate cbGate;
+    std::mutex workerMu;
+    std::condition_variable workerCv;
+    int activeWorkers = 0;
     std::mutex mu;
     std::string nextURI;
     double eq[kBands] = {0};
@@ -253,6 +315,15 @@ struct Sink {
     std::shared_ptr<Session> currentSession() {
         std::lock_guard<std::mutex> lock(mu);
         return curSession;
+    }
+};
+
+struct ScopedWorker {
+    std::shared_ptr<Sink> sink;
+    explicit ScopedWorker(const std::shared_ptr<Sink>& s) : sink(s) {}
+    ~ScopedWorker() {
+        std::lock_guard<std::mutex> lk(sink->workerMu);
+        if (--sink->activeWorkers == 0) sink->workerCv.notify_all();
     }
 };
 
@@ -267,12 +338,12 @@ static Sink* sinkOf(vibez_darwinsink_t h) {
 void Session::reportError(const std::string& msg) {
     if (cancelled.load()) return;
     auto ps = parentSink.lock();
-    if (!ps || ps->closed.load()) return;
-    if (onErr) {
-        std::vector<char> errMsg(msg.begin(), msg.end());
-        errMsg.push_back('\0');
-        onErr(userData, errMsg.data());
-    }
+    if (!ps || ps->closed.load() || !onErr) return;
+    ScopedCallback cb(ps->cbGate);
+    if (!cb || ps->closed.load() || cancelled.load()) return;
+    std::vector<char> errMsg(msg.begin(), msg.end());
+    errMsg.push_back('\0');
+    onErr(userData, errMsg.data());
 }
 
 static void onPropertyFound(
@@ -292,7 +363,9 @@ static void onPropertyFound(
             ses->asbd = asbd;
 
             AudioStreamBasicDescription pcm{};
-            pcm.mSampleRate = asbd.mSampleRate > 0 ? asbd.mSampleRate : 44100.0;
+            pcm.mSampleRate = (std::isfinite(asbd.mSampleRate) && asbd.mSampleRate >= 1.0 && asbd.mSampleRate <= 768000.0)
+                                  ? asbd.mSampleRate
+                                  : 44100.0;
             pcm.mFormatID = kAudioFormatLinearPCM;
             pcm.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
             pcm.mChannelsPerFrame = asbd.mChannelsPerFrame == 1 ? 1 : 2;
@@ -300,13 +373,12 @@ static void onPropertyFound(
             pcm.mBytesPerFrame = pcm.mChannelsPerFrame * sizeof(float);
             pcm.mFramesPerPacket = 1;
             pcm.mBytesPerPacket = pcm.mBytesPerFrame;
-            ses->pcmAsbd = pcm;
 
             if (ses->converter) {
                 AudioConverterDispose(ses->converter);
                 ses->converter = nullptr;
             }
-            err = AudioConverterNew(&ses->asbd, &ses->pcmAsbd, &ses->converter);
+            err = AudioConverterNew(&ses->asbd, &pcm, &ses->converter);
             if (err != noErr) {
                 ses->reportError("Failed to create AudioConverter: " + std::to_string(err));
                 return;
@@ -318,39 +390,7 @@ static void onPropertyFound(
                 ses->pendingMagicCookie.clear();
             }
 
-            if (!ses->queue && !ses->nullOut.load()) {
-                err = AudioQueueNewOutput(&ses->pcmAsbd, audioQueueCallback, ses, NULL, NULL, 0, &ses->queue);
-                if (err == noErr) {
-                    std::lock_guard<std::mutex> lock(ses->bufferMutex);
-                    OSStatus allocErr = noErr;
-                    for (int i = 0; i < Session::kNumBuffers; ++i) {
-                        allocErr = AudioQueueAllocateBuffer(ses->queue, Session::kBufferSize, &ses->buffers[i]);
-                        if (allocErr != noErr || !ses->buffers[i]) {
-                            break;
-                        }
-                        ses->freeBuffers.push_back(ses->buffers[i]);
-                    }
-                    if (ses->freeBuffers.empty()) {
-                        AudioQueueDispose(ses->queue, true);
-                        ses->queue = nullptr;
-                        ses->reportError("Failed to allocate AudioQueue buffers: " + std::to_string(allocErr));
-                        return;
-                    }
-                    AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, ses->initialVolume.load());
-                    ses->formatReady = true;
-                } else {
-                    const char* nullEnv = std::getenv("VIBEZ_NULL_AUDIO");
-                    if (nullEnv && std::strcmp(nullEnv, "1") == 0) {
-                        ses->nullOut = true;
-                        ses->started = true;
-                        ses->formatReady = true;
-                    } else {
-                        ses->reportError("Failed to initialize AudioQueue: " + std::to_string(err));
-                    }
-                }
-            } else {
-                ses->formatReady = true;
-            }
+            ensureOutputQueue(ses, pcm);
         }
     } else if (inPropertyID == kAudioFileStreamProperty_MagicCookieData) {
         UInt32 cookieSize = 0;
@@ -476,9 +516,11 @@ static void onPacketsParsed(
             for (UInt32 f = 0; f < ioFrames; ++f) {
                 for (int c = 0; c < channels; ++c) {
                     double x = pcmStart[f * channels + c];
+                    if (!std::isfinite(x)) x = 0.0;
                     for (int b = 0; b < kBands; ++b) {
                         if (ses->eqBank[b].active) x = ses->eqBank[b].run(x, c);
                     }
+                    if (!std::isfinite(x)) x = 0.0;
                     if (x > 1.0) x = 1.0;
                     if (x < -1.0) x = -1.0;
                     pcmStart[f * channels + c] = static_cast<float>(x);
@@ -531,8 +573,13 @@ static void audioQueueCallback(
 }
 
 static bool parseURL(const std::string& url, std::string& host, int& port, std::string& path) {
-    if (url.empty() || url.find_first_of("\r\n \t") != std::string::npos) {
+    if (url.empty()) {
         return false;
+    }
+    for (unsigned char uc : url) {
+        if (uc <= 0x20 || uc == 0x7f) {
+            return false;
+        }
     }
     const std::string httpPrefix = "http://";
     if (url.rfind(httpPrefix, 0) != 0) {
@@ -575,10 +622,11 @@ static bool parseURL(const std::string& url, std::string& host, int& port, std::
 }
 
 static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& pcm) {
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
     if (ses->queue &&
         (ses->pcmAsbd.mSampleRate != pcm.mSampleRate ||
          ses->pcmAsbd.mChannelsPerFrame != pcm.mChannelsPerFrame)) {
-        ses->flushCurrentBuffer();
+        ses->flushCurrentBufferLocked();
         {
             std::unique_lock<std::mutex> lock(ses->bufferMutex);
             ses->bufferCond.wait(lock, [ses] {
@@ -606,7 +654,8 @@ static bool ensureOutputQueue(Session* ses, const AudioStreamBasicDescription& p
                 }
                 ses->freeBuffers.push_back(ses->buffers[i]);
             }
-            if (ses->freeBuffers.empty()) {
+            if (ses->freeBuffers.size() < static_cast<size_t>(Session::kNumBuffers)) {
+                ses->freeBuffers.clear();
                 AudioQueueDispose(ses->queue, true);
                 ses->queue = nullptr;
                 ses->reportError("Failed to allocate AudioQueue buffers: " + std::to_string(allocErr));
@@ -659,7 +708,9 @@ static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::stri
     }
 
     AudioStreamBasicDescription pcm{};
-    pcm.mSampleRate = fileFmt.mSampleRate > 0 ? fileFmt.mSampleRate : 44100.0;
+    pcm.mSampleRate = (std::isfinite(fileFmt.mSampleRate) && fileFmt.mSampleRate >= 1.0 && fileFmt.mSampleRate <= 768000.0)
+                          ? fileFmt.mSampleRate
+                          : 44100.0;
     pcm.mFormatID = kAudioFormatLinearPCM;
     pcm.mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
     pcm.mChannelsPerFrame = fileFmt.mChannelsPerFrame == 1 ? 1 : 2;
@@ -692,6 +743,7 @@ static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::stri
             SInt64 targetFrame = static_cast<SInt64>(target * rate);
             ExtAudioFileSeek(extFile, targetFrame);
             ses->curBufBytes = 0;
+            std::lock_guard<std::mutex> qlk(ses->queueMutex);
             if (ses->queue) {
                 AudioQueueReset(ses->queue);
                 ses->enqueuedFrames = static_cast<uint64_t>(targetFrame);
@@ -737,9 +789,11 @@ static bool streamLocalFile(const std::shared_ptr<Session>& ses, const std::stri
             for (UInt32 f = 0; f < ioFrames; ++f) {
                 for (int c = 0; c < channels; ++c) {
                     double x = pcmFrameBuf[f * channels + c];
+                    if (!std::isfinite(x)) x = 0.0;
                     for (int b = 0; b < kBands; ++b) {
                         if (ses->eqBank[b].active) x = ses->eqBank[b].run(x, c);
                     }
+                    if (!std::isfinite(x)) x = 0.0;
                     if (x > 1.0) x = 1.0;
                     if (x < -1.0) x = -1.0;
                     pcmFrameBuf[f * channels + c] = static_cast<float>(x);
@@ -902,21 +956,30 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
     }
 
     char buf[16384];
+    bool streamFailed = false;
     if (!isChunked) {
         while (!ses->cancelled.load()) {
             ssize_t n = recv(sock, buf, sizeof(buf), 0);
-            if (n <= 0) {
+            if (n == 0) {
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                streamFailed = true;
                 break;
             }
             AudioFileStreamParseBytes(ses->streamID, static_cast<UInt32>(n), buf, 0);
         }
     } else {
+        bool sawZeroChunk = false;
         while (!ses->cancelled.load()) {
             std::string line;
             bool gotLine = false;
             while (!ses->cancelled.load()) {
                 char ch = 0;
-                if (recv(sock, &ch, 1, 0) <= 0) break;
+                ssize_t nr = recv(sock, &ch, 1, 0);
+                if (nr < 0 && errno == EINTR) continue;
+                if (nr <= 0) break;
                 if (ch == '\n') {
                     gotLine = true;
                     break;
@@ -937,7 +1000,10 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
             } catch (...) {
                 break;
             }
-            if (chunkSize == 0) break;
+            if (chunkSize == 0) {
+                sawZeroChunk = true;
+                break;
+            }
             constexpr unsigned long kMaxChunkSize = 64u << 20;
             if (chunkSize > kMaxChunkSize) break;
 
@@ -945,24 +1011,40 @@ static bool streamOneURI(std::shared_ptr<Session> ses, const std::string& url) {
             while (remaining > 0 && !ses->cancelled.load()) {
                 size_t toRead = std::min(static_cast<size_t>(remaining), sizeof(buf));
                 ssize_t n = recv(sock, buf, toRead, 0);
+                if (n < 0 && errno == EINTR) continue;
                 if (n <= 0) break;
                 AudioFileStreamParseBytes(ses->streamID, static_cast<UInt32>(n), buf, 0);
                 remaining -= static_cast<unsigned long>(n);
             }
             if (remaining > 0) break;
             char crlf[2];
-            if (recv(sock, crlf, 2, MSG_WAITALL) != 2) break;
+            ssize_t crlfGot = 0;
+            while (crlfGot < 2 && !ses->cancelled.load()) {
+                ssize_t n = recv(sock, crlf + crlfGot, static_cast<size_t>(2 - crlfGot), 0);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) break;
+                crlfGot += n;
+            }
+            if (crlfGot != 2) break;
+        }
+        if (!sawZeroChunk) {
+            streamFailed = true;
         }
     }
 
     ses->closeSock(false);
     if (ses->cancelled.load()) return false;
+    if (streamFailed) {
+        ses->reportError("Stream connection interrupted or truncated");
+        return false;
+    }
 
     AudioFileStreamParseBytes(ses->streamID, 0, NULL, kAudioFileStreamParseFlag_Discontinuity);
     return true;
 }
 
 static void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses, std::string url) {
+    ScopedWorker workerGuard(sink);
     for (;;) {
         if (!streamOneURI(ses, url)) return;
 
@@ -978,20 +1060,26 @@ static void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses,
         ses->nullFrames = 0;
         ses->lastPosition = 0.0;
         if (ses->onStreamStart && sink && !sink->closed.load() && !ses->cancelled.load()) {
-            std::vector<char> uriBuf(next.begin(), next.end());
-            uriBuf.push_back('\0');
-            ses->onStreamStart(ses->userData, uriBuf.data());
+            ScopedCallback cb(sink->cbGate);
+            if (cb && !sink->closed.load() && !ses->cancelled.load()) {
+                std::vector<char> uriBuf(next.begin(), next.end());
+                uriBuf.push_back('\0');
+                ses->onStreamStart(ses->userData, uriBuf.data());
+            }
         }
         url = std::move(next);
     }
 
     ses->flushCurrentBuffer();
 
-    if (!ses->started.load() && ses->enqueuedCount.load() > 0 && ses->queue) {
-        if (!ses->paused.load()) {
-            AudioQueueStart(ses->queue, NULL);
+    {
+        std::lock_guard<std::mutex> qlk(ses->queueMutex);
+        if (!ses->started.load() && ses->enqueuedCount.load() > 0 && ses->queue) {
+            if (!ses->paused.load()) {
+                AudioQueueStart(ses->queue, NULL);
+            }
+            ses->started = true;
         }
-        ses->started = true;
     }
 
     {
@@ -1009,7 +1097,10 @@ static void runSession(std::shared_ptr<Sink> sink, std::shared_ptr<Session> ses,
 
     if (ses->eosReached.load() && !ses->cancelled.load() && sink && !sink->closed.load()) {
         if (ses->onEos) {
-            ses->onEos(ses->userData);
+            ScopedCallback cb(sink->cbGate);
+            if (cb && !sink->closed.load() && !ses->cancelled.load()) {
+                ses->onEos(ses->userData);
+            }
         }
     }
 }
@@ -1057,6 +1148,11 @@ void vibez_darwinsink_play_uri(vibez_darwinsink_t handle, const char* uri) {
     }
 
     std::string urlStr(uri);
+    {
+        std::lock_guard<std::mutex> wlk(sink->workerMu);
+        if (sink->closed.load()) return;
+        ++sink->activeWorkers;
+    }
     // Own shared references to both Sink and Session so an unwinding worker
     // never touches freed Sink memory after vibez_darwinsink_destroy.
     std::thread([sink, newSession, urlStr]() {
@@ -1077,6 +1173,7 @@ void vibez_darwinsink_play(vibez_darwinsink_t handle) {
     auto ses = sink->currentSession();
     if (!ses) return;
     ses->paused = false;
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
     if (ses->queue && ses->started.load()) {
         AudioQueueStart(ses->queue, NULL);
     }
@@ -1088,6 +1185,7 @@ void vibez_darwinsink_pause(vibez_darwinsink_t handle) {
     auto ses = sink->currentSession();
     if (!ses) return;
     ses->paused = true;
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
     if (ses->queue && ses->started.load()) {
         AudioQueuePause(ses->queue);
     }
@@ -1125,7 +1223,10 @@ void vibez_darwinsink_set_volume(vibez_darwinsink_t handle, float volume) {
     if (volume > 1.0f) volume = 1.0f;
     sink->volume = volume;
     auto ses = sink->currentSession();
-    if (ses && ses->queue) {
+    if (!ses) return;
+    ses->initialVolume = volume;
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
+    if (ses->queue) {
         AudioQueueSetParameter(ses->queue, kAudioQueueParam_Volume, volume);
     }
 }
@@ -1137,7 +1238,7 @@ void vibez_darwinsink_set_eq(vibez_darwinsink_t handle, const double* gains_db, 
         std::lock_guard<std::mutex> lock(sink->mu);
         for (int i = 0; i < kBands; ++i) {
             double g = (gains_db && i < count) ? gains_db[i] : 0.0;
-            if (std::isnan(g)) g = 0.0;
+            if (!std::isfinite(g)) g = 0.0;
             if (g > 24.0) g = 24.0;
             if (g < -24.0) g = -24.0;
             sink->eq[i] = g;
@@ -1152,6 +1253,7 @@ double vibez_darwinsink_position(vibez_darwinsink_t handle) {
     auto ses = sink->currentSession();
     if (!ses || !ses->started.load()) return 0.0;
     if (ses->nullOut.load()) return ses->lastPosition.load();
+    std::lock_guard<std::mutex> qlk(ses->queueMutex);
     if (!ses->queue) return 0.0;
     AudioTimeStamp ts{};
     OSStatus err = AudioQueueGetCurrentTime(ses->queue, NULL, &ts, NULL);
@@ -1171,6 +1273,7 @@ void vibez_darwinsink_destroy(vibez_darwinsink_t handle) {
     auto* h = static_cast<SinkHandle*>(handle);
     if (h->sink) {
         h->sink->closed = true;
+        h->sink->cbGate.closeAndDrain();
         std::shared_ptr<Session> old;
         {
             std::lock_guard<std::mutex> lock(h->sink->mu);
@@ -1181,6 +1284,8 @@ void vibez_darwinsink_destroy(vibez_darwinsink_t handle) {
         if (old) {
             old->cancel();
         }
+        std::unique_lock<std::mutex> wlk(h->sink->workerMu);
+        h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
     }
     delete h;
 }

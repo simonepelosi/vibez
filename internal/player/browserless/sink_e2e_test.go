@@ -4,8 +4,10 @@ package browserless
 
 import (
 	"bytes"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -158,5 +160,47 @@ func TestNativeSinkGaplessTransitionEndToEnd(t *testing.T) {
 		t.Fatalf("sink error during second track: %v", e)
 	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for EOS after second track")
+	}
+}
+
+func TestNativeSinkNonFiniteControlsAndRapidDestroy(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+
+	adts := buildTestADTSStream()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/aac")
+		_, _ = w.Write(adts)
+	}))
+	defer srv.Close()
+
+	var cbAfterDestroy atomic.Bool
+	for range 5 {
+		s, err := newAudioSink()
+		if err != nil {
+			t.Fatalf("newAudioSink: %v", err)
+		}
+		var destroyed atomic.Bool
+		s.OnEOS(func() {
+			if destroyed.Load() {
+				cbAfterDestroy.Store(true)
+			}
+		})
+		s.OnError(func(error) {
+			if destroyed.Load() {
+				cbAfterDestroy.Store(true)
+			}
+		})
+		s.SetVolume(math.NaN())
+		s.SetEqualizer([]float64{math.NaN(), math.Inf(1), math.Inf(-1), 6, -6, 0, 0, 0, 0, 0})
+		s.PlayURI(srv.URL + "/stream.aac")
+		s.SetNextURI(srv.URL + "/next.aac")
+		time.Sleep(10 * time.Millisecond)
+		s.Seek(-time.Second)
+		s.Stop()
+		destroyed.Store(true)
+		s.Destroy()
+	}
+	if cbAfterDestroy.Load() {
+		t.Fatal("observed sink callback after Destroy returned")
 	}
 }

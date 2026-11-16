@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -269,4 +270,61 @@ func TestNativeSinkPlaysHiResWAV(t *testing.T) {
 	if l := wantLogFor("flac24_96k.flac"); !strings.Contains(l, "F32") && !strings.Contains(l, "S24") {
 		t.Errorf("flac24_96k.flac log = %q, want F32 or S24 (compressed decoder fell back to 16-bit)", l)
 	}
+}
+
+func TestNativeSinkRejectsDirectoryAndSanitizesNonFiniteFloatWAV(t *testing.T) {
+	t.Setenv("VIBEZ_NULL_AUDIO", "1")
+	dir := t.TempDir()
+
+	p, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = p.Close() }()
+
+	dirTrack := provider.Track{ID: "local:" + dir, Title: "Dir"}
+	p.LoadTracks([]provider.Track{dirTrack})
+	if err := p.SetQueue([]string{dirTrack.ID}); err == nil {
+		t.Fatal("expected SetQueue to reject directory path")
+	}
+
+	// Build a float WAV containing NaN/+Inf/-Inf PCM samples with EQ active.
+	wavPath := filepath.Join(dir, "nonfinite.wav")
+	const (
+		rate     = 44100
+		frames   = 4410
+		channels = 2
+	)
+	dataSize := uint32(frames * channels * 4)
+	var buf bytes.Buffer
+	for _, v := range []any{
+		[4]byte{'R', 'I', 'F', 'F'}, uint32(36) + dataSize,
+		[4]byte{'W', 'A', 'V', 'E'}, [4]byte{'f', 'm', 't', ' '},
+		uint32(16), uint16(3), uint16(channels), uint32(rate), uint32(rate * channels * 4), uint16(channels * 4), uint16(32),
+		[4]byte{'d', 'a', 't', 'a'}, dataSize,
+	} {
+		_ = binary.Write(&buf, binary.LittleEndian, v)
+	}
+	vals := []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1)), 0.1}
+	for i := range frames * channels {
+		_ = binary.Write(&buf, binary.LittleEndian, math.Float32bits(vals[i%len(vals)]))
+	}
+	if err := os.WriteFile(wavPath, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bands := player.DefaultEQBands()
+	bands[0].Gain = 6
+	if err := p.SetEqualizer(bands); err != nil {
+		t.Fatal(err)
+	}
+	okTrack := provider.Track{ID: "local:" + wavPath, Title: "FloatNaN"}
+	p.LoadTracks([]provider.Track{okTrack})
+	if err := p.SetQueue([]string{okTrack.ID}); err != nil {
+		t.Fatalf("SetQueue float WAV: %v", err)
+	}
+	waitFor(t, "float WAV with NaN samples to finish", func() bool {
+		st, _ := p.GetState()
+		return !st.Playing && !st.Loading
+	})
 }

@@ -35,8 +35,11 @@ typedef struct {
 } VibezBiquad;
 
 static void vibez_biquad_design(VibezBiquad* bq, double fs, double f0, double gain_db) {
-    if (fabs(gain_db) < 0.01 || fs <= 0.0 || f0 >= fs * 0.45) {
+    if (!isfinite(fs) || !isfinite(f0) || !isfinite(gain_db) ||
+        fabs(gain_db) < 0.01 || fs <= 0.0 || f0 <= 0.0 || f0 >= fs * 0.45) {
         bq->active = FALSE;
+        bq->z1[0] = bq->z1[1] = 0.0;
+        bq->z2[0] = bq->z2[1] = 0.0;
         return;
     }
     double A = pow(10.0, gain_db / 40.0);
@@ -53,9 +56,17 @@ static void vibez_biquad_design(VibezBiquad* bq, double fs, double f0, double ga
 }
 
 static inline double vibez_biquad_run(VibezBiquad* bq, double x, int ch) {
+    if (!isfinite(x)) x = 0.0;
     double y = bq->b0 * x + bq->z1[ch];
-    bq->z1[ch] = bq->b1 * x - bq->a1 * y + bq->z2[ch];
-    bq->z2[ch] = bq->b2 * x - bq->a2 * y;
+    double z1 = bq->b1 * x - bq->a1 * y + bq->z2[ch];
+    double z2 = bq->b2 * x - bq->a2 * y;
+    if (!isfinite(y) || !isfinite(z1) || !isfinite(z2)) {
+        bq->z1[ch] = 0.0;
+        bq->z2[ch] = 0.0;
+        return 0.0;
+    }
+    bq->z1[ch] = z1;
+    bq->z2[ch] = z2;
     return y;
 }
 
@@ -119,10 +130,19 @@ static const int vibez_adts_rates[16] = {
     16000, 12000, 11025, 8000, 7350, 0, 0, 0
 };
 
+#define VIBEZ_AAC_MAX_ADAPTER (1u << 20)
+
 static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBuffer* buf) {
     VibezAacParse* self = (VibezAacParse*)parent;
     GstMapInfo map;
     if (gst_buffer_map(buf, &map, GST_MAP_READ)) {
+        if (map.size > VIBEZ_AAC_MAX_ADAPTER || self->adapter->len > VIBEZ_AAC_MAX_ADAPTER - map.size) {
+            gst_buffer_unmap(buf, &map);
+            gst_buffer_unref(buf);
+            g_byte_array_set_size(self->adapter, 0);
+            self->synced = FALSE;
+            return GST_FLOW_ERROR;
+        }
         g_byte_array_append(self->adapter, map.data, map.size);
         gst_buffer_unmap(buf, &map);
     }
@@ -193,6 +213,10 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
             asc[0] = (guint8)((profile << 3) | ((freq_idx >> 1) & 0x07));
             asc[1] = (guint8)(((freq_idx & 0x01) << 7) | (chan_cfg << 3));
             GstBuffer* codec_buf = gst_buffer_new_allocate(NULL, 2, NULL);
+            if (!codec_buf) {
+                ret = GST_FLOW_ERROR;
+                break;
+            }
             gst_buffer_fill(codec_buf, 0, asc, 2);
 
             GstCaps* caps = gst_caps_new_simple("audio/mpeg",
@@ -219,6 +243,10 @@ static GstFlowReturn vibez_aac_parse_chain(GstPad* pad, GstObject* parent, GstBu
 
         guint raw_len = frame_len - hdr_len;
         GstBuffer* out = gst_buffer_new_allocate(NULL, raw_len, NULL);
+        if (!out) {
+            ret = GST_FLOW_ERROR;
+            break;
+        }
         gst_buffer_fill(out, 0, data + offset + hdr_len, raw_len);
         GstClockTime pts = gst_util_uint64_scale_int(self->frames_pushed * 1024, GST_SECOND, rate);
         GstClockTime dur = gst_util_uint64_scale_int(1024, GST_SECOND, rate);
@@ -289,7 +317,11 @@ static gboolean vibez_aac_parse_sink_event(GstPad* pad, GstObject* parent, GstEv
 
 static GstStateChangeReturn vibez_aac_parse_change_state(GstElement* element, GstStateChange transition) {
     VibezAacParse* self = (VibezAacParse*)element;
-    if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+    // Deactivate pads in parent_class first so any streaming thread in chain()
+    // releases the pad stream lock before parser state is reset.
+    GstStateChangeReturn ret = GST_ELEMENT_CLASS(vibez_aac_parse_parent_class)->change_state(element, transition);
+    if (transition == GST_STATE_CHANGE_PAUSED_TO_READY || transition == GST_STATE_CHANGE_READY_TO_NULL) {
+        GST_PAD_STREAM_LOCK(self->sinkpad);
         g_byte_array_set_size(self->adapter, 0);
         if (self->pending_segment) {
             gst_event_unref(self->pending_segment);
@@ -298,8 +330,9 @@ static GstStateChangeReturn vibez_aac_parse_change_state(GstElement* element, Gs
         self->caps_set = FALSE;
         self->synced = FALSE;
         self->frames_pushed = 0;
+        GST_PAD_STREAM_UNLOCK(self->sinkpad);
     }
-    return GST_ELEMENT_CLASS(vibez_aac_parse_parent_class)->change_state(element, transition);
+    return ret;
 }
 
 static void vibez_aac_parse_finalize(GObject* object) {
@@ -386,6 +419,9 @@ static gchar* vibez_http_src_uri_get_uri(GstURIHandler* handler) {
 
 static gboolean vibez_uri_is_loopback_http(const gchar* uri) {
     if (!uri || strncmp(uri, "http://", 7) != 0) return FALSE;
+    for (const gchar* q = uri; *q != '\0'; ++q) {
+        if ((unsigned char)*q < 0x20 || (unsigned char)*q == 0x7f) return FALSE;
+    }
     const gchar* hp = uri + 7;
     return (strncmp(hp, "127.0.0.1:", 10) == 0 ||
             strncmp(hp, "127.0.0.1/", 10) == 0 ||
@@ -431,7 +467,8 @@ static int vibez_connect_http_stream(const char* uri) {
     const char* slash = strchr(p, '/');
     const char* path = slash ? slash : "/";
     for (const char* q = path; *q != '\0'; ++q) {
-        if (*q == '\r' || *q == '\n' || *q == ' ' || *q == '\t') {
+        unsigned char ch = (unsigned char)*q;
+        if (ch < 0x20 || ch == 0x7f || ch == ' ') {
             return -1;
         }
     }
@@ -488,6 +525,10 @@ static int vibez_connect_http_stream(const char* uri) {
     gchar* req = g_strdup_printf(
         "GET %s HTTP/1.0\r\nHost: 127.0.0.1:%ld\r\nUser-Agent: vibez/2.0\r\nConnection: close\r\n\r\n",
         path, port);
+    if (!req) {
+        close(fd);
+        return -1;
+    }
     size_t req_len = strlen(req);
     size_t total_sent = 0;
     while (total_sent < req_len) {
@@ -526,7 +567,14 @@ static int vibez_connect_http_stream(const char* uri) {
 
 static GstStateChangeReturn vibez_http_src_change_state(GstElement* element, GstStateChange transition) {
     VibezHttpSrc* self = (VibezHttpSrc*)element;
+    if (!self->fdsrc) {
+        return GST_STATE_CHANGE_FAILURE;
+    }
     if (transition == GST_STATE_CHANGE_READY_TO_PAUSED) {
+        if (self->sock_fd >= 0) {
+            close(self->sock_fd);
+            self->sock_fd = -1;
+        }
         GST_OBJECT_LOCK(self);
         gchar* u = g_strdup(self->uri);
         GST_OBJECT_UNLOCK(self);
@@ -543,7 +591,9 @@ static GstStateChangeReturn vibez_http_src_change_state(GstElement* element, Gst
 
     GstStateChangeReturn ret = GST_ELEMENT_CLASS(vibez_http_src_parent_class)->change_state(element, transition);
 
-    if (transition == GST_STATE_CHANGE_PAUSED_TO_READY) {
+    if ((transition == GST_STATE_CHANGE_READY_TO_PAUSED && ret == GST_STATE_CHANGE_FAILURE) ||
+        transition == GST_STATE_CHANGE_PAUSED_TO_READY ||
+        transition == GST_STATE_CHANGE_READY_TO_NULL) {
         if (self->sock_fd >= 0) {
             close(self->sock_fd);
             self->sock_fd = -1;
@@ -598,11 +648,16 @@ static void vibez_http_src_class_init(VibezHttpSrcClass* klass) {
 static void vibez_http_src_init(VibezHttpSrc* self) {
     self->sock_fd = -1;
     self->fdsrc = gst_element_factory_make("fdsrc", "inner-fdsrc");
+    if (!self->fdsrc) return;
     gst_bin_add(GST_BIN(self), self->fdsrc);
     GstPad* target = gst_element_get_static_pad(self->fdsrc, "src");
-    GstPad* ghost = gst_ghost_pad_new("src", target);
-    gst_element_add_pad(GST_ELEMENT(self), ghost);
-    gst_object_unref(target);
+    if (target) {
+        GstPad* ghost = gst_ghost_pad_new("src", target);
+        if (ghost) {
+            gst_element_add_pad(GST_ELEMENT(self), ghost);
+        }
+        gst_object_unref(target);
+    }
 }
 // AAC encoder delay: iTunes-encoded AAC starts with 2112 priming samples
 // that ADTS has no field to describe, so the decoder plays them and every
@@ -645,7 +700,12 @@ static GstPadProbeReturn on_filter_event(GstPad* pad, GstPadProbeInfo* info, gpo
     gint rate = 0;
     GstCaps* caps = gst_pad_get_current_caps(pad);
     if (caps) {
-        gst_structure_get_int(gst_caps_get_structure(caps, 0), "rate", &rate);
+        if (gst_caps_get_size(caps) > 0) {
+            GstStructure* s = gst_caps_get_structure(caps, 0);
+            if (s) {
+                gst_structure_get_int(s, "rate", &rate);
+            }
+        }
         gst_caps_unref(caps);
     }
     if (seg->format != GST_FORMAT_TIME || rate <= 0) {
@@ -763,16 +823,24 @@ static GstPadProbeReturn on_filter_buffer(GstPad* pad, GstPadProbeInfo* info, gp
     if (!buf) return GST_PAD_PROBE_OK;
 
     gint rate = 0, channels = 0;
-    const gchar* fmt = NULL;
+    gboolean is_s16 = FALSE, is_f32 = FALSE;
     GstCaps* caps = gst_pad_get_current_caps(pad);
     if (caps) {
-        GstStructure* s = gst_caps_get_structure(caps, 0);
-        gst_structure_get_int(s, "rate", &rate);
-        gst_structure_get_int(s, "channels", &channels);
-        fmt = gst_structure_get_string(s, "format");
+        if (gst_caps_get_size(caps) > 0) {
+            GstStructure* s = gst_caps_get_structure(caps, 0);
+            if (s) {
+                gst_structure_get_int(s, "rate", &rate);
+                gst_structure_get_int(s, "channels", &channels);
+                const gchar* fmt = gst_structure_get_string(s, "format");
+                if (fmt) {
+                    if (strcmp(fmt, "S16LE") == 0) is_s16 = TRUE;
+                    else if (strcmp(fmt, "F32LE") == 0) is_f32 = TRUE;
+                }
+            }
+        }
         gst_caps_unref(caps);
     }
-    if (rate <= 0 || channels <= 0 || channels > 2 || !fmt)
+    if (rate <= 0 || channels <= 0 || channels > 2 || (!is_s16 && !is_f32))
         return GST_PAD_PROBE_OK;
 
     g_mutex_lock(&st->mu);
@@ -799,7 +867,7 @@ static GstPadProbeReturn on_filter_buffer(GstPad* pad, GstPadProbeInfo* info, gp
     GST_PAD_PROBE_INFO_DATA(info) = buf;
     GstMapInfo map;
     if (gst_buffer_map(buf, &map, GST_MAP_READWRITE)) {
-        if (strcmp(fmt, "S16LE") == 0) {
+        if (is_s16) {
             gint16* samples = (gint16*)map.data;
             size_t frames = map.size / (sizeof(gint16) * (size_t)channels);
             for (size_t f = 0; f < frames; f++) {
@@ -808,20 +876,23 @@ static GstPadProbeReturn on_filter_buffer(GstPad* pad, GstPadProbeInfo* info, gp
                     for (int b = 0; b < VIBEZ_EQ_BANDS; b++) {
                         if (st->eq_bank[b].active) x = vibez_biquad_run(&st->eq_bank[b], x, c);
                     }
+                    if (!isfinite(x)) x = 0.0;
                     if (x > 32767.0) x = 32767.0;
                     if (x < -32768.0) x = -32768.0;
                     samples[f * (size_t)channels + (size_t)c] = (gint16)x;
                 }
             }
-        } else if (strcmp(fmt, "F32LE") == 0) {
+        } else if (is_f32) {
             gfloat* samples = (gfloat*)map.data;
             size_t frames = map.size / (sizeof(gfloat) * (size_t)channels);
             for (size_t f = 0; f < frames; f++) {
                 for (int c = 0; c < channels; c++) {
                     double x = (double)samples[f * (size_t)channels + (size_t)c];
+                    if (!isfinite(x)) x = 0.0;
                     for (int b = 0; b < VIBEZ_EQ_BANDS; b++) {
                         if (st->eq_bank[b].active) x = vibez_biquad_run(&st->eq_bank[b], x, c);
                     }
+                    if (!isfinite(x)) x = 0.0;
                     if (x > 1.0) x = 1.0;
                     if (x < -1.0) x = -1.0;
                     samples[f * (size_t)channels + (size_t)c] = (gfloat)x;
@@ -969,6 +1040,10 @@ static void vibez_gst_set_uri(GstElement* p, VibezGstState* st, const char* uri)
     }
     g_mutex_lock(&st->mu);
     st->trim_next = vibez_uri_is_whole_track(uri);
+    for (int b = 0; b < VIBEZ_EQ_BANDS; b++) {
+        st->eq_bank[b].z1[0] = st->eq_bank[b].z1[1] = 0.0;
+        st->eq_bank[b].z2[0] = st->eq_bank[b].z2[1] = 0.0;
+    }
     g_mutex_unlock(&st->mu);
     g_object_set(G_OBJECT(p), "uri", uri, NULL);
 }
@@ -1066,6 +1141,7 @@ import "C"
 import (
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -1093,8 +1169,10 @@ type Player struct {
 	onStreamStart func(string)
 	stop          chan struct{}
 	busWake       chan struct{}
+	cbCh          chan func()
 	destroyOnce   sync.Once
 	wg            sync.WaitGroup
+	cbWg          sync.WaitGroup
 }
 
 // New initialises GStreamer once and returns a ready Player.
@@ -1104,6 +1182,7 @@ func New() (*Player, error) {
 	p := &Player{
 		st:   st,
 		stop: make(chan struct{}),
+		cbCh: make(chan func(), 16),
 	}
 
 	var eq *C.GstElement
@@ -1116,6 +1195,8 @@ func New() (*Player, error) {
 	p.bus = C.gst_element_get_bus(pl)
 	p.pipeline = pl
 	p.eq = eq
+	p.cbWg.Add(1)
+	go p.callbackLoop()
 	p.wg.Add(1)
 	go p.busLoop()
 	return p, nil
@@ -1148,12 +1229,40 @@ func hasElement(name string) bool {
 }
 
 func uriIsLoopbackHTTP(uri string) bool {
+	if strings.ContainsRune(uri, 0) {
+		return false
+	}
 	cs := C.CString(uri)
 	defer C.free(unsafe.Pointer(cs))
 	return C.vibez_uri_is_loopback_http(cs) != 0
 }
 
-// OnEOS registers a callback fired (in a goroutine) when the stream ends.
+func isAllowedPlayURI(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < 0x20 || raw[i] == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !u.IsAbs() {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "file":
+		return (u.Host == "" || strings.EqualFold(u.Host, "localhost")) && u.Path != ""
+	case "https":
+		return u.Host != ""
+	case "http":
+		return uriIsLoopbackHTTP(raw)
+	default:
+		return false
+	}
+}
+
+// OnEOS registers a callback fired (in the callback worker) when the stream ends.
 func (p *Player) OnEOS(fn func()) {
 	p.mu.Lock()
 	p.onEOS = fn
@@ -1180,6 +1289,9 @@ func (p *Player) OnStreamStart(fn func(string)) {
 func (p *Player) SetNextURI(uri string) {
 	var cs *C.char
 	if uri != "" {
+		if !isAllowedPlayURI(uri) {
+			return
+		}
 		cs = C.CString(uri)
 		defer C.free(unsafe.Pointer(cs))
 	}
@@ -1190,8 +1302,11 @@ func (p *Player) SetNextURI(uri string) {
 	p.mu.Unlock()
 }
 
-// PlayURI loads the given URI (https:// or file://) and starts playback.
+// PlayURI loads the given URI (https://, file://, or loopback http://) and starts playback.
 func (p *Player) PlayURI(uri string) {
+	if !isAllowedPlayURI(uri) {
+		return
+	}
 	cs := C.CString(uri)
 	defer C.free(unsafe.Pointer(cs))
 	p.mu.Lock()
@@ -1280,7 +1395,7 @@ func (p *Player) SetEqualizer(gains []float64) {
 	}
 	for i := range 10 {
 		gain := 0.0
-		if i < len(gains) && !math.IsNaN(gains[i]) {
+		if i < len(gains) && !math.IsNaN(gains[i]) && !math.IsInf(gains[i], 0) {
 			gain = gains[i]
 		}
 		C.vibez_gst_set_eq_band(p.eq, p.st, C.gint(i), C.gdouble(gain))
@@ -1326,6 +1441,7 @@ func (p *Player) Destroy() {
 		p.mu.Unlock()
 		C.vibez_gst_wake_bus(bus)
 		p.wg.Wait()
+		p.cbWg.Wait()
 		p.mu.Lock()
 		if p.bus != nil {
 			C.vibez_gst_unref_bus(p.bus)
@@ -1342,6 +1458,30 @@ func (p *Player) Destroy() {
 		}
 		p.mu.Unlock()
 	})
+}
+
+func (p *Player) callbackLoop() {
+	defer p.cbWg.Done()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case fn := <-p.cbCh:
+			if fn != nil {
+				fn()
+			}
+		}
+	}
+}
+
+func (p *Player) dispatchCallback(fn func()) {
+	if fn == nil {
+		return
+	}
+	select {
+	case <-p.stop:
+	case p.cbCh <- fn:
+	}
 }
 
 func (p *Player) busLoop() {
@@ -1397,14 +1537,14 @@ func (p *Player) handleBusMessage(msgType C.GstMessageType, strOut *C.gchar) {
 		}
 		p.mu.Unlock()
 		if cb != nil {
-			go cb(uri)
+			p.dispatchCallback(func() { cb(uri) })
 		}
 	case C.GST_MESSAGE_EOS:
 		p.mu.Lock()
 		cb := p.onEOS
 		p.mu.Unlock()
 		if cb != nil {
-			go cb()
+			p.dispatchCallback(cb)
 		}
 	case C.GST_MESSAGE_ERROR:
 		var msg string
@@ -1424,7 +1564,7 @@ func (p *Player) handleBusMessage(msgType C.GstMessageType, strOut *C.gchar) {
 		cb := p.onError
 		p.mu.Unlock()
 		if cb != nil {
-			go cb(fmt.Errorf("gst: %s", msg))
+			p.dispatchCallback(func() { cb(fmt.Errorf("gst: %s", msg)) })
 		}
 	}
 }

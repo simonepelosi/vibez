@@ -250,3 +250,46 @@ func TestBroadcastCloseRacingSends(t *testing.T) {
 	close(stop)
 	<-sent
 }
+
+func TestBroadcastUnsubscribeClosesChannelAndClearsBacklog(t *testing.T) {
+	var b Broadcast
+	ch1 := b.Subscribe()
+	ch2 := b.Subscribe()
+	defer b.Close()
+
+	b.SendLog(State{}, "before unsubscribe")
+	got1 := collectLogs(t, ch1, 1)
+	if len(got1) != 1 || got1[0] != "before unsubscribe" {
+		t.Fatalf("ch1 got %v, want initial log", got1)
+	}
+
+	b.Unsubscribe(ch1)
+	b.Unsubscribe(ch1) // idempotent
+	b.Unsubscribe(nil)
+	drainUntilClosed(t, ch1)
+
+	b.SendLog(State{}, "only for ch2")
+	got2 := collectLogs(t, ch2, 2)
+	if len(got2) != 2 || got2[1] != "only for ch2" {
+		t.Fatalf("ch2 got %v, want 2 log entries", got2)
+	}
+}
+
+func TestBroadcastTrimClearsEvictedBackingSlots(t *testing.T) {
+	sub := &subscriber{ch: make(chan State, subChanSize), wake: make(chan struct{}, 1)}
+	for i := range maxPendingQueue + 25 {
+		sub.push(State{Logs: []string{fmt.Sprintf("log-%d", i)}})
+	}
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	if len(sub.queue) != maxPendingQueue {
+		t.Fatalf("len(sub.queue) = %d, want %d", len(sub.queue), maxPendingQueue)
+	}
+	// Inspect spare capacity up to cap(sub.queue) to verify zeroed tail references.
+	tail := sub.queue[len(sub.queue):cap(sub.queue)]
+	for i, s := range tail {
+		if len(s.Logs) != 0 || s.Track != nil {
+			t.Fatalf("spare backing slot %d retained non-zero State: %+v", i, s)
+		}
+	}
+}
