@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -92,7 +93,7 @@ func (m *Matcher) Match(t provider.Track) (MatchResult, bool) {
 	}
 
 	if code := provider.NormalizeISRC(t.ISRC); code != "" {
-		if chosen, ok := chooseISRCCandidate(m.byISRC[code], t.Duration); ok {
+		if chosen, ok := chooseISRCCandidate(m.byISRC[code], t); ok {
 			return MatchResult{
 				Path:   chosen.LocalPath,
 				Format: trackFormat(chosen),
@@ -122,7 +123,7 @@ func (m *Matcher) Match(t provider.Track) (MatchResult, bool) {
 		if t.DiscNumber > 0 && c.DiscNumber > 0 && c.DiscNumber != t.DiscNumber {
 			continue
 		}
-		if c.Duration <= 0 || absDuration(t.Duration-c.Duration) > FallbackDurationTolerance {
+		if c.Duration <= 0 || !durationWithinTolerance(t.Duration, c.Duration, FallbackDurationTolerance) {
 			continue
 		}
 		matched = append(matched, c)
@@ -137,34 +138,92 @@ func (m *Matcher) Match(t provider.Track) (MatchResult, bool) {
 	}, true
 }
 
-// chooseISRCCandidate selects a candidate whose duration agrees with wantDur
-// within FallbackDurationTolerance. When wantDur is unknown (<= 0) it returns
-// the first candidate; when wantDur > 0 and all candidates report disagreeing
-// durations (> ±2s), it returns false so clean/live cuts do not silently match.
-func chooseISRCCandidate(cands []provider.Track, wantDur time.Duration) (provider.Track, bool) {
+// chooseISRCCandidate selects a non-ambiguous candidate matching want's ISRC.
+// When want.Duration > 0, candidates with known durations must agree within
+// FallbackDurationTolerance; unknown-duration candidates (Duration <= 0) or
+// missing want durations require title/artist metadata agreement and must
+// resolve uniquely so corrupted or mistagged files cannot act as wildcards.
+func chooseISRCCandidate(cands []provider.Track, want provider.Track) (provider.Track, bool) {
 	if len(cands) == 0 {
 		return provider.Track{}, false
 	}
-	if wantDur <= 0 {
-		return cands[0], true
+	if want.Duration <= 0 {
+		return selectUniqueISRCByMeta(cands, want)
 	}
-	var unknown *provider.Track
+	var matched []provider.Track
+	var unknown []provider.Track
 	for i := range cands {
-		c := &cands[i]
+		c := cands[i]
 		if c.Duration <= 0 {
-			if unknown == nil {
-				unknown = c
+			if isrcMetadataCompatible(c, want) {
+				unknown = append(unknown, c)
 			}
 			continue
 		}
-		if absDuration(wantDur-c.Duration) <= FallbackDurationTolerance {
-			return *c, true
+		if durationWithinTolerance(want.Duration, c.Duration, FallbackDurationTolerance) {
+			matched = append(matched, c)
 		}
 	}
-	if unknown != nil {
-		return *unknown, true
+	if len(matched) == 1 {
+		return matched[0], true
+	}
+	if len(matched) > 1 {
+		return selectUniqueISRCByMeta(matched, want)
+	}
+	if len(unknown) == 1 {
+		return unknown[0], true
 	}
 	return provider.Track{}, false
+}
+
+func selectUniqueISRCByMeta(cands []provider.Track, want provider.Track) (provider.Track, bool) {
+	var compatible []provider.Track
+	for i := range cands {
+		if isrcMetadataCompatible(cands[i], want) {
+			compatible = append(compatible, cands[i])
+		}
+	}
+	if len(compatible) == 1 {
+		return compatible[0], true
+	}
+	if len(compatible) > 1 {
+		if wantAlbum := normalizeMetaField(want.Album, "unknown album"); wantAlbum != "" {
+			var albumMatched []provider.Track
+			for i := range compatible {
+				if metaTextRelated(normalizeMetaField(compatible[i].Album, "unknown album"), wantAlbum) {
+					albumMatched = append(albumMatched, compatible[i])
+				}
+			}
+			if len(albumMatched) == 1 {
+				return albumMatched[0], true
+			}
+		}
+	}
+	return provider.Track{}, false
+}
+
+func isrcMetadataCompatible(c, want provider.Track) bool {
+	wantTitle := normalizeMetaField(want.Title, "")
+	cTitle := normalizeMetaField(c.Title, "")
+	if wantTitle != "" && (cTitle == "" || !metaTextRelated(cTitle, wantTitle)) {
+		return false
+	}
+	wantArtist := normalizeMetaField(want.Artist, "unknown artist")
+	cArtist := normalizeMetaField(c.Artist, "unknown artist")
+	if wantArtist != "" && (cArtist == "" || !metaTextRelated(cArtist, wantArtist)) {
+		return false
+	}
+	return true
+}
+
+func metaTextRelated(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return strings.Contains(" "+a+" ", " "+b+" ") || strings.Contains(" "+b+" ", " "+a+" ")
 }
 
 func trackFormat(t provider.Track) string {
@@ -215,7 +274,20 @@ func normalizeMetaField(s, placeholder string) string {
 	return out
 }
 
+func durationWithinTolerance(a, b, tol time.Duration) bool {
+	if tol < 0 {
+		return false
+	}
+	if (b < 0 && a > math.MaxInt64+b) || (b > 0 && a < math.MinInt64+b) {
+		return false
+	}
+	return absDuration(a-b) <= tol
+}
+
 func absDuration(d time.Duration) time.Duration {
+	if d == math.MinInt64 {
+		return math.MaxInt64
+	}
 	if d < 0 {
 		return -d
 	}

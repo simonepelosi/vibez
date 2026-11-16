@@ -18,21 +18,13 @@ func Clean(s string) string { return clean(s, false) }
 // lyrics: newlines are kept.
 func CleanLines(s string) string { return clean(s, true) }
 
-func clean(s string, keepNewlines bool) string {
-	s = ansi.Strip(s)
-	isSpace := func(r rune) bool {
-		return r == '\t' || r == '\u2028' || r == '\u2029' || (r == '\n' && !keepNewlines)
-	}
-	dirty := !utf8.ValidString(s)
-	if !dirty {
-		for _, r := range s {
-			if isSpace(r) || (drop(r) && (r != '\n' || !keepNewlines)) {
-				dirty = true
-				break
-			}
-		}
-	}
-	if !dirty {
+// maxCombiningMarks caps consecutive Unicode combining marks (Mn/Mc/Me) after a
+// base character so malicious Zalgo-style metadata cannot degrade terminal
+// width calculation or rendering.
+const maxCombiningMarks = 4
+
+func scrubInvalidUTF8(s string) string {
+	if utf8.ValidString(s) {
 		return s
 	}
 	var b strings.Builder
@@ -43,13 +35,79 @@ func clean(s string, keepNewlines bool) string {
 		if r == utf8.RuneError && size == 1 {
 			continue
 		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func clean(s string, keepNewlines bool) string {
+	s = ansi.Strip(s)
+	if !utf8.ValidString(s) {
+		// Re-run ANSI stripping after dropping invalid UTF-8 bytes so malformed
+		// byte sequences inside or around an ESC sequence cannot smuggle CSI/OSC.
+		s = ansi.Strip(scrubInvalidUTF8(s))
+	}
+	isSpace := func(r rune) bool {
+		return r == '\t' || r == '\u2028' || r == '\u2029' || (r == '\n' && !keepNewlines)
+	}
+	dirty := !utf8.ValidString(s)
+	if !dirty {
+		combRun := 0
+		for _, r := range s {
+			if r == '\r' || isSpace(r) || (drop(r) && (r != '\n' || !keepNewlines)) {
+				dirty = true
+				break
+			}
+			if unicode.IsMark(r) {
+				combRun++
+				if combRun > maxCombiningMarks {
+					dirty = true
+					break
+				}
+			} else {
+				combRun = 0
+			}
+		}
+	}
+	if !dirty {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	combRun := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		if r == utf8.RuneError && size == 1 {
+			continue
+		}
+		if r == '\r' {
+			if i < len(s) && s[i] == '\n' {
+				i++
+			}
+			if keepNewlines {
+				b.WriteByte('\n')
+			} else {
+				b.WriteByte(' ')
+			}
+			combRun = 0
+			continue
+		}
 		switch {
 		case isSpace(r):
 			b.WriteByte(' ')
+			combRun = 0
 		case r == '\n' && keepNewlines:
 			b.WriteByte('\n')
+			combRun = 0
 		case drop(r):
+		case unicode.IsMark(r):
+			combRun++
+			if combRun <= maxCombiningMarks {
+				b.WriteRune(r)
+			}
 		default:
+			combRun = 0
 			b.WriteRune(r)
 		}
 	}
