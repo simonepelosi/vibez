@@ -151,9 +151,10 @@ type artworkPrefetchMsg struct {
 	img image.Image
 }
 type searchResultMsg struct {
-	result *provider.SearchResult
-	query  string
-	err    error
+	result  *provider.SearchResult
+	query   string
+	err     error
+	authGen uint64
 }
 
 // searchDebounceMsg is emitted after the debounce delay. The gen field lets
@@ -175,6 +176,7 @@ type vibeResultMsg struct {
 	discovery      bool     // true when result is from a discovery auto-refill
 	radio          bool     // true when result is from a radio auto-refill
 	radioGen       int      // radio generation that produced this result
+	authGen        uint64
 }
 type vibePlannerDetectedMsg struct {
 	planner vibe.Planner
@@ -186,12 +188,14 @@ type rateSongMsg struct {
 	rating    provider.Rating // rating that was requested
 	prev      provider.Rating // rating before the optimistic update, restored on error
 	err       error
+	authGen   uint64
 }
 type songRatingMsg struct {
 	trackID   string
 	catalogID string
 	rating    provider.Rating
 	err       error
+	authGen   uint64
 }
 type tickMsg time.Time
 type glowTickMsg time.Time
@@ -237,17 +241,22 @@ type saveAudioQualityMsg struct {
 	kbps      int
 	savedOnly bool
 }
-type playlistCreatedMsg struct{ name string }
+type playlistCreatedMsg struct {
+	name    string
+	authGen uint64
+}
 type SessionExpiredMsg struct{}
 type SessionRestoredMsg struct{}
 type lyricsResultMsg struct {
 	trackID string
 	result  *lyrics.Result
 	err     error
+	authGen uint64
 }
 type feedResultMsg struct {
-	groups []provider.RecommendationGroup
-	err    error
+	groups  []provider.RecommendationGroup
+	err     error
+	authGen uint64
 }
 type feedTracksMsg struct {
 	item     provider.RecommendationItem
@@ -255,12 +264,14 @@ type feedTracksMsg struct {
 	play     bool // true = replace queue & play; false = append
 	playNext bool
 	err      error
+	authGen  uint64
 }
 
 type artistAlbumsMsg struct {
-	artist provider.Artist
-	albums []provider.Album
-	err    error
+	artist  provider.Artist
+	albums  []provider.Album
+	err     error
+	authGen uint64
 }
 
 type searchCollectionTracksMsg struct {
@@ -269,6 +280,7 @@ type searchCollectionTracksMsg struct {
 	play     bool // true = replace queue & play; false = append
 	playNext bool
 	err      error
+	authGen  uint64
 }
 
 // introFrames: logo types out letter-by-letter, then holds for 8 frames.
@@ -447,6 +459,10 @@ type Model struct {
 	// Optional callbacks to trigger or tear down Apple Music login/re-auth.
 	onReauth func()
 	onLogout func()
+
+	// Auth generation and explicit-logout flag to fence stale async responses.
+	authGen   uint64
+	loggedOut bool
 
 	// Frame-local render caches for static border/status segments.
 	cachedHorizW    int
@@ -688,6 +704,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playerStateMsg:
 		wasPlaying := m.playerState.Playing
 		s := player.State(msg)
+		if m.loggedOut {
+			m.playerState = player.State{
+				Volume:      s.Volume,
+				RepeatMode:  s.RepeatMode,
+				ShuffleMode: s.ShuffleMode,
+			}
+			if m.stateCh != nil {
+				cmds = append(cmds, waitForState(m.stateCh))
+			}
+			break
+		}
 		for _, line := range s.Logs {
 			m.appendLog(line)
 		}
@@ -753,6 +780,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.Track != nil {
+			t := *s.Track
+			s.Track = &t
 			m.enrichTrackFromQueue(s.Track)
 		}
 		if s.Track == nil {
@@ -866,7 +895,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case artworkLoadedMsg:
-		if msg.url != m.artwork.url || msg.gen != m.artworkGen {
+		if m.loggedOut || msg.url != m.artwork.url || msg.gen != m.artworkGen {
 			break
 		}
 		if msg.err != nil {
@@ -884,9 +913,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.artwork.renderedOrder = nil
 
 	case artworkPrefetchMsg:
-		m.putCachedArtwork(msg.url, msg.img)
+		if !m.loggedOut {
+			m.putCachedArtwork(msg.url, msg.img)
+		}
 
 	case songRatingMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		// Update rating state to match what Apple Music reports.
 		m.setRating(msg.trackID, msg.catalogID, msg.rating)
 		if msg.err == nil {
@@ -896,6 +930,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendLog(string(msg))
 
 	case lyricsResultMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		// Discard stale results if the user skipped to a different track.
 		if msg.trackID == m.lastLyricsTrackID {
 			m.lyricsP.m.SetLyrics(msg.result, msg.err)
@@ -915,6 +952,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.playerCmd(func(p player.Player) error { return p.Seek(pos) }))
 
 	case feedResultMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			m.feedP.m.SetError(msg.err)
 			m.appendLog(fmt.Sprintf("[feed] error: %v", msg.err))
@@ -935,6 +975,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case feedTracksMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("feed: %v", msg.err)
 			m.errExpiry = time.Now().Add(4 * time.Second)
@@ -982,6 +1025,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case vibeResultMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.radio && (!m.radio.enabled || msg.radioGen != m.radio.generation) {
 			break
 		}
@@ -1146,6 +1192,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case rateSongMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			// Revert optimistic update on failure.
 			m.setRating(msg.trackID, msg.catalogID, msg.prev)
@@ -1169,21 +1218,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case searchDebounceMsg:
 		// Drop stale debounce ticks — only the latest keystroke wins.
-		if msg.gen != m.searchGen || m.provider == nil {
+		if msg.gen != m.searchGen || m.loggedOut || m.provider == nil {
 			return m, nil
 		}
 		m.appendLog(fmt.Sprintf("[search] %q…", msg.query))
 		prov := m.provider
 		query := msg.query
+		authGen := m.authGen
 		return m, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			result, err := prov.Search(ctx, query)
-			return searchResultMsg{result: result, query: query, err: err}
+			return searchResultMsg{result: result, query: query, err: err, authGen: authGen}
 		}
 
 	case searchResultMsg:
-		if msg.query != m.searchQuery {
+		if m.loggedOut || msg.authGen != m.authGen || msg.query != m.searchQuery {
 			break
 		}
 		if msg.err != nil {
@@ -1202,6 +1252,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case artistAlbumsMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			m.appendLog(fmt.Sprintf("[search] artist %q albums error: %v", msg.artist.Name, msg.err))
 		} else {
@@ -1210,6 +1263,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.search.SetArtistAlbums(msg.artist.ID, msg.albums, msg.err)
 
 	case searchCollectionTracksMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("search: %v", msg.err)
 			m.errExpiry = time.Now().Add(4 * time.Second)
@@ -1308,7 +1364,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.scheduleSearch(m.searchQuery))
 		}
 		m.appendLog("[engine] backend: " + msg.Backend)
-		cmds = append(cmds, waitForState(m.stateCh), m.library.Init(), m.detectVibePlannerCmd())
+		var startup []tea.Cmd
+		startup = append(startup, waitForState(m.stateCh))
+		if !m.loggedOut {
+			startup = append(startup, m.library.Init())
+		}
+		startup = append(startup, m.detectVibePlannerCmd())
+		cmds = append(cmds, startup...)
 		cmds = append(cmds, m.restoreAudioSettings()...)
 		if m.memProfiling {
 			cmds = append(cmds, memTick())
@@ -1369,12 +1431,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
 	case playlistCreatedMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		m.errMsg = "✓ Playlist \"" + msg.name + "\" saved"
 		m.errExpiry = time.Now().Add(4 * time.Second)
 
 	case playlistsForPickerMsg:
-		if msg.gen != m.playlistPickerGen {
-			break // stale response; a newer fetch is in flight
+		if m.loggedOut || msg.authGen != m.authGen || msg.gen != m.playlistPickerGen {
+			break // stale response; a newer fetch is in flight or logged out
 		}
 		m.playlistPickerLoading = false
 		if msg.err != nil {
@@ -1395,6 +1460,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case trackAddedToPlaylistMsg:
+		if m.loggedOut || msg.authGen != m.authGen {
+			break
+		}
 		if msg.err != nil {
 			m.errMsg = fmt.Sprintf("✗ add to playlist: %v", msg.err)
 			m.appendLog(fmt.Sprintf("[playlist] add error: %v", msg.err))
@@ -1409,6 +1477,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persists until restored
 
 	case SessionRestoredMsg:
+		m.loggedOut = false
 		m.errMsg = "✓ Re-authenticated with Apple Music"
 		m.errExpiry = time.Now().Add(5 * time.Second)
 		if m.provider != nil {
@@ -1899,19 +1968,64 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		if m.onLogout != nil {
 			m.onLogout()
 		}
+		m.loggedOut = true
+		m.authGen++
+		m.searchGen++
+		m.playlistPickerGen++
+		m.artworkGen++
+		if inv, ok := m.provider.(interface{ InvalidateLibraryCache() }); ok {
+			inv.InvalidateLibraryCache()
+		}
 		m.queueTracks = nil
+		m.queueIDs = nil
+		m.queueMiniOffset = 0
+		m.queue.SetTracks(nil)
 		m.playerState.Track = nil
 		m.playerState.Playing = false
 		m.playerState.Loading = false
+		m.playerState.Position = 0
+		m.discovery = discoveryMode{}
+		m.syncDiscoveryView()
+		m.stopRadio()
+		m.radio.skipped = nil
+		m.playlistPickerTrack = nil
+		m.playlistPickerItems = nil
+		m.playlistPickerCursor = 0
+		m.playlistPickerLoading = false
+		if m.mode == modePlaylistPicker {
+			m.mode = modeNormal
+		}
+		if m.library != nil {
+			m.library.m.Reset()
+		}
+		if m.feedP != nil {
+			m.feedP.m.Reset()
+		}
+		if m.search != nil {
+			m.search.Reset()
+		}
+		if m.lyricsP != nil {
+			m.lyricsP.m.Reset()
+		}
+		if m.vibe != nil {
+			m.vibe.Reset()
+		}
 		m.lastLyricsTrackID = ""
 		m.artwork = artworkCache{rendered: map[art.Size][]string{}}
 		clear(m.artworkLRU)
+		m.artworkLRUOrder = nil
+		styles.ClearArtworkPalette()
+		clear(m.ratings)
 		clear(m.checkedRatings)
+		m.debugLog = nil
+		m.debugScroll = 0
 		m.appendLog("[auth] logged out of Apple Music")
 		m.errMsg = "✓ Logged out of Apple Music (use :login to reconnect)"
 		m.errExpiry = time.Now().Add(5 * time.Second)
 		if m.player != nil {
-			return m.playerCmd(func(p player.Player) error { return p.Stop() })
+			return m.playerCmd(func(p player.Player) error {
+				return errors.Join(p.ClearQueue(), p.Stop())
+			})
 		}
 		return nil
 
@@ -2087,12 +2201,20 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 
 func (m *Model) createPlaylistCmd(name string, ids []string) tea.Cmd {
 	m.appendLog(fmt.Sprintf("[playlist] creating %q with %d tracks", name, len(ids)))
+	prov := m.provider
+	authGen := m.authGen
+	idsSnap := slices.Clone(ids)
 	return func() tea.Msg {
-		_, err := m.provider.CreatePlaylist(context.Background(), name, ids)
+		if prov == nil {
+			return errMsg{fmt.Errorf("no provider")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_, err := prov.CreatePlaylist(ctx, name, idsSnap)
 		if err != nil {
 			return errMsg{fmt.Errorf("save-playlist: %w", err)}
 		}
-		return playlistCreatedMsg{name: name}
+		return playlistCreatedMsg{name: name, authGen: authGen}
 	}
 }
 
@@ -2203,22 +2325,30 @@ func (m *Model) fetchLyricsCmd(t *provider.Track) tea.Cmd {
 	trackID := views.PlaybackID(*t)
 	artist, title, album, dur := t.Artist, t.Title, t.Album, t.Duration
 	client := m.lyricsClient
+	authGen := m.authGen
 	return func() tea.Msg {
+		if client == nil {
+			return lyricsResultMsg{trackID: trackID, err: errors.New("no lyrics client"), authGen: authGen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		res, err := client.Fetch(ctx, artist, title, album, dur)
-		return lyricsResultMsg{trackID: trackID, result: res, err: err}
+		return lyricsResultMsg{trackID: trackID, result: res, err: err, authGen: authGen}
 	}
 }
 
 // fetchFeedCmd fetches personalised recommendations from the provider asynchronously.
 func (m *Model) fetchFeedCmd() tea.Cmd {
 	prov := m.provider
+	authGen := m.authGen
 	return func() tea.Msg {
+		if prov == nil {
+			return feedResultMsg{err: errors.New("no provider"), authGen: authGen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		groups, err := prov.GetRecommendations(ctx)
-		return feedResultMsg{groups: groups, err: err}
+		return feedResultMsg{groups: groups, err: err, authGen: authGen}
 	}
 }
 
@@ -2227,11 +2357,15 @@ func (m *Model) openArtistCmd(artist provider.Artist) tea.Cmd {
 	m.search.OpenArtist(artist)
 	m.appendLog(fmt.Sprintf("[search] loading artist %q (id=%s)…", artist.Name, artist.ID))
 	prov := m.provider
+	authGen := m.authGen
 	return func() tea.Msg {
+		if prov == nil {
+			return artistAlbumsMsg{artist: artist, err: errors.New("no provider"), authGen: authGen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		albums, err := prov.GetArtistAlbums(ctx, artist.ID)
-		return artistAlbumsMsg{artist: artist, albums: albums, err: err}
+		return artistAlbumsMsg{artist: artist, albums: albums, err: err, authGen: authGen}
 	}
 }
 
@@ -2246,14 +2380,18 @@ func (m *Model) openArtistCmd(artist provider.Artist) tea.Cmd {
 // uses the catalog endpoint.
 func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provider.Playlist, play bool, playNext bool) tea.Cmd {
 	prov := m.provider
+	authGen := m.authGen
 	if album != nil {
 		snap := *album
 		m.appendLog(fmt.Sprintf("[search] loading album %q (id=%s)…", snap.Title, snap.ID))
 		return func() tea.Msg {
+			if prov == nil {
+				return searchCollectionTracksMsg{label: snap.Title, err: errors.New("no provider"), authGen: authGen}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			tracks, err := prov.GetAlbumTracks(ctx, snap.ID)
-			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, playNext: playNext, err: err}
+			return searchCollectionTracksMsg{label: snap.Title, tracks: tracks, play: play, playNext: playNext, err: err, authGen: authGen}
 		}
 	}
 	if playlist != nil {
@@ -2261,6 +2399,9 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 		isLibrary := strings.HasPrefix(snap.ID, "p.")
 		m.appendLog(fmt.Sprintf("[search] loading playlist %q…", snap.Name))
 		return func() tea.Msg {
+			if prov == nil {
+				return searchCollectionTracksMsg{label: snap.Name, err: errors.New("no provider"), authGen: authGen}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			var tracks []provider.Track
@@ -2270,7 +2411,7 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 			} else {
 				tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
 			}
-			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, playNext: playNext, err: err}
+			return searchCollectionTracksMsg{label: snap.Name, tracks: tracks, play: play, playNext: playNext, err: err, authGen: authGen}
 		}
 	}
 	return nil
@@ -2281,8 +2422,12 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool, playNext bool) tea.Cmd {
 	snap := *item
 	prov := m.provider
+	authGen := m.authGen
 	m.appendLog(fmt.Sprintf("[feed] loading %q (%s)…", snap.Title, snap.Kind))
 	return func() tea.Msg {
+		if prov == nil {
+			return feedTracksMsg{item: snap, err: errors.New("no provider"), authGen: authGen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		var tracks []provider.Track
@@ -2295,7 +2440,7 @@ func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play b
 		default:
 			err = fmt.Errorf("unknown kind %q", snap.Kind)
 		}
-		return feedTracksMsg{item: snap, tracks: tracks, play: play, playNext: playNext, err: err}
+		return feedTracksMsg{item: snap, tracks: tracks, play: play, playNext: playNext, err: err, authGen: authGen}
 	}
 }
 
@@ -2312,10 +2457,11 @@ func (m *Model) startDiscovery(autoMode bool, n int) tea.Cmd {
 		sim = 0.7 // default if no metric was selected yet
 	}
 	m.stopRadio() // discovery and radio both refill on the last-track trigger — mutually exclusive
+	seedSnap := *m.playerState.Track
 	m.discovery.enabled = true
 	m.discovery.autoMode = autoMode
 	m.discovery.refillCap = n
-	m.discovery.seed = m.playerState.Track
+	m.discovery.seed = &seedSnap
 	m.discovery.similarity = sim
 	m.discovery.refilling = true // guard against double-trigger while search is in flight
 	m.discovery.triggeredForID = ""
@@ -2335,10 +2481,11 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 	if seed == nil {
 		return nil
 	}
+	seedSnap := *seed
 	m.discovery.enabled = false // discovery and radio are mutually exclusive
 	m.radio.generation++
 	m.radio.enabled = true
-	m.radio.seed = seed
+	m.radio.seed = &seedSnap
 	m.radio.skipped = nil
 	m.radio.refilling = true // guard against double-trigger while search is in flight
 	m.radio.triggeredForID = ""
@@ -2423,6 +2570,7 @@ func (m *Model) runRadioSearch() tea.Cmd {
 	}
 	prov := m.provider
 	radioGen := m.radio.generation
+	authGen := m.authGen
 
 	exclude := make(map[string]bool, len(m.radio.skipped)+len(m.queueIDs))
 	for k := range m.radio.skipped {
@@ -2436,11 +2584,14 @@ func (m *Model) runRadioSearch() tea.Cmd {
 	}
 
 	return func() tea.Msg {
+		if prov == nil {
+			return vibeResultMsg{radio: true, radioGen: radioGen, authGen: authGen, err: errors.New("no provider")}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		res, err := prov.GetStationTracks(ctx, catalogID)
 		if err != nil {
-			return vibeResultMsg{radio: true, radioGen: radioGen, err: err}
+			return vibeResultMsg{radio: true, radioGen: radioGen, authGen: authGen, err: err}
 		}
 		var merged []provider.Track
 		seen := map[string]bool{}
@@ -2454,9 +2605,9 @@ func (m *Model) runRadioSearch() tea.Cmd {
 			merged = append(merged, t)
 		}
 		if len(merged) == 0 {
-			return vibeResultMsg{radio: true, radioGen: radioGen}
+			return vibeResultMsg{radio: true, radioGen: radioGen, authGen: authGen}
 		}
-		return vibeResultMsg{radio: true, radioGen: radioGen, tracks: merged}
+		return vibeResultMsg{radio: true, radioGen: radioGen, authGen: authGen, tracks: merged}
 	}
 }
 
@@ -2560,20 +2711,20 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				return m.playQueueFrom(idx)
 			}
 		case "d":
-			if idx, t := m.queue.SelectedTrack(); idx >= 0 {
+			if idx, t := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks) && idx < len(m.queueIDs) {
 				title := ""
 				if t != nil {
 					title = t.Artist + " — " + t.Title
 				}
-				m.queueTracks = append(m.queueTracks[:idx], m.queueTracks[idx+1:]...)
-				m.queueIDs = append(m.queueIDs[:idx], m.queueIDs[idx+1:]...)
+				m.queueTracks = slices.Delete(m.queueTracks, idx, idx+1)
+				m.queueIDs = slices.Delete(m.queueIDs, idx, idx+1)
 				m.queue.SetTracks(m.queueTracks)
 				m.appendLog(fmt.Sprintf("[queue] removed #%d: %s", idx+1, title))
 				i := idx
 				return m.playerCmd(func(p player.Player) error { return p.RemoveFromQueue(i) })
 			}
 		case "K", "shift+up", "ctrl+up":
-			if idx, _ := m.queue.SelectedTrack(); idx > 0 {
+			if idx, _ := m.queue.SelectedTrack(); idx > 0 && idx < len(m.queueTracks) && idx < len(m.queueIDs) {
 				m.queueTracks[idx-1], m.queueTracks[idx] = m.queueTracks[idx], m.queueTracks[idx-1]
 				m.queueIDs[idx-1], m.queueIDs[idx] = m.queueIDs[idx], m.queueIDs[idx-1]
 				m.queue.SetTracks(m.queueTracks)
@@ -2583,7 +2734,7 @@ func (m *Model) handleNormalKey(msg tea.KeyPressMsg, k string) tea.Cmd {
 				return m.playerCmd(func(p player.Player) error { return p.MoveInQueue(from, to) })
 			}
 		case "J", "shift+down", "ctrl+down":
-			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 {
+			if idx, _ := m.queue.SelectedTrack(); idx >= 0 && idx < len(m.queueTracks)-1 && idx < len(m.queueIDs)-1 {
 				m.queueTracks[idx], m.queueTracks[idx+1] = m.queueTracks[idx+1], m.queueTracks[idx]
 				m.queueIDs[idx], m.queueIDs[idx+1] = m.queueIDs[idx+1], m.queueIDs[idx]
 				m.queue.SetTracks(m.queueTracks)
@@ -2873,6 +3024,7 @@ func (m *Model) detectVibePlannerCmd() tea.Cmd {
 func (m *Model) runVibeSearch(query string) tea.Cmd {
 	prov := m.provider
 	planner := m.vibePlanner
+	authGen := m.authGen
 	detectOpts, planTimeout := m.vibeDetectOptions()
 	detectOpts.PlanTimeout = planTimeout
 
@@ -2918,7 +3070,7 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 
 		plan, err := vibe.PlanWithFallback(ctx, activePlanner, req)
 		if err != nil {
-			return vibeResultMsg{query: query, err: err}
+			return vibeResultMsg{query: query, err: err, authGen: authGen}
 		}
 
 		out, err := vibe.ResolvePlan(ctx, prov, plan, query, 15)
@@ -2930,6 +3082,7 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 				usage:          plan.Usage,
 				err:            err,
 				warnings:       out.Warnings,
+				authGen:        authGen,
 			}
 		}
 		return vibeResultMsg{
@@ -2941,6 +3094,7 @@ func (m *Model) runVibeSearch(query string) tea.Cmd {
 			fallbackReason: plan.FallbackReason,
 			usage:          plan.Usage,
 			warnings:       out.Warnings,
+			authGen:        authGen,
 		}
 	}
 }
@@ -3120,11 +3274,12 @@ func (m *Model) rateSongCmd(t *provider.Track, rating, prev provider.Rating) tea
 	trackID := t.ID
 	title := t.Title
 	prov := m.provider
+	authGen := m.authGen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		err := prov.SetSongRating(ctx, catalogID, rating)
-		return rateSongMsg{trackID: trackID, catalogID: catalogID, title: title, rating: rating, prev: prev, err: err}
+		return rateSongMsg{trackID: trackID, catalogID: catalogID, title: title, rating: rating, prev: prev, err: err, authGen: authGen}
 	}
 }
 
@@ -3179,11 +3334,12 @@ func (m *Model) checkSongRatingCmd(t *provider.Track) tea.Cmd {
 		return nil
 	}
 	prov := m.provider
+	authGen := m.authGen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		rating, err := prov.GetSongRating(ctx, catalogID)
-		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating, err: err}
+		return songRatingMsg{trackID: trackID, catalogID: catalogID, rating: rating, err: err, authGen: authGen}
 	}
 }
 
@@ -3215,13 +3371,15 @@ func (m *Model) purgeSkippedFromQueue() {
 		if !m.discovery.skipped[m.queueIDs[i]] && !m.radio.skipped[m.queueIDs[i]] {
 			continue
 		}
-		m.appendLog(fmt.Sprintf("[skip] removing from queue: %s — %s",
-			m.queueTracks[i].Artist, m.queueTracks[i].Title))
+		if i < len(m.queueTracks) {
+			m.appendLog(fmt.Sprintf("[skip] removing from queue: %s — %s",
+				m.queueTracks[i].Artist, m.queueTracks[i].Title))
+			m.queueTracks = slices.Delete(m.queueTracks, i, i+1)
+		}
 		if m.player != nil {
 			idx := i // capture for closure
 			_ = m.player.RemoveFromQueue(idx)
 		}
-		m.queueTracks = slices.Delete(m.queueTracks, i, i+1)
 		m.queueIDs = slices.Delete(m.queueIDs, i, i+1)
 		changed = true
 	}
@@ -3237,9 +3395,11 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 	if !m.discovery.enabled || m.discovery.seed == nil {
 		return nil
 	}
-	seed := m.discovery.seed
+	seedSnap := *m.discovery.seed
+	seed := &seedSnap
 	similarity := m.discovery.similarity
 	prov := m.provider
+	authGen := m.authGen
 	refillCap := m.discovery.refillCap
 	if refillCap <= 0 {
 		refillCap = 1
@@ -3321,15 +3481,16 @@ func (m *Model) runDiscoverySearch() tea.Cmd {
 		if len(merged) == 0 {
 			reasons := dedupeStrings(reasons)
 			if len(reasons) == 0 {
-				return vibeResultMsg{discovery: true, err: errors.New("no results")}
+				return vibeResultMsg{discovery: true, authGen: authGen, err: errors.New("no results")}
 			}
 			return vibeResultMsg{
 				discovery: true,
+				authGen:   authGen,
 				err:       fmt.Errorf("no results (%s)", strings.Join(reasons, "; ")),
 				warnings:  reasons,
 			}
 		}
-		return vibeResultMsg{discovery: true, tracks: merged, warnings: dedupeStrings(reasons)}
+		return vibeResultMsg{discovery: true, authGen: authGen, tracks: merged, warnings: dedupeStrings(reasons)}
 	}
 }
 
@@ -3590,15 +3751,17 @@ func discoveryArtistPool(g string) []string {
 }
 
 func (m *Model) togglePlayPause() tea.Cmd {
+	p := m.player
+	playing := m.playerState.Playing
 	return func() tea.Msg {
-		if m.player == nil {
+		if p == nil {
 			return errMsg{fmt.Errorf("no player")}
 		}
 		var err error
-		if m.playerState.Playing {
-			err = m.player.Pause()
+		if playing {
+			err = p.Pause()
 		} else {
-			err = m.player.Play()
+			err = p.Play()
 		}
 		if err != nil {
 			return errMsg{err}
@@ -4403,12 +4566,16 @@ func (m *Model) openPlaylistPicker(t *provider.Track) tea.Cmd {
 func (m *Model) fetchPlaylistsForPickerCmd() tea.Cmd {
 	m.playlistPickerGen++
 	gen := m.playlistPickerGen
+	authGen := m.authGen
 	prov := m.provider
 	return func() tea.Msg {
+		if prov == nil {
+			return playlistsForPickerMsg{err: errors.New("no provider"), gen: gen, authGen: authGen}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		playlists, err := prov.GetLibraryPlaylists(ctx)
-		return playlistsForPickerMsg{playlists: playlists, err: err, gen: gen}
+		return playlistsForPickerMsg{playlists: playlists, err: err, gen: gen, authGen: authGen}
 	}
 }
 
@@ -4427,26 +4594,30 @@ func (m *Model) handlePlaylistPickerKey(k string) tea.Cmd {
 			m.playlistPickerCursor++
 		}
 	case "enter":
-		if m.playlistPickerLoading || len(m.playlistPickerItems) == 0 {
+		if m.playlistPickerLoading || len(m.playlistPickerItems) == 0 || m.playlistPickerTrack == nil {
 			return nil
 		}
 		if m.playlistPickerCursor >= len(m.playlistPickerItems) {
 			m.playlistPickerCursor = len(m.playlistPickerItems) - 1
 		}
 		pl := m.playlistPickerItems[m.playlistPickerCursor]
-		t := m.playlistPickerTrack
+		tSnap := *m.playlistPickerTrack
 		m.mode = m.playlistPickerReturnMode
 		prov := m.provider
+		authGen := m.authGen
 		return func() tea.Msg {
+			if prov == nil {
+				return trackAddedToPlaylistMsg{playlistName: pl.Name, err: errors.New("no provider"), authGen: authGen}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			// Prefer catalog ID for playback-sourced tracks; fall back to library ID.
-			trackID := t.ID
-			if !strings.HasPrefix(t.ID, "i.") && t.CatalogID != "" {
-				trackID = t.CatalogID
+			trackID := tSnap.ID
+			if !strings.HasPrefix(tSnap.ID, "i.") && tSnap.CatalogID != "" {
+				trackID = tSnap.CatalogID
 			}
 			err := prov.AddToPlaylist(ctx, pl.ID, trackID)
-			return trackAddedToPlaylistMsg{playlistName: pl.Name, err: err}
+			return trackAddedToPlaylistMsg{playlistName: pl.Name, err: err, authGen: authGen}
 		}
 	}
 	return nil

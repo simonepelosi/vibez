@@ -51,6 +51,7 @@ type mockPlayer struct {
 	playCalled         bool
 	pauseCalled        bool
 	stopCalled         bool
+	clearQueueCalled   bool
 	nextCalled         bool
 	prevCalled         bool
 	closeCalled        bool
@@ -101,7 +102,7 @@ func (m *mockPlayer) MoveInQueue(from, to int) error {
 	m.moveInQueueCalls = append(m.moveInQueueCalls, struct{ From, To int }{from, to})
 	return m.err
 }
-func (m *mockPlayer) ClearQueue() error { return m.err }
+func (m *mockPlayer) ClearQueue() error { m.clearQueueCalled = true; return m.err }
 func (m *mockPlayer) GetState() (*player.State, error) {
 	s := m.state
 	return &s, m.err
@@ -2164,7 +2165,7 @@ func TestHandleNormalKey_R_StartRadio(t *testing.T) {
 	if !m.radio.enabled {
 		t.Error("R key with a playing track should enable radio")
 	}
-	if m.radio.seed != track {
+	if m.radio.seed == nil || m.radio.seed.ID != track.ID || m.radio.seed.CatalogID != track.CatalogID || m.radio.seed.Title != track.Title {
 		t.Errorf("radio.seed = %+v, want %+v", m.radio.seed, track)
 	}
 }
@@ -5504,5 +5505,215 @@ func TestLogout_TearsDownSessionAndPlaylistPickerNarrowWidth(t *testing.T) {
 	opts, _ := m.vibeDetectOptions()
 	if opts.AllowRemote || !opts.DisableCLI {
 		t.Fatalf("vibeDetectOptions with local-only = %+v, want AllowRemote=false DisableCLI=true", opts)
+	}
+}
+
+type invalidatableProvider struct {
+	*mockProvider
+	invalidated bool
+}
+
+func (p *invalidatableProvider) InvalidateLibraryCache() { p.invalidated = true }
+
+func TestLogout_ClearsAllSessionCachesAndFencesStaleAsync(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	ip := &invalidatableProvider{mockProvider: &mockProvider{}}
+	m.provider = ip
+	m.cfg.SetUserToken("secret-tok")
+
+	tr := provider.Track{ID: "t1", Title: "Private Song", Artist: "Artist"}
+	m.queueTracks = []provider.Track{tr}
+	m.queueIDs = []string{"t1"}
+	m.queueMiniOffset = 3
+	m.playerState.Track = &tr
+	m.playerState.Playing = true
+	m.ratings["t1"] = provider.RatingLoved
+	m.checkedRatings["t1"] = true
+	m.discovery.enabled = true
+	m.discovery.seed = &tr
+	m.radio.enabled = true
+	m.radio.seed = &tr
+	m.lastLyricsTrackID = "t1"
+	m.debugLog = []string{"[playing] Private Song"}
+	m.feedP.m.SetRecommendations([]provider.RecommendationGroup{{
+		Title: "For You",
+		Items: []provider.RecommendationItem{{ID: "a1", Title: "Rec"}},
+	}})
+	m.search.SetResults(&provider.SearchResult{Tracks: []provider.Track{tr}}, false, nil)
+	m.searchQuery = "private"
+
+	staleGen := m.authGen
+	cmd := m.executeCommand("logout")
+	if cmd == nil {
+		t.Fatal(":logout with active player did not return command")
+	}
+	_ = cmd()
+	if !mp.stopCalled || !mp.clearQueueCalled {
+		t.Fatalf(":logout stop=%v clearQueue=%v, want both true", mp.stopCalled, mp.clearQueueCalled)
+	}
+	if !ip.invalidated {
+		t.Fatal(":logout did not invalidate provider library cache")
+	}
+	if len(m.queueTracks) != 0 || len(m.queueIDs) != 0 || m.queueMiniOffset != 0 {
+		t.Fatalf(":logout left queue state: tracks=%d ids=%d offset=%d", len(m.queueTracks), len(m.queueIDs), m.queueMiniOffset)
+	}
+	if len(m.ratings) != 0 || len(m.checkedRatings) != 0 {
+		t.Fatalf(":logout left ratings caches populated")
+	}
+	if m.discovery.enabled || m.discovery.seed != nil || m.radio.enabled || m.radio.seed != nil {
+		t.Fatal(":logout left discovery or radio active")
+	}
+	if !m.feedP.m.NeedsLoad() {
+		t.Fatal(":logout did not reset feed panel")
+	}
+	if len(m.search.Results()) != 0 {
+		t.Fatal(":logout did not reset search results")
+	}
+	if len(m.debugLog) != 1 || !strings.Contains(m.debugLog[0], "logged out") {
+		t.Fatalf(":logout left prior debug logs: %v", m.debugLog)
+	}
+
+	// Late async messages carrying pre-logout authGen or player updates must be ignored.
+	_, _ = m.Update(playerStateMsg{Track: &tr, Playing: true})
+	if m.playerState.Track != nil || m.playerState.Playing {
+		t.Fatal("playerStateMsg updated track/playing state while logged out")
+	}
+	_, _ = m.Update(searchResultMsg{
+		query:   "private",
+		result:  &provider.SearchResult{Tracks: []provider.Track{tr}},
+		authGen: staleGen,
+	})
+	if len(m.search.Results()) != 0 {
+		t.Fatal("stale searchResultMsg repopulated search results after logout")
+	}
+	_, _ = m.Update(feedResultMsg{
+		groups:  []provider.RecommendationGroup{{Title: "Stale", Items: []provider.RecommendationItem{{ID: "x"}}}},
+		authGen: staleGen,
+	})
+	if !m.feedP.m.NeedsLoad() {
+		t.Fatal("stale feedResultMsg repopulated feed after logout")
+	}
+}
+
+func TestHandleNormalKey_QueueDesyncBoundsGuard(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	m.queue.SetTracks([]provider.Track{{ID: "1"}, {ID: "2"}})
+	m.queue.Select(1)
+	// Force m.queueTracks / m.queueIDs shorter than queue widget selection.
+	m.queueTracks = []provider.Track{{ID: "1"}}
+	m.queueIDs = []string{"1"}
+	m.activePanel = slices.IndexFunc(m.panels, func(cv ContentView) bool { return cv == m.queue })
+
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 'd', Text: "d"},
+		{Code: 'K', Text: "K"},
+		{Code: 'J', Text: "J"},
+	} {
+		_ = m.handleNormalKey(key, key.String())
+	}
+}
+
+func TestCreatePlaylistCmd_NilProviderReturnsErrMsg(t *testing.T) {
+	m := newModel(nil)
+	m.provider = nil
+	msg := m.createPlaylistCmd("Test", []string{"1"})()
+	if _, ok := msg.(errMsg); !ok {
+		t.Fatalf("createPlaylistCmd with nil provider = %T, want errMsg", msg)
+	}
+}
+
+func extractPlayerStateMsgs(cmd tea.Cmd) []playerStateMsg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	switch m := msg.(type) {
+	case playerStateMsg:
+		return []playerStateMsg{m}
+	case tea.BatchMsg:
+		var out []playerStateMsg
+		for _, sub := range m {
+			out = append(out, extractPlayerStateMsgs(sub)...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func TestLogoutThenLogin_ReArmsStateChannelAndFencesPreLogoutMessages(t *testing.T) {
+	mp := newMockPlayer()
+	m := newModel(mp)
+	stateCh := make(chan player.State, 4)
+	m.stateCh = stateCh
+	m.onReauth = func() {}
+
+	trBefore := provider.Track{ID: "t1", Title: "Before"}
+	_, _ = m.Update(playerStateMsg{Track: &trBefore, Playing: true})
+	if m.playerState.Track == nil || !m.playerState.Playing {
+		t.Fatal("initial playerStateMsg was not applied")
+	}
+
+	staleAuthGen := m.authGen
+	_ = m.executeCommand("logout")
+
+	// Simulated Stop() state arrives while loggedOut is true: must keep logged-out
+	// track empty AND re-arm waitForState(m.stateCh).
+	_, cmd := m.Update(playerStateMsg{Track: &trBefore, Playing: true})
+	if m.playerState.Track != nil || m.playerState.Playing {
+		t.Fatal("loggedOut playerStateMsg populated track/playing")
+	}
+	if cmd == nil {
+		t.Fatal("loggedOut playerStateMsg dropped waitForState listener instead of re-arming")
+	}
+
+	// Pre-logout search response stays fenced even across interactive :login + SessionRestoredMsg.
+	_ = m.executeCommand("login")
+	_, _ = m.Update(SessionRestoredMsg{})
+	_, _ = m.Update(searchResultMsg{
+		query:   "stale",
+		result:  &provider.SearchResult{Tracks: []provider.Track{trBefore}},
+		authGen: staleAuthGen,
+	})
+	if len(m.search.Results()) != 0 {
+		t.Fatal("stale searchResultMsg survived logout -> login cycle")
+	}
+
+	// Subsequent player states pushed after login must reach the TUI through the re-armed command.
+	trAfter := provider.Track{ID: "t2", Title: "After"}
+	stateCh <- player.State{Track: &trAfter, Playing: true, Position: 12 * time.Second}
+	msgs := extractPlayerStateMsgs(cmd)
+	if len(msgs) != 1 {
+		t.Fatalf("got %d playerStateMsgs from re-armed cmd, want 1", len(msgs))
+	}
+	_, _ = m.Update(msgs[0])
+	if m.playerState.Track == nil || m.playerState.Track.ID != "t2" || !m.playerState.Playing {
+		t.Fatalf("post-login playerStateMsg did not update TUI state: %+v", m.playerState)
+	}
+}
+
+func TestSessionRestoredAndLogin_DoNotOrphanInFlightRadioRefill(t *testing.T) {
+	m := newModel(nil)
+	m.onReauth = func() {}
+	m.radio.enabled = true
+	m.radio.refilling = true
+	m.radio.generation = 7
+	capturedAuthGen := m.authGen
+
+	// Concurrent background re-auth / interactive :login without logout must not bump authGen.
+	_, _ = m.Update(SessionExpiredMsg{})
+	_ = m.executeCommand("login")
+	_, _ = m.Update(SessionRestoredMsg{})
+
+	_, _ = m.Update(vibeResultMsg{
+		radio:    true,
+		radioGen: 7,
+		authGen:  capturedAuthGen,
+		tracks:   []provider.Track{{ID: "next-1", Title: "Next Track"}},
+	})
+	if m.radio.refilling {
+		t.Fatal("radio.refilling remained stuck true after SessionRestoredMsg/:login")
 	}
 }

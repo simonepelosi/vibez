@@ -21,16 +21,107 @@ import (
 	"github.com/simone-vibes/vibez/internal/version"
 )
 
+type reauthCoordinator struct {
+	cfg            *config.Config
+	onUserToken    func(string)
+	reauthInFlight atomic.Bool
+	loggedOut      atomic.Bool
+	authGen        atomic.Uint64
+	reauthMu       sync.Mutex
+	reauthCancel   context.CancelFunc
+	authCommitMu   sync.Mutex
+}
+
+func (c *reauthCoordinator) cancelActive() {
+	c.reauthMu.Lock()
+	cancel := c.reauthCancel
+	c.reauthCancel = nil
+	c.reauthMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *reauthCoordinator) logout() {
+	c.authCommitMu.Lock()
+	c.loggedOut.Store(true)
+	c.authGen.Add(1)
+	c.cancelActive()
+	if c.cfg != nil {
+		c.cfg.SetUserToken("")
+		_ = c.cfg.Save("")
+	}
+	c.authCommitMu.Unlock()
+}
+
+func (c *reauthCoordinator) commitLogin(gen uint64) (string, string, bool) {
+	c.authCommitMu.Lock()
+	defer c.authCommitMu.Unlock()
+	if c.loggedOut.Load() || c.authGen.Load() != gen {
+		if c.cfg != nil {
+			c.cfg.SetUserToken("")
+			_ = c.cfg.Save("")
+		}
+		return "", "", false
+	}
+	devTok, usrTok := c.cfg.GetAppleTokens()
+	if c.onUserToken != nil {
+		c.onUserToken(usrTok)
+	}
+	return devTok, usrTok, true
+}
+
+func (c *reauthCoordinator) beginLogin(allowWhenLoggedOut, bumpGen bool) (uint64, context.Context, context.CancelFunc, bool) {
+	if !allowWhenLoggedOut && c.loggedOut.Load() {
+		return 0, nil, nil, false
+	}
+	// Claim in-flight ownership before mutating loggedOut/authGen so a
+	// duplicate :login during an active login is a clean no-op and never
+	// invalidates the active login's generation.
+	if !c.reauthInFlight.CompareAndSwap(false, true) {
+		return 0, nil, nil, false
+	}
+
+	c.authCommitMu.Lock()
+	if !allowWhenLoggedOut && c.loggedOut.Load() {
+		c.authCommitMu.Unlock()
+		c.reauthInFlight.Store(false)
+		return 0, nil, nil, false
+	}
+	if allowWhenLoggedOut {
+		c.loggedOut.Store(false)
+	}
+	if bumpGen {
+		c.authGen.Add(1)
+	}
+	gen := c.authGen.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	c.reauthMu.Lock()
+	c.reauthCancel = cancel
+	c.reauthMu.Unlock()
+	c.authCommitMu.Unlock()
+	return gen, ctx, cancel, true
+}
+
+func (c *reauthCoordinator) finishLogin(cancel context.CancelFunc) {
+	if cancel != nil {
+		cancel()
+	}
+	c.reauthMu.Lock()
+	c.reauthCancel = nil
+	c.reauthMu.Unlock()
+	c.reauthInFlight.Store(false)
+}
+
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	var (
-		prog           *tea.Program
-		activePlayer   atomic.Pointer[browserless.Player]
-		reauthInFlight atomic.Bool
-		loggedOut      atomic.Bool
-		authGen        atomic.Uint64
-		reauthMu       sync.Mutex
-		reauthCancel   context.CancelFunc
+		prog         *tea.Program
+		activePlayer atomic.Pointer[browserless.Player]
 	)
+	authState := &reauthCoordinator{
+		cfg:         cfg,
+		onUserToken: onUserToken,
+	}
 
 	tuiAuthLog := func(msg string) {
 		if prog != nil {
@@ -39,74 +130,28 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		}
 	}
 
-	cancelActiveReauth := func() {
-		reauthMu.Lock()
-		cancel := reauthCancel
-		reauthCancel = nil
-		reauthMu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-	}
-
-	handleLogout := func() {
-		loggedOut.Store(true)
-		authGen.Add(1)
-		cancelActiveReauth()
-		cfg.SetUserToken("")
-	}
-
 	startReauth := func(allowWhenLoggedOut bool) {
-		if allowWhenLoggedOut {
-			loggedOut.Store(false)
-			authGen.Add(1)
-		} else if loggedOut.Load() {
+		gen, reauthCtx, cancel, ok := authState.beginLogin(allowWhenLoggedOut, allowWhenLoggedOut)
+		if !ok {
 			return
 		}
-		if !reauthInFlight.CompareAndSwap(false, true) {
-			return
-		}
-		if loggedOut.Load() {
-			reauthInFlight.Store(false)
-			return
-		}
-		gen := authGen.Load()
-		reauthMu.Lock()
-		if loggedOut.Load() || authGen.Load() != gen {
-			reauthMu.Unlock()
-			reauthInFlight.Store(false)
-			return
-		}
-		reauthCtx, cancel := context.WithCancel(context.Background())
-		reauthCancel = cancel
-		reauthMu.Unlock()
 
 		if prog != nil {
 			prog.Send(tui.SessionExpiredMsg{})
 		}
 		go func() {
-			defer func() {
-				cancel()
-				reauthMu.Lock()
-				reauthCancel = nil
-				reauthMu.Unlock()
-				reauthInFlight.Store(false)
-			}()
+			defer authState.finishLogin(cancel)
 			if err := auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog); err != nil {
 				if !errors.Is(err, auth.ErrLoginCancelled) && prog != nil {
 					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
 				}
 				return
 			}
-			if loggedOut.Load() || authGen.Load() != gen {
-				cfg.SetUserToken("")
+			devTok, usrTok, ok := authState.commitLogin(gen)
+			if !ok {
 				return
 			}
-			devTok, usrTok := cfg.GetAppleTokens()
-			if onUserToken != nil {
-				onUserToken(usrTok)
-			}
-			if cfg.StoreFront == "" && onStorefront != nil {
+			if onStorefront != nil {
 				if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
 					onStorefront(sf)
 				}
@@ -114,7 +159,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			if p := activePlayer.Load(); p != nil {
 				p.ResetSessionExpired()
 			}
-			if prog != nil && !loggedOut.Load() && authGen.Load() == gen {
+			if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
 				prog.Send(tui.SessionRestoredMsg{})
 			}
 		}()
@@ -124,23 +169,24 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	triggerInteractiveLogin := func() { startReauth(true) }
 
 	opts.OnReauth = triggerInteractiveLogin
-	opts.OnLogout = handleLogout
+	opts.OnLogout = authState.logout
 	prog = tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)
 	restartExe := make(chan string, 1)
 	scanCtx, cancelScan := context.WithCancel(context.Background())
 	defer cancelScan()
-	defer cancelActiveReauth()
+	defer authState.cancelActive()
 	var stopRPC func()
 
 	go func() {
 		devTok, usrTok := cfg.GetAppleTokens()
+		initialStorefront := cfg.StoreFront
 		var (
 			exe               string
 			authStatus        = auth.TokensValid
 			sf                string
 			wg                sync.WaitGroup
-			optimisticSession = usrTok != "" && cfg.StoreFront != "" && !auth.IsDeveloperTokenExpired(devTok)
+			optimisticSession = usrTok != "" && initialStorefront != "" && !auth.IsDeveloperTokenExpired(devTok)
 		)
 		wg.Go(func() {
 			exe = updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
@@ -191,30 +237,25 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			}
 		}
 
-		if cfg.UserToken() == "" && !loggedOut.Load() {
-			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music..."))
-			reauthMu.Lock()
-			loginCtx, cancelLogin := context.WithCancel(context.Background())
-			reauthCancel = cancelLogin
-			reauthMu.Unlock()
-			err := auth.LoginWithContext(loginCtx, cfg, tuiAuthLog)
-			cancelLogin()
-			reauthMu.Lock()
-			reauthCancel = nil
-			reauthMu.Unlock()
-			if err != nil {
-				if !errors.Is(err, auth.ErrLoginCancelled) {
-					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
+		if cfg.UserToken() == "" && !authState.loggedOut.Load() {
+			if gen, loginCtx, cancelLogin, ok := authState.beginLogin(false, false); ok {
+				prog.Send(tui.InitStatusMsg("Authorizing with Apple Music..."))
+				err := auth.LoginWithContext(loginCtx, cfg, tuiAuthLog)
+				authState.finishLogin(cancelLogin)
+				if err != nil {
+					if !errors.Is(err, auth.ErrLoginCancelled) {
+						prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
+					}
+					return
 				}
-				return
-			}
-			dTok, uTok := cfg.GetAppleTokens()
-			if onUserToken != nil {
-				onUserToken(uTok)
-			}
-			if cfg.StoreFront == "" && onStorefront != nil {
-				if _, sf := auth.CheckTokens(dTok, uTok); sf != "" {
-					onStorefront(sf)
+				dTok, uTok, ok := authState.commitLogin(gen)
+				if !ok {
+					return
+				}
+				if initialStorefront == "" && onStorefront != nil {
+					if _, sf := auth.CheckTokens(dTok, uTok); sf != "" {
+						onStorefront(sf)
+					}
 				}
 			}
 		}
@@ -238,7 +279,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 		if optimisticSession {
 			go func() {
-				if loggedOut.Load() {
+				if authState.loggedOut.Load() {
 					return
 				}
 				dTok, uTok := cfg.GetAppleTokens()
@@ -246,7 +287,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 					return
 				}
 				st, freshSF := auth.CheckTokens(dTok, uTok)
-				if loggedOut.Load() {
+				if authState.loggedOut.Load() {
 					return
 				}
 				switch st {
