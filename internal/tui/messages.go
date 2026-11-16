@@ -58,10 +58,12 @@ type playlistsForPickerMsg struct {
 	playlists []provider.Playlist
 	err       error
 	gen       int // stale-response guard; discarded if != m.playlistPickerGen
+	authGen   uint64
 }
 
 // trackAddedToPlaylistMsg is the response to an AddToPlaylist call.
 type trackAddedToPlaylistMsg struct {
 	playlistName string
 	err          error
+	authGen      uint64
 }

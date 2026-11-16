@@ -30,6 +30,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		authGen        atomic.Uint64
 		reauthMu       sync.Mutex
 		reauthCancel   context.CancelFunc
+		authCommitMu   sync.Mutex
 	)
 
 	tuiAuthLog := func(msg string) {
@@ -50,10 +51,28 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	}
 
 	handleLogout := func() {
+		authCommitMu.Lock()
 		loggedOut.Store(true)
 		authGen.Add(1)
 		cancelActiveReauth()
 		cfg.SetUserToken("")
+		_ = cfg.Save("")
+		authCommitMu.Unlock()
+	}
+
+	commitAuthLogin := func(gen uint64) (string, string, bool) {
+		authCommitMu.Lock()
+		defer authCommitMu.Unlock()
+		if loggedOut.Load() || authGen.Load() != gen {
+			cfg.SetUserToken("")
+			_ = cfg.Save("")
+			return "", "", false
+		}
+		devTok, usrTok := cfg.GetAppleTokens()
+		if onUserToken != nil {
+			onUserToken(usrTok)
+		}
+		return devTok, usrTok, true
 	}
 
 	startReauth := func(allowWhenLoggedOut bool) {
@@ -98,15 +117,11 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 				}
 				return
 			}
-			if loggedOut.Load() || authGen.Load() != gen {
-				cfg.SetUserToken("")
+			devTok, usrTok, ok := commitAuthLogin(gen)
+			if !ok {
 				return
 			}
-			devTok, usrTok := cfg.GetAppleTokens()
-			if onUserToken != nil {
-				onUserToken(usrTok)
-			}
-			if cfg.StoreFront == "" && onStorefront != nil {
+			if onStorefront != nil {
 				if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
 					onStorefront(sf)
 				}
@@ -135,12 +150,13 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 	go func() {
 		devTok, usrTok := cfg.GetAppleTokens()
+		initialStorefront := cfg.StoreFront
 		var (
 			exe               string
 			authStatus        = auth.TokensValid
 			sf                string
 			wg                sync.WaitGroup
-			optimisticSession = usrTok != "" && cfg.StoreFront != "" && !auth.IsDeveloperTokenExpired(devTok)
+			optimisticSession = usrTok != "" && initialStorefront != "" && !auth.IsDeveloperTokenExpired(devTok)
 		)
 		wg.Go(func() {
 			exe = updater.CheckAndUpdate(version.Version, noUpdate, func(msg string) {
@@ -192,29 +208,43 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		}
 
 		if cfg.UserToken() == "" && !loggedOut.Load() {
-			prog.Send(tui.InitStatusMsg("Authorizing with Apple Music..."))
-			reauthMu.Lock()
-			loginCtx, cancelLogin := context.WithCancel(context.Background())
-			reauthCancel = cancelLogin
-			reauthMu.Unlock()
-			err := auth.LoginWithContext(loginCtx, cfg, tuiAuthLog)
-			cancelLogin()
-			reauthMu.Lock()
-			reauthCancel = nil
-			reauthMu.Unlock()
-			if err != nil {
-				if !errors.Is(err, auth.ErrLoginCancelled) {
-					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
+			if reauthInFlight.CompareAndSwap(false, true) {
+				gen := authGen.Load()
+				prog.Send(tui.InitStatusMsg("Authorizing with Apple Music..."))
+				reauthMu.Lock()
+				var loginCtx context.Context
+				var cancelLogin context.CancelFunc
+				if !loggedOut.Load() && authGen.Load() == gen {
+					loginCtx, cancelLogin = context.WithCancel(context.Background())
+					reauthCancel = cancelLogin
 				}
-				return
-			}
-			dTok, uTok := cfg.GetAppleTokens()
-			if onUserToken != nil {
-				onUserToken(uTok)
-			}
-			if cfg.StoreFront == "" && onStorefront != nil {
-				if _, sf := auth.CheckTokens(dTok, uTok); sf != "" {
-					onStorefront(sf)
+				reauthMu.Unlock()
+
+				var err error
+				if loginCtx != nil {
+					err = auth.LoginWithContext(loginCtx, cfg, tuiAuthLog)
+					cancelLogin()
+				} else {
+					err = auth.ErrLoginCancelled
+				}
+				reauthMu.Lock()
+				reauthCancel = nil
+				reauthMu.Unlock()
+				reauthInFlight.Store(false)
+				if err != nil {
+					if !errors.Is(err, auth.ErrLoginCancelled) {
+						prog.Send(tui.InitErrMsg{Err: fmt.Errorf("authentication: %w", err)})
+					}
+					return
+				}
+				dTok, uTok, ok := commitAuthLogin(gen)
+				if !ok {
+					return
+				}
+				if initialStorefront == "" && onStorefront != nil {
+					if _, sf := auth.CheckTokens(dTok, uTok); sf != "" {
+						onStorefront(sf)
+					}
 				}
 			}
 		}

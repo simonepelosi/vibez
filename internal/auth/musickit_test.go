@@ -632,3 +632,37 @@ func TestLoginWithContext_CancelAbortsLogin(t *testing.T) {
 		t.Fatalf("cancelled login set UserToken = %q, want empty", cfg.UserToken())
 	}
 }
+
+func TestLoginWithContext_CancelClearsDiskTokenIfLate(t *testing.T) {
+	cfgDir := t.TempDir()
+	cfgPath := cfgDir + "/config.json"
+	cfg := &config.Config{ //nolint:gosec // G101: test value, not a real credential
+		AppleDeveloperToken: "dev-tok",
+		AuthPort:            0,
+	}
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	origOpen := openBrowser
+	ctx, cancel := context.WithCancel(t.Context())
+	openBrowser = func(loginURL string) error {
+		// Cancel immediately before returning so parentCtx is already cancelled
+		// when LoginWithContext observes browser completion.
+		cancel()
+		return nil
+	}
+	t.Cleanup(func() { openBrowser = origOpen })
+
+	err := LoginWithContext(ctx, cfg, func(string) {})
+	if !errors.Is(err, ErrLoginCancelled) {
+		t.Fatalf("LoginWithContext err = %v, want ErrLoginCancelled", err)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.UserToken() != "" {
+		t.Fatalf("cancelled login left disk UserToken = %q, want empty", reloaded.UserToken())
+	}
+}

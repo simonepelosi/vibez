@@ -73,8 +73,18 @@ func countActiveWords(words []lyrics.Word, pos time.Duration) int {
 
 // SetLoading transitions the panel into a fetching state.
 func (l *LyricsModel) SetLoading() {
-	l.loading = true
+	l.resetState(true)
+}
+
+// Reset clears loaded lyrics and error state.
+func (l *LyricsModel) Reset() {
+	l.resetState(false)
+}
+
+func (l *LyricsModel) resetState(loading bool) {
+	l.loading = loading
 	l.lines = nil
+	l.synced = false
 	l.sorted = false
 	l.errMsg = ""
 	l.pos = 0
@@ -83,6 +93,7 @@ func (l *LyricsModel) SetLoading() {
 	l.cursor = -1
 	l.follow = true
 	l.scroll = 0
+	l.cachedView = ""
 	l.invalidateView()
 }
 

@@ -148,6 +148,11 @@ To get one:
 		if err := cfg.Save(""); err != nil {
 			return fmt.Errorf("saving config: %w", err)
 		}
+		if parentCtx.Err() != nil {
+			cfg.SetUserToken("")
+			_ = cfg.Save("")
+			return ErrLoginCancelled
+		}
 		logf("Apple Music connected successfully!")
 		return nil
 	case err := <-errCh:
