@@ -449,8 +449,6 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 			"--no-custom-instructions",
 			"--disable-builtin-mcps",
 			"--disallow-temp-dir",
-			"--no-remote",
-			"--no-remote-export",
 			"--no-ask-user",
 			"--no-auto-update",
 			"--available-tools=__vibez_none__",

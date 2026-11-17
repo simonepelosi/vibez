@@ -141,11 +141,16 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		}
 		for _, want := range []string{
 			"-s", "--no-custom-instructions", "--disable-builtin-mcps", "--disallow-temp-dir",
-			"--no-remote", "--no-remote-export", "--no-ask-user", "--no-auto-update",
+			"--no-ask-user", "--no-auto-update",
 			"--available-tools=__vibez_none__", "--deny-tool=shell", "--model", "gpt-4.1",
 		} {
 			if !slices.Contains(args, want) {
 				t.Errorf("copilot args %v missing %q", args, want)
+			}
+		}
+		for _, removed := range []string{"--no-remote", "--no-remote-export"} {
+			if slices.Contains(args, removed) {
+				t.Errorf("copilot args %v unexpectedly included removed flag %q", args, removed)
 			}
 		}
 		if !slices.Contains(env, "COPILOT_ALLOW_ALL=false") || !slices.Contains(env, "COPILOT_ASSISTED_APPROVAL=false") {
