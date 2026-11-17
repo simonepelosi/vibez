@@ -628,6 +628,7 @@ func TestConfig_StateConcurrencyAndSave(t *testing.T) {
 				_ = cfg.GetEQBands()
 				_, _ = cfg.AudioBitrateKbps()
 				_, _ = cfg.VibeConfig()
+				_ = cfg.GetVibeEndpoint()
 			}
 		})
 	}

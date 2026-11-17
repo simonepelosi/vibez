@@ -197,6 +197,16 @@ func (c *Config) SetVibeConfig(backend, model string) {
 	c.stateMu.Unlock()
 }
 
+// GetVibeEndpoint returns the configured Vibe endpoint safely.
+func (c *Config) GetVibeEndpoint() string {
+	if c == nil {
+		return ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.VibeEndpoint
+}
+
 // HasVolume reports whether a playback volume preference is saved.
 func (c *Config) HasVolume() bool {
 	if c == nil {

@@ -180,7 +180,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 	go func() {
 		devTok, usrTok := cfg.GetAppleTokens()
-		initialStorefront := cfg.StoreFront
+		initialStorefront := cfg.Storefront()
 		var (
 			exe               string
 			authStatus        = auth.TokensValid
