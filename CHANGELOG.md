@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.2] — 2026-11-17
+
+### Security
+- **Centralized SSRF, proxy-aware transport, and transition-prefix hardening (#254)** — introduces `internal/netguard` across album-art fetches, Widevine/playback license clients, Discord RPC, MPRIS, and Windows SMTC to enforce public `https://` redirect checks, zone/loopback/private/CGNAT dial controls via `NewSafeRoundTripper` (while honoring explicitly configured `HTTP_PROXY`/`HTTPS_PROXY`/SOCKS proxies and resolved TUN fake-IP `198.18.0.0/15` + public-embedded DNS64 `64:ff9b::/96`), and literal-URL blocking.
+- **Widevine CDM path validation, macOS AudioQueue lifetime, and C++ FFI bounds (#255)** — validates Widevine CDM directories, ownership/non-world-writable permissions, and non-symlink regular binaries (`cdm/path_check*`), surfaces startup progress/docs notices when `VIBEZ_CDM_PATH` overrides (such as symlinks) are skipped, hardens macOS `AudioQueue`/CoreAudio callbacks, and adds bounds checks across the C++ CDM bridge and Windows/Darwin sinks.
+- **GStreamer plugin sandboxing, local path verification, and broadcast safety (#256)** — sandboxes GStreamer plugin scanning/loading, strengthens regular-file verification across Linux/macOS/Windows (`openVerifiedRegularDiskHandle` inspecting Windows reparse tags so only `IO_REPARSE_TAG_SYMLINK` / `IO_REPARSE_TAG_MOUNT_POINT` are blocked while allowing non-symlink reparse points such as OneDrive cloud placeholders), and serializes CoreAudio/`player.Broadcast` access.
+- **Provider parsing bounds, synchronized config state, and Apple/Last.fm hardening (#257)** — preflights OGG/Vorbis picture block sizes before allocation (`provider/local`), protects `Config` mutable preferences with `stateMu sync.RWMutex` across `config`, `cmd`, and `internal/tui`, and hardens Apple provider catalog/playback parsing alongside Last.fm parameter/error bounds.
+- **Vibe CLI sandboxes and release/installer/worker supply-chain controls (#259)** — isolates Vibe CLI agent invocations in hermetic temporary directories with scrubbed environments, drops removed Copilot CLI flags (`--no-remote`, `--no-remote-export`), and tightens workflow pin/attestation rules, Flatpak manifest permissions, Makefile build flags, installer checks, and token broker worker validation.
+
+### Fixed
+- **TUI `:logout`/`:login` state teardown, listener continuity, and concurrent auth coordination (#258)** — completes queue/panel/cache teardown on `:logout`, fences stale pre-logout async search/feed/lyrics/vibe responses without wedging active radio refills across background `SessionRestoredMsg`, preserves `waitForState` listening across logout/login cycles, and coordinates concurrent startup vs. interactive `:login` via `reauthCoordinator`.
+
 ## [2.2.1] — 2026-11-16
 
 ### Security
@@ -865,7 +877,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.1...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.2...HEAD
+[2.2.2]: https://github.com/simonepelosi/vibez/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/simonepelosi/vibez/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/simonepelosi/vibez/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/simonepelosi/vibez/compare/v2.0.8...v2.1.0
