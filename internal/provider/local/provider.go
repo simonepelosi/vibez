@@ -6,8 +6,10 @@
 package local
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -276,8 +278,8 @@ func (b *boundedReadSeeker) Seek(offset int64, whence int) (int64, error) {
 }
 
 // safeReadTags wraps tag.ReadFrom with panic recovery, bounded read I/O, and
-// pre-flight FLAC block/picture bounds validation so malformed tags cannot
-// panic or trigger multi-gigabyte allocations inside github.com/dhowden/tag.
+// pre-flight FLAC/OGG/Vorbis block and picture bounds validation so malformed
+// tags cannot panic or trigger multi-gigabyte allocations inside dhowden/tag.
 func safeReadTags(rs io.ReadSeeker) (m tag.Metadata, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -293,14 +295,29 @@ func safeReadTags(rs io.ReadSeeker) (m tag.Metadata, err error) {
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
-	if err := validateFLACTagBounds(rs, fileSize); err != nil {
-		return nil, err
+	var magic [4]byte
+	if n, _ := io.ReadFull(rs, magic[:]); n == 4 && string(magic[:]) == "OggS" {
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		if err := validateOGGTagsBounds(rs, fileSize); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		if err := validateFLACTagBounds(rs, fileSize); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := rs.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
 	return tag.ReadFrom(&boundedReadSeeker{rs: rs, remaining: maxTagReadBytes})
 }
+
+const maxVorbisComments = 8192
 
 func validateFLACTagBounds(rs io.ReadSeeker, fileSize int64) error {
 	if err := skipID3v2(rs); err != nil {
@@ -325,8 +342,13 @@ func validateFLACTagBounds(rs io.ReadSeeker, fileSize int64) error {
 		if blockLen < 0 || blockLen > fileSize-curPos || blockLen > maxTagBlockBytes {
 			return errors.New("flac metadata block exceeds file or memory bounds")
 		}
-		if typ == 6 {
-			if err := validateFLACPictureBounds(rs, curPos, blockLen); err != nil {
+		switch typ {
+		case 4:
+			if err := validateVorbisCommentBounds(io.LimitReader(rs, blockLen), blockLen); err != nil {
+				return err
+			}
+		case 6:
+			if err := validatePictureBlockReader(io.LimitReader(rs, blockLen), blockLen); err != nil {
 				return err
 			}
 		}
@@ -340,43 +362,198 @@ func validateFLACTagBounds(rs io.ReadSeeker, fileSize int64) error {
 	return errors.New("flac metadata block count exceeded")
 }
 
-func validateFLACPictureBounds(rs io.ReadSeeker, blockStart, blockLen int64) error {
-	if blockLen < 32 {
-		return errors.New("truncated flac picture block")
+func validateOGGTagsBounds(rs io.ReadSeeker, fileSize int64) error {
+	var (
+		vorbisPrefix = []byte("\x03vorbis")
+		opusPrefix   = []byte("OpusTags")
+	)
+	packets := make(map[uint32]*bytes.Buffer)
+	var readTotal int64
+	for range maxMetadataBlocks {
+		if readTotal >= maxTagReadBytes || readTotal >= fileSize {
+			return nil
+		}
+		var hdr [27]byte
+		if _, err := io.ReadFull(rs, hdr[:]); err != nil {
+			return nil
+		}
+		readTotal += 27
+		if string(hdr[:4]) != "OggS" {
+			return errors.New("malformed ogg page header")
+		}
+		flags := hdr[5]
+		serial := binary.LittleEndian.Uint32(hdr[14:18])
+		segCount := int(hdr[26])
+		segTable := make([]byte, segCount)
+		if _, err := io.ReadFull(rs, segTable); err != nil {
+			return nil
+		}
+		readTotal += int64(segCount)
+		var segTotal int64
+		for _, s := range segTable {
+			segTotal += int64(s)
+		}
+		if segTotal < 0 || segTotal > fileSize-readTotal || readTotal+segTotal > maxTagReadBytes {
+			return errors.New("ogg page payload exceeds file or memory bounds")
+		}
+		segData := make([]byte, segTotal)
+		if _, err := io.ReadFull(rs, segData); err != nil {
+			return nil
+		}
+		readTotal += segTotal
+
+		var pktBuf *bytes.Buffer
+		if flags&0x01 != 0 {
+			var ok bool
+			pktBuf, ok = packets[serial]
+			if !ok {
+				return errors.New("unexpected continued ogg packet")
+			}
+		} else {
+			if len(packets) >= 16 {
+				return errors.New("too many concurrent ogg streams")
+			}
+			pktBuf = &bytes.Buffer{}
+		}
+
+		var pos int
+		for _, s := range segTable {
+			n := int(s)
+			if int64(pktBuf.Len()+n) > maxTagBlockBytes {
+				return errors.New("ogg comment packet exceeds memory bounds")
+			}
+			pktBuf.Write(segData[pos : pos+n])
+			pos += n
+			if s < 255 {
+				pkt := pktBuf.Bytes()
+				switch {
+				case bytes.HasPrefix(pkt, vorbisPrefix):
+					payload := pkt[len(vorbisPrefix):]
+					return validateVorbisCommentBounds(bytes.NewReader(payload), int64(len(payload)))
+				case bytes.HasPrefix(pkt, opusPrefix):
+					payload := pkt[len(opusPrefix):]
+					return validateVorbisCommentBounds(bytes.NewReader(payload), int64(len(payload)))
+				}
+				pktBuf = &bytes.Buffer{}
+			}
+		}
+		packets[serial] = pktBuf
+	}
+	return nil
+}
+
+func validateVorbisCommentBounds(r io.Reader, rem int64) error {
+	if rem < 8 || rem > maxTagBlockBytes {
+		return errors.New("vorbis comment block out of bounds")
+	}
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return err
+	}
+	rem -= 4
+	vendorLen := int64(binary.LittleEndian.Uint32(lenBuf[:]))
+	if vendorLen < 0 || vendorLen > rem-4 || vendorLen > maxTagBlockBytes {
+		return errors.New("vorbis vendor length out of bounds")
+	}
+	if _, err := io.CopyN(io.Discard, r, vendorLen); err != nil {
+		return err
+	}
+	rem -= vendorLen
+
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return err
+	}
+	rem -= 4
+	commentsLen := binary.LittleEndian.Uint32(lenBuf[:])
+	if commentsLen > maxVorbisComments || int64(commentsLen)*4 > rem {
+		return errors.New("vorbis comment count out of bounds")
+	}
+
+	const picKey = "metadata_block_picture="
+	for range commentsLen {
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return err
+		}
+		rem -= 4
+		l := int64(binary.LittleEndian.Uint32(lenBuf[:]))
+		if l < 0 || l > rem || l > maxTagBlockBytes {
+			return errors.New("vorbis comment entry length out of bounds")
+		}
+		rem -= l
+		if l <= int64(len(picKey)) {
+			if _, err := io.CopyN(io.Discard, r, l); err != nil {
+				return err
+			}
+			continue
+		}
+		var prefix [len(picKey)]byte
+		if _, err := io.ReadFull(r, prefix[:]); err != nil {
+			return err
+		}
+		restLen := l - int64(len(picKey))
+		if !strings.EqualFold(string(prefix[:]), picKey) {
+			if _, err := io.CopyN(io.Discard, r, restLen); err != nil {
+				return err
+			}
+			continue
+		}
+		if restLen > int64(base64.StdEncoding.EncodedLen(maxTagBlockBytes)) {
+			return errors.New("vorbis picture base64 exceeds memory bounds")
+		}
+		b64 := make([]byte, restLen)
+		if _, err := io.ReadFull(r, b64); err != nil {
+			return err
+		}
+		decoded, err := base64.StdEncoding.DecodeString(string(b64))
+		if err != nil {
+			return err
+		}
+		if err := validatePictureBlockReader(bytes.NewReader(decoded), int64(len(decoded))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePictureBlockReader(r io.Reader, blockRem int64) error {
+	if blockRem < 32 || blockRem > maxTagBlockBytes {
+		return errors.New("truncated or oversized flac picture block")
 	}
 	var head [8]byte
-	if _, err := io.ReadFull(rs, head[:]); err != nil {
+	if _, err := io.ReadFull(r, head[:]); err != nil {
 		return err
 	}
+	rem := blockRem - 8
 	mimeLen := int64(binary.BigEndian.Uint32(head[4:8]))
-	if mimeLen < 0 || mimeLen > blockLen-8-24 {
+	if mimeLen < 0 || mimeLen > rem-24 || mimeLen > maxTagBlockBytes {
 		return errors.New("flac picture mime length out of bounds")
 	}
-	if _, err := rs.Seek(mimeLen, io.SeekCurrent); err != nil {
+	if _, err := io.CopyN(io.Discard, r, mimeLen); err != nil {
 		return err
 	}
+	rem -= mimeLen
+
 	var descHdr [4]byte
-	if _, err := io.ReadFull(rs, descHdr[:]); err != nil {
+	if _, err := io.ReadFull(r, descHdr[:]); err != nil {
 		return err
 	}
+	rem -= 4
 	descLen := int64(binary.BigEndian.Uint32(descHdr[:]))
-	if descLen < 0 || descLen > blockLen-(mimeLen+12)-20 {
+	if descLen < 0 || descLen > rem-20 || descLen > maxTagBlockBytes {
 		return errors.New("flac picture description length out of bounds")
 	}
-	if _, err := rs.Seek(descLen+16, io.SeekCurrent); err != nil {
+	if _, err := io.CopyN(io.Discard, r, descLen+16); err != nil {
 		return err
 	}
+	rem -= descLen + 16
+
 	var dataHdr [4]byte
-	if _, err := io.ReadFull(rs, dataHdr[:]); err != nil {
+	if _, err := io.ReadFull(r, dataHdr[:]); err != nil {
 		return err
 	}
+	rem -= 4
 	dataLen := int64(binary.BigEndian.Uint32(dataHdr[:]))
-	curPos, err := rs.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return err
-	}
-	blockRem := (blockStart + blockLen) - curPos
-	if dataLen < 0 || dataLen > maxTagPictureBytes || dataLen > blockRem {
+	if dataLen < 0 || dataLen > maxTagPictureBytes || dataLen > rem {
 		return errors.New("flac picture payload length out of bounds")
 	}
 	return nil

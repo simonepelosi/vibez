@@ -199,8 +199,8 @@ func runTUI(_ *cobra.Command, _ []string) error {
 		}
 		sfMu.Lock()
 		defer sfMu.Unlock()
-		if sf != cfg.StoreFront {
-			cfg.StoreFront = sf
+		if sf != cfg.Storefront() {
+			cfg.SetStorefront(sf)
 			if saveErr := cfg.Save(""); saveErr != nil && debug {
 				fmt.Fprintf(os.Stderr, "debug: saving storefront: %v\n", saveErr)
 			}

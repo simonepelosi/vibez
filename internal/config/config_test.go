@@ -598,3 +598,39 @@ func TestConfig_TokenConcurrencyAndIsVibeLocalOnly(t *testing.T) {
 	}
 	<-done
 }
+
+func TestConfig_StateConcurrencyAndSave(t *testing.T) {
+	path := writeCfg(t, map[string]any{"storefront": "us"})
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range 60 {
+			cfg.SetStorefront([]string{"us", "it", "gb"}[i%3])
+			cfg.SetAlbumArt(i%2 == 0)
+			cfg.SetVolume(float64(i%10) / 10.0)
+			cfg.SetEQBands([]config.EQBand{{Frequency: 62, Q: 1.4, Gain: float64(i % 5)}})
+			_ = cfg.SetAudioBitrate([]int{64, 256}[i%2])
+			cfg.SetVibeConfig("ollama", fmt.Sprintf("model-%d", i))
+			_ = cfg.Save("")
+		}
+	})
+	for range 3 {
+		wg.Go(func() {
+			for range 60 {
+				_ = cfg.Storefront()
+				_ = cfg.GetAlbumArt()
+				_ = cfg.HasVolume()
+				_ = cfg.VolumeOrDefault()
+				_ = cfg.GetEQBands()
+				_, _ = cfg.AudioBitrateKbps()
+				_, _ = cfg.VibeConfig()
+				_ = cfg.GetVibeEndpoint()
+			}
+		})
+	}
+	wg.Wait()
+}

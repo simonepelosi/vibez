@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ type Config struct {
 	// --config file instead of silently falling back to the default profile.
 	path    string
 	tokenMu sync.RWMutex
+	stateMu sync.RWMutex
 
 	// Runtime-injected credentials (embedded via ldflags or fetched from a token
 	// broker) and the values read from disk, so Save() never writes ephemeral or
@@ -93,7 +95,9 @@ func (c *Config) VibePlanTimeout() time.Duration {
 	if c == nil {
 		return 0
 	}
+	c.stateMu.RLock()
 	raw := strings.TrimSpace(c.VibeTimeout)
+	c.stateMu.RUnlock()
 	if raw == "" {
 		return 0
 	}
@@ -112,8 +116,114 @@ type EQBand struct {
 	Gain      float64 `json:"gain"`
 }
 
+// Storefront returns the configured Apple Music storefront ID safely.
+func (c *Config) Storefront() string {
+	if c == nil {
+		return ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.StoreFront
+}
+
+// SetStorefront updates the Apple Music storefront ID safely.
+func (c *Config) SetStorefront(sf string) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.StoreFront = sf
+	c.stateMu.Unlock()
+}
+
+// GetAlbumArt returns whether album-art view is enabled safely.
+func (c *Config) GetAlbumArt() bool {
+	if c == nil {
+		return false
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.AlbumArt
+}
+
+// SetAlbumArt updates the album-art view flag safely.
+func (c *Config) SetAlbumArt(on bool) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.AlbumArt = on
+	c.stateMu.Unlock()
+}
+
+// GetEQBands returns a detached copy of the saved equalizer bands safely.
+func (c *Config) GetEQBands() []EQBand {
+	if c == nil {
+		return nil
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return slices.Clone(c.EQBands)
+}
+
+// SetEQBands replaces the saved equalizer bands safely.
+func (c *Config) SetEQBands(bands []EQBand) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.EQBands = slices.Clone(bands)
+	c.stateMu.Unlock()
+}
+
+// VibeConfig returns the configured Vibe backend and model safely.
+func (c *Config) VibeConfig() (backend, model string) {
+	if c == nil {
+		return "", ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.VibeBackend, c.VibeModel
+}
+
+// SetVibeConfig updates the configured Vibe backend and model safely.
+func (c *Config) SetVibeConfig(backend, model string) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.VibeBackend = backend
+	c.VibeModel = model
+	c.stateMu.Unlock()
+}
+
+// GetVibeEndpoint returns the configured Vibe endpoint safely.
+func (c *Config) GetVibeEndpoint() string {
+	if c == nil {
+		return ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.VibeEndpoint
+}
+
+// HasVolume reports whether a playback volume preference is saved.
+func (c *Config) HasVolume() bool {
+	if c == nil {
+		return false
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.Volume != nil
+}
+
 // VolumeOrDefault returns the saved volume, or 1.0 if none has been stored yet.
 func (c *Config) VolumeOrDefault() float64 {
+	if c == nil {
+		return 1.0
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	if c.Volume != nil {
 		return *c.Volume
 	}
@@ -122,6 +232,11 @@ func (c *Config) VolumeOrDefault() float64 {
 
 // DiscordRPCEnabled reports whether Discord Rich Presence is enabled (default true).
 func (c *Config) DiscordRPCEnabled() bool {
+	if c == nil {
+		return true
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	if c.DiscordRPC != nil {
 		return *c.DiscordRPC
 	}
@@ -130,13 +245,23 @@ func (c *Config) DiscordRPCEnabled() bool {
 
 // SetVolume updates the in-memory volume field. Call Save to persist it.
 func (c *Config) SetVolume(v float64) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
 	c.Volume = &v
+	c.stateMu.Unlock()
 }
 
 // IsVibeLocalOnly reports whether vibe_privacy explicitly restricts Vibe Mode
 // to on-device runtimes with external CLI agents disabled.
 func (c *Config) IsVibeLocalOnly() bool {
-	return c != nil && strings.EqualFold(strings.TrimSpace(c.VibePrivacy), "local-only")
+	if c == nil {
+		return false
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return strings.EqualFold(strings.TrimSpace(c.VibePrivacy), "local-only")
 }
 
 // DeveloperToken returns the configured or runtime Apple developer token safely.
@@ -209,6 +334,18 @@ func (c *Config) SetRuntimeLastfmCredentials(apiKey, apiSecret string) {
 func (c *Config) forPersistence() *Config {
 	c.tokenMu.RLock()
 	defer c.tokenMu.RUnlock()
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	var volCopy *float64
+	if c.Volume != nil {
+		v := *c.Volume
+		volCopy = &v
+	}
+	var discordCopy *bool
+	if c.DiscordRPC != nil {
+		b := *c.DiscordRPC
+		discordCopy = &b
+	}
 	out := &Config{
 		AppleDeveloperToken: c.AppleDeveloperToken,
 		AppleUserToken:      c.AppleUserToken,
@@ -219,16 +356,16 @@ func (c *Config) forPersistence() *Config {
 		Provider:            c.Provider,
 		Theme:               c.Theme,
 		AudioQuality:        c.AudioQuality,
-		Volume:              c.Volume,
+		Volume:              volCopy,
 		LastfmAPIKey:        c.LastfmAPIKey,
 		LastfmAPISecret:     c.LastfmAPISecret,
 		LastfmSessionKey:    c.LastfmSessionKey,
-		EQBands:             c.EQBands,
+		EQBands:             slices.Clone(c.EQBands),
 		WSL:                 c.WSL,
 		AlbumArt:            c.AlbumArt,
 		MusicDir:            c.MusicDir,
 		HybridPlayback:      c.HybridPlayback,
-		DiscordRPC:          c.DiscordRPC,
+		DiscordRPC:          discordCopy,
 		DiscordClientID:     c.DiscordClientID,
 		VibeBackend:         c.VibeBackend,
 		VibePrivacy:         c.VibePrivacy,
@@ -258,7 +395,13 @@ func defaults() *Config {
 }
 
 func (c *Config) AudioBitrateKbps() (int, error) {
-	return audioquality.Parse(c.AudioQuality)
+	if c == nil {
+		return audioquality.Parse("")
+	}
+	c.stateMu.RLock()
+	q := c.AudioQuality
+	c.stateMu.RUnlock()
+	return audioquality.Parse(q)
 }
 
 func (c *Config) SetAudioBitrate(kbps int) error {
@@ -266,7 +409,9 @@ func (c *Config) SetAudioBitrate(kbps int) error {
 	if err != nil {
 		return err
 	}
+	c.stateMu.Lock()
 	c.AudioQuality = value
+	c.stateMu.Unlock()
 	return nil
 }
 

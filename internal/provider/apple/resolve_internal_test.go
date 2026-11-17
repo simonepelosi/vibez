@@ -687,3 +687,51 @@ func TestInitPaginatedPage(t *testing.T) {
 		t.Fatalf("multi-page = (%v, ps=%d, done=%v), want len 5 done=false", items, ps, done)
 	}
 }
+
+func TestTrackFetchRejectsInvalidResourceIDs(t *testing.T) {
+	p := New(&config.Config{
+		AppleDeveloperToken: "dev",
+		AppleUserToken:      "usr",
+		StoreFront:          "us",
+	})
+	for _, bad := range []string{"", "../admin", "a/b", "123?x=1", "abc\x00"} {
+		if _, err := p.GetLibraryAlbumTracks(context.Background(), bad); err == nil {
+			t.Errorf("GetLibraryAlbumTracks(%q) = nil error, want rejection", bad)
+		}
+		if _, err := p.GetCatalogPlaylistTracks(context.Background(), bad); err == nil {
+			t.Errorf("GetCatalogPlaylistTracks(%q) = nil error, want rejection", bad)
+		}
+	}
+}
+
+func TestAppleProvider_ConcurrentConfigTokenAndStorefrontReads(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"id": "us"}},
+		})
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "usr", StoreFront: "us"}
+	p := New(cfg)
+	p.SetBaseURL(srv.URL)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range 60 {
+			cfg.SetUserToken(fmt.Sprintf("usr-%d", i))
+			cfg.SetStorefront([]string{"us", "gb", ""}[i%3])
+		}
+	})
+	for range 3 {
+		wg.Go(func() {
+			for range 60 {
+				_ = p.IsAuthenticated()
+				_, _ = p.newRequest(context.Background(), http.MethodGet, "/me/library/songs")
+				_, _ = p.newCatalogRequest(context.Background(), http.MethodGet, "/catalog/us/search")
+				_, _ = p.storefront(context.Background())
+			}
+		})
+	}
+	wg.Wait()
+}

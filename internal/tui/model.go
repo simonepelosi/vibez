@@ -500,7 +500,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		onReauth:       opts.OnReauth,
 		onLogout:       opts.OnLogout,
 		preMuteVol:     -1,
-		artMode:        cfg.AlbumArt,
+		artMode:        cfg.GetAlbumArt(),
 		artwork:        artworkCache{rendered: map[art.Size][]string{}},
 		artworkLRU:     make(map[string]image.Image),
 		artHTTP:        art.NewSafeHTTPClient(5 * time.Second),
@@ -521,7 +521,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.lyricsP = &lyricsPanel{m: views.NewLyrics()}
 	m.lyricsClient = lyrics.NewClient()
 	m.feedP = &feedPanel{m: views.NewFeed()}
-	eqBands := configEQBandsToPlayer(cfg.EQBands)
+	eqBands := configEQBandsToPlayer(cfg.GetEQBands())
 	m.eqP = &eqPanel{m: views.NewEqualizer(eqBands)}
 	m.vibe = views.NewVibe()
 	m.search = views.NewSearch(prov)
@@ -573,15 +573,15 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) restoreAudioSettings() []tea.Cmd {
 	var cmds []tea.Cmd
-	if m.cfg.Volume != nil {
+	if m.cfg.HasVolume() {
 		v := m.cfg.VolumeOrDefault()
 		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
 			return p.SetVolume(v)
 		}))
 		m.appendLog(fmt.Sprintf("[vol] restored %.0f%% from config", v*100))
 	}
-	if len(m.cfg.EQBands) > 0 {
-		bands := configEQBandsToPlayer(m.cfg.EQBands)
+	if eqBands := m.cfg.GetEQBands(); len(eqBands) > 0 {
+		bands := configEQBandsToPlayer(eqBands)
 		cmds = append(cmds, m.playerCmd(func(p player.Player) error {
 			return p.SetEqualizer(bands)
 		}))
@@ -969,7 +969,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendLog(fmt.Sprintf("[eq] error: %v", err))
 			}
 		}
-		m.cfg.EQBands = playerEQBandsToConfig(msg.Bands)
+		m.cfg.SetEQBands(playerEQBandsToConfig(msg.Bands))
 		if err := m.cfg.Save(""); err != nil {
 			m.appendLog(fmt.Sprintf("[eq] config save error: %v", err))
 		}
@@ -1928,7 +1928,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			return nil
 		}
 		m.artMode = !m.artMode
-		m.cfg.AlbumArt = m.artMode
+		m.cfg.SetAlbumArt(m.artMode)
 		if err := m.cfg.Save(""); err != nil {
 			m.appendLog(fmt.Sprintf("[art] config save error: %v", err))
 		}
@@ -2166,8 +2166,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			}
 		}
 		if m.cfg != nil {
-			m.cfg.VibeBackend = backend
-			m.cfg.VibeModel = modelArg
+			m.cfg.SetVibeConfig(backend, modelArg)
 			if err := m.cfg.Save(""); err != nil {
 				m.appendLog(fmt.Sprintf("[vibe] config save error: %v", err))
 			}
@@ -2991,9 +2990,8 @@ func (m *Model) vibeDetectOptions() (vibe.DetectOptions, time.Duration) {
 	var opts vibe.DetectOptions
 	planTimeout := vibe.DefaultPlanTimeout
 	if m.cfg != nil {
-		opts.Backend = m.cfg.VibeBackend
-		opts.Model = m.cfg.VibeModel
-		opts.Endpoint = m.cfg.VibeEndpoint
+		opts.Backend, opts.Model = m.cfg.VibeConfig()
+		opts.Endpoint = m.cfg.GetVibeEndpoint()
 		if custom := m.cfg.VibePlanTimeout(); custom > 0 {
 			planTimeout = custom
 		}
