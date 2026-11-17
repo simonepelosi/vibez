@@ -5,6 +5,7 @@ package cdm
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -116,5 +117,49 @@ func TestCDM_PathAndSessionNULGuards(t *testing.T) {
 	}
 	if err := c.CloseSession("bad\x00sid"); err == nil {
 		t.Fatal("CloseSession accepted session ID with NUL byte")
+	}
+}
+
+func TestCDM_PathSafetyRejectsUNCSymlinkAndStickyDir(t *testing.T) {
+	for _, badWin := range []string{
+		`\\evil.example.com\share\widevinecdm.dll`,
+		`//evil.example.com/share/widevinecdm.dll`,
+		`\\?\UNC\evil\share\widevinecdm.dll`,
+		`\??\C:\widevinecdm.dll`,
+		`//./C:/widevinecdm.dll`,
+		`\\.\PhysicalDrive0`,
+		`relative\widevinecdm.dll`,
+	} {
+		if isSafePlatformAbsPath(badWin, "windows") {
+			t.Errorf("isSafePlatformAbsPath(%q, windows) = true, want false", badWin)
+		}
+	}
+	if !isSafePlatformAbsPath(`C:\Users\me\widevinecdm.dll`, "windows") {
+		t.Error("isSafePlatformAbsPath rejected valid Windows drive path")
+	}
+
+	if runtime.GOOS != "windows" {
+		dir := t.TempDir()
+		realFile := filepath.Join(dir, "real.so")
+		if err := os.WriteFile(realFile, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		linkFile := filepath.Join(dir, "link.so")
+		if err := os.Symlink(realFile, linkFile); err == nil {
+			if _, err := ValidateLibraryPath(linkFile); err == nil {
+				t.Fatal("ValidateLibraryPath accepted symlinked CDM file")
+			}
+		}
+
+		stickyDir := filepath.Join(dir, "sticky")
+		if err := os.Mkdir(stickyDir, 0o750); err == nil {
+			_ = os.Chmod(stickyDir, 0o777|os.ModeSticky) //nolint:gosec // G302: testing rejection of sticky world-writable parent dir
+			inSticky := filepath.Join(stickyDir, "in_sticky.so")
+			if err := os.WriteFile(inSticky, []byte("x"), 0o600); err == nil {
+				if _, err := ValidateLibraryPath(inSticky); err == nil {
+					t.Fatal("ValidateLibraryPath accepted file inside sticky world-writable directory")
+				}
+			}
+		}
 	}
 }

@@ -814,164 +814,205 @@ vibez_winsink_t vibez_winsink_create(
     vibez_winsink_eos_cb_t on_eos,
     vibez_winsink_err_cb_t on_err,
     vibez_winsink_stream_start_cb_t on_stream_start) {
-    auto* h = new Handle();
-    h->sink = std::make_shared<Sink>();
-    h->sink->user = user_data;
-    h->sink->onEos = on_eos;
-    h->sink->onErr = on_err;
-    h->sink->onStreamStart = on_stream_start;
-    return h;
+    try {
+        auto* h = new Handle();
+        h->sink = std::make_shared<Sink>();
+        h->sink->user = user_data;
+        h->sink->onEos = on_eos;
+        h->sink->onErr = on_err;
+        h->sink->onStreamStart = on_stream_start;
+        return h;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void vibez_winsink_play_uri(vibez_winsink_t handle, const char* uri_utf8) {
     if (!handle || !uri_utf8) return;
-    auto sink = static_cast<Handle*>(handle)->sink;
-    if (!sink || sink->closed.load()) return;
-    auto ses = std::make_shared<Session>();
-    std::shared_ptr<Session> old;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        sink->nextURI.clear();
-        old = sink->cur;
-        sink->cur = ses;
+    try {
+        auto sink = static_cast<Handle*>(handle)->sink;
+        if (!sink || sink->closed.load()) return;
+        auto ses = std::make_shared<Session>();
+        std::shared_ptr<Session> old;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            sink->nextURI.clear();
+            old = sink->cur;
+            sink->cur = ses;
+        }
+        cancelSession(old);
+        std::string url(uri_utf8);
+        {
+            std::lock_guard<std::mutex> wlk(sink->workerMu);
+            if (sink->closed.load()) return;
+            ++sink->activeWorkers;
+        }
+        try {
+            // The worker owns shared references to the sink and session, so a stale
+            // session blocked on the network can finish by itself after it is replaced.
+            std::thread(runSession, sink, ses, std::move(url)).detach();
+        } catch (...) {
+            std::lock_guard<std::mutex> wlk(sink->workerMu);
+            if (--sink->activeWorkers == 0) sink->workerCv.notify_all();
+        }
+    } catch (...) {
     }
-    cancelSession(old);
-    {
-        std::lock_guard<std::mutex> wlk(sink->workerMu);
-        if (sink->closed.load()) return;
-        ++sink->activeWorkers;
-    }
-    // The worker owns shared references to the sink and session, so a stale
-    // session blocked on the network can finish by itself after it is replaced.
-    std::thread(runSession, sink, ses, std::string(uri_utf8)).detach();
 }
 
 void vibez_winsink_set_next_uri(vibez_winsink_t handle, const char* uri_utf8) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    std::lock_guard<std::mutex> lk(sink->mu);
-    sink->nextURI = uri_utf8 ? uri_utf8 : "";
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        std::lock_guard<std::mutex> lk(sink->mu);
+        sink->nextURI = uri_utf8 ? uri_utf8 : "";
+    } catch (...) {
+    }
 }
 
 void vibez_winsink_play(vibez_winsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    std::shared_ptr<Session> ses;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        ses = sink->cur;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        std::shared_ptr<Session> ses;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            ses = sink->cur;
+        }
+        if (!ses) return;
+        ses->paused = false;
+        std::lock_guard<std::mutex> lk(ses->mu);
+        if (ses->hwo) waveOutRestart(ses->hwo);
+    } catch (...) {
     }
-    if (!ses) return;
-    ses->paused = false;
-    std::lock_guard<std::mutex> lk(ses->mu);
-    if (ses->hwo) waveOutRestart(ses->hwo);
 }
 
 void vibez_winsink_pause(vibez_winsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    std::shared_ptr<Session> ses;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        ses = sink->cur;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        std::shared_ptr<Session> ses;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            ses = sink->cur;
+        }
+        if (!ses) return;
+        ses->paused = true;
+        std::lock_guard<std::mutex> lk(ses->mu);
+        if (ses->hwo) waveOutPause(ses->hwo);
+    } catch (...) {
     }
-    if (!ses) return;
-    ses->paused = true;
-    std::lock_guard<std::mutex> lk(ses->mu);
-    if (ses->hwo) waveOutPause(ses->hwo);
 }
 
 void vibez_winsink_stop(vibez_winsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink) return;
-    std::shared_ptr<Session> old;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        sink->nextURI.clear();
-        old = sink->cur;
-        sink->cur.reset();
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink) return;
+        std::shared_ptr<Session> old;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            sink->nextURI.clear();
+            old = sink->cur;
+            sink->cur.reset();
+        }
+        cancelSession(old);
+    } catch (...) {
     }
-    cancelSession(old);
 }
 
 void vibez_winsink_seek(vibez_winsink_t handle, double seconds) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    std::shared_ptr<Session> ses;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        ses = sink->cur;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        std::shared_ptr<Session> ses;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            ses = sink->cur;
+        }
+        if (!ses) return;
+        if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
+        if (seconds > 1e8) seconds = 1e8;
+        ses->seekTarget.store(seconds);
+    } catch (...) {
     }
-    if (!ses) return;
-    if (std::isnan(seconds) || std::isinf(seconds) || seconds < 0.0) seconds = 0.0;
-    if (seconds > 1e8) seconds = 1e8;
-    ses->seekTarget.store(seconds);
 }
 
 void vibez_winsink_set_volume(vibez_winsink_t handle, double volume) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return;
-    if (std::isnan(volume) || volume < 0.0) volume = 0.0;
-    if (volume > 1.0) volume = 1.0;
-    sink->volume = volume;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return;
+        if (std::isnan(volume) || volume < 0.0) volume = 0.0;
+        if (volume > 1.0) volume = 1.0;
+        sink->volume = volume;
+    } catch (...) {
+    }
 }
 
 void vibez_winsink_set_eq(vibez_winsink_t handle, const double* gains_db, int count) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load() || !gains_db) return;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        for (int i = 0; i < kBands; ++i) {
-            double g = i < count ? gains_db[i] : 0.0;
-            if (!std::isfinite(g)) g = 0.0;
-            if (g > 24.0) g = 24.0;
-            if (g < -24.0) g = -24.0;
-            sink->eq[i] = g;
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load() || !gains_db) return;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            for (int i = 0; i < kBands; ++i) {
+                double g = i < count ? gains_db[i] : 0.0;
+                if (!std::isfinite(g)) g = 0.0;
+                if (g > 24.0) g = 24.0;
+                if (g < -24.0) g = -24.0;
+                sink->eq[i] = g;
+            }
         }
+        sink->eqVersion++;
+    } catch (...) {
     }
-    sink->eqVersion++;
 }
 
 double vibez_winsink_position(vibez_winsink_t handle) {
-    Sink* sink = sinkOf(handle);
-    if (!sink || sink->closed.load()) return 0.0;
-    std::shared_ptr<Session> ses;
-    {
-        std::lock_guard<std::mutex> lk(sink->mu);
-        ses = sink->cur;
-    }
-    if (!ses) return 0.0;
-    std::lock_guard<std::mutex> lk(ses->mu);
-    if (!ses->hwo) {
-        const double end = ses->endPosition.load();
-        if (end >= 0.0) return end;
-        const uint64_t nf = ses->nullFrames.load();
-        if (nf > 0 && ses->sampleRate > 0) {
-            return static_cast<double>(nf) / static_cast<double>(ses->sampleRate);
+    try {
+        Sink* sink = sinkOf(handle);
+        if (!sink || sink->closed.load()) return 0.0;
+        std::shared_ptr<Session> ses;
+        {
+            std::lock_guard<std::mutex> lk(sink->mu);
+            ses = sink->cur;
         }
+        if (!ses) return 0.0;
+        std::lock_guard<std::mutex> lk(ses->mu);
+        if (!ses->hwo) {
+            const double end = ses->endPosition.load();
+            if (end >= 0.0) return end;
+            const uint64_t nf = ses->nullFrames.load();
+            if (nf > 0 && ses->sampleRate > 0) {
+                return static_cast<double>(nf) / static_cast<double>(ses->sampleRate);
+            }
+            return 0.0;
+        }
+        return devicePosition(*ses);
+    } catch (...) {
         return 0.0;
     }
-    return devicePosition(*ses);
 }
 
 void vibez_winsink_destroy(vibez_winsink_t handle) {
     if (!handle) return;
     auto* h = static_cast<Handle*>(handle);
-    {
-        std::lock_guard<std::mutex> wlk(h->sink->workerMu);
-        h->sink->closed = true;
-    }
-    h->sink->cbGate.closeAndDrain();
-    std::shared_ptr<Session> old;
-    {
-        std::lock_guard<std::mutex> lk(h->sink->mu);
-        old = h->sink->cur;
-        h->sink->cur.reset();
-    }
-    cancelSession(old);
-    {
-        std::unique_lock<std::mutex> wlk(h->sink->workerMu);
-        h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
+    try {
+        {
+            std::lock_guard<std::mutex> wlk(h->sink->workerMu);
+            h->sink->closed = true;
+        }
+        h->sink->cbGate.closeAndDrain();
+        std::shared_ptr<Session> old;
+        {
+            std::lock_guard<std::mutex> lk(h->sink->mu);
+            old = h->sink->cur;
+            h->sink->cur.reset();
+        }
+        cancelSession(old);
+        {
+            std::unique_lock<std::mutex> wlk(h->sink->workerMu);
+            h->sink->workerCv.wait(wlk, [&] { return h->sink->activeWorkers == 0; });
+        }
+    } catch (...) {
     }
     delete h;
 }

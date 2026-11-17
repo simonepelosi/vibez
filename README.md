@@ -417,7 +417,7 @@ Configuration is stored as JSON at `~/.config/vibez/config.json` on Linux/macOS 
 | `wsl` | Audio buffer tuning hint for WSL2 environments | `false` |
 | `lastfm_api_key` / `_secret` / `_session_key` | Last.fm credentials (release builds embed API key/secret automatically) | `""` |
 
-**Environment variables:** set `VIBEZ_CDM_PATH` to point to a specific Widevine CDM library (`libwidevinecdm.so`, `libwidevinecdm.dylib`, or `widevinecdm.dll`) instead of auto-discovering or downloading.
+**Environment variables:** set `VIBEZ_CDM_PATH` to point directly to a regular non-symlink Widevine CDM library (`libwidevinecdm.so`, `libwidevinecdm.dylib`, or `widevinecdm.dll`) in a non-world-writable directory instead of auto-discovering or downloading; symlinks (such as Nix profile links) and unsafe permissions are skipped with a startup notice, so pass the resolved file path (for example under `/nix/store`).
 
 ---
 

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -360,5 +361,87 @@ func TestCDMPathAndCandidateSecurityGuards(t *testing.T) {
 		if got := FindCDM(); got != fakeLib {
 			t.Fatalf("FindCDM() = %q, want %q for valid 0600 ELF", got, fakeLib)
 		}
+	}
+}
+
+func testValidCDMMagicBytes() []byte {
+	buf := make([]byte, 120000)
+	switch runtime.GOOS {
+	case "windows":
+		buf[0], buf[1] = 'M', 'Z'
+	case "darwin":
+		copy(buf[:4], []byte{0xcf, 0xfa, 0xed, 0xfe})
+	default:
+		copy(buf[:4], []byte{0x7f, 'E', 'L', 'F'})
+	}
+	return buf
+}
+
+func TestEnsureCDM_LogsNoticeWhenEnvOverrideIgnored(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome)
+	t.Setenv("LocalAppData", filepath.Join(tmpHome, "AppData", "Local"))
+
+	fallback := DefaultCDMPath()
+	if fallback == "" {
+		t.Fatal("DefaultCDMPath returned empty path")
+	}
+	if err := os.MkdirAll(filepath.Dir(fallback), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fallback, testValidCDMMagicBytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	badOverride := filepath.Join(tmpHome, "non-binary-cdm")
+	if err := os.WriteFile(badOverride, []byte("small"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VIBEZ_CDM_PATH", badOverride)
+
+	var invalidNotices []string
+	gotInvalid, err := EnsureCDM(func(msg string) {
+		invalidNotices = append(invalidNotices, msg)
+	})
+	if err != nil {
+		t.Fatalf("EnsureCDM(invalid override) failed: %v", err)
+	}
+	if gotInvalid != fallback {
+		t.Fatalf("EnsureCDM() = %q, want %q fallback", gotInvalid, fallback)
+	}
+	if len(invalidNotices) == 0 || !strings.Contains(invalidNotices[0], "ignoring VIBEZ_CDM_PATH") {
+		t.Fatalf("EnsureCDM notices = %v, expected notice explaining ignored VIBEZ_CDM_PATH", invalidNotices)
+	}
+
+	// Point VIBEZ_CDM_PATH to a symlink on Unix (or skip symlink subcheck if unsupported on Windows runner).
+	override := filepath.Join(tmpHome, "symlink-cdm")
+	if err := os.Symlink(fallback, override); err != nil {
+		if runtime.GOOS == "windows" {
+			return
+		}
+		t.Fatal(err)
+	}
+	t.Setenv("VIBEZ_CDM_PATH", override)
+
+	var notices []string
+	got, err := EnsureCDM(func(msg string) {
+		notices = append(notices, msg)
+	})
+	if err != nil {
+		t.Fatalf("EnsureCDM failed: %v", err)
+	}
+	if got != fallback {
+		t.Fatalf("EnsureCDM() = %q, want %q fallback", got, fallback)
+	}
+	foundNotice := false
+	for _, msg := range notices {
+		if strings.Contains(msg, "ignoring VIBEZ_CDM_PATH") {
+			foundNotice = true
+			break
+		}
+	}
+	if !foundNotice {
+		t.Fatalf("EnsureCDM notices = %v, expected notice explaining ignored VIBEZ_CDM_PATH", notices)
 	}
 }
