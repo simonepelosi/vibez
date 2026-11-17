@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createPublicKey, verify } from "node:crypto";
 
-import worker, { signToken, TOKEN_TTL_SECONDS } from "../src/index.js";
+import worker, { signToken, timingSafeEqual, TOKEN_TTL_SECONDS } from "../src/index.js";
 
 function makeEnv(overrides = {}) {
   const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -104,4 +104,12 @@ test("a bad key yields a generic 503 and leaks nothing", async () => {
   const res = await fresh.default.fetch(req({ "x-vibez-client": "client-key" }), env);
   assert.equal(res.status, 503);
   assert.deepEqual(await res.json(), { error: "token unavailable" });
+});
+
+test("timingSafeEqual handles equal, mismatched-length, and prefix strings accurately", () => {
+  assert.equal(timingSafeEqual("secret-token", "secret-token"), true);
+  assert.equal(timingSafeEqual("", ""), true);
+  assert.equal(timingSafeEqual("secret", "secret-longer"), false);
+  assert.equal(timingSafeEqual("secret-longer", "secret"), false);
+  assert.equal(timingSafeEqual("secret-token", "secret-tokeN"), false);
 });

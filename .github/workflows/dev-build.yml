@@ -105,6 +105,9 @@ jobs:
           [ -n "$VIBEZ_TOKEN_URL" ] || { echo "VIBEZ_TOKEN_URL repository variable is not set"; exit 1; }
           [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
 
+      - name: Verify Go modules
+        run: go mod verify
+
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --fix-missing libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev g++-mingw-w64-x86-64
 
@@ -174,6 +177,9 @@ jobs:
         run: |
           [ -n "$VIBEZ_TOKEN_URL" ] || { echo "VIBEZ_TOKEN_URL repository variable is not set"; exit 1; }
           [ -n "$VIBEZ_CLIENT_KEY" ] || { echo "VIBEZ_CLIENT_KEY secret is not set"; exit 1; }
+
+      - name: Verify Go modules
+        run: go mod verify
 
       - name: Build (darwin/arm64)
         env:

@@ -366,6 +366,9 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 			"-p",
 			"--cwd=" + tmpDir,
 			"--no-tools",
+			"--no-lsp",
+			"--no-pty",
+			"--offline",
 			"--no-session",
 			"--no-extensions",
 			"--no-skills",
@@ -415,7 +418,7 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 			"--output-format", "text",
 			"--approval-mode", "plan",
 			"--extensions", "none",
-			"--policy", policyPath,
+			"--admin-policy", policyPath,
 		}
 		if model != "" {
 			args = append(args, "--model", model)
@@ -423,40 +426,65 @@ func prepareCLIInvocation(agent, tmpDir, model, sysPrompt, userMsg string) (args
 		return args, combined, nil, nil
 
 	case "codex":
+		codexHome, herr := prepareIsolatedCodexHome(tmpDir)
+		if herr != nil {
+			return nil, "", nil, herr
+		}
 		args = []string{
 			"exec",
 			"--ephemeral",
 			"--skip-git-repo-check",
 			"--sandbox", "read-only",
+			"-c", "mcp_servers={}",
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
 		args = append(args, "-")
-		return args, combined, nil, nil
+		return args, combined, []string{"CODEX_HOME=" + codexHome}, nil
 
 	case "copilot":
 		args = []string{
 			"-s",
 			"--no-custom-instructions",
-			"--available-tools=",
+			"--disable-builtin-mcps",
+			"--disallow-temp-dir",
+			"--no-ask-user",
+			"--no-auto-update",
+			"--available-tools=__vibez_none__",
+			"--deny-tool=shell",
+			"--deny-tool=write",
+			"--deny-tool=edit",
+			"--deny-tool=web_fetch",
+			"--deny-tool=url",
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return args, combined, nil, nil
+		return args, combined, []string{
+			"COPILOT_ALLOW_ALL=false",
+			"COPILOT_ASSISTED_APPROVAL=false",
+		}, nil
 
 	case "opencode":
 		// cmd.Dir is already set to tmpDir; avoid --pure/--dir which opencode 2.2+ rejects on `run`.
+		promptPath := filepath.Join(tmpDir, "prompt.txt")
+		if err := os.WriteFile(promptPath, []byte(combined), 0o600); err != nil {
+			return nil, "", nil, fmt.Errorf("write opencode prompt: %w", err)
+		}
 		args = []string{
 			"run",
 			"--format", "default",
+			"-f", promptPath,
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		args = append(args, "--", combined)
-		return args, "", []string{`OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`}, nil
+		args = append(args, "--", "Follow the instructions in the attached file.")
+		return args, "", []string{
+			`OPENCODE_CONFIG_CONTENT={"plugin":[],"mcp":{},"tools":{"*":false},"permission":{"*":"deny"}}`,
+			`OPENCODE_PERMISSION={"*":"deny"}`,
+		}, nil
 
 	case "llm":
 		args = []string{
@@ -493,10 +521,7 @@ func scrubbedCLIEnv(overrides ...string) []string {
 			continue
 		}
 		upper := strings.ToUpper(k)
-		if strings.HasPrefix(upper, "APPLE_") ||
-			strings.HasPrefix(upper, "VIBEZ_") ||
-			strings.HasPrefix(upper, "LASTFM_") ||
-			strings.HasPrefix(upper, "DISCORD_") {
+		if isScrubbedCLIEnvVar(upper) {
 			continue
 		}
 		if _, overridden := overrideKeys[upper]; overridden {
@@ -529,4 +554,64 @@ func scrubbedCLIEnv(overrides ...string) []string {
 	out = append(out, "NO_COLOR=1")
 	out = append(out, overrides...)
 	return out
+}
+
+func isScrubbedCLIEnvVar(upper string) bool {
+	if strings.HasPrefix(upper, "APPLE_") ||
+		strings.HasPrefix(upper, "VIBEZ_") ||
+		strings.HasPrefix(upper, "LASTFM_") ||
+		strings.HasPrefix(upper, "DISCORD_") {
+		return true
+	}
+	switch upper {
+	case "COPILOT_ALLOW_ALL",
+		"COPILOT_ASSISTED_APPROVAL",
+		"COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
+		"OPENCODE_CONFIG",
+		"OPENCODE_CONFIG_DIR",
+		"OPENCODE_PERMISSION",
+		"OMP_PROFILE",
+		"PI_CODING_AGENT_DIR",
+		"CODEX_HOME":
+		return true
+	}
+	return false
+}
+
+// prepareIsolatedCodexHome creates an isolated CODEX_HOME inside tmpDir with
+// an empty config.toml so user MCP servers and plugins are never loaded,
+// copying only auth.json (if a non-symlink regular file <= 1 MiB exists) so
+// OAuth credentials keep working.
+func prepareIsolatedCodexHome(tmpDir string) (string, error) {
+	isolated := filepath.Join(tmpDir, "codex-home")
+	if err := os.MkdirAll(isolated, 0o700); err != nil {
+		return "", fmt.Errorf("create isolated codex home: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(isolated, "config.toml"), nil, 0o600); err != nil {
+		return "", fmt.Errorf("write empty codex config: %w", err)
+	}
+
+	var candidates []string
+	if envHome := strings.TrimSpace(os.Getenv("CODEX_HOME")); envHome != "" {
+		candidates = append(candidates, filepath.Join(envHome, "auth.json"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".codex", "auth.json"))
+	}
+	const maxCodexAuthBytes = 1 << 20
+	for _, src := range candidates {
+		fi, err := os.Lstat(src) //nolint:gosec // G703: candidate comes from user CODEX_HOME or ~/.codex
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() || fi.Size() > maxCodexAuthBytes {
+			continue
+		}
+		raw, err := os.ReadFile(src) //nolint:gosec // G304,G703: validated regular file from user codex home
+		if err != nil {
+			continue
+		}
+		if werr := os.WriteFile(filepath.Join(isolated, "auth.json"), raw, 0o600); werr != nil { //nolint:gosec // G703: isolated is inside Go-created tmpDir
+			return "", fmt.Errorf("copy codex auth.json: %w", werr)
+		}
+		break
+	}
+	return isolated, nil
 }

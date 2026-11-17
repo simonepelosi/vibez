@@ -44,7 +44,7 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 			t.Fatalf("unexpected stdin=%q env=%v", stdin, env)
 		}
 		for _, wantFlag := range []string{
-			"-p", "--cwd=" + tmp, "--no-tools", "--no-session",
+			"-p", "--cwd=" + tmp, "--no-tools", "--no-lsp", "--no-pty", "--offline", "--no-session",
 			"--no-extensions", "--no-skills", "--no-rules", "--no-context-files",
 			"--no-title", "--thinking=off", "--system-prompt=SYS", "--model=gemini-3-flash-preview",
 		} {
@@ -109,10 +109,13 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 			t.Fatalf("gemini args leaked user prompt on argv: %v", args)
 		}
 		policyPath := filepath.Join(tmp, "gemini-policy.toml")
-		for _, want := range []string{"plan", "none", policyPath, "gemini-2.5-flash"} {
+		for _, want := range []string{"plan", "none", "--admin-policy", policyPath, "gemini-2.5-flash"} {
 			if !slices.Contains(args, want) {
 				t.Errorf("gemini args %v missing %q", args, want)
 			}
+		}
+		if slices.Contains(args, "--policy") {
+			t.Errorf("gemini args %v should use --admin-policy rather than --policy", args)
 		}
 		data, err := os.ReadFile(policyPath) //nolint:gosec // test temp policy file
 		if err != nil {
@@ -126,7 +129,7 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 
 	t.Run("copilot passes prompt via stdin with tools disabled", func(t *testing.T) {
 		tmp := t.TempDir()
-		args, stdin, _, err := prepareCLIInvocation("copilot", tmp, "gpt-4.1", "SYS", "USER")
+		args, stdin, env, err := prepareCLIInvocation("copilot", tmp, "gpt-4.1", "SYS", "USER")
 		if err != nil {
 			t.Fatalf("prepareCLIInvocation(copilot): %v", err)
 		}
@@ -136,47 +139,116 @@ func TestPrepareCLIInvocation_HermeticPerAgent(t *testing.T) {
 		if slices.Contains(args, "-p") || slices.Contains(args, "USER") {
 			t.Fatalf("copilot args passed prompt on argv: %v", args)
 		}
-		for _, want := range []string{"-s", "--no-custom-instructions", "--available-tools=", "--model", "gpt-4.1"} {
+		for _, want := range []string{
+			"-s", "--no-custom-instructions", "--disable-builtin-mcps", "--disallow-temp-dir",
+			"--no-ask-user", "--no-auto-update",
+			"--available-tools=__vibez_none__", "--deny-tool=shell", "--model", "gpt-4.1",
+		} {
 			if !slices.Contains(args, want) {
 				t.Errorf("copilot args %v missing %q", args, want)
 			}
 		}
+		for _, removed := range []string{"--no-remote", "--no-remote-export"} {
+			if slices.Contains(args, removed) {
+				t.Errorf("copilot args %v unexpectedly included removed flag %q", args, removed)
+			}
+		}
+		if !slices.Contains(env, "COPILOT_ALLOW_ALL=false") || !slices.Contains(env, "COPILOT_ASSISTED_APPROVAL=false") {
+			t.Errorf("copilot env = %v, want explicit allow-all/assisted-approval disable", env)
+		}
 	})
 
-	t.Run("codex passes skip-git-repo-check and read-only sandbox", func(t *testing.T) {
+	t.Run("codex isolates CODEX_HOME and passes read-only sandbox", func(t *testing.T) {
 		tmp := t.TempDir()
-		args, stdin, _, err := prepareCLIInvocation("codex", tmp, "o4-mini", "SYS", "USER")
+		srcCodex := t.TempDir()
+		if err := os.WriteFile(filepath.Join(srcCodex, "auth.json"), []byte(`{"token":"ok"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(srcCodex, "config.toml"), []byte("[mcp_servers.evil]\ncommand='sh'\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CODEX_HOME", srcCodex)
+		args, stdin, env, err := prepareCLIInvocation("codex", tmp, "o4-mini", "SYS", "USER")
 		if err != nil {
 			t.Fatalf("prepareCLIInvocation(codex): %v", err)
 		}
 		if !strings.Contains(stdin, "SYS") || !strings.Contains(stdin, "USER") {
 			t.Errorf("codex stdin = %q, want combined prompt", stdin)
 		}
-		for _, want := range []string{"exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "o4-mini", "-"} {
+		for _, want := range []string{"exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "mcp_servers={}", "o4-mini", "-"} {
 			if !slices.Contains(args, want) {
 				t.Errorf("codex args %v missing %q", args, want)
 			}
 		}
+		isolatedHome := filepath.Join(tmp, "codex-home")
+		if !slices.Contains(env, "CODEX_HOME="+isolatedHome) {
+			t.Errorf("codex env = %v, want CODEX_HOME=%s", env, isolatedHome)
+		}
+		cfgBytes, err := os.ReadFile(filepath.Join(isolatedHome, "config.toml")) //nolint:gosec // test temp file
+		if err != nil || len(cfgBytes) != 0 {
+			t.Errorf("isolated codex config.toml = (%q, %v), want empty", string(cfgBytes), err)
+		}
+		authBytes, err := os.ReadFile(filepath.Join(isolatedHome, "auth.json")) //nolint:gosec // test temp file
+		if err != nil || string(authBytes) != `{"token":"ok"}` {
+			t.Errorf("isolated codex auth.json = (%q, %v), want copied auth", string(authBytes), err)
+		}
 	})
 
-	t.Run("opencode runs with permission deny config and without unsupported flags", func(t *testing.T) {
+	t.Run("opencode runs with file prompt, full deny config, and without unsupported flags", func(t *testing.T) {
 		tmp := t.TempDir()
 		args, _, env, err := prepareCLIInvocation("opencode", tmp, "local/model", "SYS", "USER")
 		if err != nil {
 			t.Fatalf("prepareCLIInvocation(opencode): %v", err)
 		}
-		for _, want := range []string{"run", "--format", "default", "--model", "local/model"} {
+		promptPath := filepath.Join(tmp, "prompt.txt")
+		for _, want := range []string{"run", "--format", "default", "-f", promptPath, "--model", "local/model"} {
 			if !slices.Contains(args, want) {
 				t.Errorf("opencode args %v missing %q", args, want)
 			}
+		}
+		if slices.Contains(args, "USER") {
+			t.Errorf("opencode args leaked user prompt onto argv: %v", args)
+		}
+		promptBytes, err := os.ReadFile(promptPath) //nolint:gosec // test temp file
+		if err != nil || !strings.Contains(string(promptBytes), "USER") {
+			t.Errorf("opencode prompt file = (%q, %v), want combined prompt", string(promptBytes), err)
 		}
 		for _, forbidden := range []string{"--pure", "--dir", tmp} {
 			if slices.Contains(args, forbidden) {
 				t.Errorf("opencode args %v must not contain %q", args, forbidden)
 			}
 		}
-		if !slices.Contains(env, `OPENCODE_CONFIG_CONTENT={"permission":{"*":"deny"}}`) {
-			t.Errorf("opencode env = %v, want OPENCODE_CONFIG_CONTENT deny-all", env)
+		if !slices.Contains(env, `OPENCODE_CONFIG_CONTENT={"plugin":[],"mcp":{},"tools":{"*":false},"permission":{"*":"deny"}}`) ||
+			!slices.Contains(env, `OPENCODE_PERMISSION={"*":"deny"}`) {
+			t.Errorf("opencode env = %v, want full OPENCODE_CONFIG_CONTENT and OPENCODE_PERMISSION deny-all", env)
+		}
+	})
+
+	t.Run("scrubbedCLIEnv strips agent bypass and config-override variables", func(t *testing.T) {
+		for _, k := range []string{
+			"APPLE_USER_TOKEN",
+			"VIBEZ_TOKEN_URL",
+			"COPILOT_ALLOW_ALL",
+			"COPILOT_ASSISTED_APPROVAL",
+			"COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
+			"OPENCODE_CONFIG",
+			"OPENCODE_CONFIG_DIR",
+			"OPENCODE_PERMISSION",
+			"OMP_PROFILE",
+			"PI_CODING_AGENT_DIR",
+			"CODEX_HOME",
+		} {
+			t.Setenv(k, "evil-val")
+		}
+		env := scrubbedCLIEnv("CODEX_HOME=/tmp/isolated")
+		for _, kv := range env {
+			k, v, _ := strings.Cut(kv, "=")
+			if v == "evil-val" {
+				t.Errorf("scrubbedCLIEnv leaked hazardous env var %s=%s", k, v)
+			}
+		}
+		if !slices.Contains(env, "CODEX_HOME=/tmp/isolated") {
+			t.Errorf("scrubbedCLIEnv omitted explicit override: %v", env)
 		}
 	})
 }
@@ -274,8 +346,12 @@ func TestCLIPlanner_EndToEndEnvAndPolicy(t *testing.T) {
 	dir := t.TempDir()
 	fakeOpenCode := filepath.Join(dir, "opencode")
 	script := `#!/bin/sh
-if [ "$OPENCODE_CONFIG_CONTENT" != '{"permission":{"*":"deny"}}' ]; then
-  echo "missing permission deny env: $OPENCODE_CONFIG_CONTENT" >&2
+if [ "$OPENCODE_CONFIG_CONTENT" != '{"plugin":[],"mcp":{},"tools":{"*":false},"permission":{"*":"deny"}}' ]; then
+  echo "missing hardened OPENCODE_CONFIG_CONTENT: $OPENCODE_CONFIG_CONTENT" >&2
+  exit 1
+fi
+if [ "$OPENCODE_PERMISSION" != '{"*":"deny"}' ]; then
+  echo "missing OPENCODE_PERMISSION deny env: $OPENCODE_PERMISSION" >&2
   exit 1
 fi
 cat <<'EOF'
@@ -377,7 +453,8 @@ func TestValidateCLIModelName_AndOpencodeDelimiter(t *testing.T) {
 		}
 	}
 
-	args, _, _, err := prepareCLIInvocation("opencode", t.TempDir(), "anthropic/claude-sonnet-4-5", "sys", "-leading-dash-prompt")
+	opTmp := t.TempDir()
+	args, _, _, err := prepareCLIInvocation("opencode", opTmp, "anthropic/claude-sonnet-4-5", "sys", "-leading-dash-prompt")
 	if err != nil {
 		t.Fatalf("prepareCLIInvocation(opencode): %v", err)
 	}
@@ -385,8 +462,9 @@ func TestValidateCLIModelName_AndOpencodeDelimiter(t *testing.T) {
 	if delimIdx < 0 || delimIdx != len(args)-2 {
 		t.Fatalf("opencode args missing trailing '--' delimiter before prompt: %v", args)
 	}
-	if !strings.HasSuffix(args[delimIdx+1], "-leading-dash-prompt") {
-		t.Fatalf("opencode prompt arg = %q, want suffix -leading-dash-prompt", args[delimIdx+1])
+	promptData, err := os.ReadFile(filepath.Join(opTmp, "prompt.txt")) //nolint:gosec // test temp file
+	if err != nil || !strings.Contains(string(promptData), "-leading-dash-prompt") {
+		t.Fatalf("opencode prompt.txt = (%q, %v), want -leading-dash-prompt", string(promptData), err)
 	}
 }
 

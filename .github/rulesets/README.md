@@ -39,9 +39,9 @@ Targets `refs/tags/v*` (all semver release tags).
 
 | Rule | Value |
 |------|-------|
+| Creation | ❌ blocked |
 | Deletion | ❌ blocked |
-| Tag update | ❌ blocked (non-fast-forward) |
-| Creation | restricted to bypass actors only |
+| Tag update | ❌ blocked (`update` & `non_fast_forward`) |
 
 Release tags are immutable once pushed. Only repo admins can create or move
 `v*` tags, which prevents accidental or malicious tag rewrites that would
