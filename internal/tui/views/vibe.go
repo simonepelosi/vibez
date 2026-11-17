@@ -244,6 +244,20 @@ func (v *VibeModel) SetDiscovery(info DiscoveryInfo) {
 // DiscoveryActive reports whether discovery mode is currently active.
 func (v *VibeModel) DiscoveryActive() bool { return v.discovery.Active }
 
+// Reset clears session vibe query summaries, discovery info, and errors.
+func (v *VibeModel) Reset() {
+	v.state = vibeIdle
+	v.input.Blur()
+	v.input.SetValue("")
+	v.lastQ = ""
+	v.added = 0
+	v.explanation = ""
+	v.usage = ""
+	v.errStr = ""
+	v.discovery = DiscoveryInfo{}
+	v.pickerIdx = 0
+}
+
 // Update processes keyboard and paste input when the vibe panel is focused
 // (vibeInputting) or when the metric picker is open (vibeDiscoveryPicker).
 // Returns a Cmd that dispatches VibeQueryMsg or DiscoveryMetricSelectedMsg.

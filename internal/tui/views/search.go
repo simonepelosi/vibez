@@ -114,6 +114,17 @@ func NewSearch(prov provider.Provider) *SearchModel {
 
 func (m *SearchModel) Init() tea.Cmd { return nil }
 
+// Reset clears cached search results and artist drill-down state.
+func (m *SearchModel) Reset() {
+	m.results = nil
+	m.rows = nil
+	m.artist = nil
+	m.cursor = 0
+	m.scroll = 0
+	m.loading = false
+	m.err = nil
+}
+
 func (m *SearchModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
@@ -524,8 +535,8 @@ func (m *SearchModel) View() string {
 			if m.artist != nil {
 				// Every album here is the artist's; the year orders them.
 				parts = nil
-				if len(a.ReleaseDate) >= 4 {
-					parts = append(parts, a.ReleaseDate[:4])
+				if year := asciiYearPrefix(a.ReleaseDate); year != "" {
+					parts = append(parts, year)
 				}
 			}
 			if a.TrackCount > 0 {
@@ -552,6 +563,18 @@ func (m *SearchModel) View() string {
 	}
 
 	return sb.String()
+}
+
+func asciiYearPrefix(date string) string {
+	if len(date) < 4 {
+		return ""
+	}
+	for i := range 4 {
+		if date[i] < '0' || date[i] > '9' {
+			return ""
+		}
+	}
+	return date[:4]
 }
 
 // Focus / Focused — kept for backward compatibility (input is managed by the model).

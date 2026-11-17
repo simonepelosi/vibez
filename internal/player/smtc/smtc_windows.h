@@ -41,7 +41,8 @@ typedef struct {
     const char* title;
     const char* artist;
     const char* album;
-    const char* artwork_url; // http(s) URL or empty for no thumbnail
+    const char* artwork_url; // https URL (or loopback http only when allow_loopback_artwork is set in tests)
+    int allow_loopback_artwork;
     int has_status;
     int status; // VIBEZ_SMTC_STATUS_*
     int has_timeline;

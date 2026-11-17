@@ -158,6 +158,22 @@ func (m *LibraryModel) InvalidateTracksCache() {
 	m.libraryTracksTime = time.Time{}
 }
 
+// Reset clears cached library tracks, playlists, and groups and returns the
+// panel to its top-level section list.
+func (m *LibraryModel) Reset() {
+	m.loading = false
+	m.loadErr = nil
+	m.drillErr = nil
+	m.libraryTracks = nil
+	m.tracksLoaded = false
+	m.libraryTracksTime = time.Time{}
+	m.playlists = nil
+	m.playlistsLoaded = false
+	m.albums = nil
+	m.artists = nil
+	m.ResetTopLevel()
+}
+
 func (m *LibraryModel) Back() bool {
 	switch m.pane {
 	case paneSections:

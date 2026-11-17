@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/assets"
@@ -191,8 +192,14 @@ func runTUI(_ *cobra.Command, _ []string) error {
 			fmt.Fprintf(os.Stderr, "debug: saving user token: %v\n", saveErr)
 		}
 	}
+	var sfMu sync.Mutex
 	onStorefront := func(sf string) {
-		if sf != "" && sf != cfg.StoreFront {
+		if sf == "" {
+			return
+		}
+		sfMu.Lock()
+		defer sfMu.Unlock()
+		if sf != cfg.StoreFront {
 			cfg.StoreFront = sf
 			if saveErr := cfg.Save(""); saveErr != nil && debug {
 				fmt.Fprintf(os.Stderr, "debug: saving storefront: %v\n", saveErr)

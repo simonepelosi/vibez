@@ -44,6 +44,15 @@ func (f *FeedModel) NeedsLoad() bool {
 	return f.state == feedStateEmpty || f.state == feedStateError
 }
 
+// Reset clears cached recommendations and returns the feed panel to its empty state.
+func (f *FeedModel) Reset() {
+	f.state = feedStateEmpty
+	f.errMsg = ""
+	f.rows = nil
+	f.cursor = 0
+	f.scroll = 0
+}
+
 func (f *FeedModel) SetLoading() {
 	f.state = feedStateLoading
 	f.rows = nil

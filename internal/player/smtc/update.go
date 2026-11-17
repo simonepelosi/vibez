@@ -2,12 +2,10 @@ package smtc
 
 import (
 	"math"
-	"net"
-	"net/url"
-	"strings"
+	"testing"
 	"time"
-	"unicode/utf8"
 
+	"github.com/simone-vibes/vibez/internal/netguard"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
@@ -121,31 +119,11 @@ func sanitizeSMTCString(s string) string {
 }
 
 func sanitizeSMTCArtworkURL(raw string) string {
-	if raw == "" || len(raw) > maxSMTCArtworkURLLen || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+	allowLoopback := allowLoopbackArtworkHTTP && testing.Testing()
+	if raw == "" || !netguard.IsSafePublicHTTPSURL(raw, maxSMTCArtworkURLLen, allowLoopback) {
 		return ""
 	}
 	if provider.Clean(raw) != raw {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return ""
-	}
-	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
-	if host == "" {
-		return ""
-	}
-	ip := net.ParseIP(host)
-	if allowLoopbackArtworkHTTP && u.Scheme == "http" && ip != nil && ip.IsLoopback() {
-		return raw
-	}
-	if u.Scheme != "https" {
-		return ""
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
-		return ""
-	}
-	if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()) {
 		return ""
 	}
 	return raw

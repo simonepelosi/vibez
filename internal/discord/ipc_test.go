@@ -426,6 +426,11 @@ func TestFormatArtworkURL_Validation(t *testing.T) {
 		want string
 	}{
 		{"https://is1-ssl.mzstatic.com/image/{w}x{h}.jpg", "https://is1-ssl.mzstatic.com/image/512x512.jpg"},
+		{"http://is1-ssl.mzstatic.com/image/art.jpg", ""},
+		{"https://127.0.0.1/art.jpg", ""},
+		{"https://100.64.0.1/art.jpg", ""},
+		{"https://[::1%25lo]/art.jpg", ""},
+		{"https://2130706433/art.jpg", ""},
 		{"javascript:alert(1)", ""},
 		{"https://user:pass@example.com/a.jpg", ""},
 		{"https://example.com/\x00bad.jpg", ""},

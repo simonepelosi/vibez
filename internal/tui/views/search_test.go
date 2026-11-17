@@ -1114,3 +1114,19 @@ func TestSearch_JumpSection_EmptyNoPanic(t *testing.T) {
 		t.Error("expected nil track on empty search after JumpSection")
 	}
 }
+
+func TestSearch_ReleaseDateUTF8DoesNotSplitRune(t *testing.T) {
+	s := artistSearch()
+	s.OpenArtist(provider.Artist{ID: "ar1", Name: "Some Artist"})
+	s.SetArtistAlbums("ar1", []provider.Album{
+		{ID: "bad-utf8", Title: "BadDate", ReleaseDate: "👍abc", TrackCount: 3},
+		{ID: "good", Title: "GoodDate", ReleaseDate: "2024-05-01", TrackCount: 5},
+	}, nil)
+	v := s.View()
+	if strings.ContainsRune(v, '\ufffd') {
+		t.Fatalf("View() produced replacement rune from byte-slicing UTF-8 ReleaseDate: %q", v)
+	}
+	if !strings.Contains(v, "2024") {
+		t.Fatalf("View() missing expected valid release year 2024: %q", v)
+	}
+}

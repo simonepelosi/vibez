@@ -1,12 +1,14 @@
 package discord
 
 import (
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/simone-vibes/vibez/internal/netguard"
 	"github.com/simone-vibes/vibez/internal/player"
 )
+
+const maxDiscordArtworkURLLen = 2048
 
 // ActivityTypeListening indicates "Listening to ..." in Discord.
 const ActivityTypeListening = 2
@@ -91,7 +93,8 @@ func BuildActivity(st player.State) *Activity {
 	return act
 }
 
-// formatArtworkURL ensures {w}x{h} placeholders are resolved and validates URL structure.
+// formatArtworkURL expands {w}/{h} placeholders and validates that the artwork URL
+// is a bounded public HTTPS URL.
 func formatArtworkURL(raw string) string {
 	if raw == "" {
 		return ""
@@ -99,13 +102,8 @@ func formatArtworkURL(raw string) string {
 	expanded := strings.ReplaceAll(raw, "{w}x{h}", "512x512")
 	expanded = strings.ReplaceAll(expanded, "{w}", "512")
 	expanded = strings.ReplaceAll(expanded, "{h}", "512")
-	for i := 0; i < len(expanded); i++ {
-		if expanded[i] < 0x20 || expanded[i] == 0x7f {
-			return ""
-		}
-	}
-	u, err := url.Parse(expanded)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+	u, err := netguard.ParseSafeURL(expanded, maxDiscordArtworkURLLen, false)
+	if err != nil {
 		return ""
 	}
 	return u.String()
