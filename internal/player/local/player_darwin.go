@@ -391,6 +391,7 @@ func (r *audioRef) release() {
 
 // Player implements player.Player for local audio files using CoreAudio
 type Player struct {
+	cmdMu      sync.Mutex // serializes CoreAudio/ExtAudioFile transport calls
 	mu         sync.RWMutex
 	state      player.State
 	bcast      player.Broadcast
@@ -466,19 +467,24 @@ func (p *Player) pollState() {
 		case <-p.pollWakeCh:
 			syncTicker()
 		case <-tickC:
+			p.cmdMu.Lock()
 			p.mu.RLock()
+			closed := p.closed
 			playing := p.state.Playing
 			ref := p.audio
 			p.mu.RUnlock()
-			if !playing || ref == nil {
+			if closed || !playing || ref == nil {
+				p.cmdMu.Unlock()
 				stopTicker()
 				continue
 			}
 			if !ref.acquire() {
+				p.cmdMu.Unlock()
 				continue
 			}
 			secs := float64(C.vibez_get_playback_time(ref.s))
 			ref.release()
+			p.cmdMu.Unlock()
 			if secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) || secs > float64(math.MaxInt64/int64(time.Second)) {
 				continue
 			}
@@ -533,7 +539,14 @@ func vibezOnEOS(h C.uintptr_t) {
 	}
 }
 
-func (p *Player) playTrack(t provider.Track) {
+// playTrackLocked opens path and starts CoreAudio playback. Caller must hold p.cmdMu.
+func (p *Player) playTrackLocked(t provider.Track) {
+	p.mu.RLock()
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
+		return
+	}
 	path, ok := strings.CutPrefix(t.ID, "local:")
 	if !ok || path == "" {
 		p.mu.Lock()
@@ -543,7 +556,7 @@ func (p *Player) playTrack(t provider.Track) {
 		p.broadcast(s)
 		return
 	}
-	cleanPath, err := verifyRegularAudioPath(path)
+	cleanPath, err := VerifyRegularAudioPath(path)
 	if err != nil {
 		p.mu.Lock()
 		old := p.audio
@@ -630,6 +643,8 @@ func (p *Player) playTrack(t provider.Track) {
 }
 
 func (p *Player) Play() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	if (p.ended || p.audio == nil) && len(p.queue) > 0 {
 		if p.ended || p.idx < 0 || p.idx >= len(p.queue) {
@@ -638,7 +653,7 @@ func (p *Player) Play() error {
 		p.ended = false
 		t := p.queue[p.idx]
 		p.mu.Unlock()
-		p.playTrack(t)
+		p.playTrackLocked(t)
 		return nil
 	}
 	ref := p.audio
@@ -654,6 +669,8 @@ func (p *Player) Play() error {
 }
 
 func (p *Player) Pause() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	ref := p.audio
 	p.state.Playing = false
@@ -668,6 +685,8 @@ func (p *Player) Pause() error {
 }
 
 func (p *Player) Stop() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	ref := p.audio
 	p.state.Playing = false
@@ -682,6 +701,8 @@ func (p *Player) Stop() error {
 }
 
 func (p *Player) Next() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	if len(p.queue) == 0 {
 		p.mu.Unlock()
@@ -694,7 +715,7 @@ func (p *Player) Next() error {
 	if p.state.RepeatMode == player.RepeatModeOne {
 		t := p.queue[p.idx]
 		p.mu.Unlock()
-		p.playTrack(t)
+		p.playTrackLocked(t)
 		return nil
 	}
 
@@ -711,11 +732,13 @@ func (p *Player) Next() error {
 	p.idx = (p.idx + 1) % len(p.queue)
 	t := p.queue[p.idx]
 	p.mu.Unlock()
-	p.playTrack(t)
+	p.playTrackLocked(t)
 	return nil
 }
 
 func (p *Player) Previous() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	if len(p.queue) == 0 {
 		p.mu.Unlock()
@@ -723,7 +746,7 @@ func (p *Player) Previous() error {
 	}
 	if p.state.Position > 3*time.Second {
 		p.mu.Unlock()
-		_ = p.Seek(0)
+		p.seekLocked(0)
 		return nil
 	}
 	if p.idx <= 0 || p.idx >= len(p.queue) {
@@ -733,11 +756,18 @@ func (p *Player) Previous() error {
 	}
 	t := p.queue[p.idx]
 	p.mu.Unlock()
-	p.playTrack(t)
+	p.playTrackLocked(t)
 	return nil
 }
 
 func (p *Player) Seek(pos time.Duration) error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
+	p.seekLocked(pos)
+	return nil
+}
+
+func (p *Player) seekLocked(pos time.Duration) {
 	if pos < 0 {
 		pos = 0
 	}
@@ -762,7 +792,6 @@ func (p *Player) Seek(pos time.Duration) error {
 		ref.release()
 	}
 	p.broadcast(s)
-	return nil
 }
 
 func (p *Player) SetVolume(v float64) error {
@@ -770,6 +799,8 @@ func (p *Player) SetVolume(v float64) error {
 		v = 0
 	}
 	v = min(max(v, 0), 1)
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	ref := p.audio
 	p.state.Volume = v
@@ -794,6 +825,8 @@ func (p *Player) SetQueue(ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	newQueue := tracksForIDs(p.allTracks, ids)
 	if len(newQueue) == 0 {
@@ -804,11 +837,13 @@ func (p *Player) SetQueue(ids []string) error {
 	p.idx = 0
 	t := p.queue[0]
 	p.mu.Unlock()
-	p.playTrack(t)
+	p.playTrackLocked(t)
 	return nil
 }
 
 func (p *Player) SetPlaylist(_ string, startIdx int) error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	if len(p.queue) == 0 {
 		p.mu.Unlock()
@@ -821,11 +856,13 @@ func (p *Player) SetPlaylist(_ string, startIdx int) error {
 	}
 	t := p.queue[p.idx]
 	p.mu.Unlock()
-	p.playTrack(t)
+	p.playTrackLocked(t)
 	return nil
 }
 
 func (p *Player) AppendQueue(ids []string) error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	extra := tracksForIDs(p.allTracks, ids)
 	if len(extra) == 0 {
@@ -846,7 +883,7 @@ func (p *Player) AppendQueue(ids []string) error {
 	t := extra[0]
 	p.mu.Unlock()
 	if wasEmpty || wasEnded {
-		p.playTrack(t)
+		p.playTrackLocked(t)
 	}
 	return nil
 }
@@ -879,6 +916,8 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 		}
 		gains[i] = g
 	}
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	p.eqGains = gains
 	ref := p.audio
@@ -899,6 +938,8 @@ func (p *Player) SetEqualizer(bands []player.EQBand) error {
 }
 
 func (p *Player) RemoveFromQueue(idx int) error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	var old *audioRef
 	if idx >= 0 && idx < len(p.queue) {
@@ -949,6 +990,8 @@ func (p *Player) MoveInQueue(from, to int) error {
 }
 
 func (p *Player) ClearQueue() error {
+	p.cmdMu.Lock()
+	defer p.cmdMu.Unlock()
 	p.mu.Lock()
 	old := p.audio
 	p.audio = nil
@@ -966,6 +1009,7 @@ func (p *Player) ClearQueue() error {
 }
 
 func (p *Player) GetState() (*player.State, error) {
+	p.cmdMu.Lock()
 	p.mu.Lock()
 	ref := p.audio
 	p.mu.Unlock()
@@ -981,6 +1025,7 @@ func (p *Player) GetState() (*player.State, error) {
 	p.mu.RLock()
 	s := p.state
 	p.mu.RUnlock()
+	p.cmdMu.Unlock()
 	return &s, nil
 }
 
@@ -996,6 +1041,7 @@ func (p *Player) Close() error {
 		close(p.done)
 		p.bcast.Close()
 		p.audioWg.Wait()
+		p.cmdMu.Lock()
 		p.mu.Lock()
 		old := p.audio
 		p.audio = nil
@@ -1003,6 +1049,7 @@ func (p *Player) Close() error {
 		if old != nil {
 			old.release()
 		}
+		p.cmdMu.Unlock()
 	})
 	return nil
 }

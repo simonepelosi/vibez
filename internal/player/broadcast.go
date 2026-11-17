@@ -2,6 +2,7 @@ package player
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -66,13 +67,24 @@ func (b *Broadcast) Subscribe() <-chan State {
 	return sub.ch
 }
 
-// Send delivers s to every subscriber. It does nothing after Close.
+func cloneState(s State) State {
+	if s.Track != nil {
+		t := *s.Track
+		t.Genres = slices.Clone(t.Genres)
+		t.AudioVariants = slices.Clone(t.AudioVariants)
+		s.Track = &t
+	}
+	s.Logs = slices.Clone(s.Logs)
+	return s
+}
+
+// Send delivers an isolated copy of s to every subscriber. It does nothing after Close.
 func (b *Broadcast) Send(s State) {
 	b.mu.Lock()
-	subs := b.subs
+	subs := slices.Clone(b.subs)
 	b.mu.Unlock()
 	for _, sub := range subs {
-		sub.push(s)
+		sub.push(cloneState(s))
 	}
 }
 

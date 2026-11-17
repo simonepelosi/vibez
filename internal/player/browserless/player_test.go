@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1251,5 +1252,62 @@ func TestPollPositionParksWhenIdleOrPaused(t *testing.T) {
 	time.Sleep(320 * time.Millisecond)
 	if got := sink.posCalls.Load(); got != afterPause {
 		t.Fatalf("posCalls grew while paused: before=%d after=%d", afterPause, got)
+	}
+}
+
+func TestHybridRejectsSymlinkSwapBeforeSink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink test")
+	}
+	dir := t.TempDir()
+	trackPath := filepath.Join(dir, "01 - Track.flac")
+	writeTestFLAC(t, trackPath, time.Minute, map[string]string{
+		"TITLE":       "Track",
+		"ARTIST":      "Artist",
+		"ALBUM":       "Album",
+		"TRACKNUMBER": "1",
+	})
+
+	matcher, err := local.NewMatcher(dir)
+	if err != nil {
+		t.Fatalf("NewMatcher: %v", err)
+	}
+
+	// Swap indexed regular file with a symlink after indexing.
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "outside.flac")
+	writeTestFLAC(t, outside, time.Minute, map[string]string{
+		"TITLE":       "Track",
+		"ARTIST":      "Artist",
+		"ALBUM":       "Album",
+		"TRACKNUMBER": "1",
+	})
+	if err := os.Remove(trackPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, trackPath); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	sink := &hybridSpySink{
+		playCh: make(chan string, 1),
+		nextCh: make(chan string, 1),
+	}
+	p := &Player{
+		sink:   sink,
+		doneCh: make(chan struct{}),
+		queue: []provider.Track{
+			{ID: "1", Title: "Track", Artist: "Artist", Album: "Album", TrackNumber: 1},
+		},
+	}
+	p.SetLocalMatcher(matcher)
+	t.Cleanup(func() { _ = p.Close() })
+
+	p.playTrack(p.queue[0])
+
+	select {
+	case uri := <-sink.playCh:
+		t.Fatalf("unexpected PlayURI for symlinked hybrid match: %q", uri)
+	case <-time.After(150 * time.Millisecond):
 	}
 }
