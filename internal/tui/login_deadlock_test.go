@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -8,11 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// TestLoginCommand_DoesNotDeadlockEventLoop runs the real Bubble Tea event
-// loop with OnReauth wired the way cmd/browserless_flow.go wires it: the
-// callback calls prog.Send(SessionExpiredMsg{}). Program.Send writes to an
-// unbuffered channel that only the event loop reads, so if :login invokes
-// OnReauth synchronously from Update the send can never complete.
 func TestLoginCommand_DoesNotDeadlockEventLoop(t *testing.T) {
 	m := newModel(nil)
 	m.width, m.height = 100, 30
@@ -20,45 +16,40 @@ func TestLoginCommand_DoesNotDeadlockEventLoop(t *testing.T) {
 	m.cmdBuf = "login"
 
 	var prog *tea.Program
-	reauthReturned := make(chan struct{})
-	m.onReauth = func() {
-		prog.Send(SessionExpiredMsg{}) // mirrors startReauth in cmd/browserless_flow.go
-		close(reauthReturned)
+	type probeMsg struct{}
+	probeReceived := make(chan struct{})
+	m.onReauth = func() tea.Cmd {
+		return func() tea.Msg {
+			// A send from Update would block the very loop that receives it.
+			prog.Send(SessionExpiredMsg{})
+			return probeMsg{}
+		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	prog = tea.NewProgram(m,
+		tea.WithContext(ctx),
 		tea.WithInput(nil),
 		tea.WithOutput(io.Discard),
 		tea.WithoutSignals(),
 		tea.WithoutRenderer(),
+		tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if _, ok := msg.(probeMsg); ok {
+				close(probeReceived)
+				return tea.Quit()
+			}
+			return msg
+		}),
 	)
-	runDone := make(chan struct{})
-	go func() {
-		_, _ = prog.Run()
-		close(runDone)
-	}()
-	t.Cleanup(func() {
-		prog.Kill()
-		<-runDone
-	})
+	go prog.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 
-	prog.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
-
-	select {
-	case <-reauthReturned:
-	case <-time.After(3 * time.Second):
-		t.Fatal(":login deadlocked the TUI: OnReauth's prog.Send never returned because it was called from inside Update")
+	if _, err := prog.Run(); err != nil {
+		t.Fatalf("Bubble Tea exited before processing the login command: %v", err)
 	}
-
-	// The event loop must still be responsive afterwards.
-	probe := make(chan struct{})
-	go func() {
-		prog.Send(tea.KeyPressMsg{Code: tea.KeyEscape})
-		close(probe)
-	}()
 	select {
-	case <-probe:
-	case <-time.After(3 * time.Second):
-		t.Fatal("event loop unresponsive after :login")
+	case <-probeReceived:
+	default:
+		t.Fatal("event loop did not receive a message after :login's Program.Send")
 	}
 }

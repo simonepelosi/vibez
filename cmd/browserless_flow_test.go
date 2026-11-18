@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"context"
 	"testing"
 
 	"github.com/simone-vibes/vibez/internal/config"
@@ -47,6 +48,24 @@ func TestReauthCoordinator_ConcurrentInteractiveLoginIsNoOp(t *testing.T) {
 	_, uTok, ok := coord.commitLogin(gen0)
 	if !ok || uTok != "user-tok-1" || committedToken != "user-tok-1" {
 		t.Fatalf("commitLogin(gen0) = (%q, %v), committed=%q; want user-tok-1, true", uTok, ok, committedToken)
+	}
+}
+
+func TestReauthCoordinator_LogoutCancelsReauthBeforeCommandRuns(t *testing.T) {
+	coord := &reauthCoordinator{}
+	runCalled := false
+	work := coord.prepareReauth(true, func(context.Context, uint64) { runCalled = true })
+	if work == nil {
+		t.Fatal("interactive login did not return a command")
+	}
+
+	coord.logout()
+	_ = work()
+	if runCalled {
+		t.Fatal("an interactive login queued before :logout ran after :logout")
+	}
+	if !coord.loggedOut.Load() || coord.reauthInFlight.Load() {
+		t.Fatal("cancelled login did not leave the coordinator logged out and idle")
 	}
 }
 

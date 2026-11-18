@@ -5444,15 +5444,11 @@ func TestExecuteCommand_LoginLogoutAndIntroURL(t *testing.T) {
 	m.width = 100
 	m.height = 30
 	reauthCalled := false
-	m.onReauth = func() { reauthCalled = true }
-	loginCmd := m.executeCommand("login")
-	if loginCmd == nil {
-		t.Fatal(":login returned nil cmd, want a cmd that invokes onReauth off the event loop")
+	m.onReauth = func() tea.Cmd {
+		reauthCalled = true
+		return nil
 	}
-	if reauthCalled {
-		t.Fatal(":login invoked onReauth synchronously inside Update")
-	}
-	_ = loginCmd()
+	_ = m.executeCommand("login")
 	if !reauthCalled {
 		t.Fatal(":login did not invoke onReauth callback")
 	}
@@ -5466,6 +5462,26 @@ func TestExecuteCommand_LoginLogoutAndIntroURL(t *testing.T) {
 	introOut := ansi.Strip(m.renderIntro())
 	if !strings.Contains(introOut, "http://localhost:7777/login?state=abc123xyz") {
 		t.Fatalf("renderIntro truncated or omitted login URL:\n%s", introOut)
+	}
+}
+
+func TestLogin_RegistersBeforeSubsequentLogout(t *testing.T) {
+	m := newModel(nil)
+	registered := false
+	m.onReauth = func() tea.Cmd {
+		registered = true
+		return func() tea.Msg { return nil }
+	}
+	m.onLogout = func() { registered = false }
+
+	work := m.executeCommand("login")
+	if work == nil {
+		t.Fatal(":login did not return its queued work")
+	}
+	_ = m.executeCommand("logout")
+	_ = work() // Simulate Bubble Tea scheduling login work after logout.
+	if registered {
+		t.Fatal("a pending :login registered a new attempt after a subsequent :logout")
 	}
 }
 
@@ -5655,7 +5671,7 @@ func TestLogoutThenLogin_ReArmsStateChannelAndFencesPreLogoutMessages(t *testing
 	m := newModel(mp)
 	stateCh := make(chan player.State, 4)
 	m.stateCh = stateCh
-	m.onReauth = func() {}
+	m.onReauth = func() tea.Cmd { return nil }
 
 	trBefore := provider.Track{ID: "t1", Title: "Before"}
 	_, _ = m.Update(playerStateMsg{Track: &trBefore, Playing: true})
@@ -5703,7 +5719,7 @@ func TestLogoutThenLogin_ReArmsStateChannelAndFencesPreLogoutMessages(t *testing
 
 func TestSessionRestoredAndLogin_DoNotOrphanInFlightRadioRefill(t *testing.T) {
 	m := newModel(nil)
-	m.onReauth = func() {}
+	m.onReauth = func() tea.Cmd { return nil }
 	m.radio.enabled = true
 	m.radio.refilling = true
 	m.radio.generation = 7
