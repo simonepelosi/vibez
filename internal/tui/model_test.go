@@ -5445,7 +5445,14 @@ func TestExecuteCommand_LoginLogoutAndIntroURL(t *testing.T) {
 	m.height = 30
 	reauthCalled := false
 	m.onReauth = func() { reauthCalled = true }
-	_ = m.executeCommand("login")
+	loginCmd := m.executeCommand("login")
+	if loginCmd == nil {
+		t.Fatal(":login returned nil cmd, want a cmd that invokes onReauth off the event loop")
+	}
+	if reauthCalled {
+		t.Fatal(":login invoked onReauth synchronously inside Update")
+	}
+	_ = loginCmd()
 	if !reauthCalled {
 		t.Fatal(":login did not invoke onReauth callback")
 	}

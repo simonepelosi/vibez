@@ -1949,8 +1949,13 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			m.errMsg = "✓ Opening browser for Apple Music login…"
 			m.errExpiry = time.Now().Add(30 * time.Second)
 			m.appendLog("[auth] user requested :login")
-			m.onReauth()
-			return nil
+			// Run the callback off the event loop: it may call prog.Send,
+			// which blocks forever when invoked from inside Update.
+			onReauth := m.onReauth
+			return func() tea.Msg {
+				onReauth()
+				return nil
+			}
 		}
 		m.errMsg = "login is only available in Apple Music mode"
 		m.errExpiry = time.Now().Add(4 * time.Second)
