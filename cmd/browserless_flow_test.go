@@ -4,8 +4,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/simone-vibes/vibez/internal/auth"
 	"github.com/simone-vibes/vibez/internal/config"
 )
 
@@ -112,5 +114,115 @@ func TestReauthCoordinator_LogoutCancelsActiveReauthAndResetsOnSubsequentLogin(t
 	cfg.SetUserToken("fresh-tok")
 	if _, uTok, ok := coord.commitLogin(gen2); !ok || uTok != "fresh-tok" {
 		t.Fatalf("commitLogin(gen2) = (%q, %v), want (fresh-tok, true)", uTok, ok)
+	}
+}
+
+func TestReauthCoordinator_StartReauth_InteractiveSkipsSessionExpiredNotification(t *testing.T) {
+	setIsolatedConfigEnv(t)
+	cfg := &config.Config{AppleDeveloperToken: "dev-tok"}
+	if err := cfg.Save(""); err != nil {
+		t.Fatal(err)
+	}
+
+	coord := &reauthCoordinator{cfg: cfg}
+
+	// Interactive :login should not fire the background "session expired" banner.
+	expiredCount := 0
+	successTok := ""
+	work := coord.startReauth(true, reauthHooks{
+		onExpired: func() { expiredCount++ },
+		login: func(context.Context) error {
+			cfg.SetUserToken("interactive-tok")
+			return nil
+		},
+		onSuccess: func(_, usrTok string, _ uint64) { successTok = usrTok },
+		onErr:     func(err error) { t.Fatalf("unexpected onErr: %v", err) },
+	})
+	if work == nil {
+		t.Fatal("interactive startReauth returned nil cmd")
+	}
+	_ = work()
+	if expiredCount != 0 {
+		t.Fatalf("interactive login triggered onExpired %d times, want 0", expiredCount)
+	}
+	if successTok != "interactive-tok" {
+		t.Fatalf("interactive onSuccess token = %q, want interactive-tok", successTok)
+	}
+
+	// Background session-expiry re-auth must still emit the notice.
+	expiredCount = 0
+	successTok = ""
+	bgWork := coord.startReauth(false, reauthHooks{
+		onExpired: func() { expiredCount++ },
+		login: func(context.Context) error {
+			cfg.SetUserToken("bg-tok")
+			return nil
+		},
+		onSuccess: func(_, usrTok string, _ uint64) { successTok = usrTok },
+		onErr:     func(err error) { t.Fatalf("unexpected onErr: %v", err) },
+	})
+	if bgWork == nil {
+		t.Fatal("background startReauth returned nil cmd")
+	}
+	_ = bgWork()
+	if expiredCount != 1 {
+		t.Fatalf("background re-auth triggered onExpired %d times, want 1", expiredCount)
+	}
+	if successTok != "bg-tok" {
+		t.Fatalf("background onSuccess token = %q, want bg-tok", successTok)
+	}
+}
+
+func TestReauthCoordinator_StartReauth_CancelledOrLogoutSkipsNotification(t *testing.T) {
+	setIsolatedConfigEnv(t)
+	cfg := &config.Config{AppleDeveloperToken: "dev-tok"}
+	coord := &reauthCoordinator{cfg: cfg}
+
+	expiredCalled := false
+	loginCalled := false
+	errCalled := false
+	work := coord.startReauth(false, reauthHooks{
+		onExpired: func() { expiredCalled = true },
+		login: func(ctx context.Context) error {
+			loginCalled = true
+			return auth.ErrLoginCancelled
+		},
+		onErr: func(error) { errCalled = true },
+	})
+	if work == nil {
+		t.Fatal("startReauth returned nil cmd")
+	}
+
+	coord.logout()
+	_ = work()
+	if expiredCalled || loginCalled || errCalled {
+		t.Fatalf("cancelled re-auth invoked callbacks: expired=%v login=%v err=%v", expiredCalled, loginCalled, errCalled)
+	}
+
+	// Even if cancellation happens synchronously right before login returns ErrLoginCancelled,
+	// cancelled errors must not trigger onErr.
+	coord.loggedOut.Store(false)
+	errCalled = false
+	work2 := coord.startReauth(false, reauthHooks{
+		onExpired: func() { expiredCalled = true },
+		login: func(ctx context.Context) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			coord.logout()
+			return errors.Join(auth.ErrLoginCancelled, context.Canceled)
+		},
+		onSuccess: func(_, _ string, _ uint64) { t.Fatal("onSuccess called after logout") },
+		onErr:     func(err error) { errCalled = true },
+	})
+	if work2 == nil {
+		t.Fatal("second startReauth returned nil cmd")
+	}
+	_ = work2()
+	if !expiredCalled {
+		t.Fatal("expected background re-auth to notify onExpired before logout")
+	}
+	if errCalled {
+		t.Fatal("cancelled re-auth reported ErrLoginCancelled to onErr")
 	}
 }

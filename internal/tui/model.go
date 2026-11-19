@@ -1473,6 +1473,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
 	case SessionExpiredMsg:
+		if m.loggedOut {
+			break
+		}
 		m.errMsg = "Session expired — opening browser to re-authenticate…"
 		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persists until restored
 

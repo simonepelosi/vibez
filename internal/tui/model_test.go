@@ -5740,3 +5740,20 @@ func TestSessionRestoredAndLogin_DoNotOrphanInFlightRadioRefill(t *testing.T) {
 		t.Fatal("radio.refilling remained stuck true after SessionRestoredMsg/:login")
 	}
 }
+
+func TestLogout_IgnoresStaleSessionExpiredMsg(t *testing.T) {
+	m := newModel(nil)
+	_ = m.executeCommand("logout")
+	loggedOutBanner := m.errMsg
+	if loggedOutBanner == "" {
+		t.Fatal("expected logout banner errMsg")
+	}
+
+	_, _ = m.Update(SessionExpiredMsg{})
+	if m.errMsg != loggedOutBanner {
+		t.Fatalf("stale SessionExpiredMsg overwrote logout banner: got %q, want %q", m.errMsg, loggedOutBanner)
+	}
+	if !m.loggedOut {
+		t.Fatal("expected model to remain logged out")
+	}
+}
