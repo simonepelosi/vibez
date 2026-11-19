@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.3] — 2026-11-19
+
+### Fixed
+- **Interactive `:login` / `:auth` deadlock and banner ordering (#262, #267)** — registers interactive login attempts synchronously while moving browser auth and `Program.Send` off Bubble Tea's `Update` loop into a queued `tea.Cmd` (cancelling queued logins if `:logout` runs first; fixes #260, thanks to `@hiKareeem`), and suppresses the `"Session expired..."` banner on explicit `:login`/`:auth` and stale `SessionExpiredMsg` deliveries after `:logout`.
+
 ## [2.2.2] — 2026-11-17
 
 ### Security
@@ -877,7 +882,8 @@ First public pre-release of vibez.
 
 ---
 
-[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.2...HEAD
+[Unreleased]: https://github.com/simonepelosi/vibez/compare/v2.2.3...HEAD
+[2.2.3]: https://github.com/simonepelosi/vibez/compare/v2.2.2...v2.2.3
 [2.2.2]: https://github.com/simonepelosi/vibez/compare/v2.2.1...v2.2.2
 [2.2.1]: https://github.com/simonepelosi/vibez/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/simonepelosi/vibez/compare/v2.1.0...v2.2.0
