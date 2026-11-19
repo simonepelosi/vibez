@@ -113,6 +113,56 @@ func (c *reauthCoordinator) finishLogin(cancel context.CancelFunc) {
 	c.reauthInFlight.Store(false)
 }
 
+type reauthHooks struct {
+	onExpired func()
+	login     func(context.Context) error
+	onSuccess func(devTok, usrTok string, gen uint64)
+	onErr     func(error)
+}
+
+func (c *reauthCoordinator) prepareReauth(interactive bool, run func(context.Context, uint64)) tea.Cmd {
+	// Register before returning to the TUI so a subsequent :logout can cancel
+	// the attempt even if Bubble Tea hasn't started its command yet.
+	gen, ctx, cancel, ok := c.beginLogin(interactive, interactive)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		defer c.finishLogin(cancel)
+		if ctx.Err() == nil {
+			run(ctx, gen)
+		}
+		return nil
+	}
+}
+
+// startReauth schedules an auth attempt and suppresses the "session expired"
+// notice on interactive :login/:auth so it does not overwrite the user's
+// login banner or race ahead of a cancellation check.
+func (c *reauthCoordinator) startReauth(allowWhenLoggedOut bool, hooks reauthHooks) tea.Cmd {
+	return c.prepareReauth(allowWhenLoggedOut, func(reauthCtx context.Context, gen uint64) {
+		if reauthCtx.Err() != nil {
+			return
+		}
+		if !allowWhenLoggedOut && hooks.onExpired != nil {
+			hooks.onExpired()
+		}
+		if err := hooks.login(reauthCtx); err != nil {
+			if !errors.Is(err, auth.ErrLoginCancelled) && hooks.onErr != nil {
+				hooks.onErr(err)
+			}
+			return
+		}
+		devTok, usrTok, ok := c.commitLogin(gen)
+		if !ok {
+			return
+		}
+		if hooks.onSuccess != nil {
+			hooks.onSuccess(devTok, usrTok, gen)
+		}
+	})
+}
+
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	var (
 		prog         *tea.Program
@@ -124,51 +174,51 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	}
 
 	tuiAuthLog := func(msg string) {
-		if prog != nil {
+		if prog != nil && !authState.loggedOut.Load() {
 			prog.Send(tui.InitStatusMsg(msg))
 			prog.Send(tui.DebugLogMsg("[auth] " + msg))
 		}
 	}
 
-	startReauth := func(allowWhenLoggedOut bool) {
-		gen, reauthCtx, cancel, ok := authState.beginLogin(allowWhenLoggedOut, allowWhenLoggedOut)
-		if !ok {
-			return
-		}
-
-		if prog != nil {
-			prog.Send(tui.SessionExpiredMsg{})
-		}
-		go func() {
-			defer authState.finishLogin(cancel)
-			if err := auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog); err != nil {
-				if !errors.Is(err, auth.ErrLoginCancelled) && prog != nil {
+	startReauth := func(allowWhenLoggedOut bool) tea.Cmd {
+		return authState.startReauth(allowWhenLoggedOut, reauthHooks{
+			onExpired: func() {
+				// Program.Send must run off Bubble Tea's event loop.
+				if prog != nil {
+					prog.Send(tui.SessionExpiredMsg{})
+				}
+			},
+			login: func(reauthCtx context.Context) error {
+				return auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog)
+			},
+			onSuccess: func(devTok, usrTok string, gen uint64) {
+				if onStorefront != nil {
+					if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
+						onStorefront(sf)
+					}
+				}
+				if p := activePlayer.Load(); p != nil {
+					p.ResetSessionExpired()
+				}
+				if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
+					prog.Send(tui.SessionRestoredMsg{})
+				}
+			},
+			onErr: func(err error) {
+				if prog != nil {
 					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
 				}
-				return
-			}
-			devTok, usrTok, ok := authState.commitLogin(gen)
-			if !ok {
-				return
-			}
-			if onStorefront != nil {
-				if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
-					onStorefront(sf)
-				}
-			}
-			if p := activePlayer.Load(); p != nil {
-				p.ResetSessionExpired()
-			}
-			if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
-				prog.Send(tui.SessionRestoredMsg{})
-			}
-		}()
+			},
+		})
 	}
 
-	triggerReauth := func() { startReauth(false) }
-	triggerInteractiveLogin := func() { startReauth(true) }
+	triggerReauth := func() {
+		if work := startReauth(false); work != nil {
+			go work()
+		}
+	}
 
-	opts.OnReauth = triggerInteractiveLogin
+	opts.OnReauth = func() tea.Cmd { return startReauth(true) }
 	opts.OnLogout = authState.logout
 	prog = tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)

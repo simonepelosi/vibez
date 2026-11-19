@@ -458,7 +458,7 @@ type Model struct {
 	vibePlanner vibe.Planner
 
 	// Optional callbacks to trigger or tear down Apple Music login/re-auth.
-	onReauth func()
+	onReauth func() tea.Cmd
 	onLogout func()
 
 	// Auth generation and explicit-logout flag to fence stale async responses.
@@ -1488,6 +1488,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errExpiry = time.Now().Add(3 * time.Second)
 
 	case SessionExpiredMsg:
+		if m.loggedOut {
+			break
+		}
 		m.errMsg = "Session expired — opening browser to re-authenticate…"
 		m.errExpiry = time.Now().Add(365 * 24 * time.Hour) // persists until restored
 
@@ -1964,8 +1967,7 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			m.errMsg = "✓ Opening browser for Apple Music login…"
 			m.errExpiry = time.Now().Add(30 * time.Second)
 			m.appendLog("[auth] user requested :login")
-			m.onReauth()
-			return nil
+			return m.onReauth()
 		}
 		m.errMsg = "login is only available in Apple Music mode"
 		m.errExpiry = time.Now().Add(4 * time.Second)
