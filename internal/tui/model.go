@@ -254,9 +254,10 @@ type lyricsResultMsg struct {
 	authGen uint64
 }
 type feedResultMsg struct {
-	groups  []provider.RecommendationGroup
-	err     error
-	authGen uint64
+	groups   []provider.RecommendationGroup
+	warnings []string
+	err      error
+	authGen  uint64
 }
 type feedTracksMsg struct {
 	item     provider.RecommendationItem
@@ -954,6 +955,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case feedResultMsg:
 		if m.loggedOut || msg.authGen != m.authGen {
 			break
+		}
+		for _, w := range msg.warnings {
+			m.appendLog("[feed] " + provider.Clean(w))
 		}
 		if msg.err != nil {
 			m.feedP.m.SetError(msg.err)
@@ -2357,6 +2361,12 @@ func (m *Model) fetchFeedCmd() tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		if wp, ok := prov.(interface {
+			GetRecommendationsWithWarnings(context.Context) ([]provider.RecommendationGroup, []string, error)
+		}); ok {
+			groups, warnings, err := wp.GetRecommendationsWithWarnings(ctx)
+			return feedResultMsg{groups: groups, warnings: warnings, err: err, authGen: authGen}
+		}
 		groups, err := prov.GetRecommendations(ctx)
 		return feedResultMsg{groups: groups, err: err, authGen: authGen}
 	}

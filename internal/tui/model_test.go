@@ -5832,3 +5832,34 @@ func extractVibeResultMsgs(cmd tea.Cmd) []vibeResultMsg {
 		return nil
 	}
 }
+
+type warningFeedProvider struct {
+	mockProvider
+	groups   []provider.RecommendationGroup
+	warnings []string
+}
+
+func (w *warningFeedProvider) GetRecommendationsWithWarnings(_ context.Context) ([]provider.RecommendationGroup, []string, error) {
+	return w.groups, w.warnings, nil
+}
+
+func TestFetchFeedCmd_LogsRecommendationsWarnings(t *testing.T) {
+	prov := &warningFeedProvider{
+		groups:   []provider.RecommendationGroup{{Title: "Albums", Items: []provider.RecommendationItem{{ID: "1", Kind: "album", Title: "A"}}}},
+		warnings: []string{"personal station fallback: status 502\x1b[31m"},
+	}
+	m := New(testCfg(), prov, nil, Options{})
+	msg := m.fetchFeedCmd()()
+	_, _ = m.Update(msg)
+
+	found := false
+	for _, entry := range m.debugLog {
+		if strings.Contains(entry, "[feed] personal station fallback: status 502") && !strings.Contains(entry, "\x1b") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected sanitized [feed] warning in debugLog, got %v", m.debugLog)
+	}
+}

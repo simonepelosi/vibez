@@ -2189,8 +2189,6 @@ func recommendationItemFromContent(c recommendationContent) (provider.Recommenda
 			item.Subtitle = provider.Clean(c.Attributes.EditorialNotes.Short)
 		case strings.TrimSpace(c.Attributes.CuratorName) != "":
 			item.Subtitle = provider.Clean(c.Attributes.CuratorName)
-		default:
-			item.Subtitle = "Apple Music"
 		}
 	default:
 		return provider.RecommendationItem{}, false
@@ -2198,19 +2196,19 @@ func recommendationItemFromContent(c recommendationContent) (provider.Recommenda
 	return item, true
 }
 
-func (a *AppleProvider) fetchPersonalStation(ctx context.Context) []provider.RecommendationItem {
+func (a *AppleProvider) fetchPersonalStation(ctx context.Context) ([]provider.RecommendationItem, error) {
 	sf, err := a.storefront(ctx)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("storefront: %w", err)
 	}
 	endpoint := "/catalog/" + url.PathEscape(sf) + "/stations?filter[identity]=personal"
 	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	var resp stationsListResponse
 	if err := a.do(req, &resp); err != nil {
-		return nil
+		return nil, err
 	}
 	var items []provider.RecommendationItem
 	for _, c := range resp.Data {
@@ -2221,14 +2219,28 @@ func (a *AppleProvider) fetchPersonalStation(ctx context.Context) []provider.Rec
 			items = append(items, item)
 		}
 	}
-	return items
+	return items, nil
 }
 
 // GetRecommendations fetches personalised recommendation groups from
 // GET /v1/me/recommendations and returns them as provider-level structs.
 func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.RecommendationGroup, error) {
+	groups, _, err := a.getRecommendations(ctx)
+	return groups, err
+}
+
+// GetRecommendationsWithWarnings behaves like GetRecommendations and also
+// returns non-fatal fallback or pagination warnings for diagnostic logging.
+func (a *AppleProvider) GetRecommendationsWithWarnings(ctx context.Context) ([]provider.RecommendationGroup, []string, error) {
+	return a.getRecommendations(ctx)
+}
+
+func (a *AppleProvider) getRecommendations(ctx context.Context) ([]provider.RecommendationGroup, []string, error) {
 	const maxRecommendationPages = 3
-	var groups []provider.RecommendationGroup
+	var (
+		groups   []provider.RecommendationGroup
+		warnings []string
+	)
 	hasStations := false
 	endpoint := "/me/recommendations?limit=10"
 
@@ -2236,15 +2248,17 @@ func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.Reco
 		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
 		if err != nil {
 			if pageNum == 0 {
-				return nil, fmt.Errorf("GetRecommendations: %w", err)
+				return nil, nil, fmt.Errorf("GetRecommendations: %w", err)
 			}
+			warnings = append(warnings, fmt.Sprintf("recommendations page %d: %v", pageNum+1, err))
 			break
 		}
 		var resp recommendationsResponse
 		if err := a.do(req, &resp); err != nil {
 			if pageNum == 0 {
-				return nil, fmt.Errorf("GetRecommendations: %w", err)
+				return nil, nil, fmt.Errorf("GetRecommendations: %w", err)
 			}
+			warnings = append(warnings, fmt.Sprintf("recommendations page %d: %v", pageNum+1, err))
 			break
 		}
 
@@ -2270,21 +2284,26 @@ func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.Reco
 			groups = append(groups, provider.RecommendationGroup{Title: title, Items: items})
 		}
 
-		if resp.Next == "" || resp.Next == endpoint {
+		// Stop once stations have already appeared so accounts with "Stations for You"
+		// on page 1 avoid extra round-trips and oversized Feeds.
+		if hasStations || resp.Next == "" || resp.Next == endpoint {
 			break
 		}
 		endpoint = resp.Next
 	}
 
 	if !hasStations {
-		if personal := a.fetchPersonalStation(ctx); len(personal) > 0 {
+		personal, err := a.fetchPersonalStation(ctx)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("personal station fallback: %v", err))
+		} else if len(personal) > 0 {
 			groups = append(groups, provider.RecommendationGroup{
 				Title: "Stations for You",
 				Items: personal,
 			})
 		}
 	}
-	return groups, nil
+	return groups, warnings, nil
 }
 
 // GetCatalogTracks fetches track metadata for a list of catalog song IDs.

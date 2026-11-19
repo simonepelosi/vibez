@@ -1940,12 +1940,66 @@ func TestGetRecommendations_IncludesStationsAndSkipsLiveStreams(t *testing.T) {
 		t.Fatalf("station items = %d (%+v), want 2 (live stream skipped)", len(groups[1].Items), groups[1].Items)
 	}
 	personal := groups[1].Items[0]
-	if personal.Kind != "station" || personal.ID != "ra.u-personal-1" || personal.Subtitle != "Apple Music" {
+	if personal.Kind != "station" || personal.ID != "ra.u-personal-1" || personal.Subtitle != "" {
 		t.Fatalf("unexpected personal station item: %+v", personal)
 	}
 	discovery := groups[1].Items[1]
 	if discovery.Kind != "station" || discovery.ID != "ra.discovery-1" || strings.Contains(discovery.Subtitle, "\x1b") {
 		t.Fatalf("unexpected discovery station item: %+v", discovery)
+	}
+}
+
+func TestGetRecommendations_StopsPaginatingOnceStationsFound(t *testing.T) {
+	page2Requested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"next": "/v1/me/recommendations?offset=10&limit=10",
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Stations for You"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":   "ra.u-page1",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name":   "My Station",
+											"isLive": false,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/me/recommendations?offset=10&limit=10":
+			page2Requested = true
+			writeJSON(t, w, map[string]any{"data": []any{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, warnings, err := p.GetRecommendationsWithWarnings(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendationsWithWarnings: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if page2Requested {
+		t.Fatal("expected pagination to stop after page 1 already contained stations")
+	}
+	if len(groups) != 1 || groups[0].Items[0].ID != "ra.u-page1" {
+		t.Fatalf("groups = %+v, want page 1 station group", groups)
 	}
 }
 
@@ -2003,7 +2057,52 @@ func TestGetRecommendations_PersonalStationFallback(t *testing.T) {
 	if len(groups) != 2 || groups[1].Title != "Stations for You" {
 		t.Fatalf("groups = %+v, want personal station fallback group", groups)
 	}
-	if got := groups[1].Items[0]; got.Kind != "station" || got.ID != "ra.u-fallback" || got.Title != "My Station" {
+	if got := groups[1].Items[0]; got.Kind != "station" || got.ID != "ra.u-fallback" || got.Title != "My Station" || got.Subtitle != "" {
 		t.Fatalf("fallback item = %+v", got)
+	}
+}
+
+func TestGetRecommendationsWithWarnings_LogsPersonalStationFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Albums"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":         "alb-1",
+										"type":       "albums",
+										"attributes": map[string]any{"name": "Album", "artistName": "Artist"},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/catalog/us/stations?filter[identity]=personal":
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, warnings, err := p.GetRecommendationsWithWarnings(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendationsWithWarnings: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %+v, want 1 album group", groups)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "personal station fallback:") {
+		t.Fatalf("warnings = %v, want personal station fallback error warning", warnings)
 	}
 }
