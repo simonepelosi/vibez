@@ -113,6 +113,22 @@ func (c *reauthCoordinator) finishLogin(cancel context.CancelFunc) {
 	c.reauthInFlight.Store(false)
 }
 
+func (c *reauthCoordinator) prepareReauth(interactive bool, run func(context.Context, uint64)) tea.Cmd {
+	// Register before returning to the TUI so a subsequent :logout can cancel
+	// the attempt even if Bubble Tea hasn't started its command yet.
+	gen, ctx, cancel, ok := c.beginLogin(interactive, interactive)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		defer c.finishLogin(cancel)
+		if ctx.Err() == nil {
+			run(ctx, gen)
+		}
+		return nil
+	}
+}
+
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	var (
 		prog         *tea.Program
@@ -130,17 +146,15 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 		}
 	}
 
-	startReauth := func(allowWhenLoggedOut bool) {
-		gen, reauthCtx, cancel, ok := authState.beginLogin(allowWhenLoggedOut, allowWhenLoggedOut)
-		if !ok {
-			return
-		}
-
-		if prog != nil {
-			prog.Send(tui.SessionExpiredMsg{})
-		}
-		go func() {
-			defer authState.finishLogin(cancel)
+	startReauth := func(allowWhenLoggedOut bool) tea.Cmd {
+		return authState.prepareReauth(allowWhenLoggedOut, func(reauthCtx context.Context, gen uint64) {
+			// Program.Send must run off Bubble Tea's event loop.
+			if prog != nil {
+				prog.Send(tui.SessionExpiredMsg{})
+			}
+			if reauthCtx.Err() != nil {
+				return
+			}
 			if err := auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog); err != nil {
 				if !errors.Is(err, auth.ErrLoginCancelled) && prog != nil {
 					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
@@ -162,13 +176,16 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
 				prog.Send(tui.SessionRestoredMsg{})
 			}
-		}()
+		})
 	}
 
-	triggerReauth := func() { startReauth(false) }
-	triggerInteractiveLogin := func() { startReauth(true) }
+	triggerReauth := func() {
+		if work := startReauth(false); work != nil {
+			go work()
+		}
+	}
 
-	opts.OnReauth = triggerInteractiveLogin
+	opts.OnReauth = func() tea.Cmd { return startReauth(true) }
 	opts.OnLogout = authState.logout
 	prog = tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)

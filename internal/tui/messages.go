@@ -1,6 +1,7 @@
 package tui
 
 import (
+	tea "charm.land/bubbletea/v2"
 	"github.com/simone-vibes/vibez/internal/player"
 	"github.com/simone-vibes/vibez/internal/provider"
 )
@@ -24,8 +25,9 @@ type Options struct {
 	ScanNotice string
 	// InitialLogs pre-populates the debug log on launch (e.g. broker token fetch logs).
 	InitialLogs []string
-	// OnReauth optionally triggers an asynchronous Apple Music login/re-auth flow.
-	OnReauth func()
+	// OnReauth registers an Apple Music login attempt on the event loop and
+	// returns a command for the blocking work, or nil if no attempt was started.
+	OnReauth func() tea.Cmd
 	// OnLogout optionally tears down any in-flight re-auth and suppresses automatic re-auth after :logout.
 	OnLogout func()
 }
