@@ -41,11 +41,18 @@ type audioSink interface {
 	Destroy()
 }
 
+const (
+	staleStreamAge      = 15 * time.Minute
+	autoRecoverCooldown = 30 * time.Second
+)
+
 type preparedNext struct {
-	idx       int
-	track     provider.Track
-	streamURL string
-	duration  time.Duration
+	idx        int
+	track      provider.Track
+	streamURL  string
+	duration   time.Duration
+	preparedAt time.Time
+	failedErr  string
 }
 
 // Player implements player.Player without a web browser, using an in-process
@@ -81,8 +88,14 @@ type Player struct {
 	stagedPreps        map[string]*preparedNext // URIs handed to sink since current track started
 	curStream          string                   // stream ID of the track sink is playing
 	curStreamURL       string                   // base loopback stream URL for current track
+	curStreamAt        time.Time                // timestamp when curStream was prepared/committed
 	seekOffset         time.Duration            // start offset of the current segment after Seek
 	streamErr          string                   // specific cause from onFail for curStream
+	resumeTrackID      string                   // track ID eligible for timestamp-preserving resume on Play
+	resumePos          time.Duration            // saved playback position across mid-stream errors
+	autoRecoveredTrack string                   // track ID of last automatic mid-stream recovery
+	autoRecoveredAt    time.Time                // timestamp of last automatic mid-stream recovery
+	nowFn              func() time.Time         // optional clock override for tests
 	ended              bool                     // queue played through to the end
 	sessionExpiredOnce sync.Once
 	doneCh             chan struct{}
@@ -176,51 +189,9 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 		},
 	}
 
-	p.sink.OnStreamStart(func(uri string) {
-		p.handleStreamStart(uri)
-	})
-
-	p.sink.OnEOS(func() {
-		p.mu.RLock()
-		closed := p.closed
-		playing := p.state.Playing
-		seekOff := p.seekOffset
-		var dur time.Duration
-		if p.state.Track != nil {
-			dur = p.state.Track.Duration
-		}
-		p.mu.RUnlock()
-
-		if closed || !playing {
-			return
-		}
-		sinkPos, ok := p.sinkPosition()
-		if !ok {
-			return
-		}
-		pos := seekOff + sinkPos
-		if dur > 5*time.Second && pos < dur-5*time.Second {
-			// Ignore premature EOS
-			return
-		}
-		_ = p.Next()
-	})
-	p.streamer.onFail = func(streamID string, err error) {
-		p.mu.Lock()
-		if p.closed || streamID != p.curStream {
-			p.mu.Unlock()
-			return
-		}
-		p.streamErr = err.Error()
-		p.curStreamURL = ""
-		p.state.Playing = false
-		p.state.Loading = false
-		s := p.state
-		s.Error = p.streamErr
-		p.mu.Unlock()
-		p.signalPoll()
-		p.bcast.SendLog(s, "[stream] "+err.Error())
-	}
+	p.sink.OnStreamStart(p.handleStreamStart)
+	p.sink.OnEOS(p.handleSinkEOS)
+	p.streamer.onFail = p.handleStreamFail
 	p.streamer.onLog = func(msg string) {
 		p.mu.RLock()
 		closed := p.closed
@@ -230,30 +201,190 @@ func New(cfg *config.Config, prov *apple.AppleProvider, progress ...func(string)
 			p.bcast.SendLog(s, msg)
 		}
 	}
-
-	p.sink.OnError(func(e error) {
-		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
-			return
-		}
-		p.curStreamURL = ""
-		p.state.Playing = false
-		p.state.Loading = false
-		s := p.state
-		if p.streamErr != "" {
-			s.Error = p.streamErr
-		} else {
-			s.Error = e.Error()
-		}
-		p.mu.Unlock()
-		p.signalPoll()
-		p.bcast.SendLog(s, "[sink] "+s.Error)
-	})
+	p.sink.OnError(p.handleSinkError)
 
 	p.bgWg.Go(p.pollPosition)
 
 	return p, nil
+}
+
+func (p *Player) now() time.Time {
+	if p.nowFn != nil {
+		return p.nowFn()
+	}
+	return time.Now()
+}
+
+func (p *Player) isPreparedFreshLocked(prep *preparedNext) bool {
+	return prep != nil && prep.failedErr == "" && (prep.preparedAt.IsZero() || p.now().Sub(prep.preparedAt) <= staleStreamAge)
+}
+
+func (p *Player) isCurStreamStaleLocked() bool {
+	return p.curStreamURL != "" && !p.curStreamAt.IsZero() && p.now().Sub(p.curStreamAt) > staleStreamAge
+}
+
+func (p *Player) clearResumeLocked() {
+	p.resumeTrackID = ""
+	p.resumePos = 0
+}
+
+func (p *Player) handleSinkEOS() {
+	p.mu.RLock()
+	closed := p.closed
+	playing := p.state.Playing
+	loading := p.state.Loading
+	hasURL := p.curStreamURL != ""
+	streamErr := p.streamErr
+	seekOff := p.seekOffset
+	var dur time.Duration
+	if p.state.Track != nil {
+		dur = p.state.Track.Duration
+	}
+	p.mu.RUnlock()
+
+	if closed || !playing || loading || !hasURL || streamErr != "" {
+		return
+	}
+	sinkPos, ok := p.sinkPosition()
+	if !ok {
+		return
+	}
+	pos := seekOff + sinkPos
+	if dur > 5*time.Second && pos < dur-5*time.Second {
+		// Ignore premature EOS
+		return
+	}
+	_ = p.Next()
+}
+
+func (p *Player) handleStreamFail(streamID string, err error) {
+	if err == nil {
+		return
+	}
+	errMsg := err.Error()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	if streamID != p.curStream {
+		clearNext := false
+		matchedStaged := false
+		if p.nextPrep != nil && streamIDFromURL(p.nextPrep.streamURL) == streamID {
+			p.nextPrep.failedErr = errMsg
+			p.nextPrep = nil
+			clearNext = true
+			matchedStaged = true
+		}
+		for _, prep := range p.stagedPreps {
+			if prep != nil && streamIDFromURL(prep.streamURL) == streamID {
+				prep.failedErr = errMsg
+				matchedStaged = true
+			}
+		}
+		s := p.state
+		shouldReprefetch := matchedStaged && p.state.Playing && !p.state.Loading
+		p.mu.Unlock()
+		if clearNext {
+			p.withSink(func(sk audioSink) { sk.SetNextURI("") })
+		}
+		if matchedStaged {
+			p.bcast.SendLog(s, "[stream] prefetched track failed: "+errMsg)
+			if shouldReprefetch {
+				p.scheduleNextPrefetch()
+			}
+		}
+		return
+	}
+	p.streamErr = errMsg
+	p.mu.Unlock()
+	p.handleActiveStreamFailure(errMsg, "[stream] ")
+}
+
+func (p *Player) handleSinkError(e error) {
+	if e == nil {
+		return
+	}
+	p.handleActiveStreamFailure(e.Error(), "[sink] ")
+}
+
+func (p *Player) handleActiveStreamFailure(errMsg, logPrefix string) {
+	sinkPos, hasSinkPos := p.sinkPosition()
+
+	p.mu.Lock()
+	if p.closed || p.state.Loading || p.ended || (p.curStreamURL == "" && !p.state.Playing) {
+		p.mu.Unlock()
+		return
+	}
+
+	var track provider.Track
+	hasTrack := false
+	if p.state.Track != nil {
+		track = *p.state.Track
+		hasTrack = true
+	} else if p.idx >= 0 && p.idx < len(p.queue) {
+		track = p.queue[p.idx]
+		hasTrack = true
+	}
+
+	savedPos := p.state.Position
+	if hasSinkPos && sinkPos > 0 {
+		if livePos := p.seekOffset + sinkPos; livePos > savedPos {
+			savedPos = livePos
+		}
+	}
+	dur := track.Duration
+	if dur > 0 && savedPos > dur {
+		savedPos = dur
+	}
+
+	errText := errMsg
+	if p.streamErr != "" {
+		errText = p.streamErr
+	}
+	wasPlaying := p.state.Playing
+	now := p.now()
+	canRecover := wasPlaying && hasTrack && p.streamer != nil &&
+		(dur == 0 || savedPos < dur-2*time.Second) &&
+		(p.autoRecoveredTrack != track.ID || now.Sub(p.autoRecoveredAt) > autoRecoverCooldown)
+
+	p.curStream = ""
+	p.curStreamURL = ""
+	p.curStreamAt = time.Time{}
+	p.streamErr = ""
+	p.cancelPrefetchLocked()
+	p.stagedPreps = nil
+	p.state.Position = savedPos
+
+	if canRecover {
+		p.autoRecoveredTrack = track.ID
+		p.autoRecoveredAt = now
+		p.clearResumeLocked()
+		p.state.Playing = false
+		p.state.Loading = true
+		s := p.state
+		p.mu.Unlock()
+
+		p.withSink(func(sk audioSink) { sk.Stop() })
+		p.signalPoll()
+		p.bcast.SendLog(s, fmt.Sprintf("[recover] resuming %s at %s: %s", provider.Clean(track.ID), savedPos.Round(time.Second), provider.Clean(errText)))
+		p.playTrackAt(track, savedPos)
+		return
+	}
+
+	p.state.Playing = false
+	p.state.Loading = false
+	if hasTrack && savedPos > 0 && (dur == 0 || savedPos < dur-2*time.Second) {
+		p.resumeTrackID = track.ID
+		p.resumePos = savedPos
+	}
+	s := p.state
+	s.Error = errText
+	p.mu.Unlock()
+
+	p.withSink(func(sk audioSink) { sk.Stop() })
+	p.signalPoll()
+	p.bcast.SendLog(s, logPrefix+errText)
 }
 
 func (p *Player) signalPoll() {
@@ -396,6 +527,30 @@ func (p *Player) handleStreamStart(uri string) {
 	p.cancelPrefetchLocked()
 	p.stagedPreps = nil
 
+	if prep.failedErr != "" || !p.isPreparedFreshLocked(prep) {
+		reason := "stale"
+		if prep.failedErr != "" {
+			reason = prep.failedErr
+		}
+		p.curStream = ""
+		p.curStreamURL = ""
+		p.curStreamAt = time.Time{}
+		p.clearResumeLocked()
+		p.state.Playing = false
+		p.state.Loading = true
+		track := prep.track
+		idx := prep.idx
+		if idx >= 0 && idx < len(p.queue) && p.queue[idx].ID == track.ID {
+			p.idx = idx
+		}
+		s := p.state
+		p.mu.Unlock()
+		p.withSink(func(sk audioSink) { sk.Stop() })
+		p.bcast.SendLog(s, "[recover] restarting prefetched track: "+provider.Clean(reason))
+		p.playTrack(track)
+		return
+	}
+
 	idx := prep.idx
 	if idx < 0 || idx >= len(p.queue) || p.queue[idx].ID != prep.track.ID {
 		found := -1
@@ -425,10 +580,18 @@ func (p *Player) handleStreamStart(uri string) {
 	p.state.Position = 0
 	p.state.Error = ""
 	p.streamErr = ""
+	p.clearResumeLocked()
+	p.autoRecoveredTrack = ""
+	p.autoRecoveredAt = time.Time{}
 	p.seekOffset = 0
 	p.ended = false
 	p.curStream = streamIDFromURL(prep.streamURL)
 	p.curStreamURL = prep.streamURL
+	if prep.preparedAt.IsZero() {
+		p.curStreamAt = p.now()
+	} else {
+		p.curStreamAt = prep.preparedAt
+	}
 	s := p.state
 	p.mu.Unlock()
 	p.signalPoll()
@@ -513,10 +676,11 @@ func (p *Player) scheduleNextPrefetch() {
 						p.queue[nextIdx].LocalFormat = match.Format
 					}
 					prep := &preparedNext{
-						idx:       nextIdx,
-						track:     nextTrack,
-						streamURL: localURI,
-						duration:  nextTrack.Duration,
+						idx:        nextIdx,
+						track:      nextTrack,
+						streamURL:  localURI,
+						duration:   nextTrack.Duration,
+						preparedAt: p.now(),
 					}
 					p.nextPrep = prep
 					if p.stagedPreps == nil {
@@ -542,10 +706,11 @@ func (p *Player) scheduleNextPrefetch() {
 			return
 		}
 		prep := &preparedNext{
-			idx:       nextIdx,
-			track:     nextTrack,
-			streamURL: streamURL,
-			duration:  duration,
+			idx:        nextIdx,
+			track:      nextTrack,
+			streamURL:  streamURL,
+			duration:   duration,
+			preparedAt: p.now(),
 		}
 		p.nextPrep = prep
 		if p.stagedPreps == nil {
@@ -567,6 +732,13 @@ func (p *Player) trackLoadTimeout() time.Duration {
 }
 
 func (p *Player) playTrack(t provider.Track) {
+	p.playTrackAt(t, 0)
+}
+
+func (p *Player) playTrackAt(t provider.Track, resumePos time.Duration) {
+	if resumePos < 0 || (t.Duration > 0 && resumePos >= t.Duration-2*time.Second) {
+		resumePos = 0
+	}
 	p.mu.Lock()
 	if p.playCtx != nil {
 		p.playCtx()
@@ -585,15 +757,22 @@ func (p *Player) playTrack(t provider.Track) {
 	ctx, cancel := context.WithTimeout(context.Background(), loadTimeout)
 	p.playCtx = cancel
 
+	p.clearResumeLocked()
+	if resumePos == 0 && p.autoRecoveredTrack != t.ID {
+		p.autoRecoveredTrack = ""
+		p.autoRecoveredAt = time.Time{}
+	}
 	p.state.Track = &t
 	p.state.Loading = true
 	p.state.Playing = false
-	p.state.Position = 0
+	p.state.Position = resumePos
 	p.state.Error = ""
 	p.streamErr = ""
-	p.seekOffset = 0
+	p.seekOffset = resumePos
 	p.ended = false
+	p.curStream = ""
 	p.curStreamURL = ""
+	p.curStreamAt = time.Time{}
 	s := p.state
 	prefer256k := p.state.Bitrate >= 256
 	streamer := p.streamer
@@ -683,17 +862,29 @@ func (p *Player) playTrack(t provider.Track) {
 					}
 					p.curStream = ""
 					p.curStreamURL = localURI
+					p.curStreamAt = p.now()
 					p.streamErr = ""
 					p.seekOffset = 0
 					p.ended = false
 					p.state.Loading = false
 					p.state.Playing = true
+					shouldSeek := resumePos > 0 && (t.Duration == 0 || resumePos < t.Duration-2*time.Second)
+					if shouldSeek {
+						p.state.Position = resumePos
+					} else {
+						p.state.Position = 0
+					}
 					tCopy := t
 					p.state.Track = &tCopy
 					s = p.state
 					p.mu.Unlock()
 					p.signalPoll()
-					p.withSink(func(sk audioSink) { sk.PlayURI(localURI) })
+					p.withSink(func(sk audioSink) {
+						sk.PlayURI(localURI)
+						if shouldSeek {
+							sk.Seek(resumePos)
+						}
+					})
 					p.logHybridTrack(s, tCopy)
 					p.scheduleNextPrefetch()
 					return
@@ -721,6 +912,11 @@ func (p *Player) playTrack(t provider.Track) {
 				}
 				p.state.Loading = false
 				p.state.Playing = false
+				if resumePos > 0 && (t.Duration == 0 || resumePos < t.Duration-2*time.Second) {
+					p.resumeTrackID = t.ID
+					p.resumePos = resumePos
+					p.state.Position = resumePos
+				}
 				s := p.state
 				cb := p.OnSessionExpired
 				p.mu.Unlock()
@@ -760,6 +956,11 @@ func (p *Player) playTrack(t provider.Track) {
 				return
 			}
 			p.state.Loading = false
+			if resumePos > 0 && (t.Duration == 0 || resumePos < t.Duration-2*time.Second) {
+				p.resumeTrackID = t.ID
+				p.resumePos = resumePos
+				p.state.Position = resumePos
+			}
 			s := p.state
 			s.Error = err.Error()
 			p.mu.Unlock()
@@ -768,15 +969,28 @@ func (p *Player) playTrack(t provider.Track) {
 			return
 		}
 
+		streamID := streamIDFromURL(streamURL)
+		playURI := streamURL
+		seekOff := time.Duration(0)
+		if resumePos > 0 && (duration == 0 || resumePos < duration-2*time.Second) {
+			if startSeg, segOffset, ok := streamer.SeekTarget(streamID, resumePos); ok && startSeg > 0 {
+				seekOff = segOffset
+				playURI = fmt.Sprintf("%s?start_seg=%d", streamURL, startSeg)
+			}
+		}
+
 		p.mu.Lock()
 		if p.closed || p.playGen != gen || errors.Is(ctx.Err(), context.Canceled) {
 			p.mu.Unlock()
 			return
 		}
-		p.curStream = streamIDFromURL(streamURL)
+		p.curStream = streamID
 		p.curStreamURL = streamURL
+		p.curStreamAt = p.now()
 		p.streamErr = ""
-		p.seekOffset = 0
+		p.clearResumeLocked()
+		p.seekOffset = seekOff
+		p.state.Position = seekOff
 		p.ended = false
 		p.state.Loading = false
 		p.state.Playing = true
@@ -788,7 +1002,7 @@ func (p *Player) playTrack(t provider.Track) {
 		s = p.state
 		p.mu.Unlock()
 		p.signalPoll()
-		p.withSink(func(sk audioSink) { sk.PlayURI(streamURL) })
+		p.withSink(func(sk audioSink) { sk.PlayURI(playURI) })
 		p.bcast.Send(s)
 		p.scheduleNextPrefetch()
 	}()
@@ -797,6 +1011,8 @@ func (p *Player) playTrack(t provider.Track) {
 // ── player.Player Implementation ───────────────────────────────────────────
 
 func (p *Player) Play() error {
+	sinkPos, hasSinkPos := p.sinkPosition()
+
 	p.mu.Lock()
 	if p.closed || p.state.Loading {
 		p.mu.Unlock()
@@ -806,11 +1022,50 @@ func (p *Player) Play() error {
 		if p.ended || p.idx < 0 || p.idx >= len(p.queue) {
 			p.idx = 0
 		}
-		p.ended = false
 		t := p.queue[p.idx]
+		resumePos := time.Duration(0)
+		if !p.ended && p.resumeTrackID == t.ID && p.resumePos > 0 {
+			resumePos = p.resumePos
+		}
+		p.ended = false
+		p.clearResumeLocked()
 		p.mu.Unlock()
-		p.playTrack(t)
+		p.playTrackAt(t, resumePos)
 		return nil
+	}
+	if p.isCurStreamStaleLocked() {
+		var track provider.Track
+		hasTrack := false
+		if p.state.Track != nil {
+			track = *p.state.Track
+			hasTrack = true
+		} else if p.idx >= 0 && p.idx < len(p.queue) {
+			track = p.queue[p.idx]
+			hasTrack = true
+		}
+		if hasTrack {
+			savedPos := p.state.Position
+			if hasSinkPos && sinkPos > 0 {
+				if livePos := p.seekOffset + sinkPos; livePos > savedPos {
+					savedPos = livePos
+				}
+			}
+			p.curStream = ""
+			p.curStreamURL = ""
+			p.curStreamAt = time.Time{}
+			p.cancelPrefetchLocked()
+			p.stagedPreps = nil
+			p.mu.Unlock()
+			p.withSink(func(sk audioSink) { sk.Stop() })
+			p.playTrackAt(track, savedPos)
+			return nil
+		}
+	}
+	reprefetch := false
+	if p.nextPrep != nil && !p.isPreparedFreshLocked(p.nextPrep) {
+		p.cancelPrefetchLocked()
+		p.stagedPreps = nil
+		reprefetch = true
 	}
 	p.state.Playing = true
 	s := p.state
@@ -818,6 +1073,9 @@ func (p *Player) Play() error {
 	p.signalPoll()
 	p.withSink(func(sk audioSink) { sk.Play() })
 	p.bcast.Send(s)
+	if reprefetch {
+		p.scheduleNextPrefetch()
+	}
 	return nil
 }
 
@@ -834,6 +1092,10 @@ func (p *Player) Pause() error {
 			p.playCtx = nil
 		}
 		p.state.Loading = false
+		if p.curStreamURL == "" && p.state.Track != nil && p.state.Position > 0 {
+			p.resumeTrackID = p.state.Track.ID
+			p.resumePos = p.state.Position
+		}
 	}
 	p.state.Playing = false
 	s := p.state
@@ -857,7 +1119,12 @@ func (p *Player) Stop() error {
 	}
 	p.cancelPrefetchLocked()
 	p.stagedPreps = nil
+	p.curStream = ""
 	p.curStreamURL = ""
+	p.curStreamAt = time.Time{}
+	p.clearResumeLocked()
+	p.autoRecoveredTrack = ""
+	p.autoRecoveredAt = time.Time{}
 	p.ended = false
 	p.state.Playing = false
 	p.state.Loading = false
@@ -900,6 +1167,10 @@ func (p *Player) Next() error {
 		p.ended = true
 		p.curStream = ""
 		p.curStreamURL = ""
+		p.curStreamAt = time.Time{}
+		p.clearResumeLocked()
+		p.autoRecoveredTrack = ""
+		p.autoRecoveredAt = time.Time{}
 		p.seekOffset = 0
 		p.state.Loading = false
 		p.state.Playing = false
@@ -917,7 +1188,7 @@ func (p *Player) Next() error {
 	p.idx = nextIdx
 	t := p.queue[p.idx]
 	prep := p.nextPrep
-	if prep != nil && prep.idx == nextIdx && prep.track.ID == t.ID && prep.streamURL != "" {
+	if prep != nil && prep.idx == nextIdx && prep.track.ID == t.ID && prep.streamURL != "" && p.isPreparedFreshLocked(prep) {
 		p.playGen++
 		if p.playCtx != nil {
 			p.playCtx()
@@ -935,10 +1206,18 @@ func (p *Player) Next() error {
 		p.state.Position = 0
 		p.state.Error = ""
 		p.streamErr = ""
+		p.clearResumeLocked()
+		p.autoRecoveredTrack = ""
+		p.autoRecoveredAt = time.Time{}
 		p.seekOffset = 0
 		p.ended = false
 		p.curStream = streamIDFromURL(prep.streamURL)
 		p.curStreamURL = prep.streamURL
+		if prep.preparedAt.IsZero() {
+			p.curStreamAt = p.now()
+		} else {
+			p.curStreamAt = prep.preparedAt
+		}
 		s := p.state
 		p.mu.Unlock()
 		p.signalPoll()
@@ -947,6 +1226,9 @@ func (p *Player) Next() error {
 		p.scheduleNextPrefetch()
 		return nil
 	}
+	p.clearResumeLocked()
+	p.autoRecoveredTrack = ""
+	p.autoRecoveredAt = time.Time{}
 	p.mu.Unlock()
 	p.playTrack(t)
 	return nil
@@ -1024,6 +1306,7 @@ func (p *Player) Seek(position time.Duration) error {
 	}
 	p.seekOffset = segOffset
 	p.ended = false
+	p.clearResumeLocked()
 	p.state.Position = segOffset
 	s := p.state
 	p.mu.Unlock()
@@ -1254,6 +1537,10 @@ func (p *Player) RemoveFromQueue(idx int) error {
 			}
 			p.curStream = ""
 			p.curStreamURL = ""
+			p.curStreamAt = time.Time{}
+			p.clearResumeLocked()
+			p.autoRecoveredTrack = ""
+			p.autoRecoveredAt = time.Time{}
 			p.seekOffset = 0
 			p.state.Track = nil
 			p.state.Playing = false
@@ -1351,6 +1638,10 @@ func (p *Player) ClearQueue() error {
 	p.idx = 0
 	p.curStream = ""
 	p.curStreamURL = ""
+	p.curStreamAt = time.Time{}
+	p.clearResumeLocked()
+	p.autoRecoveredTrack = ""
+	p.autoRecoveredAt = time.Time{}
 	p.seekOffset = 0
 	p.ended = false
 	p.state.Track = nil

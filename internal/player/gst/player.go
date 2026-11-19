@@ -523,7 +523,7 @@ static int vibez_connect_http_stream(const char* uri) {
     if (fd < 0) return -1;
 
     struct timeval tv;
-    tv.tv_sec = 10;
+    tv.tv_sec = 30;
     tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
@@ -577,6 +577,13 @@ static int vibez_connect_http_stream(const char* uri) {
                 close(fd);
                 return -1;
             }
+            // Upstream HLS retries / stall detection run up to ~30s in Go, so
+            // give fdsrc more headroom than that to avoid blind -5 timeouts
+            // before StreamServer reports the underlying failure.
+            struct timeval stream_tv;
+            stream_tv.tv_sec = 45;
+            stream_tv.tv_usec = 0;
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &stream_tv, sizeof(stream_tv));
             return fd;
         }
     }

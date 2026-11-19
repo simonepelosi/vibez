@@ -5,6 +5,7 @@ package browserless
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -1309,5 +1310,389 @@ func TestHybridRejectsSymlinkSwapBeforeSink(t *testing.T) {
 	case uri := <-sink.playCh:
 		t.Fatalf("unexpected PlayURI for symlinked hybrid match: %q", uri)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+type recoverySpySink struct {
+	noopSink
+	mu       sync.Mutex
+	pos      time.Duration
+	playURIs []string
+	nextURIs []string
+	plays    int
+	stops    int
+	playCh   chan string
+	stopCh   chan struct{}
+}
+
+func newRecoverySpySink() *recoverySpySink {
+	return &recoverySpySink{
+		playCh: make(chan string, 8),
+		stopCh: make(chan struct{}, 8),
+	}
+}
+
+func (s *recoverySpySink) PlayURI(uri string) {
+	s.mu.Lock()
+	s.playURIs = append(s.playURIs, uri)
+	s.mu.Unlock()
+	select {
+	case s.playCh <- uri:
+	default:
+	}
+}
+
+func (s *recoverySpySink) SetNextURI(uri string) {
+	s.mu.Lock()
+	s.nextURIs = append(s.nextURIs, uri)
+	s.mu.Unlock()
+}
+
+func (s *recoverySpySink) Play() {
+	s.mu.Lock()
+	s.plays++
+	s.mu.Unlock()
+}
+
+func (s *recoverySpySink) Stop() {
+	s.mu.Lock()
+	s.stops++
+	s.mu.Unlock()
+	select {
+	case s.stopCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *recoverySpySink) Position() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pos
+}
+
+func newRawMP3StreamTestServer(t *testing.T, totalSize int) *httptest.Server {
+	t.Helper()
+	payload := make([]byte, totalSize)
+	copy(payload, mp3Frame())
+
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"songList":[{"assets":[{"flavor":"128:ctrp256","URL":"` + srvURL + `/upload.mp3"}]}]}`))
+			return
+		}
+		http.ServeContent(w, r, "upload.mp3", time.Time{}, bytes.NewReader(payload))
+	}))
+	srvURL = srv.URL
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestHandleSinkError_StopsSinkClearsPrefetchAndPreservesResumePos(t *testing.T) {
+	sink := newRecoverySpySink()
+	sink.pos = 75 * time.Second
+	nextURL := "http://127.0.0.1:1234/stream/i.next/tok.aac"
+	p := &Player{
+		sink: sink,
+		queue: []provider.Track{
+			{ID: "i.cur", Title: "Current", Duration: 200 * time.Second},
+			{ID: "i.next", Title: "Next", Duration: 200 * time.Second},
+		},
+		idx:          0,
+		curStream:    "i.cur-1",
+		curStreamURL: "http://127.0.0.1:1234/stream/i.cur-1/tok.aac",
+		nextPrep: &preparedNext{
+			idx:       1,
+			track:     provider.Track{ID: "i.next", Title: "Next"},
+			streamURL: nextURL,
+		},
+		stagedPreps: map[string]*preparedNext{nextURL: {}},
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Playing = true
+
+	p.handleSinkError(errors.New("gst: Internal data stream error"))
+
+	// Even if a delayed EOS arrives from the dying sink, it must not advance to Next.
+	p.handleSinkEOS()
+
+	sink.mu.Lock()
+	stops := sink.stops
+	nextURIs := append([]string(nil), sink.nextURIs...)
+	sink.mu.Unlock()
+	if stops != 1 {
+		t.Fatalf("sink.Stop() calls = %d, want 1 (prevent stale about-to-finish transition)", stops)
+	}
+	if len(nextURIs) == 0 || nextURIs[len(nextURIs)-1] != "" {
+		t.Fatalf("SetNextURI history = %v, want trailing empty URI clear", nextURIs)
+	}
+	if p.QueueIndex() != 0 {
+		t.Fatalf("QueueIndex = %d, want 0 (must not skip track on sink error)", p.QueueIndex())
+	}
+	if p.state.Playing {
+		t.Fatal("state.Playing remained true after unrecovered sink error")
+	}
+	if p.resumeTrackID != "i.cur" || p.resumePos != 75*time.Second || p.state.Position != 75*time.Second {
+		t.Fatalf("resume state = (%q, %v), pos=%v; want (\"i.cur\", 75s)", p.resumeTrackID, p.resumePos, p.state.Position)
+	}
+}
+
+func TestHandleActiveStreamFailure_AutoRecoversFromSavedSegmentViaStartSeg(t *testing.T) {
+	srv := newRawMP3StreamTestServer(t, 1<<20) // ~43.7s CBR MP3 across 4 raw segments (~10.9s each)
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := newRecoverySpySink()
+	sink.pos = 15 * time.Second // falls cleanly inside segment 1 (> 10.9s)
+	now := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
+
+	p := &Player{
+		cfg:          cfg,
+		licClient:    lic,
+		streamer:     streamer,
+		sink:         sink,
+		doneCh:       make(chan struct{}),
+		nowFn:        func() time.Time { return now },
+		queue:        []provider.Track{{ID: "i.up1", Title: "Eco", Duration: 43 * time.Second}},
+		idx:          0,
+		curStream:    "i.up1-1",
+		curStreamURL: "http://127.0.0.1:1234/stream/i.up1-1/tok.mp3",
+		curStreamAt:  now,
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Playing = true
+	t.Cleanup(func() { _ = p.Close() })
+
+	// First mid-stream error must automatically re-prepare and resume at ?start_seg=1.
+	p.handleSinkError(errors.New("gst: Internal data stream error"))
+
+	var resumedURI string
+	select {
+	case resumedURI = <-sink.playCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for auto-recovery PlayURI")
+	}
+	if !strings.Contains(resumedURI, "?start_seg=1") {
+		t.Fatalf("resumed PlayURI = %q, want ?start_seg=1", resumedURI)
+	}
+	st, _ := p.GetState()
+	if st.Position <= 0 {
+		t.Fatalf("resumed Position = %v, want > 0 matching start_seg=1 offset", st.Position)
+	}
+
+	// Second failure within the 30s cooldown must stop cleanly instead of looping,
+	// while still saving resumePos so a manual Play() resumes from the saved position.
+	sink.pos = 5 * time.Second // added onto segOffset (~10.9s + 5s = ~15.9s)
+	p.handleSinkError(errors.New("gst: second interruption"))
+
+	p.mu.RLock()
+	playing := p.state.Playing
+	savedTrack := p.resumeTrackID
+	savedPos := p.resumePos
+	p.mu.RUnlock()
+	if playing {
+		t.Fatal("expected second interruption within cooldown to pause instead of loop")
+	}
+	if savedTrack != "i.up1" || savedPos < 15*time.Second {
+		t.Fatalf("saved resume state = (%q, %v), want (i.up1, >=15s)", savedTrack, savedPos)
+	}
+
+	// Manual Play() after error must resume at savedPos rather than restarting from 0:00.
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	select {
+	case manualURI := <-sink.playCh:
+		if !strings.Contains(manualURI, "?start_seg=1") {
+			t.Fatalf("manual PlayURI = %q, want ?start_seg=1", manualURI)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for manual resume PlayURI")
+	}
+}
+
+func TestStalePrefetchAndPausedStream_RefreshedOnPlayAndNext(t *testing.T) {
+	srv := newRawMP3StreamTestServer(t, 1<<20)
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	curTime := time.Date(2026, 11, 19, 9, 24, 0, 0, time.UTC)
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return curTime
+	}
+
+	sink := newRecoverySpySink()
+	staleNextURL := "http://127.0.0.1:1234/stream/i.up2-stale/tok.mp3"
+	p := &Player{
+		cfg:       cfg,
+		licClient: lic,
+		streamer:  streamer,
+		sink:      sink,
+		doneCh:    make(chan struct{}),
+		nowFn:     clock,
+		queue: []provider.Track{
+			{ID: "i.up1", Title: "Eco", Duration: 43 * time.Second},
+			{ID: "i.up2", Title: "Higher", Duration: 43 * time.Second},
+		},
+		idx:          0,
+		curStream:    "i.up1-old",
+		curStreamURL: "http://127.0.0.1:1234/stream/i.up1-old/tok.mp3",
+		curStreamAt:  curTime,
+		nextPrep: &preparedNext{
+			idx:        1,
+			track:      provider.Track{ID: "i.up2", Title: "Higher"},
+			streamURL:  staleNextURL,
+			preparedAt: curTime,
+		},
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Position = 15 * time.Second
+	t.Cleanup(func() { _ = p.Close() })
+
+	// Advance clock by 64 minutes (paused meeting + shower).
+	mu.Lock()
+	curTime = curTime.Add(64 * time.Minute)
+	mu.Unlock()
+
+	// Resuming via Play() must re-prepare current track at saved Position instead of calling sink.Play() on stale stream.
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play after long pause: %v", err)
+	}
+	var refreshedURI string
+	select {
+	case refreshedURI = <-sink.playCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for stale stream refresh on Play")
+	}
+	if !strings.Contains(refreshedURI, "?start_seg=1") {
+		t.Fatalf("refreshed PlayURI = %q, want ?start_seg=1", refreshedURI)
+	}
+	sink.mu.Lock()
+	rawPlays := sink.plays
+	sink.mu.Unlock()
+	if rawPlays != 0 {
+		t.Fatalf("sink.Play() called %d times on stale paused stream, want 0", rawPlays)
+	}
+
+	// Now plant a stale nextPrep and verify Next() skips using it and prepares fresh.
+	mu.Lock()
+	p.mu.Lock()
+	p.nextPrep = &preparedNext{
+		idx:        1,
+		track:      p.queue[1],
+		streamURL:  staleNextURL,
+		preparedAt: curTime.Add(-20 * time.Minute),
+	}
+	p.mu.Unlock()
+	mu.Unlock()
+
+	if err := p.Next(); err != nil {
+		t.Fatalf("Next with stale prefetch: %v", err)
+	}
+	select {
+	case nextURI := <-sink.playCh:
+		if nextURI == staleNextURL {
+			t.Fatalf("Next() reused stale prefetched URL %q", staleNextURL)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fresh track load on Next")
+	}
+}
+
+func TestHandleStreamFail_StagedPrefetchClearsNextURIAndPrevents10sSkip(t *testing.T) {
+	srv := newRawMP3StreamTestServer(t, 1<<20)
+	cfg := &config.Config{AppleDeveloperToken: "dev", AppleUserToken: "user"}
+	lic := license.NewClientWithHTTP(cfg, &http.Client{
+		Transport: rewriteTransport{target: srv.URL, rt: srv.Client().Transport},
+		Timeout:   5 * time.Second,
+	})
+	streamer, err := NewStreamServer(nil, lic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sink := newRecoverySpySink()
+	stagedURL := "http://127.0.0.1:1234/stream/i.higher-staged/tok.mp3"
+	prep := &preparedNext{
+		idx:       1,
+		track:     provider.Track{ID: "i.higher", Title: "Higher", Duration: 43 * time.Second},
+		streamURL: stagedURL,
+	}
+	p := &Player{
+		cfg:          cfg,
+		licClient:    lic,
+		streamer:     streamer,
+		sink:         sink,
+		doneCh:       make(chan struct{}),
+		queue:        []provider.Track{{ID: "i.eco", Title: "Eco"}, prep.track},
+		idx:          0,
+		curStream:    "i.eco-1",
+		curStreamURL: "http://127.0.0.1:1234/stream/i.eco-1/tok.mp3",
+		nextPrep:     prep,
+		stagedPreps:  map[string]*preparedNext{stagedURL: prep},
+	}
+	p.state.Track = &p.queue[0]
+	p.state.Playing = true
+	t.Cleanup(func() { _ = p.Close() })
+
+	sub := p.Subscribe()
+
+	// Segment 1 of the prefetched track fails before STREAM_START arrives.
+	p.handleStreamFail("i.higher-staged", errors.New("segment 2/4: fetch: status 403 Forbidden"))
+
+	// Must clear next_uri immediately and emit a [stream] log instead of dropping it.
+	sink.mu.Lock()
+	nextURIs := append([]string(nil), sink.nextURIs...)
+	sink.mu.Unlock()
+	if len(nextURIs) == 0 || nextURIs[0] != "" {
+		t.Fatalf("SetNextURI history = %v, want leading empty URI clear", nextURIs)
+	}
+	if prep.failedErr == "" {
+		t.Fatal("expected staged prep.failedErr to be recorded")
+	}
+
+	gotLog := false
+	deadline := time.After(500 * time.Millisecond)
+	for !gotLog {
+		select {
+		case st := <-sub:
+			for _, l := range st.Logs {
+				if strings.Contains(l, "[stream] prefetched track failed:") {
+					gotLog = true
+				}
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for [stream] prefetched track failed log")
+		}
+	}
+
+	// If playbin had already switched to stagedURL and fires STREAM_START anyway,
+	// handleStreamStart must restart Higher fresh instead of playing truncated segment 0.
+	p.handleStreamStart(stagedURL)
+	select {
+	case freshURI := <-sink.playCh:
+		if freshURI == stagedURL {
+			t.Fatalf("handleStreamStart committed failed staged URL %q", stagedURL)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for fresh PlayURI after failed staged STREAM_START")
 	}
 }
