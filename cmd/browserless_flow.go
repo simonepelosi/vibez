@@ -113,6 +113,13 @@ func (c *reauthCoordinator) finishLogin(cancel context.CancelFunc) {
 	c.reauthInFlight.Store(false)
 }
 
+type reauthHooks struct {
+	onExpired func()
+	login     func(context.Context) error
+	onSuccess func(devTok, usrTok string, gen uint64)
+	onErr     func(error)
+}
+
 func (c *reauthCoordinator) prepareReauth(interactive bool, run func(context.Context, uint64)) tea.Cmd {
 	// Register before returning to the TUI so a subsequent :logout can cancel
 	// the attempt even if Bubble Tea hasn't started its command yet.
@@ -129,6 +136,33 @@ func (c *reauthCoordinator) prepareReauth(interactive bool, run func(context.Con
 	}
 }
 
+// startReauth schedules an auth attempt and suppresses the "session expired"
+// notice on interactive :login/:auth so it does not overwrite the user's
+// login banner or race ahead of a cancellation check.
+func (c *reauthCoordinator) startReauth(allowWhenLoggedOut bool, hooks reauthHooks) tea.Cmd {
+	return c.prepareReauth(allowWhenLoggedOut, func(reauthCtx context.Context, gen uint64) {
+		if reauthCtx.Err() != nil {
+			return
+		}
+		if !allowWhenLoggedOut && hooks.onExpired != nil {
+			hooks.onExpired()
+		}
+		if err := hooks.login(reauthCtx); err != nil {
+			if !errors.Is(err, auth.ErrLoginCancelled) && hooks.onErr != nil {
+				hooks.onErr(err)
+			}
+			return
+		}
+		devTok, usrTok, ok := c.commitLogin(gen)
+		if !ok {
+			return
+		}
+		if hooks.onSuccess != nil {
+			hooks.onSuccess(devTok, usrTok, gen)
+		}
+	})
+}
+
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	var (
 		prog         *tea.Program
@@ -140,42 +174,41 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 	}
 
 	tuiAuthLog := func(msg string) {
-		if prog != nil {
+		if prog != nil && !authState.loggedOut.Load() {
 			prog.Send(tui.InitStatusMsg(msg))
 			prog.Send(tui.DebugLogMsg("[auth] " + msg))
 		}
 	}
 
 	startReauth := func(allowWhenLoggedOut bool) tea.Cmd {
-		return authState.prepareReauth(allowWhenLoggedOut, func(reauthCtx context.Context, gen uint64) {
-			// Program.Send must run off Bubble Tea's event loop.
-			if prog != nil {
-				prog.Send(tui.SessionExpiredMsg{})
-			}
-			if reauthCtx.Err() != nil {
-				return
-			}
-			if err := auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog); err != nil {
-				if !errors.Is(err, auth.ErrLoginCancelled) && prog != nil {
+		return authState.startReauth(allowWhenLoggedOut, reauthHooks{
+			onExpired: func() {
+				// Program.Send must run off Bubble Tea's event loop.
+				if prog != nil {
+					prog.Send(tui.SessionExpiredMsg{})
+				}
+			},
+			login: func(reauthCtx context.Context) error {
+				return auth.LoginWithContext(reauthCtx, cfg, tuiAuthLog)
+			},
+			onSuccess: func(devTok, usrTok string, gen uint64) {
+				if onStorefront != nil {
+					if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
+						onStorefront(sf)
+					}
+				}
+				if p := activePlayer.Load(); p != nil {
+					p.ResetSessionExpired()
+				}
+				if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
+					prog.Send(tui.SessionRestoredMsg{})
+				}
+			},
+			onErr: func(err error) {
+				if prog != nil {
 					prog.Send(tui.InitErrMsg{Err: fmt.Errorf("re-auth: %w", err)})
 				}
-				return
-			}
-			devTok, usrTok, ok := authState.commitLogin(gen)
-			if !ok {
-				return
-			}
-			if onStorefront != nil {
-				if _, sf := auth.CheckTokens(devTok, usrTok); sf != "" {
-					onStorefront(sf)
-				}
-			}
-			if p := activePlayer.Load(); p != nil {
-				p.ResetSessionExpired()
-			}
-			if prog != nil && !authState.loggedOut.Load() && authState.authGen.Load() == gen {
-				prog.Send(tui.SessionRestoredMsg{})
-			}
+			},
 		})
 	}
 
