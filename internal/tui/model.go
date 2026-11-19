@@ -979,12 +979,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if msg.err != nil {
+			if msg.play {
+				m.playerState.Loading = false
+			}
 			m.errMsg = fmt.Sprintf("feed: %v", msg.err)
 			m.errExpiry = time.Now().Add(4 * time.Second)
 			m.appendLog(fmt.Sprintf("[feed] track fetch error: %v", msg.err))
 			break
 		}
 		if len(msg.tracks) == 0 {
+			if msg.play {
+				m.playerState.Loading = false
+			}
 			m.errMsg = "feed: no playable tracks"
 			m.errExpiry = time.Now().Add(3 * time.Second)
 			break
@@ -994,6 +1000,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ids[i] = views.PlaybackID(t)
 		}
 		if msg.play {
+			if msg.item.Kind == "station" {
+				m.startStationRadio(msg.item.ID, msg.item.Title)
+			} else {
+				m.stopRadio()
+			}
 			m.queueTracks = msg.tracks
 			m.queueIDs = ids
 			m.queue.SetTracks(m.queueTracks)
@@ -2419,6 +2430,9 @@ func (m *Model) fetchSearchCollectionCmd(album *provider.Album, playlist *provid
 // fetchFeedItemTracksCmd loads the tracks for a recommendation item then either
 // plays them (play=true) or appends them to the queue.
 func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play bool, playNext bool) tea.Cmd {
+	if item == nil {
+		return nil
+	}
 	snap := *item
 	prov := m.provider
 	authGen := m.authGen
@@ -2436,11 +2450,37 @@ func (m *Model) fetchFeedItemTracksCmd(item *provider.RecommendationItem, play b
 			tracks, err = prov.GetAlbumTracks(ctx, snap.ID)
 		case "playlist":
 			tracks, err = prov.GetCatalogPlaylistTracks(ctx, snap.ID)
+		case "station":
+			tracks, err = prov.GetStationTracks(ctx, snap.ID)
 		default:
 			err = fmt.Errorf("unknown kind %q", snap.Kind)
 		}
 		return feedTracksMsg{item: snap, tracks: tracks, play: play, playNext: playNext, err: err, authGen: authGen}
 	}
+}
+
+// enableRadio resets radio session state around seed while disabling mutually
+// exclusive discovery mode.
+func (m *Model) enableRadio(seed provider.Track, refilling bool, logMsg string) {
+	m.discovery.enabled = false
+	m.syncDiscoveryView()
+	m.radio.generation++
+	m.radio.enabled = true
+	m.radio.seed = &seed
+	m.radio.skipped = nil
+	m.radio.refilling = refilling
+	m.radio.triggeredForID = ""
+	m.radio.retries = 0
+	m.appendLog(logMsg)
+}
+
+// startStationRadio enables continuous station refill using an explicit Apple Music station ID.
+func (m *Model) startStationRadio(stationID, title string) {
+	m.enableRadio(provider.Track{
+		ID:        stationID,
+		CatalogID: stationID,
+		Title:     title,
+	}, false, fmt.Sprintf("[radio] started station %q", title))
 }
 
 // startDiscovery activates discovery mode with the configured similarity metric.
@@ -2480,16 +2520,8 @@ func (m *Model) startRadioFrom(seed *provider.Track) tea.Cmd {
 	if seed == nil {
 		return nil
 	}
-	seedSnap := *seed
-	m.discovery.enabled = false // discovery and radio are mutually exclusive
-	m.radio.generation++
-	m.radio.enabled = true
-	m.radio.seed = &seedSnap
-	m.radio.skipped = nil
-	m.radio.refilling = true // guard against double-trigger while search is in flight
-	m.radio.triggeredForID = ""
-	m.radio.retries = 0
-	m.appendLog(fmt.Sprintf("[radio] started from %q", seed.Title))
+	// Guard against double-trigger while initial radio search is in flight.
+	m.enableRadio(*seed, true, fmt.Sprintf("[radio] started from %q", seed.Title))
 	return tea.Batch(m.dropQueueAfter(seed), m.runRadioSearch())
 }
 

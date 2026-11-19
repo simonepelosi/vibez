@@ -68,11 +68,11 @@ func (f *FeedModel) SetRecommendations(groups []provider.RecommendationGroup) {
 		return
 	}
 	var rows []feedRow
-	for gi, g := range groups {
-		rows = append(rows, feedRow{header: true, label: g.Title})
-		for i := range g.Items {
-			it := &groups[gi].Items[i]
-			rows = append(rows, feedRow{item: it})
+	for gi := range groups {
+		rows = append(rows, feedRow{header: true, label: groups[gi].Title})
+		items := groups[gi].Items
+		for i := range items {
+			rows = append(rows, feedRow{item: &items[i]})
 		}
 		rows = append(rows, feedRow{header: true}) // blank spacer between groups
 	}
@@ -184,8 +184,12 @@ func (f *FeedModel) View() string {
 			subSt = sel
 		}
 		kindTag := muted.Render(fmt.Sprintf(" [%s]", row.item.Kind))
+		subPart := ""
+		if row.item.Subtitle != "" {
+			subPart = "  " + subSt.Render(row.item.Subtitle)
+		}
 		sb.WriteString(cursor + titleSt.Render(row.item.Title) +
-			"  " + subSt.Render(row.item.Subtitle) + kindTag + "\n")
+			subPart + kindTag + "\n")
 	}
 	return sb.String()
 }

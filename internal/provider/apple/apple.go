@@ -1896,14 +1896,12 @@ func (a *AppleProvider) resolveCatalogSongID(ctx context.Context, libraryID stri
 }
 
 // stationNextTracksPage fetches one batch (~2 tracks) of upcoming tracks for the
-// per-song station ra.<catalogID>. Each POST advances the station. next-tracks
-// without an ID only accepts GET; next-tracks/{id} only accepts POST with a body
-// (an empty object suffices — the ID carries the seed).
-func (a *AppleProvider) stationNextTracksPage(ctx context.Context, catalogID string) ([]provider.Track, error) {
-	if err := validateResourceID(catalogID); err != nil {
+// station ID (e.g. "ra.<catalogID>" or "ra.u-..."). Each POST advances the station.
+func (a *AppleProvider) stationNextTracksPage(ctx context.Context, stationID string) ([]provider.Track, error) {
+	if err := validateResourceID(stationID); err != nil {
 		return nil, err
 	}
-	endpoint := "/me/stations/next-tracks/ra." + url.PathEscape(catalogID)
+	endpoint := "/me/stations/next-tracks/" + url.PathEscape(stationID)
 	req, err := a.newRequestWithBody(ctx, http.MethodPost, endpoint, "application/json", []byte("{}"))
 	if err != nil {
 		return nil, err
@@ -1920,25 +1918,38 @@ func (a *AppleProvider) stationNextTracksPage(ctx context.Context, catalogID str
 	return tracks, nil
 }
 
-// GetStationTracks returns a batch of upcoming tracks for the Apple Music radio
-// station seeded by the given song. "ra.<catalogSongID>" is Apple's synthetic
-// per-song station ID. The seed MUST be a catalog song ID; a library ID
-// ("i.XXXX") is resolved to its catalog ID first (a raw library seed 500s).
-// Because each next-tracks call yields only ~2 tracks, several pages are
-// accumulated (deduped) up to stationBatchTarget so refills have runway.
-func (a *AppleProvider) GetStationTracks(ctx context.Context, seed string) ([]provider.Track, error) {
+func (a *AppleProvider) resolveStationEndpointID(ctx context.Context, seed string) (string, error) {
+	if err := validateResourceID(seed); err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(seed, "ra.") {
+		return seed, nil
+	}
 	if strings.HasPrefix(seed, "i.") {
 		catalogID, err := a.resolveCatalogSongID(ctx, seed)
 		if err != nil {
-			return nil, fmt.Errorf("GetStationTracks: resolve catalog id: %w", err)
+			return "", fmt.Errorf("resolve catalog id: %w", err)
 		}
 		seed = catalogID
+	}
+	return "ra." + seed, nil
+}
+
+// GetStationTracks returns a batch of upcoming tracks for an Apple Music radio
+// station. seed may be a full station ID ("ra.XXXX"), a catalog song ID, or a
+// library song ID ("i.XXXX") resolved to its catalog ID before seeding.
+// Because each next-tracks call yields only ~2 tracks, several pages are
+// accumulated (deduped) up to stationBatchTarget so refills have runway.
+func (a *AppleProvider) GetStationTracks(ctx context.Context, seed string) ([]provider.Track, error) {
+	stationID, err := a.resolveStationEndpointID(ctx, seed)
+	if err != nil {
+		return nil, fmt.Errorf("GetStationTracks: %w", err)
 	}
 
 	var out []provider.Track
 	seen := make(map[string]bool)
 	for calls := 0; len(out) < stationBatchTarget && calls < stationMaxCalls; calls++ {
-		page, err := a.stationNextTracksPage(ctx, seed)
+		page, err := a.stationNextTracksPage(ctx, stationID)
 		if err != nil {
 			if len(out) > 0 {
 				break // return what we already have rather than fail the refill
@@ -2108,12 +2119,21 @@ func (a *AppleProvider) GetSongRating(ctx context.Context, catalogID string) (pr
 
 type recommendationContent struct {
 	ID         string `json:"id"`
-	Type       string `json:"type"` // "albums" or "playlists"
+	Type       string `json:"type"` // "albums", "playlists", or "stations"
 	Attributes struct {
-		Name        string       `json:"name"`
-		ArtistName  string       `json:"artistName"`
-		CuratorName string       `json:"curatorName"`
-		Artwork     artworkAttrs `json:"artwork"`
+		Name           string       `json:"name"`
+		ArtistName     string       `json:"artistName"`
+		CuratorName    string       `json:"curatorName"`
+		IsLive         bool         `json:"isLive"`
+		Artwork        artworkAttrs `json:"artwork"`
+		EditorialNotes *struct {
+			Short    string `json:"short"`
+			Standard string `json:"standard"`
+		} `json:"editorialNotes"`
+		PlayParams *struct {
+			Format string `json:"format"`
+			Kind   string `json:"kind"`
+		} `json:"playParams"`
 	} `json:"attributes"`
 }
 
@@ -2132,45 +2152,137 @@ type recommendationResource struct {
 
 type recommendationsResponse struct {
 	Data []recommendationResource `json:"data"`
+	Next string                   `json:"next"`
+}
+
+type stationsListResponse struct {
+	Data []recommendationContent `json:"data"`
+}
+
+func recommendationItemFromContent(c recommendationContent) (provider.RecommendationItem, bool) {
+	if validateResourceID(c.ID) != nil {
+		return provider.RecommendationItem{}, false
+	}
+	title := provider.Clean(c.Attributes.Name)
+	if title == "" {
+		return provider.RecommendationItem{}, false
+	}
+	item := provider.RecommendationItem{
+		ID:    c.ID,
+		Title: title,
+	}
+	switch c.Type {
+	case "albums":
+		item.Kind = "album"
+		item.Subtitle = provider.Clean(c.Attributes.ArtistName)
+	case "playlists":
+		item.Kind = "playlist"
+		item.Subtitle = provider.Clean(c.Attributes.CuratorName)
+	case "stations":
+		// Live broadcast streams (e.g. Apple Music 1) do not expose next-tracks queues.
+		if c.Attributes.IsLive || (c.Attributes.PlayParams != nil && c.Attributes.PlayParams.Format == "stream") {
+			return provider.RecommendationItem{}, false
+		}
+		item.Kind = "station"
+		switch {
+		case c.Attributes.EditorialNotes != nil && strings.TrimSpace(c.Attributes.EditorialNotes.Short) != "":
+			item.Subtitle = provider.Clean(c.Attributes.EditorialNotes.Short)
+		case strings.TrimSpace(c.Attributes.CuratorName) != "":
+			item.Subtitle = provider.Clean(c.Attributes.CuratorName)
+		default:
+			item.Subtitle = "Apple Music"
+		}
+	default:
+		return provider.RecommendationItem{}, false
+	}
+	return item, true
+}
+
+func (a *AppleProvider) fetchPersonalStation(ctx context.Context) []provider.RecommendationItem {
+	sf, err := a.storefront(ctx)
+	if err != nil {
+		return nil
+	}
+	endpoint := "/catalog/" + url.PathEscape(sf) + "/stations?filter[identity]=personal"
+	req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+	if err != nil {
+		return nil
+	}
+	var resp stationsListResponse
+	if err := a.do(req, &resp); err != nil {
+		return nil
+	}
+	var items []provider.RecommendationItem
+	for _, c := range resp.Data {
+		if c.Type == "" {
+			c.Type = "stations"
+		}
+		if item, ok := recommendationItemFromContent(c); ok && item.Kind == "station" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 // GetRecommendations fetches personalised recommendation groups from
 // GET /v1/me/recommendations and returns them as provider-level structs.
 func (a *AppleProvider) GetRecommendations(ctx context.Context) ([]provider.RecommendationGroup, error) {
-	req, err := a.newRequest(ctx, http.MethodGet, "/me/recommendations?limit=10")
-	if err != nil {
-		return nil, fmt.Errorf("GetRecommendations: %w", err)
-	}
-	var resp recommendationsResponse
-	if err := a.do(req, &resp); err != nil {
-		return nil, fmt.Errorf("GetRecommendations: %w", err)
-	}
-
+	const maxRecommendationPages = 3
 	var groups []provider.RecommendationGroup
-	for _, r := range resp.Data {
-		title := provider.Clean(r.Attributes.Title.StringForDisplay)
-		if title == "" {
-			continue
+	hasStations := false
+	endpoint := "/me/recommendations?limit=10"
+
+	for pageNum := range maxRecommendationPages {
+		req, err := a.newRequest(ctx, http.MethodGet, endpoint)
+		if err != nil {
+			if pageNum == 0 {
+				return nil, fmt.Errorf("GetRecommendations: %w", err)
+			}
+			break
 		}
-		var items []provider.RecommendationItem
-		for _, c := range r.Relationships.Contents.Data {
-			item := provider.RecommendationItem{ID: c.ID, Title: provider.Clean(c.Attributes.Name)}
-			switch c.Type {
-			case "albums":
-				item.Kind = "album"
-				item.Subtitle = provider.Clean(c.Attributes.ArtistName)
-			case "playlists":
-				item.Kind = "playlist"
-				item.Subtitle = provider.Clean(c.Attributes.CuratorName)
-			default:
+		var resp recommendationsResponse
+		if err := a.do(req, &resp); err != nil {
+			if pageNum == 0 {
+				return nil, fmt.Errorf("GetRecommendations: %w", err)
+			}
+			break
+		}
+
+		for _, r := range resp.Data {
+			title := provider.Clean(r.Attributes.Title.StringForDisplay)
+			if title == "" {
 				continue
 			}
-			items = append(items, item)
+			var items []provider.RecommendationItem
+			for _, c := range r.Relationships.Contents.Data {
+				item, ok := recommendationItemFromContent(c)
+				if !ok {
+					continue
+				}
+				if item.Kind == "station" {
+					hasStations = true
+				}
+				items = append(items, item)
+			}
+			if len(items) == 0 {
+				continue
+			}
+			groups = append(groups, provider.RecommendationGroup{Title: title, Items: items})
 		}
-		if len(items) == 0 {
-			continue
+
+		if resp.Next == "" || resp.Next == endpoint {
+			break
 		}
-		groups = append(groups, provider.RecommendationGroup{Title: title, Items: items})
+		endpoint = resp.Next
+	}
+
+	if !hasStations {
+		if personal := a.fetchPersonalStation(ctx); len(personal) > 0 {
+			groups = append(groups, provider.RecommendationGroup{
+				Title: "Stations for You",
+				Items: personal,
+			})
+		}
 	}
 	return groups, nil
 }

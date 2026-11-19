@@ -179,5 +179,11 @@ func (Provider) GetRecommendations(_ context.Context) ([]provider.Recommendation
 				{ID: "demo-pl-1", Kind: "playlist", Title: "New Music Mix", Subtitle: "Apple Music"},
 			},
 		},
+		{
+			Title: "Stations for You",
+			Items: []provider.RecommendationItem{
+				{ID: "ra.demo-discovery", Kind: "station", Title: "Discovery Station", Subtitle: "Apple Music"},
+			},
+		},
 	}, nil
 }

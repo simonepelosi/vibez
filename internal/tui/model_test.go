@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -5715,5 +5716,119 @@ func TestSessionRestoredAndLogin_DoNotOrphanInFlightRadioRefill(t *testing.T) {
 	})
 	if m.radio.refilling {
 		t.Fatal("radio.refilling remained stuck true after SessionRestoredMsg/:login")
+	}
+}
+
+type trackingStationProvider struct {
+	mockProvider
+	mu            sync.Mutex
+	stationSeeds  []string
+	stationTracks []provider.Track
+	albumTracks   []provider.Track
+	albumErr      error
+}
+
+func (p *trackingStationProvider) GetStationTracks(_ context.Context, seed string) ([]provider.Track, error) {
+	p.mu.Lock()
+	p.stationSeeds = append(p.stationSeeds, seed)
+	out := append([]provider.Track(nil), p.stationTracks...)
+	p.mu.Unlock()
+	return out, nil
+}
+
+func (p *trackingStationProvider) GetAlbumTracks(_ context.Context, _ string) ([]provider.Track, error) {
+	if p.albumErr != nil {
+		return nil, p.albumErr
+	}
+	return append([]provider.Track(nil), p.albumTracks...), nil
+}
+
+func TestFeedStation_PlayStartsContinuousRadioAndRefills(t *testing.T) {
+	mp := newMockPlayer()
+	prov := &trackingStationProvider{
+		stationTracks: []provider.Track{
+			{ID: "st-1", CatalogID: "st-1", Title: "Station Song 1", Artist: "Artist 1"},
+		},
+	}
+	m := New(testCfg(), prov, mp, Options{})
+	m.stateCh = nil
+	stationItem := provider.RecommendationItem{
+		ID:       "ra.u-personal-station",
+		Kind:     "station",
+		Title:    "Simone's Station",
+		Subtitle: "Apple Music",
+	}
+	m.feedP.m.SetRecommendations([]provider.RecommendationGroup{{
+		Title: "Stations for You",
+		Items: []provider.RecommendationItem{stationItem},
+	}})
+
+	fetchCmd := m.fetchFeedItemTracksCmd(&stationItem, true, false)
+	if fetchCmd == nil {
+		t.Fatal("fetchFeedItemTracksCmd returned nil")
+	}
+	msg := fetchCmd()
+	if fmsg, ok := msg.(feedTracksMsg); !ok || len(fmsg.tracks) != 1 {
+		t.Fatalf("unexpected feed msg: %#v", msg)
+	}
+	_, _ = m.Update(msg)
+
+	if !m.radio.enabled || m.radio.seed == nil || m.radio.seed.CatalogID != "ra.u-personal-station" {
+		t.Fatalf("radio state after station play = enabled=%v seed=%+v", m.radio.enabled, m.radio.seed)
+	}
+
+	// Playing the last queued station track should trigger a continuous station refill.
+	prov.mu.Lock()
+	prov.stationTracks = []provider.Track{
+		{ID: "st-2", CatalogID: "st-2", Title: "Station Song 2", Artist: "Artist 2"},
+	}
+	prov.mu.Unlock()
+
+	_, refillCmd := m.Update(playerStateMsg{Track: &provider.Track{ID: "st-1", Title: "Station Song 1", Artist: "Artist 1"}, Playing: true})
+	for _, rmsg := range extractVibeResultMsgs(refillCmd) {
+		_, _ = m.Update(rmsg)
+	}
+	if len(m.queueTracks) != 2 || m.queueTracks[1].ID != "st-2" {
+		t.Fatalf("queueTracks after station refill = %+v, want st-1 then st-2", m.queueTracks)
+	}
+
+	prov.mu.Lock()
+	seeds := append([]string(nil), prov.stationSeeds...)
+	prov.mu.Unlock()
+	if len(seeds) != 2 || seeds[0] != "ra.u-personal-station" || seeds[1] != "ra.u-personal-station" {
+		t.Fatalf("GetStationTracks seeds = %v, want [ra.u-personal-station, ra.u-personal-station]", seeds)
+	}
+
+	// Switching to a regular Feed album stops station auto-refill, and Feed fetch errors clear Loading.
+	albumItem := provider.RecommendationItem{ID: "alb-1", Kind: "album", Title: "Album 1"}
+	prov.albumTracks = []provider.Track{{ID: "a-1", Title: "Album Song"}}
+	_, _ = m.Update(m.fetchFeedItemTracksCmd(&albumItem, true, false)())
+	if m.radio.enabled {
+		t.Fatal("playing a non-station Feed item did not stop active radio")
+	}
+
+	m.playerState.Loading = true
+	prov.albumErr = errors.New("boom")
+	_, _ = m.Update(m.fetchFeedItemTracksCmd(&albumItem, true, false)())
+	if m.playerState.Loading {
+		t.Fatal("playerState.Loading remained true after Feed fetch error")
+	}
+}
+
+func extractVibeResultMsgs(cmd tea.Cmd) []vibeResultMsg {
+	if cmd == nil {
+		return nil
+	}
+	switch v := cmd().(type) {
+	case vibeResultMsg:
+		return []vibeResultMsg{v}
+	case tea.BatchMsg:
+		var out []vibeResultMsg
+		for _, sub := range v {
+			out = append(out, extractVibeResultMsgs(sub)...)
+		}
+		return out
+	default:
+		return nil
 	}
 }
