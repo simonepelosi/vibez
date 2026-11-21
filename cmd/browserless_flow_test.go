@@ -5,6 +5,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -259,6 +260,17 @@ func TestHybridCoordinator_MissingDirAndDisabledMode(t *testing.T) {
 		cfg:     &config.Config{HybridPlayback: true, MusicDir: ""},
 		sendMsg: record,
 	}
+	// Interactive :rescan (triggerScan) with empty music_dir must never emit on sendMsg synchronously.
+	if started, msg := missingDir.triggerScan(); started || !strings.Contains(msg, "music_dir is not set") {
+		t.Fatalf("missingDir triggerScan() = (%v, %q), want (false, music_dir is not set)", started, msg)
+	}
+	mu.Lock()
+	syncEmits := len(msgs)
+	mu.Unlock()
+	if syncEmits != 0 {
+		t.Fatalf("triggerScan emitted %d synchronous messages with empty music_dir, want 0 (would deadlock Update loop)", syncEmits)
+	}
+
 	missingDir.startStartupScan()
 
 	mu.Lock()
@@ -418,5 +430,74 @@ func TestHybridCoordinator_AttachPlayerAppliesCompletedMatcher(t *testing.T) {
 	coord.attachPlayer(p)
 	if pPtr.Load() != p {
 		t.Fatal("attachPlayer did not store active player")
+	}
+}
+
+func TestHybridCoordinator_RescanCommandDoesNotDeadlockBubbleTeaLoop(t *testing.T) {
+	wantDir := t.TempDir()
+	cfg := &config.Config{HybridPlayback: true, MusicDir: wantDir}
+	matcher, err := localProvider.NewMatcher(wantDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var prog *tea.Program
+	coord := &hybridCoordinator{
+		cfg:     cfg,
+		scanCtx: t.Context(),
+		sendMsg: func(msg tea.Msg) {
+			if prog != nil {
+				prog.Send(msg)
+			}
+		},
+		scanFn: func(_ context.Context, _ string, onProgress func(localProvider.ScanProgress)) (*localProvider.Matcher, error) {
+			onProgress(localProvider.ScanProgress{Phase: localProvider.ScanPhaseParseStart, Found: 0})
+			return matcher, nil
+		},
+	}
+	defer coord.closeAndWait()
+
+	model := tui.New(cfg, nil, nil, tui.Options{
+		HybridEnabled: true,
+		HybridDir:     wantDir,
+		OnRescan:      coord.triggerScan,
+	})
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRun()
+
+	scanFinished := make(chan struct{})
+	var closeOnce sync.Once
+	prog = tea.NewProgram(model,
+		tea.WithContext(runCtx),
+		tea.WithInput(nil),
+		tea.WithOutput(io.Discard),
+		tea.WithoutSignals(),
+		tea.WithoutRenderer(),
+		tea.WithFilter(func(_ tea.Model, msg tea.Msg) tea.Msg {
+			if st, ok := msg.(tui.HybridStatusMsg); ok && !st.Scanning && st.Err == "" {
+				closeOnce.Do(func() { close(scanFinished) })
+				return tea.Quit()
+			}
+			return msg
+		}),
+	)
+
+	go func() {
+		prog.Send(tea.WindowSizeMsg{Width: 100, Height: 30})
+		prog.Send(tea.KeyPressMsg{Code: ':', Text: ":"})
+		for _, r := range "rescan" {
+			prog.Send(tea.KeyPressMsg{Code: r, Text: string(r)})
+		}
+		prog.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
+	}()
+
+	if _, err := prog.Run(); err != nil {
+		t.Fatalf("Bubble Tea exited unexpectedly during :rescan test: %v", err)
+	}
+	select {
+	case <-scanFinished:
+	default:
+		t.Fatal("Bubble Tea event loop never received final HybridStatusMsg after :rescan")
 	}
 }

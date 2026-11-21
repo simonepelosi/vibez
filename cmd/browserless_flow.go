@@ -216,6 +216,11 @@ func (c *hybridCoordinator) startStartupScan() {
 	if c.cfg == nil || !c.cfg.HybridPlaybackEnabled() {
 		return
 	}
+	if strings.TrimSpace(c.cfg.GetMusicDir()) == "" {
+		c.emit(tui.HybridStatusMsg{Enabled: true, Err: "no dir"})
+		c.emit(tui.DebugLogMsg("[hybrid] enabled, but music_dir is not set (use --music-dir <path> or set music_dir in config.json)"))
+		return
+	}
 	_, _ = c.triggerScan()
 }
 
@@ -225,8 +230,8 @@ func (c *hybridCoordinator) triggerScan() (bool, string) {
 	}
 	dir := strings.TrimSpace(c.cfg.GetMusicDir())
 	if dir == "" {
-		c.emit(tui.HybridStatusMsg{Enabled: true, Err: "no dir"})
-		c.emit(tui.DebugLogMsg("[hybrid] enabled, but music_dir is not set (use --music-dir <path> or set music_dir in config.json)"))
+		// Never call c.emit (prog.Send) synchronously here: Options.OnRescan runs
+		// inside Bubble Tea's Update loop and would deadlock waiting on itself.
 		return false, "music_dir is not set (use --music-dir <path> or set music_dir in config.json)"
 	}
 	if c.scanCtx != nil && c.scanCtx.Err() != nil {
@@ -247,9 +252,6 @@ func (c *hybridCoordinator) triggerScan() (bool, string) {
 	c.mu.Unlock()
 
 	cleanDir := provider.Clean(dir)
-	c.emit(tui.HybridStatusMsg{Enabled: true, Scanning: true, Count: prevCount})
-	c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] scanning %s…", cleanDir)))
-
 	scanFn := c.scanFn
 	if scanFn == nil {
 		scanFn = localProvider.NewMatcherProgress
@@ -262,6 +264,10 @@ func (c *hybridCoordinator) triggerScan() (bool, string) {
 	go func() {
 		defer c.wg.Done()
 		defer c.inFlight.Store(false)
+
+		// Emit status/log off Bubble Tea's event loop so interactive :rescan never deadlocks prog.Send.
+		c.emit(tui.HybridStatusMsg{Enabled: true, Scanning: true, Count: prevCount})
+		c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] scanning %s…", cleanDir)))
 
 		matcher, mErr := scanFn(ctx, dir, func(p localProvider.ScanProgress) {
 			c.emitProgressLog(cleanDir, p)

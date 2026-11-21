@@ -2233,6 +2233,11 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 			m.hybrid.enabled = true
 			m.hybrid.scanning = true
 			m.hybrid.err = ""
+		} else if strings.Contains(msg, "music_dir is not set") {
+			m.hybrid.enabled = true
+			m.hybrid.scanning = false
+			m.hybrid.err = "no dir"
+			m.appendLog("[hybrid] " + msg)
 		}
 		if msg != "" {
 			if started {
