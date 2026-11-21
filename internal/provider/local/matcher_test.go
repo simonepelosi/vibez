@@ -875,3 +875,63 @@ func TestScanNotice_SanitizesPathAndExtension(t *testing.T) {
 		t.Fatalf("ScanNotice contains unsanitized ESC: %q", notice)
 	}
 }
+
+func TestMatcher_NewMatcherWithOptions_ProgressAndCache(t *testing.T) {
+	dir := t.TempDir()
+	cacheHome := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("LOCALAPPDATA", cacheHome)
+
+	writeSyntheticFLAC(t, filepath.Join(dir, "01.flac"), 3*time.Minute, map[string]string{
+		"TITLE": "One", "ARTIST": "Artist", "ALBUM": "Album",
+	})
+	writeSyntheticFLAC(t, filepath.Join(dir, "02.flac"), 3*time.Minute, map[string]string{
+		"TITLE": "Two", "ARTIST": "Artist", "ALBUM": "Album",
+	})
+
+	record := func() ([]local.ScanProgress, *local.Matcher) {
+		var events []local.ScanProgress
+		m, err := local.NewMatcherWithOptions(context.Background(), dir, local.ScanOptions{
+			Heartbeat: 10 * time.Millisecond,
+			OnProgress: func(p local.ScanProgress) {
+				events = append(events, p)
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewMatcherWithOptions: %v", err)
+		}
+		return events, m
+	}
+
+	firstEvents, m1 := record()
+	if m1.Count() != 2 {
+		t.Fatalf("first scan Count = %d, want 2", m1.Count())
+	}
+	var firstStart local.ScanProgress
+	sawStart := false
+	for _, e := range firstEvents {
+		if e.Phase == local.ScanPhaseParseStart {
+			firstStart = e
+			sawStart = true
+		}
+	}
+	if !sawStart || firstStart.Found != 2 || firstStart.Cached != 0 || firstStart.TotalToParse != 2 {
+		t.Fatalf("first ParseStart = %+v (saw=%v), want Found=2 Cached=0 TotalToParse=2", firstStart, sawStart)
+	}
+
+	secondEvents, m2 := record()
+	if m2.Count() != 2 {
+		t.Fatalf("second scan Count = %d, want 2", m2.Count())
+	}
+	var secondStart local.ScanProgress
+	sawSecond := false
+	for _, e := range secondEvents {
+		if e.Phase == local.ScanPhaseParseStart {
+			secondStart = e
+			sawSecond = true
+		}
+	}
+	if !sawSecond || secondStart.Found != 2 || secondStart.Cached != 2 || secondStart.TotalToParse != 0 {
+		t.Fatalf("second ParseStart = %+v (saw=%v), want Found=2 Cached=2 TotalToParse=0", secondStart, sawSecond)
+	}
+}

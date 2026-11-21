@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -163,11 +164,177 @@ func (c *reauthCoordinator) startReauth(allowWhenLoggedOut bool, hooks reauthHoo
 	})
 }
 
+type hybridCoordinator struct {
+	cfg          *config.Config
+	scanCtx      context.Context
+	activePlayer *atomic.Pointer[browserless.Player]
+	sendMsg      func(tea.Msg)
+	scanFn       func(context.Context, string, func(localProvider.ScanProgress)) (*localProvider.Matcher, error)
+
+	inFlight atomic.Bool
+
+	mu            sync.Mutex
+	closed        bool
+	hasMatcher    bool
+	latestMatcher *localProvider.Matcher
+	lastCount     int
+	wg            sync.WaitGroup
+}
+
+func (c *hybridCoordinator) emit(msg tea.Msg) {
+	if c.sendMsg == nil {
+		return
+	}
+	if c.scanCtx != nil && c.scanCtx.Err() != nil {
+		return
+	}
+	c.sendMsg(msg)
+}
+
+func (c *hybridCoordinator) attachPlayer(p *browserless.Player) {
+	if p == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.activePlayer != nil {
+		c.activePlayer.Store(p)
+	}
+	if c.hasMatcher {
+		p.SetLocalMatcher(c.latestMatcher)
+	}
+	c.mu.Unlock()
+}
+
+func (c *hybridCoordinator) closeAndWait() {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	c.wg.Wait()
+}
+
+func (c *hybridCoordinator) startStartupScan() {
+	if c.cfg == nil || !c.cfg.HybridPlaybackEnabled() {
+		return
+	}
+	_, _ = c.triggerScan()
+}
+
+func (c *hybridCoordinator) triggerScan() (bool, string) {
+	if c.cfg == nil || !c.cfg.HybridPlaybackEnabled() {
+		return false, "hybrid playback is not enabled (start with --hybrid --music-dir <path>)"
+	}
+	dir := strings.TrimSpace(c.cfg.GetMusicDir())
+	if dir == "" {
+		c.emit(tui.HybridStatusMsg{Enabled: true, Err: "no dir"})
+		c.emit(tui.DebugLogMsg("[hybrid] enabled, but music_dir is not set (use --music-dir <path> or set music_dir in config.json)"))
+		return false, "music_dir is not set (use --music-dir <path> or set music_dir in config.json)"
+	}
+	if c.scanCtx != nil && c.scanCtx.Err() != nil {
+		return false, "scan cancelled"
+	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return false, "scan cancelled"
+	}
+	if !c.inFlight.CompareAndSwap(false, true) {
+		c.mu.Unlock()
+		return false, "local library scan already in progress"
+	}
+	prevCount := c.lastCount
+	c.wg.Add(1)
+	c.mu.Unlock()
+
+	cleanDir := provider.Clean(dir)
+	c.emit(tui.HybridStatusMsg{Enabled: true, Scanning: true, Count: prevCount})
+	c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] scanning %s…", cleanDir)))
+
+	scanFn := c.scanFn
+	if scanFn == nil {
+		scanFn = localProvider.NewMatcherProgress
+	}
+	ctx := c.scanCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	go func() {
+		defer c.wg.Done()
+		defer c.inFlight.Store(false)
+
+		matcher, mErr := scanFn(ctx, dir, func(p localProvider.ScanProgress) {
+			c.emitProgressLog(cleanDir, p)
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		if mErr != nil {
+			c.mu.Lock()
+			keepCount := c.lastCount
+			c.mu.Unlock()
+			c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] local scan failed (%s): %s", cleanDir, provider.Clean(mErr.Error()))))
+			c.emit(tui.HybridStatusMsg{Enabled: true, Count: keepCount, Err: "scan failed"})
+			return
+		}
+
+		count := 0
+		if matcher != nil {
+			count = matcher.Count()
+		}
+		c.mu.Lock()
+		c.hasMatcher = true
+		c.latestMatcher = matcher
+		c.lastCount = count
+		if c.activePlayer != nil {
+			if p := c.activePlayer.Load(); p != nil {
+				p.SetLocalMatcher(matcher)
+			}
+		}
+		c.mu.Unlock()
+		c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] indexed %d lossless local track(s) in %s", count, cleanDir)))
+		c.emit(tui.HybridStatusMsg{Enabled: true, Count: count})
+	}()
+	return true, "Rescanning local library in background…"
+}
+
+func (c *hybridCoordinator) emitProgressLog(cleanDir string, p localProvider.ScanProgress) {
+	switch p.Phase {
+	case localProvider.ScanPhaseWalk:
+		c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] scanning %s: walked %d entries, %d lossless file(s) found…", cleanDir, p.Walked, p.Found)))
+	case localProvider.ScanPhaseParseStart:
+		if p.TotalToParse == 0 {
+			if p.Found > 0 {
+				c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] found %d lossless file(s) in %s (%d cached)", p.Found, cleanDir, p.Cached)))
+			}
+			return
+		}
+		c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] found %d lossless file(s) in %s (%d cached, scanning tags for %d new/changed)…", p.Found, cleanDir, p.Cached, p.TotalToParse)))
+	case localProvider.ScanPhaseParse:
+		pct := 0
+		if p.TotalToParse > 0 {
+			pct = min(100, (p.Parsed*100)/p.TotalToParse)
+		}
+		c.emit(tui.DebugLogMsg(fmt.Sprintf("[hybrid] scanning tags: %d/%d (%d%%)…", p.Parsed, p.TotalToParse, pct)))
+	}
+}
+
 func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onStorefront func(string), audioBitrateKbps int) error {
 	var (
 		prog         *tea.Program
 		activePlayer atomic.Pointer[browserless.Player]
 	)
+	scanCtx, cancelScan := context.WithCancel(context.Background())
+	hybridState := &hybridCoordinator{
+		cfg:          cfg,
+		scanCtx:      scanCtx,
+		activePlayer: &activePlayer,
+		sendMsg: func(msg tea.Msg) {
+			if prog != nil {
+				prog.Send(msg)
+			}
+		},
+	}
 	authState := &reauthCoordinator{
 		cfg:         cfg,
 		onUserToken: onUserToken,
@@ -220,15 +387,20 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 
 	opts.OnReauth = func() tea.Cmd { return startReauth(true) }
 	opts.OnLogout = authState.logout
+	opts.HybridEnabled = cfg.HybridPlaybackEnabled()
+	opts.HybridDir = cfg.GetMusicDir()
+	opts.OnRescan = hybridState.triggerScan
 	prog = tea.NewProgram(tui.New(cfg, nil, nil, opts))
 	playerCh := make(chan *browserless.Player, 1)
 	restartExe := make(chan string, 1)
-	scanCtx, cancelScan := context.WithCancel(context.Background())
+	defer hybridState.closeAndWait()
 	defer cancelScan()
 	defer authState.cancelActive()
 	var stopRPC func()
 
 	go func() {
+		hybridState.startStartupScan()
+
 		devTok, usrTok := cfg.GetAppleTokens()
 		initialStorefront := cfg.Storefront()
 		var (
@@ -324,7 +496,7 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			return
 		}
 		_ = blPlayer.SetAudioBitrate(audioBitrateKbps)
-		activePlayer.Store(blPlayer)
+		hybridState.attachPlayer(blPlayer)
 		blPlayer.OnSessionExpired = triggerReauth
 
 		if optimisticSession {
@@ -368,26 +540,11 @@ func runBrowserlessFlow(cfg *config.Config, opts tui.Options, onUserToken, onSto
 			Provider: prov,
 			Backend:  backendLabel,
 		})
-
-		if cfg.HybridPlayback && cfg.MusicDir != "" {
-			go func() {
-				matcher, mErr := localProvider.NewMatcherContext(scanCtx, cfg.MusicDir)
-				if scanCtx.Err() != nil {
-					return
-				}
-				cleanDir := provider.Clean(cfg.MusicDir)
-				if mErr != nil {
-					prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] local scan failed (%s): %s", cleanDir, provider.Clean(mErr.Error()))))
-					return
-				}
-				blPlayer.SetLocalMatcher(matcher)
-				prog.Send(tui.DebugLogMsg(fmt.Sprintf("[hybrid] indexed %d lossless local track(s) in %s", matcher.Count(), cleanDir)))
-			}()
-		}
 	}()
 
 	_, err := prog.Run()
 	cancelScan()
+	hybridState.closeAndWait()
 	if stopRPC != nil {
 		stopRPC()
 	}

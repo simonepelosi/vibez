@@ -15,6 +15,42 @@ import (
 // matching a catalog track to a local lossless file via the metadata fallback.
 const FallbackDurationTolerance = 2 * time.Second
 
+// DefaultScanHeartbeat is the default interval between periodic progress
+// callbacks emitted during long local directory walks and tag scans.
+const DefaultScanHeartbeat = 30 * time.Second
+
+// ScanPhase identifies which stage a local library scan is currently executing.
+type ScanPhase int
+
+const (
+	// ScanPhaseWalk indicates filepath.WalkDir is traversing directories.
+	ScanPhaseWalk ScanPhase = iota
+	// ScanPhaseParseStart is emitted once directory walking completes and
+	// incremental cache lookup determines how many files need tag parsing.
+	ScanPhaseParseStart
+	// ScanPhaseParse indicates tag-parsing workers are processing uncached files.
+	ScanPhaseParse
+)
+
+// ScanProgress reports incremental progress during a local library scan.
+type ScanProgress struct {
+	Phase        ScanPhase
+	Walked       int // filesystem entries visited during WalkDir
+	Found        int // matching audio files discovered
+	Cached       int // matching files satisfied by the metadata cache
+	Parsed       int // new or modified files whose tags have been parsed
+	TotalToParse int // total new or modified files requiring tag parsing
+}
+
+// ScanOptions configures progress reporting for NewMatcherWithOptions.
+type ScanOptions struct {
+	// Heartbeat controls how often Walk and Parse progress updates fire.
+	// Non-positive values default to DefaultScanHeartbeat (30s) when OnProgress is set.
+	Heartbeat time.Duration
+	// OnProgress receives phase transitions and periodic progress snapshots.
+	OnProgress func(ScanProgress)
+}
+
 // MatchResult describes a local lossless file matched to a streaming track.
 type MatchResult struct {
 	Path   string
@@ -46,7 +82,25 @@ func NewMatcher(dir string) (*Matcher, error) {
 // NewMatcherContext behaves like NewMatcher but aborts directory walking when
 // ctx is cancelled.
 func NewMatcherContext(ctx context.Context, dir string) (*Matcher, error) {
-	res, err := scanDirectory(ctx, dir, true)
+	return NewMatcherWithOptions(ctx, dir, ScanOptions{})
+}
+
+// NewMatcherProgress scans dir like NewMatcherContext and emits phase transitions
+// plus periodic DefaultScanHeartbeat progress updates via onProgress.
+func NewMatcherProgress(ctx context.Context, dir string, onProgress func(ScanProgress)) (*Matcher, error) {
+	return NewMatcherWithOptions(ctx, dir, ScanOptions{
+		Heartbeat:  DefaultScanHeartbeat,
+		OnProgress: onProgress,
+	})
+}
+
+// NewMatcherWithOptions scans dir for playable lossless audio files with the
+// supplied cancellation context and progress-reporting configuration.
+func NewMatcherWithOptions(ctx context.Context, dir string, opts ScanOptions) (*Matcher, error) {
+	if opts.OnProgress != nil && opts.Heartbeat <= 0 {
+		opts.Heartbeat = DefaultScanHeartbeat
+	}
+	res, err := scanDirectoryWithProgress(ctx, dir, true, opts)
 	if err != nil {
 		return nil, err
 	}

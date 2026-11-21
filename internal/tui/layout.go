@@ -349,10 +349,33 @@ func (m *Model) renderModernLayout() string {
 }
 
 func (m *Model) heroHeaderSuffix() string {
+	var parts []string
 	if m.playerState.Track == nil {
-		return "idle"
+		parts = append(parts, "idle")
 	}
-	return ""
+	if h := m.hybridHeaderLabel(); h != "" {
+		parts = append(parts, h)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (m *Model) hybridHeaderLabel() string {
+	if !m.hybrid.enabled {
+		return ""
+	}
+	switch {
+	case m.hybrid.scanning:
+		if m.hybrid.count > 0 {
+			return fmt.Sprintf("hybrid: rescanning (%d)", m.hybrid.count)
+		}
+		return "hybrid: scanning…"
+	case m.hybrid.err != "":
+		return "hybrid: " + m.hybrid.err
+	case m.hybrid.count == 1:
+		return "hybrid: 1 track"
+	default:
+		return fmt.Sprintf("hybrid: %d tracks", m.hybrid.count)
+	}
 }
 
 func (m *Model) activeFullPanelSpec() (linesFn func(w, h int) []string, title, suffix string, borderSt, titleSt lipgloss.Style) {

@@ -372,6 +372,7 @@ Press `:` anywhere to open the command bar. Use `↑`/`↓` (`ctrl+p`/`ctrl+n`) 
 | `:quality <high\|standard\|256\|64>` | Switch Apple Music AAC bitrate (`256` or `64` kbps) |
 | `:art` | Toggle cover-art mode in the Now Playing panel (saved to config) |
 | `:debug-logs` | Toggle the debug log panel |
+| `:rescan` | Rescan local music directory in the background (hybrid mode) |
 | `:about` | Open the About & support panel |
 | `:donate` | Open Ko-fi donation page in browser |
 | `:q` / `:quit` | Quit vibez |
@@ -438,7 +439,7 @@ When `hybrid_playback` is enabled, vibez indexes local lossless files under `mus
 - **Enable by default vs. per-run:** set `"hybrid_playback": true` together with `"music_dir"` in `config.json` to enable hybrid playback on every launch. Passing `--hybrid` on the command line enables it for the current session only (unlike `--music-dir <path>`, which persists `music_dir` to `config.json`).
 - **Supported files (no Apple Music cache):** vibez indexes standalone, DRM-free **`.flac`**, **ALAC `.m4a`**, **`.wav`**, and (on Linux/macOS) **`.aiff`/`.aif`** files (lossy `.mp3`/`.m4a`/`.ogg` files are skipped in hybrid mode). Apple Music's native offline download bundles (`.movpkg` directories containing FairPlay-encrypted `.frag` / `.m3u8` segments) cannot be read or decrypted locally.
 - **Directory layout:** any folder structure works — scanning walks `music_dir` recursively and matches purely on embedded audio tags (`ISRC` first, then metadata) rather than folder or file names. Symlinked directories/files pointing outside `music_dir` and non-regular paths are skipped.
-- **Scanning & status visibility:** `music_dir` is scanned asynchronously **once on startup** (using an incremental metadata cache on disk, so files added while vibez is running require a restart). Check `:debug-logs` for `[hybrid] indexed N lossless local track(s) in <dir>`, `[hybrid] local scan failed ...`, and `[hybrid] playing local <FORMAT>: <file>`, or look at the **Now Playing** format badge switching to `FLAC`, `ALAC`, `WAV`, or `AIFF` when a local track is substituted.
+- **Scanning, progress & `:rescan`:** `music_dir` is scanned asynchronously on startup using an incremental metadata cache on disk, and can be re-indexed live without interrupting playback or your active queue/radio via `:rescan`. The **Now Playing** header shows live hybrid status (`hybrid: scanning…`, `hybrid: <N> tracks`, `hybrid: rescanning (<N>)`, `hybrid: no dir`, or `hybrid: scan failed`), and `:debug-logs` records `[hybrid] scanning <dir>…`, 30s walk/tag progress heartbeats, `[hybrid] indexed N lossless local track(s) in <dir>`, and `[hybrid] playing local <FORMAT>: <file>` (alongside the format badge switching to `FLAC`, `ALAC`, `WAV`, or `AIFF` on substitution).
 
 > **Play history note:** Locally substituted tracks play offline from disk without hitting Apple's playback reporting endpoint, so they won't appear in Apple Music's *Recently Played* history. Last.fm scrobbling and Discord Rich Presence still record them normally.
 

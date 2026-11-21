@@ -460,6 +460,10 @@ type Model struct {
 	// Optional callbacks to trigger or tear down Apple Music login/re-auth.
 	onReauth func() tea.Cmd
 	onLogout func()
+	onRescan func() (started bool, msg string)
+
+	// Hybrid local-library status surfaced in the Now Playing header.
+	hybrid hybridStatus
 
 	// Auth generation and explicit-logout flag to fence stale async responses.
 	authGen   uint64
@@ -472,6 +476,13 @@ type Model struct {
 	statusBarKey    statusCacheKey
 	statusBarCached []string
 	layoutCache     layoutCacheState
+}
+
+type hybridStatus struct {
+	enabled  bool
+	scanning bool
+	count    int
+	err      string
 }
 
 type statusCacheKey struct {
@@ -500,6 +511,7 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 		memProfiling:   opts.MemProfiling,
 		onReauth:       opts.OnReauth,
 		onLogout:       opts.OnLogout,
+		onRescan:       opts.OnRescan,
 		preMuteVol:     -1,
 		artMode:        cfg.GetAlbumArt(),
 		artwork:        artworkCache{rendered: map[art.Size][]string{}},
@@ -531,6 +543,14 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 	m.panels = []ContentView{m.library, m.queue, m.lyricsP, m.feedP, m.eqP, m.aboutP}
 	for _, line := range opts.InitialLogs {
 		m.appendLog(line)
+	}
+	if opts.HybridEnabled {
+		m.hybrid.enabled = true
+		if strings.TrimSpace(opts.HybridDir) == "" {
+			m.hybrid.err = "no dir"
+		} else {
+			m.hybrid.scanning = true
+		}
 	}
 	if opts.Backend != "" {
 		m.appendLog("[engine] backend: " + opts.Backend)
@@ -929,6 +949,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case DebugLogMsg:
 		m.appendLog(string(msg))
+
+	case HybridStatusMsg:
+		m.hybrid = hybridStatus{
+			enabled:  msg.Enabled,
+			scanning: msg.Scanning,
+			count:    msg.Count,
+			err:      msg.Err,
+		}
 
 	case lyricsResultMsg:
 		if m.loggedOut || msg.authGen != m.authGen {
@@ -1813,6 +1841,7 @@ var allCommands = []cmdEntry{
 	{"about", "about", "Show information about vibez"},
 	{"donate", "donate", "Support vibez development by donating"},
 	{"debug-logs", "debug-logs", "Toggle debug log panel"},
+	{"rescan", "rescan", "Rescan local music directory in hybrid playback mode"},
 	{"q", "q", "Quit vibez"},
 	{"quit", "quit", "Quit vibez"},
 }
@@ -2192,6 +2221,28 @@ func (m *Model) executeCommand(cmd string) tea.Cmd {
 		m.errMsg = fmt.Sprintf("✓ Vibe backend → %s", strings.TrimSpace(backend+" "+modelArg))
 		m.errExpiry = time.Now().Add(4 * time.Second)
 		return m.detectVibePlannerCmd()
+
+	case cmd == "rescan":
+		if m.onRescan == nil {
+			m.errMsg = "rescan is only available in hybrid playback mode"
+			m.errExpiry = time.Now().Add(4 * time.Second)
+			return nil
+		}
+		started, msg := m.onRescan()
+		if started {
+			m.hybrid.enabled = true
+			m.hybrid.scanning = true
+			m.hybrid.err = ""
+		}
+		if msg != "" {
+			if started {
+				m.errMsg = "✓ " + msg
+			} else {
+				m.errMsg = msg
+			}
+			m.errExpiry = time.Now().Add(4 * time.Second)
+		}
+		return nil
 
 	case strings.HasPrefix(cmd, "save "), strings.HasPrefix(cmd, "save-playlist "):
 		name := cmd
