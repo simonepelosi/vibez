@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-11-21
+
+### Fixed
+- **`:rescan` UI freeze across platforms (#274)** — moves initial `HybridStatusMsg` and `[hybrid] scanning <dir>…` emissions inside the background scan goroutine in `hybridCoordinator.triggerScan` (and handles unset-`music_dir` status updates inline inside `Model.executeCommand`) so invoking `:rescan` from Bubble Tea's `Update` loop never calls `Program.Send` synchronously on the unbuffered event channel (fixes #270 freeze reported on `v2.3.0`, thanks to `@squirrelchew`).
+
 ## [2.3.0] — 2026-11-21
 
 ### Added
