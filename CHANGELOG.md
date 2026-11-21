@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-11-21
+
+### Added
+- **Apple Music personal & Discovery stations in Feed (#266)** — surfaces Apple Music `stations` recommendations alongside albums and playlists (with early `/me/recommendations` pagination stop once stations are found and `/me/stations/next-tracks/...` continuous queue refill), adds the personal-station fallback with `[feed]` diagnostics, and stops active radio refills cleanly when playing a non-station Feed item (#265; thanks to `@squirrelchew` and `@ianswope`).
+- **TUI hybrid status indicator, 30s progress logs, and `:rescan` (#272)** — surfaces live `--hybrid` state in the `Now Playing` header (`hybrid: scanning…`, `hybrid: <N> tracks`, `hybrid: rescanning (<N>)`, `hybrid: no dir`, `hybrid: scan failed`), emits `[hybrid] scanning <dir>…` on startup, missing-`music_dir` warnings, and 30-second walk/tag `%` completion heartbeats (`ScanProgress` / `NewMatcherProgress`), and adds `:rescan` to rebuild the local lossless matcher in the background without resetting the active queue, radio, or playback position (#270).
+
+### Fixed
+- **Mid-stream error recovery & stale prefetch refresh (#269)** — stops the sink and clears staged next-track URIs on active stream/sink failures, performs bounded recovery and manual `Play()` resume at the saved playback position via `?start_seg=N` (or `Seek` for local `--hybrid` files), refreshes paused/prefetched streams older than 15 minutes (`Play()`, `Next()`, `handleStreamStart`), cleans up failed staged prefetches, and raises GStreamer socket `SO_RCVTIMEO` (`30s` connect/headers, `45s` `fdsrc` stream) so `StreamServer` diagnostics surface cleanly (#263).
+
+### Documentation
+- **Hybrid playback setup & command reference (#271, #272)** — clarifies DRM-free lossless format requirements (vs. FairPlay `.movpkg`/`.frag` caches), tag-based matching, per-run `--hybrid` vs. persistent `config.json` setup, `:rescan`, Now Playing status labels, and `:debug-logs` progress output in `README.md` (#270).
+
 ## [2.2.3] — 2026-11-19
 
 ### Fixed
