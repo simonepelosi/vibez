@@ -404,8 +404,8 @@ Configuration is stored as JSON at `~/.config/vibez/config.json` on Linux/macOS 
 | `theme` | Palette name (`default`, `dracula`, `gruvbox`, `nord`, or `<name>` in `themes/`) | `"default"` |
 | `audio_quality` | Apple Music AAC tier: `"high"` (`"256"`) or `"standard"` (`"64"`) | `"high"` |
 | `album_art` | Start Now Playing in album-art mode (toggled by `:art`) | `false` |
-| `music_dir` | Root directory scanned recursively by `--local` and `--hybrid` | `""` |
-| `hybrid_playback` | Prefer matching local lossless files inside Apple Music queues | `false` |
+| `music_dir` | Root directory scanned recursively on startup by `--local` and `--hybrid` | `""` |
+| `hybrid_playback` | Prefer matching local lossless files in Apple Music queues (`--hybrid` enables for the current launch only) | `false` |
 | `discord_rpc` | Enable Discord Rich Presence (`--no-discord` overrides at runtime) | `true` |
 | `discord_client_id` | Custom Discord application ID override | `""` |
 | `vibe_backend` | Vibe planner: `"auto"`, `"ollama"`, `"lmstudio"`, `"llamacpp"`, `"openai"` (OpenAI-compat local URL), `"keyword"` | `"auto"` |
@@ -433,7 +433,12 @@ Widevine CDM resolution order: `VIBEZ_CDM_PATH` → standard browser install pat
 
 ### Hybrid local lossless playback (`--hybrid`)
 
-When `hybrid_playback` is enabled (via config or `vibez --hybrid --music-dir ~/Music`), vibez indexes lossless files (`.flac`, ALAC `.m4a`, `.wav`, `.aiff`) under `music_dir` and plays them natively whenever an Apple Music queue track matches by **ISRC** or unambiguously by `(artist, album, title, track_number, duration ±2s)`. Unmatched tracks continue streaming from Apple Music without interruption.
+When `hybrid_playback` is enabled, vibez indexes local lossless files under `music_dir` and plays them natively whenever an Apple Music queue track matches by **ISRC** or unambiguously by `(artist, album, title, track_number, duration ±2s)` (plus `disc_number` when tagged). Unmatched tracks continue streaming from Apple Music without interruption.
+
+- **Enable by default vs. per-run:** set `"hybrid_playback": true` together with `"music_dir"` in `config.json` to enable hybrid playback on every launch. Passing `--hybrid` on the command line enables it for the current session only (unlike `--music-dir <path>`, which persists `music_dir` to `config.json`).
+- **Supported files (no Apple Music cache):** vibez indexes standalone, DRM-free **`.flac`**, **ALAC `.m4a`**, **`.wav`**, and (on Linux/macOS) **`.aiff`/`.aif`** files (lossy `.mp3`/`.m4a`/`.ogg` files are skipped in hybrid mode). Apple Music's native offline download bundles (`.movpkg` directories containing FairPlay-encrypted `.frag` / `.m3u8` segments) cannot be read or decrypted locally.
+- **Directory layout:** any folder structure works — scanning walks `music_dir` recursively and matches purely on embedded audio tags (`ISRC` first, then metadata) rather than folder or file names. Symlinked directories/files pointing outside `music_dir` and non-regular paths are skipped.
+- **Scanning & status visibility:** `music_dir` is scanned asynchronously **once on startup** (using an incremental metadata cache on disk, so files added while vibez is running require a restart). Check `:debug-logs` for `[hybrid] indexed N lossless local track(s) in <dir>`, `[hybrid] local scan failed ...`, and `[hybrid] playing local <FORMAT>: <file>`, or look at the **Now Playing** format badge switching to `FLAC`, `ALAC`, `WAV`, or `AIFF` when a local track is substituted.
 
 > **Play history note:** Locally substituted tracks play offline from disk without hitting Apple's playback reporting endpoint, so they won't appear in Apple Music's *Recently Played* history. Last.fm scrobbling and Discord Rich Presence still record them normally.
 
