@@ -6003,4 +6003,19 @@ func TestHybridStatusHeaderAndRescanCommand(t *testing.T) {
 	if !strings.Contains(plain.errMsg, "hybrid playback mode") {
 		t.Fatalf("plain :rescan errMsg = %q, want hybrid playback hint", plain.errMsg)
 	}
+
+	// Empty music_dir updates header and debug logs inline without needing prog.Send.
+	noDirRescan := New(&config.Config{HybridPlayback: true}, &mockProvider{}, newMockPlayer(), Options{
+		HybridEnabled: true,
+		OnRescan: func() (bool, string) {
+			return false, "music_dir is not set (use --music-dir <path> or set music_dir in config.json)"
+		},
+	})
+	_ = noDirRescan.executeCommand("rescan")
+	if got := noDirRescan.heroHeaderSuffix(); got != "idle · hybrid: no dir" {
+		t.Fatalf("noDir rescan suffix = %q, want %q", got, "idle · hybrid: no dir")
+	}
+	if len(noDirRescan.debugLog) == 0 || !strings.Contains(noDirRescan.debugLog[len(noDirRescan.debugLog)-1], "music_dir is not set") {
+		t.Fatalf("noDir rescan did not record debug log: %+v", noDirRescan.debugLog)
+	}
 }
