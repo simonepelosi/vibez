@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/simone-vibes/vibez/internal/provider"
 )
@@ -71,6 +72,20 @@ func isLosslessExt(ext string) bool {
 }
 
 func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResult, error) {
+	return scanDirectoryWithProgress(ctx, dir, losslessOnly, ScanOptions{})
+}
+
+func scanDirectoryWithProgress(ctx context.Context, dir string, losslessOnly bool, opts ScanOptions) (scanResult, error) {
+	return scanDirectoryWithParser(ctx, dir, losslessOnly, opts, trackFromFile)
+}
+
+func scanDirectoryWithParser(
+	ctx context.Context,
+	dir string,
+	losslessOnly bool,
+	opts ScanOptions,
+	parseFn func(string) (provider.Track, error),
+) (scanResult, error) {
 	if err := ctx.Err(); err != nil {
 		return scanResult{}, err
 	}
@@ -78,6 +93,23 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 	root := canonicalMusicDir(dir)
 	skipped := map[string]int{}
 	var candidates []scanCandidate
+	var walked atomic.Int64
+	var found atomic.Int64
+
+	stopWalkHeartbeat := func() {}
+	if opts.OnProgress != nil {
+		heartbeat := opts.Heartbeat
+		if heartbeat <= 0 {
+			heartbeat = DefaultScanHeartbeat
+		}
+		stopWalkHeartbeat = startScanHeartbeat(ctx, heartbeat, func() {
+			opts.OnProgress(ScanProgress{
+				Phase:  ScanPhaseWalk,
+				Walked: int(walked.Load()),
+				Found:  int(found.Load()),
+			})
+		})
+	}
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -92,6 +124,7 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 			}
 			return err
 		}
+		walked.Add(1)
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
@@ -110,8 +143,10 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 			cand.modNano = info.ModTime().UnixNano()
 		}
 		candidates = append(candidates, cand)
+		found.Add(1)
 		return nil
 	})
+	stopWalkHeartbeat()
 	if err != nil {
 		return scanResult{}, err
 	}
@@ -133,7 +168,18 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 		missIdx = append(missIdx, i)
 	}
 
-	if err := parseCandidatesParallel(ctx, candidates, missIdx, results); err != nil {
+	cachedCount := len(candidates) - len(missIdx)
+	if opts.OnProgress != nil {
+		opts.OnProgress(ScanProgress{
+			Phase:        ScanPhaseParseStart,
+			Walked:       int(walked.Load()),
+			Found:        len(candidates),
+			Cached:       cachedCount,
+			TotalToParse: len(missIdx),
+		})
+	}
+
+	if err := parseCandidatesParallel(ctx, candidates, missIdx, results, opts, cachedCount, int(walked.Load()), parseFn); err != nil {
 		return scanResult{}, err
 	}
 
@@ -194,18 +240,82 @@ func scanDirectory(ctx context.Context, dir string, losslessOnly bool) (scanResu
 	}, nil
 }
 
-func parseCandidatesParallel(ctx context.Context, candidates []scanCandidate, missIdx []int, results []scanItemResult) error {
+func startScanHeartbeat(ctx context.Context, interval time.Duration, tickFn func()) func() {
+	if interval <= 0 || tickFn == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if ctx.Err() != nil {
+					return
+				}
+				tickFn()
+			}
+		}
+	})
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(done) })
+		wg.Wait()
+	}
+}
+
+func parseCandidatesParallel(
+	ctx context.Context,
+	candidates []scanCandidate,
+	missIdx []int,
+	results []scanItemResult,
+	opts ScanOptions,
+	cachedCount int,
+	walkedCount int,
+	parseFn func(string) (provider.Track, error),
+) error {
 	if len(missIdx) == 0 {
 		return nil
 	}
-	if len(missIdx) == 1 {
-		i := missIdx[0]
-		t, err := trackFromFile(candidates[i].path)
-		if err != nil {
-			results[i].unreadable = true
-		} else {
-			results[i].track = t
+
+	var parsed atomic.Int64
+	stopHeartbeat := func() {}
+	if opts.OnProgress != nil {
+		heartbeat := opts.Heartbeat
+		if heartbeat <= 0 {
+			heartbeat = DefaultScanHeartbeat
 		}
+		stopHeartbeat = startScanHeartbeat(ctx, heartbeat, func() {
+			opts.OnProgress(ScanProgress{
+				Phase:        ScanPhaseParse,
+				Walked:       walkedCount,
+				Found:        len(candidates),
+				Cached:       cachedCount,
+				Parsed:       int(parsed.Load()),
+				TotalToParse: len(missIdx),
+			})
+		})
+	}
+	defer stopHeartbeat()
+
+	applyParse := func(idx int) {
+		t, err := parseFn(candidates[idx].path)
+		if err != nil {
+			results[idx].unreadable = true
+		} else {
+			results[idx].track = t
+		}
+		parsed.Add(1)
+	}
+
+	if len(missIdx) == 1 {
+		applyParse(missIdx[0])
 		return ctx.Err()
 	}
 
@@ -222,17 +332,12 @@ func parseCandidatesParallel(ctx context.Context, candidates []scanCandidate, mi
 				if pos >= len(missIdx) {
 					return
 				}
-				idx := missIdx[pos]
-				t, err := trackFromFile(candidates[idx].path)
-				if err != nil {
-					results[idx].unreadable = true
-				} else {
-					results[idx].track = t
-				}
+				applyParse(missIdx[pos])
 			}
 		})
 	}
 	wg.Wait()
+	stopHeartbeat()
 	return ctx.Err()
 }
 

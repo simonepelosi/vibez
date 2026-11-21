@@ -5903,3 +5903,104 @@ func TestLogout_IgnoresStaleSessionExpiredMsg(t *testing.T) {
 		t.Fatal("expected model to remain logged out")
 	}
 }
+
+func TestHybridStatusHeaderAndRescanCommand(t *testing.T) {
+	// Default non-hybrid model leaves hero header unchanged.
+	plain := newModel(nil)
+	if got := plain.heroHeaderSuffix(); got != "idle" {
+		t.Fatalf("plain heroHeaderSuffix() = %q, want %q", got, "idle")
+	}
+
+	// Missing music_dir with hybrid enabled surfaces "hybrid: no dir".
+	noDirModel := New(&config.Config{}, nil, nil, Options{
+		HybridEnabled: true,
+		HybridDir:     "",
+	})
+	if got := noDirModel.heroHeaderSuffix(); got != "idle · hybrid: no dir" {
+		t.Fatalf("noDir heroHeaderSuffix() = %q, want %q", got, "idle · hybrid: no dir")
+	}
+
+	// Configured hybrid mode starts in scanning state and appears in rendered view.
+	rescanCalled := 0
+	canStart := true
+	cfg := &config.Config{HybridPlayback: true, MusicDir: "/music"}
+	m := New(cfg, &mockProvider{}, newMockPlayer(), Options{
+		HybridEnabled: true,
+		HybridDir:     "/music",
+		OnRescan: func() (bool, string) {
+			rescanCalled++
+			if !canStart {
+				return false, "local library scan already in progress"
+			}
+			return true, "Rescanning local library in background…"
+		},
+	})
+	m.renderArt = art.RenderHalfBlocks
+	m.introStep = introDone
+	m.width = 120
+	m.height = 40
+	if got := m.heroHeaderSuffix(); got != "idle · hybrid: scanning…" {
+		t.Fatalf("initial hybrid heroHeaderSuffix() = %q, want %q", got, "idle · hybrid: scanning…")
+	}
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "hybrid: scanning…") {
+		t.Fatalf("rendered View() missing hybrid scanning header: %s", view)
+	}
+
+	// Single indexed track singularises cleanly and shows when actively playing.
+	_, _ = m.Update(HybridStatusMsg{Enabled: true, Count: 1})
+	if got := m.heroHeaderSuffix(); got != "idle · hybrid: 1 track" {
+		t.Fatalf("1-track idle suffix = %q, want %q", got, "idle · hybrid: 1 track")
+	}
+	tr := provider.Track{ID: "t1", Title: "Song"}
+	m.playerState.Track = &tr
+	_, _ = m.Update(HybridStatusMsg{Enabled: true, Count: 42})
+	if got := m.heroHeaderSuffix(); got != "hybrid: 42 tracks" {
+		t.Fatalf("42-track playing suffix = %q, want %q", got, "hybrid: 42 tracks")
+	}
+
+	// Command palette discovers :rescan.
+	m.cmdBuf = "res"
+	sugg := m.commandSuggestions()
+	foundRescan := false
+	for _, s := range sugg {
+		if s.trigger == "rescan" {
+			foundRescan = true
+			break
+		}
+	}
+	if !foundRescan {
+		t.Fatalf("commandSuggestions(%q) did not include rescan: %+v", m.cmdBuf, sugg)
+	}
+
+	// Executing :rescan preserves existing queue/radio/playback state and transitions header to rescanning (count).
+	m.queueTracks = []provider.Track{tr}
+	m.queueIDs = []string{"t1"}
+	m.radio.enabled = true
+	m.radio.generation = 3
+	_ = m.executeCommand("rescan")
+	if rescanCalled != 1 {
+		t.Fatalf("rescanCalled = %d, want 1", rescanCalled)
+	}
+	if len(m.queueTracks) != 1 || !m.radio.enabled || m.radio.generation != 3 {
+		t.Fatalf(":rescan disturbed active queue/radio state: queue=%d radio=%+v", len(m.queueTracks), m.radio)
+	}
+	if got := m.heroHeaderSuffix(); got != "hybrid: rescanning (42)" {
+		t.Fatalf("rescanning suffix = %q, want %q", got, "hybrid: rescanning (42)")
+	}
+	if !strings.Contains(m.errMsg, "Rescanning local library") {
+		t.Fatalf("unexpected rescan banner: %q", m.errMsg)
+	}
+
+	// Duplicate :rescan surfaces status without resetting count.
+	canStart = false
+	_ = m.executeCommand("rescan")
+	if m.errMsg != "local library scan already in progress" {
+		t.Fatalf("duplicate rescan banner = %q", m.errMsg)
+	}
+
+	// Missing callback prints helpful message.
+	_ = plain.executeCommand("rescan")
+	if !strings.Contains(plain.errMsg, "hybrid playback mode") {
+		t.Fatalf("plain :rescan errMsg = %q, want hybrid playback hint", plain.errMsg)
+	}
+}

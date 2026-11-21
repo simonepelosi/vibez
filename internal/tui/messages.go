@@ -30,6 +30,13 @@ type Options struct {
 	OnReauth func() tea.Cmd
 	// OnLogout optionally tears down any in-flight re-auth and suppresses automatic re-auth after :logout.
 	OnLogout func()
+	// HybridEnabled indicates whether hybrid local-playback matching is active.
+	HybridEnabled bool
+	// HybridDir is the configured music directory shown in hybrid diagnostics.
+	HybridDir string
+	// OnRescan triggers a background local-library rescan (used by :rescan).
+	// Returns whether a scan started and an optional status banner message.
+	OnRescan func() (started bool, msg string)
 }
 
 // InitStatusMsg updates the status text shown on the loading screen.
@@ -53,6 +60,14 @@ type RestartMsg struct{}
 // Use this to surface background-goroutine events (e.g. scrobbling) without
 // printing to stderr.
 type DebugLogMsg string
+
+// HybridStatusMsg updates the TUI's hybrid local-playback indicator in the Now Playing header.
+type HybridStatusMsg struct {
+	Enabled  bool
+	Scanning bool
+	Count    int
+	Err      string
+}
 
 // playlistsForPickerMsg is the response to a library-playlists fetch for the
 // playlist picker modal.

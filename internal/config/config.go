@@ -264,6 +264,26 @@ func (c *Config) IsVibeLocalOnly() bool {
 	return strings.EqualFold(strings.TrimSpace(c.VibePrivacy), "local-only")
 }
 
+// HybridPlaybackEnabled reports whether hybrid local lossless playback is active.
+func (c *Config) HybridPlaybackEnabled() bool {
+	if c == nil {
+		return false
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.HybridPlayback
+}
+
+// GetMusicDir returns the configured local music directory safely.
+func (c *Config) GetMusicDir() string {
+	if c == nil {
+		return ""
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.MusicDir
+}
+
 // DeveloperToken returns the configured or runtime Apple developer token safely.
 func (c *Config) DeveloperToken() string {
 	if c == nil {
