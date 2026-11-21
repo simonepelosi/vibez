@@ -101,15 +101,15 @@ func (t Track) ReleaseYear() string {
 	return year
 }
 
-// RecommendationItem is a single album or playlist entry inside a recommendation group.
+// RecommendationItem is a single album, playlist, or station entry inside a recommendation group.
 type RecommendationItem struct {
 	ID       string
-	Kind     string // "album" or "playlist"
+	Kind     string // "album", "playlist", or "station"
 	Title    string
-	Subtitle string // artist name for albums; curator name for playlists
+	Subtitle string // artist name for albums; curator/description for playlists and stations
 }
 
-// RecommendationGroup is a titled set of recommended albums or playlists.
+// RecommendationGroup is a titled set of recommended albums, playlists, or stations.
 type RecommendationGroup struct {
 	Title string
 	Items []RecommendationItem
@@ -196,13 +196,13 @@ type Provider interface {
 	// RatingNone (no error) when the song is not rated or the provider does
 	// not support ratings.
 	GetSongRating(ctx context.Context, catalogID string) (Rating, error)
-	// GetRecommendations returns personalised recommendation groups (albums and
-	// playlists) from Apple Music based on the user's library and history.
+	// GetRecommendations returns personalised recommendation groups (albums,
+	// playlists, and on-demand stations) from Apple Music based on the user's library and history.
 	GetRecommendations(ctx context.Context) ([]RecommendationGroup, error)
 	// GetStationTracks fetches a batch of tracks for an Apple Music radio
-	// station seeded by the given song. The seed may be a catalog song ID or a
-	// library ID ("i.XXXX"); a library ID is resolved to its catalog ID first,
-	// since a station can only be seeded by a catalog ID.
+	// station. seed may be a full station ID ("ra.XXXX"), a catalog song ID,
+	// or a library ID ("i.XXXX"); a library ID is resolved to its catalog ID
+	// first since per-song stations require a catalog song ID.
 	GetStationTracks(ctx context.Context, seed string) ([]Track, error)
 	// AddToPlaylist adds a track to an existing library playlist.
 	// playlistID must be a library playlist ID (e.g. "p.XXXXX").

@@ -1814,3 +1814,295 @@ func TestToTrack_ExtendedMetadataAndPalette(t *testing.T) {
 		t.Errorf("unexpected ArtworkPalette: %+v", tr.ArtworkPalette)
 	}
 }
+
+func TestGetStationTracks_DirectStationID(t *testing.T) {
+	var seenPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		writeJSON(t, w, map[string]any{
+			"data": []any{
+				songJSON("2001", "Discovery Song", "Artist", "Album", 190000, ""),
+			},
+		})
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	tracks, err := p.GetStationTracks(context.Background(), "ra.u-04bcab05bb818ecf1abb70ff757")
+	if err != nil {
+		t.Fatalf("GetStationTracks(ra.u-...): %v", err)
+	}
+	wantSuffix := "/stations/next-tracks/ra.u-04bcab05bb818ecf1abb70ff757"
+	if !strings.HasSuffix(seenPath, wantSuffix) {
+		t.Fatalf("station endpoint path = %q, want suffix %q (no double ra. prefix)", seenPath, wantSuffix)
+	}
+	if len(tracks) != 1 || tracks[0].ID != "2001" {
+		t.Fatalf("tracks = %+v, want song 2001", tracks)
+	}
+}
+
+func TestGetRecommendations_IncludesStationsAndSkipsLiveStreams(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"next": "/v1/me/recommendations?offset=10&limit=10",
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Top Picks"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":   "alb-1",
+										"type": "albums",
+										"attributes": map[string]any{
+											"name":       "Album One",
+											"artistName": "Artist A",
+										},
+									},
+									map[string]any{
+										"id":   "../evil",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name": "Bad ID Station",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/me/recommendations?offset=10&limit=10":
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Stations for You"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":   "ra.u-personal-1",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name":   "Simone's Station",
+											"isLive": false,
+										},
+									},
+									map[string]any{
+										"id":   "ra.discovery-1",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name":   "Discovery Station",
+											"isLive": false,
+											"editorialNotes": map[string]any{
+												"short": "New music picked for you\x1b[31m",
+											},
+										},
+									},
+									map[string]any{
+										"id":   "ra.live-1",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name":   "Apple Music 1",
+											"isLive": true,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, err := p.GetRecommendations(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendations: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("groups = %d (%+v), want 2", len(groups), groups)
+	}
+	if groups[1].Title != "Stations for You" {
+		t.Fatalf("groups[1].Title = %q, want %q", groups[1].Title, "Stations for You")
+	}
+	if len(groups[1].Items) != 2 {
+		t.Fatalf("station items = %d (%+v), want 2 (live stream skipped)", len(groups[1].Items), groups[1].Items)
+	}
+	personal := groups[1].Items[0]
+	if personal.Kind != "station" || personal.ID != "ra.u-personal-1" || personal.Subtitle != "" {
+		t.Fatalf("unexpected personal station item: %+v", personal)
+	}
+	discovery := groups[1].Items[1]
+	if discovery.Kind != "station" || discovery.ID != "ra.discovery-1" || strings.Contains(discovery.Subtitle, "\x1b") {
+		t.Fatalf("unexpected discovery station item: %+v", discovery)
+	}
+}
+
+func TestGetRecommendations_StopsPaginatingOnceStationsFound(t *testing.T) {
+	page2Requested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"next": "/v1/me/recommendations?offset=10&limit=10",
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Stations for You"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":   "ra.u-page1",
+										"type": "stations",
+										"attributes": map[string]any{
+											"name":   "My Station",
+											"isLive": false,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/me/recommendations?offset=10&limit=10":
+			page2Requested = true
+			writeJSON(t, w, map[string]any{"data": []any{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, warnings, err := p.GetRecommendationsWithWarnings(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendationsWithWarnings: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if page2Requested {
+		t.Fatal("expected pagination to stop after page 1 already contained stations")
+	}
+	if len(groups) != 1 || groups[0].Items[0].ID != "ra.u-page1" {
+		t.Fatalf("groups = %+v, want page 1 station group", groups)
+	}
+}
+
+func TestGetRecommendations_PersonalStationFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Albums"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":   "alb-1",
+										"type": "albums",
+										"attributes": map[string]any{
+											"name":       "Album",
+											"artistName": "Artist",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/catalog/us/stations?filter[identity]=personal":
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"id":   "ra.u-fallback",
+						"type": "stations",
+						"attributes": map[string]any{
+							"name":   "My Station",
+							"isLive": false,
+						},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, err := p.GetRecommendations(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendations: %v", err)
+	}
+	if len(groups) != 2 || groups[1].Title != "Stations for You" {
+		t.Fatalf("groups = %+v, want personal station fallback group", groups)
+	}
+	if got := groups[1].Items[0]; got.Kind != "station" || got.ID != "ra.u-fallback" || got.Title != "My Station" || got.Subtitle != "" {
+		t.Fatalf("fallback item = %+v", got)
+	}
+}
+
+func TestGetRecommendationsWithWarnings_LogsPersonalStationFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case "/me/recommendations?limit=10":
+			writeJSON(t, w, map[string]any{
+				"data": []any{
+					map[string]any{
+						"attributes": map[string]any{
+							"title": map[string]any{"stringForDisplay": "Albums"},
+						},
+						"relationships": map[string]any{
+							"contents": map[string]any{
+								"data": []any{
+									map[string]any{
+										"id":         "alb-1",
+										"type":       "albums",
+										"attributes": map[string]any{"name": "Album", "artistName": "Artist"},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case "/catalog/us/stations?filter[identity]=personal":
+			w.WriteHeader(http.StatusBadGateway)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(t, srv)
+	groups, warnings, err := p.GetRecommendationsWithWarnings(context.Background())
+	if err != nil {
+		t.Fatalf("GetRecommendationsWithWarnings: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %+v, want 1 album group", groups)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "personal station fallback:") {
+		t.Fatalf("warnings = %v, want personal station fallback error warning", warnings)
+	}
+}
