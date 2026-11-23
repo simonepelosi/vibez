@@ -1263,10 +1263,6 @@ func fetchSegmentWithRetryInto(ctx context.Context, client *http.Client, segURL 
 	return nil, lastStage, lastErr
 }
 
-func readBoundedBody(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
-	return readBoundedBodyInto(r, sizeHint, maxBytes, nil)
-}
-
 func readBoundedBodyInto(r io.Reader, sizeHint, maxBytes int64, dstBuf *bytes.Buffer) ([]byte, error) {
 	hint := min(max(sizeHint, 0), min(maxBytes, maxMediaSegmentSize))
 	buf := dstBuf

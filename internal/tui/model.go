@@ -415,10 +415,10 @@ type Model struct {
 	lastKey string
 
 	// Errors / status messages
-	errMsg          string
-	errExpiry       time.Time
-	errTickEnabled  bool
-	errTickRunning  bool
+	errMsg         string
+	errExpiry      time.Time
+	errTickEnabled bool
+	errTickRunning bool
 
 	// Debug log
 	debugLog    []string

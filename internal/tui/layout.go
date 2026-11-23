@@ -1161,11 +1161,12 @@ func (m *Model) buildHeroContentCached(contentW, h, screenX0 int) (raw, padded [
 		artMatch := true
 		if useArt {
 			artLines := m.artwork.rendered[artSize]
-			if len(artLines) != len(c.heroArtRef) {
+			switch {
+			case len(artLines) != len(c.heroArtRef):
 				artMatch = false
-			} else if len(artLines) > 0 {
+			case len(artLines) > 0:
 				artMatch = &artLines[0] == &c.heroArtRef[0]
-			} else {
+			default:
 				artMatch = m.artwork.img == nil
 			}
 		}
