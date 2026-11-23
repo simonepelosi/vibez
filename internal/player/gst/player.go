@@ -1528,6 +1528,11 @@ func (p *Player) callbackLoop() {
 		case <-p.stop:
 			return
 		case fn := <-p.cbCh:
+			select {
+			case <-p.stop:
+				return
+			default:
+			}
 			if fn != nil {
 				fn()
 			}
