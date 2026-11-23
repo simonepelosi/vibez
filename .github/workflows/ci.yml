@@ -94,12 +94,15 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 
       - name: Fuzz smoke tests
+        # Use an iteration cap (-fuzztime=5000x) rather than a duration: Go's
+        # internal/fuzz coordinator has a context.WithTimeout propagation race
+        # that can fail a clean fuzz run with "context deadline exceeded".
         run: |
           while IFS= read -r file; do
             pkg="./$(dirname "$file")"
             while IFS= read -r fn; do
               echo "=== Fuzzing $pkg ($fn) ==="
-              go test -mod=readonly -run='^$' -fuzz="^${fn}$" -fuzztime=3s "$pkg"
+              go test -mod=readonly -run='^$' -fuzz="^${fn}$" -fuzztime=5000x "$pkg"
             done < <(sed -n 's/^func \(Fuzz[A-Za-z0-9_]*\).*/\1/p' "$file")
           done < <(grep -rl '^func Fuzz' . --include='*_test.go')
 
