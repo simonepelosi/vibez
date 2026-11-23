@@ -68,6 +68,7 @@ func isUnsafeIP(ip net.IP) bool {
 func NewSafeHTTPClient(timeout time.Duration) *http.Client {
 	tr := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: timeout,
 		MaxIdleConns:        16,
 		MaxIdleConnsPerHost: 8,

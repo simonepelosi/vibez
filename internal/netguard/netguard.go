@@ -325,8 +325,18 @@ func NewSafeRoundTripper(base *http.Transport, dialTimeout time.Duration, allowL
 	var tr *http.Transport
 	if base != nil {
 		tr = base.Clone()
+		if base.TLSNextProto == nil {
+			// base.Clone() triggers onceSetNextProtoDefaults on transports with
+			// DialContext == nil, populating ALPN "h2" in TLSClientConfig. Keep
+			// HTTP/2 enabled after installing our custom DialContext so Go does
+			// not negotiate "h2" and then parse binary HTTP/2 frames as HTTP/1.x.
+			tr.ForceAttemptHTTP2 = true
+		}
 	} else {
-		tr = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		tr = &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			ForceAttemptHTTP2: true,
+		}
 	}
 	if dialTimeout <= 0 {
 		dialTimeout = 5 * time.Second

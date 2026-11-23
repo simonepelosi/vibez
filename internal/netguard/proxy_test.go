@@ -213,3 +213,61 @@ func TestNewSafeRoundTripper_AllowsConfiguredLoopbackProxyAndBlocksSSRF(t *testi
 		t.Fatal("nil-base NewSafeRoundTripper allowed unproxied loopback dial")
 	}
 }
+
+func TestNewSafeRoundTripper_NegotiatesHTTP2WithoutFrameMismatch(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "h2-ok")
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	srvTransport, ok := srv.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected server transport type %T", srv.Client().Transport)
+	}
+
+	// Regression test for #276: a caller-built Transport with DialContext==nil
+	// and ForceAttemptHTTP2==false previously had base.Clone() seed ALPN "h2"
+	// while NewSafeRoundTripper installed DialContext without ForceAttemptHTTP2,
+	// causing HTTP/2 servers (like Apple's mzstatic CDN) to return binary
+	// SETTINGS frames to Go's HTTP/1.x parser.
+	base := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			RootCAs:    srvTransport.TLSClientConfig.RootCAs,
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: NewSafeRoundTripper(base, 2*time.Second, true),
+	}
+	defer client.CloseIdleConnections()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL+"/cover.jpg", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HTTP/2 request through NewSafeRoundTripper failed: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("resp.ProtoMajor = %d, want 2", resp.ProtoMajor)
+	}
+	if string(body) != "h2-ok" {
+		t.Fatalf("body = %q, want %q", body, "h2-ok")
+	}
+
+	nilBaseRT, ok := NewSafeRoundTripper(nil, time.Second, false).(*safeRoundTripper)
+	if !ok || !nilBaseRT.base.ForceAttemptHTTP2 {
+		t.Fatal("nil-base NewSafeRoundTripper did not enable ForceAttemptHTTP2")
+	}
+}
