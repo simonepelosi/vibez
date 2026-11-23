@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.3] — 2026-11-23
+
+### Fixed
+- **Album art downloads failing since `v2.2.2` due to HTTP/2 ALPN mismatch (#281)** — sets `ForceAttemptHTTP2 = true` in `netguard.NewSafeRoundTripper` (whenever `base == nil` or `base.TLSNextProto == nil`) and in `art.NewSafeHTTPClient`, preventing `Transport.Clone()` from advertising ALPN `"h2"` while Go's HTTP/1.x parser rejects Apple's `*.mzstatic.com` HTTP/2 `SETTINGS` frames (fixes #276, thanks to `@jiangtaoc`).
+- **GStreamer callback teardown & E2E destroy check (#280)** — drops buffered callbacks immediately once `Destroy()` closes `p.stop` in `gst.Player.callbackLoop` and fixes the `destroyed` flag ordering in `TestNativeSinkNonFiniteControlsAndRapidDestroy`.
+
 ## [2.3.2] — 2026-11-23
 
 ### Fixed
