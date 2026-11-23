@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.2] — 2026-11-23
+
+### Fixed
+- **Widevine CDM auto-download CRX3 ID & Library nil-provider panic (#278)** — fixes byte 9 of `widevineCRXID` (`0x33` → `0xd9`, matching `oimompecagnajdejgnnjijobebaeigek`) so automatic Widevine CDM downloads pass CRX3 signature verification again when no local browser CDM is installed, and guards `LibraryModel`'s track/playlist loaders against a `nil` provider when the audio engine fails to start (fixes #277, thanks to `@rhydlewis`).
+
 ## [2.3.1] — 2026-11-21
 
 ### Fixed
