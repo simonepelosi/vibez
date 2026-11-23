@@ -197,8 +197,8 @@ func TestNativeSinkNonFiniteControlsAndRapidDestroy(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		s.Seek(-time.Second)
 		s.Stop()
-		destroyed.Store(true)
 		s.Destroy()
+		destroyed.Store(true)
 	}
 	if cbAfterDestroy.Load() {
 		t.Fatal("observed sink callback after Destroy returned")
