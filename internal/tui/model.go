@@ -197,6 +197,7 @@ type songRatingMsg struct {
 	authGen   uint64
 }
 type tickMsg time.Time
+type errTickMsg struct{ gen uint64 }
 type glowTickMsg time.Time
 type introTickMsg time.Time
 type memTickMsg struct{ stats string }
@@ -415,10 +416,12 @@ type Model struct {
 	lastKey string
 
 	// Errors / status messages
-	errMsg         string
-	errExpiry      time.Time
-	errTickEnabled bool
-	errTickRunning bool
+	errMsg          string
+	errExpiry       time.Time
+	errTickEnabled  bool
+	errTickRunning  bool
+	errTickDeadline time.Time
+	errTickGen      uint64
 
 	// Debug log
 	debugLog    []string
@@ -614,25 +617,48 @@ func (m *Model) restoreAudioSettings() []tea.Cmd {
 
 // ── Timers ────────────────────────────────────────────────────────────────
 
-func errTick(expiry time.Time) tea.Cmd {
-	d := time.Second
-	if !expiry.IsZero() {
-		d = time.Until(expiry)
-		if d < 50*time.Millisecond {
-			d = 50 * time.Millisecond
-		} else if d > time.Hour {
-			// Cap very long expiries (e.g. session-expired banners) to avoid
-			// overflowing or holding multi-year timers.
-			d = time.Hour
-		}
+func errTickDeadlineFor(now, expiry time.Time) (time.Time, time.Duration) {
+	if expiry.IsZero() {
+		return now.Add(time.Second), time.Second
 	}
-	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
+	d := expiry.Sub(now)
+	switch {
+	case d < 50*time.Millisecond:
+		return now.Add(50 * time.Millisecond), 50 * time.Millisecond
+	case d > time.Hour:
+		// Cap very long expiries (e.g. session-expired banners) to avoid
+		// overflowing or holding multi-year timers.
+		return now.Add(time.Hour), time.Hour
+	default:
+		return expiry, d
+	}
+}
+
+func (m *Model) armErrTick(cmds *[]tea.Cmd, now time.Time) {
+	deadline, d := errTickDeadlineFor(now, m.errExpiry)
+	m.errTickRunning = true
+	m.errTickDeadline = deadline
+	m.errTickGen++
+	gen := m.errTickGen
+	*cmds = append(*cmds, tea.Tick(d, func(time.Time) tea.Msg { return errTickMsg{gen: gen} }))
 }
 
 func (m *Model) ensureErrTick(cmds *[]tea.Cmd) {
-	if m.errTickEnabled && !m.errTickRunning && m.errMsg != "" {
-		m.errTickRunning = true
-		*cmds = append(*cmds, errTick(m.errExpiry))
+	if !m.errTickEnabled {
+		return
+	}
+	if m.errMsg == "" {
+		if m.errTickRunning {
+			m.errTickRunning = false
+			m.errTickDeadline = time.Time{}
+			m.errTickGen++
+		}
+		return
+	}
+	now := time.Now()
+	target, _ := errTickDeadlineFor(now, m.errExpiry)
+	if !m.errTickRunning || target.Before(m.errTickDeadline) {
+		m.armErrTick(cmds, now)
 	}
 }
 
@@ -715,15 +741,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.eqP.SetSize(contentW, panelH)
 		m.aboutP.SetSize(contentW, panelH)
 
-	case tickMsg:
-		if m.errMsg != "" && time.Now().After(m.errExpiry) {
+	case errTickMsg:
+		if msg.gen != m.errTickGen {
+			break
+		}
+		now := time.Now()
+		if m.errMsg != "" && now.After(m.errExpiry) {
 			m.errMsg = ""
 		}
 		if m.errMsg != "" {
-			m.errTickRunning = true
-			cmds = append(cmds, errTick(m.errExpiry))
+			m.armErrTick(&cmds, now)
 		} else {
 			m.errTickRunning = false
+			m.errTickDeadline = time.Time{}
+		}
+
+	case tickMsg:
+		now := time.Now()
+		if m.errMsg != "" && now.After(m.errExpiry) {
+			m.errMsg = ""
+		}
+		if m.errMsg != "" {
+			m.armErrTick(&cmds, now)
+		} else {
+			m.errTickRunning = false
+			m.errTickDeadline = time.Time{}
 		}
 
 	case glowTickMsg:
