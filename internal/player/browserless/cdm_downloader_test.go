@@ -445,3 +445,18 @@ func TestEnsureCDM_LogsNoticeWhenEnvOverrideIgnored(t *testing.T) {
 		t.Fatalf("EnsureCDM notices = %v, expected notice explaining ignored VIBEZ_CDM_PATH", notices)
 	}
 }
+
+// Chrome extension IDs encode 16 bytes as 32 letters 'a'..'p', one per nibble.
+// Deriving the bytes here guards the hand-written widevineCRXID literal against
+// typos, which would make every CDM auto-download fail signature verification.
+func TestWidevineCRXIDMatchesExtensionID(t *testing.T) {
+	const extensionID = "oimompecagnajdejgnnjijobebaeigek"
+	var want [16]byte
+	for i := range want {
+		hi, lo := extensionID[2*i]-'a', extensionID[2*i+1]-'a'
+		want[i] = hi<<4 | lo
+	}
+	if widevineCRXID != want {
+		t.Fatalf("widevineCRXID = %x, want %x (decoded from %q)", widevineCRXID, want, extensionID)
+	}
+}

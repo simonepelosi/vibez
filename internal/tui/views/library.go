@@ -3,6 +3,7 @@ package views
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -28,6 +29,12 @@ const (
 	libraryLoadTimeout = 20 * time.Second
 	libraryTracksTTL   = 5 * time.Minute
 )
+
+// errLibraryUnavailable is reported when a library section is opened before a
+// provider exists. The browserless flow starts the TUI with a nil provider and
+// only supplies one on EngineReadyMsg, which never arrives if the audio engine
+// fails to start (e.g. the Widevine CDM is missing).
+var errLibraryUnavailable = errors.New("library unavailable: Apple Music engine did not start (see :debug-logs)")
 
 type librarySection int
 
@@ -224,6 +231,9 @@ func (m *LibraryModel) loadLibraryTracks() tea.Cmd {
 	m.loading = true
 	prov := m.provider
 	return func() tea.Msg {
+		if prov == nil {
+			return libraryTracksLoadedMsg{generation: generation, section: section, kind: kind, err: errLibraryUnavailable}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
 		defer cancel()
 		tracks, err := prov.GetLibraryTracks(ctx)
@@ -241,6 +251,9 @@ func (m *LibraryModel) loadPlaylists() tea.Cmd {
 	m.loading = true
 	prov := m.provider
 	return func() tea.Msg {
+		if prov == nil {
+			return libraryLoadedMsg{generation: generation, section: section, kind: kind, err: errLibraryUnavailable}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
 		defer cancel()
 		playlists, err := prov.GetLibraryPlaylists(ctx)
@@ -257,6 +270,9 @@ func (m *LibraryModel) loadPlaylistTracks(pl provider.Playlist) tea.Cmd {
 	m.drillLoading = true
 	prov := m.provider
 	return func() tea.Msg {
+		if prov == nil {
+			return playlistTracksMsg{playlist: pl, generation: generation, kind: kind, err: errLibraryUnavailable}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), libraryLoadTimeout)
 		defer cancel()
 		tracks, err := prov.GetPlaylistTracks(ctx, pl.ID)
