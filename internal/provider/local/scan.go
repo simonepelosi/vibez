@@ -184,6 +184,17 @@ func scanDirectoryWithParser(
 	}
 
 	tracks := make([]provider.Track, 0, len(candidates))
+	internPool := make(map[string]string, min(len(candidates), 256))
+	intern := func(s string) string {
+		if s == "" {
+			return ""
+		}
+		if existing, ok := internPool[s]; ok {
+			return existing
+		}
+		internPool[s] = s
+		return s
+	}
 	unreadable := 0
 	readableCount := 0
 	cacheDirty := false
@@ -203,7 +214,15 @@ func scanDirectoryWithParser(
 		if losslessOnly && strings.ToLower(filepath.Ext(c.path)) == ".m4a" && res.track.LocalFormat != "ALAC" {
 			continue
 		}
-		tracks = append(tracks, res.track)
+		t := res.track
+		t.Artist = intern(t.Artist)
+		t.Album = intern(t.Album)
+		t.LocalFormat = intern(t.LocalFormat)
+		for gi, g := range t.Genres {
+			t.Genres[gi] = intern(g)
+		}
+		results[i].track = t
+		tracks = append(tracks, t)
 	}
 	if !losslessOnly && len(cached) != readableCount {
 		cacheDirty = true

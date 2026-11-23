@@ -104,3 +104,29 @@ func BenchmarkDecryptSegmentBatch(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkDecryptSegmentBatchInto(b *testing.B) {
+	cfg := AudioConfig{ObjectType: 2, FreqIndex: 4, ChanConfig: 2}
+	kid := make([]byte, 16)
+	seg := buildBenchSegment(256, 384)
+	batchOut := make([][]byte, 256)
+	nopBatch := func(_ []byte, samples []EncryptedSample) ([][]byte, error) {
+		for i, s := range samples {
+			batchOut[i] = s.Data
+		}
+		return batchOut[:len(samples)], nil
+	}
+	dst := make([]byte, 0, 128<<10)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		var err error
+		dst, err = DecryptSegmentBatchInto(dst[:0], seg, kid, cfg, nopBatch)
+		if err != nil {
+			b.Fatalf("DecryptSegmentBatchInto: %v", err)
+		}
+		if len(dst) == 0 {
+			b.Fatal("empty decrypted segment")
+		}
+	}
+}

@@ -60,3 +60,41 @@ func BenchmarkModelView(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkModelView_GlowTick(b *testing.B) {
+	m := New(testCfg(), &mockProvider{}, newMockPlayer(), Options{})
+	m.introStep = introDone
+	m.width = 120
+	m.height = 40
+	m.artMode = true
+	m.renderArt = art.RenderHalfBlocks
+	m.playerState.Playing = true
+	m.playerState.Position = 85 * time.Second
+	m.playerState.Track = &provider.Track{
+		ID:       "bench-1",
+		Title:    "Digital Love",
+		Artist:   "Daft Punk",
+		Album:    "Discovery",
+		Duration: 301 * time.Second,
+	}
+	m.artwork = artworkCache{
+		url:      "bench://cover",
+		img:      makeModelBenchImage(),
+		rendered: make(map[art.Size][]string),
+	}
+	m.queueTracks = []provider.Track{
+		*m.playerState.Track,
+		{ID: "bench-2", Title: "Harder, Better, Faster, Stronger", Artist: "Daft Punk", Duration: 224 * time.Second},
+		{ID: "bench-3", Title: "Crescendolls", Artist: "Daft Punk", Duration: 211 * time.Second},
+	}
+	m.queue.SetTracks(m.queueTracks)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		m.glowStep++
+		v := m.View()
+		if v.Content == "" {
+			b.Fatal("empty view")
+		}
+	}
+}

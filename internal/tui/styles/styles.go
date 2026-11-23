@@ -3,9 +3,20 @@ package styles
 import (
 	"image/color"
 	"math"
+	"sync/atomic"
 
 	"charm.land/lipgloss/v2"
 )
+
+// themeGen monotonically increments whenever Apply, ApplyArtworkPalette, or
+// ClearArtworkPalette mutates the global style palette. Callers can compare
+// ThemeGen() instead of re-reading dozens of style properties per frame.
+var themeGen atomic.Uint64
+
+// ThemeGen returns the current global style generation counter.
+func ThemeGen() uint64 {
+	return themeGen.Load()
+}
 
 // Color variables — all mutable so Apply(Theme) can swap the palette at startup.
 // Initial values match DefaultTheme (Tokyo Night / Catppuccin Mocha blend).
@@ -201,6 +212,7 @@ const (
 
 func init() {
 	rebuildNavTabStyles()
+	themeGen.Add(1)
 }
 
 // GlowPalette drives the "now playing" breathing animation, from dark to bright.
@@ -311,6 +323,7 @@ func Apply(t Theme) {
 	ControlPillPaused = lipgloss.NewStyle().Background(ColorPrimary).Foreground(ColorBg).Bold(true).Padding(0, 1)
 	ControlPillLoading = lipgloss.NewStyle().Background(ColorAccent).Foreground(ColorBg).Bold(true).Padding(0, 1)
 	rebuildNavTabStyles()
+	themeGen.Add(1)
 }
 
 // NavTabStyles returns the per-tab color-coded styles for tabIdx in [0, NavTabCount).
@@ -425,6 +438,7 @@ func ApplyArtworkPalette(_, text1, text2, text3, text4 string) {
 	NowPlayingTime = lipgloss.NewStyle().Foreground(c2)
 	HeroBorder = lipgloss.NewStyle().Foreground(LerpColor(c1, ColorAccent, 0.25))
 	ProgressGradStops = []color.Color{c1, c2, c3}
+	themeGen.Add(1)
 }
 
 // ClearArtworkPalette restores the Now Playing styles and progress gradient
@@ -435,6 +449,7 @@ func ClearArtworkPalette() {
 	NowPlayingTime = lipgloss.NewStyle().Foreground(ColorProgress)
 	HeroBorder = lipgloss.NewStyle().Foreground(ColorAccent)
 	ProgressGradStops = []color.Color{ColorProgress, ColorGlow6, ColorLove}
+	themeGen.Add(1)
 }
 
 func relativeLuminance(c color.Color) float64 {

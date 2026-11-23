@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
 	"math/rand"
 	"net/http"
 	"slices"
@@ -416,8 +415,10 @@ type Model struct {
 	lastKey string
 
 	// Errors / status messages
-	errMsg    string
-	errExpiry time.Time
+	errMsg          string
+	errExpiry       time.Time
+	errTickEnabled  bool
+	errTickRunning  bool
 
 	// Debug log
 	debugLog    []string
@@ -475,6 +476,7 @@ type Model struct {
 	cardEdges       cardEdgeCache
 	statusBarKey    statusCacheKey
 	statusBarCached []string
+	statusBarPadded []string
 	layoutCache     layoutCacheState
 }
 
@@ -497,9 +499,7 @@ type statusCacheKey struct {
 	discoveryEnabled bool
 	vibePicker       bool
 	radioEnabled     bool
-	primary          color.Color
-	fg               color.Color
-	muted            color.Color
+	themeGen         uint64
 }
 
 func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Options) *Model {
@@ -575,10 +575,11 @@ func New(cfg *config.Config, prov provider.Provider, plyr player.Player, opts Op
 }
 
 func (m *Model) Init() tea.Cmd {
+	m.errTickEnabled = true
 	cmds := []tea.Cmd{
-		tick(),
 		introTick(),
 	}
+	m.ensureErrTick(&cmds)
 	m.ensureGlow(&cmds)
 	if m.provider != nil {
 		cmds = append(cmds, m.library.Init())
@@ -613,8 +614,26 @@ func (m *Model) restoreAudioSettings() []tea.Cmd {
 
 // ── Timers ────────────────────────────────────────────────────────────────
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
+func errTick(expiry time.Time) tea.Cmd {
+	d := time.Second
+	if !expiry.IsZero() {
+		d = time.Until(expiry)
+		if d < 50*time.Millisecond {
+			d = 50 * time.Millisecond
+		} else if d > time.Hour {
+			// Cap very long expiries (e.g. session-expired banners) to avoid
+			// overflowing or holding multi-year timers.
+			d = time.Hour
+		}
+	}
+	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func (m *Model) ensureErrTick(cmds *[]tea.Cmd) {
+	if m.errTickEnabled && !m.errTickRunning && m.errMsg != "" {
+		m.errTickRunning = true
+		*cmds = append(*cmds, errTick(m.errExpiry))
+	}
 }
 
 func glowTick() tea.Cmd {
@@ -622,7 +641,10 @@ func glowTick() tea.Cmd {
 }
 
 func (m *Model) shouldGlow() bool {
-	return m.introStep != introDone || m.playerState.Playing || m.playerState.Loading || m.vibe.IsAnimating()
+	if m.introStep != introDone || m.playerState.Loading || m.vibe.IsAnimating() {
+		return true
+	}
+	return m.playerState.Playing && !m.cfg.GetReducedMotion()
 }
 
 func (m *Model) ensureGlow(cmds *[]tea.Cmd) {
@@ -697,7 +719,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.errMsg != "" && time.Now().After(m.errExpiry) {
 			m.errMsg = ""
 		}
-		cmds = append(cmds, tick())
+		if m.errMsg != "" {
+			m.errTickRunning = true
+			cmds = append(cmds, errTick(m.errExpiry))
+		} else {
+			m.errTickRunning = false
+		}
 
 	case glowTickMsg:
 		m.glowStep++
@@ -1561,6 +1588,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, libCmd)
 	}
 
+	m.ensureErrTick(&cmds)
 	return m, tea.Batch(cmds...)
 }
 
@@ -4253,6 +4281,16 @@ func (m *Model) searchFooterContext() (sig, kind, esc string, multiSection, isAr
 // statusLines renders a single unified footer line (wrapping only when narrow)
 // with context-sensitive shortcuts and no legacy mode badges.
 func (m *Model) statusLines(w int) []string {
+	raw, _ := m.statusLinesCached(w)
+	return raw
+}
+
+func (m *Model) statusLinesPadded(w int) []string {
+	_, padded := m.statusLinesCached(w)
+	return padded
+}
+
+func (m *Model) statusLinesCached(w int) (raw, padded []string) {
 	vibeFocused := m.vibe != nil && m.vibe.IsFocused()
 	vibePicker := m.vibe != nil && m.vibe.PickerActive()
 	var searchCtx, searchKind, searchEsc string
@@ -4273,12 +4311,11 @@ func (m *Model) statusLines(w int) []string {
 		discoveryEnabled: m.discovery.enabled,
 		vibePicker:       vibePicker,
 		radioEnabled:     m.radio.enabled,
-		primary:          styles.ColorPrimary,
-		fg:               styles.ColorFg,
-		muted:            styles.ColorMuted,
+		themeGen:         styles.ThemeGen(),
 	}
 	if m.statusBarKey == key {
-		return m.statusBarCached[:len(m.statusBarCached):len(m.statusBarCached)]
+		return m.statusBarCached[:len(m.statusBarCached):len(m.statusBarCached)],
+			m.statusBarPadded[:len(m.statusBarPadded):len(m.statusBarPadded)]
 	}
 
 	muted := styles.QueueItemMuted
@@ -4402,9 +4439,14 @@ func (m *Model) statusLines(w int) []string {
 		res = wrapFit(parts, dot, w)
 	}
 
+	padded = make([]string, len(res))
+	for i, line := range res {
+		padded[i] = padRight(line, w)
+	}
 	m.statusBarKey = key
 	m.statusBarCached = res[:len(res):len(res)]
-	return m.statusBarCached
+	m.statusBarPadded = padded[:len(padded):len(padded)]
+	return m.statusBarCached, m.statusBarPadded
 }
 
 // commandLines renders the command palette in the panel area when CMD mode is active.
