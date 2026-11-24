@@ -318,9 +318,18 @@ func TestModel_Update_WindowSizeMsgRemeasuresCellAspect(t *testing.T) {
 
 func TestModel_Update_TickMsg(t *testing.T) {
 	m := newModel(nil)
+	// When no error banner is active, tickMsg stops ticking so idle uses zero wakeups.
 	_, cmd := m.Update(tickMsg(time.Now()))
+	if cmd != nil {
+		t.Error("tickMsg with no active errMsg should not reschedule tick")
+	}
+
+	// When an unexpired error banner is active, tickMsg reschedules until expiry.
+	m.errMsg = "active error"
+	m.errExpiry = time.Now().Add(5 * time.Second)
+	_, cmd = m.Update(tickMsg(time.Now()))
 	if cmd == nil {
-		t.Error("tickMsg should return a non-nil cmd (reschedule tick)")
+		t.Error("tickMsg with active unexpired errMsg should reschedule tick")
 	}
 }
 
@@ -328,9 +337,111 @@ func TestModel_Update_TickMsg_ClearsExpiredErr(t *testing.T) {
 	m := newModel(nil)
 	m.errMsg = "old error"
 	m.errExpiry = time.Now().Add(-1 * time.Second) // already expired
-	m.Update(tickMsg(time.Now()))
+	_, cmd := m.Update(tickMsg(time.Now()))
 	if m.errMsg != "" {
 		t.Errorf("expired errMsg should be cleared, got %q", m.errMsg)
+	}
+	if cmd != nil || m.errTickRunning {
+		t.Errorf("cleared errMsg should stop errTick, got cmd=%v running=%v", cmd, m.errTickRunning)
+	}
+}
+
+func TestModel_OnDemandErrTick_AndReducedMotion(t *testing.T) {
+	m := newModel(nil)
+	m.Init()
+	if m.errTickRunning {
+		t.Fatal("Init with no initial errMsg must not arm errTick")
+	}
+
+	_, cmd := m.Update(errMsg{err: errors.New("boom")})
+	if cmd == nil || !m.errTickRunning {
+		t.Fatalf("setting errMsg after Init should arm errTick, got cmd=%v running=%v", cmd, m.errTickRunning)
+	}
+
+	// Unrelated messages while the same banner is active must not re-arm errTick.
+	genBefore := m.errTickGen
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.errTickGen != genBefore {
+		t.Fatalf("unrelated Update re-armed errTick: gen %d -> %d", genBefore, m.errTickGen)
+	}
+
+	// Replacing a long-lived banner (SessionExpiredMsg, capped at 1h) with a
+	// shorter one (SessionRestoredMsg, 5s) must re-arm with the earlier deadline.
+	m.errMsg = ""
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	if m.errTickRunning {
+		t.Fatal("clearing errMsg should invalidate pending errTick")
+	}
+	_, cmd = m.Update(SessionExpiredMsg{})
+	if cmd == nil || !m.errTickRunning {
+		t.Fatal("SessionExpiredMsg should arm errTick")
+	}
+	longDeadline := m.errTickDeadline
+	longGen := m.errTickGen
+
+	_, cmd = m.Update(SessionRestoredMsg{})
+	if cmd == nil || !m.errTickRunning {
+		t.Fatal("SessionRestoredMsg should re-arm errTick for shorter 5s deadline")
+	}
+	if m.errTickGen == longGen {
+		t.Fatalf("expected errTickGen to advance on earlier deadline, still %d", m.errTickGen)
+	}
+	if !m.errTickDeadline.Before(longDeadline) {
+		t.Fatalf("expected shorter deadline %v < long deadline %v", m.errTickDeadline, longDeadline)
+	}
+
+	// Stale errTickMsg from the superseded long timer must be ignored.
+	restoredMsg := m.errMsg
+	restoredGen := m.errTickGen
+	_, staleCmd := m.Update(errTickMsg{gen: longGen})
+	if staleCmd != nil || m.errMsg != restoredMsg || m.errTickGen != restoredGen || !m.errTickRunning {
+		t.Fatalf("stale errTickMsg disrupted active banner: cmd=%v msg=%q gen=%d running=%v", staleCmd, m.errMsg, m.errTickGen, m.errTickRunning)
+	}
+
+	// Replacing a shorter banner with a longer one keeps the earlier timer; when
+	// that timer fires before the new expiry, it reschedules for the new deadline.
+	m.errMsg = "long notice"
+	m.errExpiry = time.Now().Add(30 * time.Second)
+	_, laterCmd := m.Update(errTickMsg{gen: restoredGen})
+	if laterCmd == nil || !m.errTickRunning || m.errMsg != "long notice" {
+		t.Fatalf("unexpired errTickMsg should reschedule without clearing banner: cmd=%v running=%v msg=%q", laterCmd, m.errTickRunning, m.errMsg)
+	}
+
+	// Current generation firing after expiry clears the banner and stops ticking.
+	m.errExpiry = time.Now().Add(-time.Second)
+	_, doneCmd := m.Update(errTickMsg{gen: m.errTickGen})
+	if doneCmd != nil || m.errTickRunning || m.errMsg != "" {
+		t.Fatalf("expired errTickMsg should clear banner and stop: cmd=%v running=%v msg=%q", doneCmd, m.errTickRunning, m.errMsg)
+	}
+
+	// ReducedMotion disables continuous 10 Hz glow during steady playback.
+	m.introStep = introDone
+	m.playerState.Playing = true
+	if !m.shouldGlow() {
+		t.Fatal("expected shouldGlow=true during playback with default motion")
+	}
+	m.cfg.SetReducedMotion(true)
+	if m.shouldGlow() {
+		t.Fatal("expected shouldGlow=false during steady playback when ReducedMotion=true")
+	}
+	m.playerState.Loading = true
+	if !m.shouldGlow() {
+		t.Fatal("expected shouldGlow=true while loading even with ReducedMotion=true")
+	}
+}
+
+func TestClampLines(t *testing.T) {
+	if got := clampLines("a\nb\nc", 2); got != "a\nb" {
+		t.Errorf("clampLines(3 lines, 2) = %q, want %q", got, "a\nb")
+	}
+	if got := clampLines("a\nb\nc", 3); got != "a\nb\nc" {
+		t.Errorf("clampLines(3 lines, 3) = %q, want unchanged", got)
+	}
+	if got := clampLines("a\nb\nc", 1); got != "a" {
+		t.Errorf("clampLines(3 lines, 1) = %q, want %q", got, "a")
+	}
+	if got := clampLines("a\nb", 0); got != "" {
+		t.Errorf("clampLines(2 lines, 0) = %q, want empty", got)
 	}
 }
 

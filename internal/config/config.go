@@ -61,6 +61,9 @@ type Config struct {
 	// AlbumArt starts the now-playing panel in the album-art view (the :art
 	// command toggles it at runtime and persists the choice here).
 	AlbumArt bool `json:"album_art,omitempty"`
+	// ReducedMotion disables continuous 10 Hz glow animations during steady
+	// playback to reduce TUI wakeups and CPU usage on battery-powered devices.
+	ReducedMotion bool `json:"reduced_motion,omitempty"`
 	// MusicDir is the local directory to scan for audio files
 	// Supports MP3, FLAC, M4A. Scanned recursively.
 	MusicDir string `json:"music_dir,omitempty"`
@@ -153,6 +156,26 @@ func (c *Config) SetAlbumArt(on bool) {
 	}
 	c.stateMu.Lock()
 	c.AlbumArt = on
+	c.stateMu.Unlock()
+}
+
+// GetReducedMotion returns whether reduced-motion mode is enabled safely.
+func (c *Config) GetReducedMotion() bool {
+	if c == nil {
+		return false
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.ReducedMotion
+}
+
+// SetReducedMotion updates the reduced-motion flag safely.
+func (c *Config) SetReducedMotion(on bool) {
+	if c == nil {
+		return
+	}
+	c.stateMu.Lock()
+	c.ReducedMotion = on
 	c.stateMu.Unlock()
 }
 

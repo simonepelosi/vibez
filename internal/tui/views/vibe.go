@@ -73,6 +73,22 @@ func closestOptionIdx(similarity float64) int {
 	return best
 }
 
+type vibeLinesCacheKey struct {
+	valid       bool
+	w, h        int
+	bearIdx     int
+	state       vibeState
+	lastQ       string
+	added       int
+	explanation string
+	usage       string
+	errStr      string
+	discovery   DiscoveryInfo
+	pickerIdx   int
+	placeholder string
+	themeGen    uint64
+}
+
 // VibeModel drives the interactive vibe panel (right split of the bottom area).
 type VibeModel struct {
 	state       vibeState
@@ -85,6 +101,9 @@ type VibeModel struct {
 	errStr      string // error message from last search
 	discovery   DiscoveryInfo
 	pickerIdx   int // selected row in the metric picker
+
+	linesCacheKey vibeLinesCacheKey
+	linesCache    []string
 }
 
 const vibeMaxRunes = 80
@@ -402,15 +421,49 @@ func (v *VibeModel) IsAnimating() bool {
 	return v.state == vibeSearching || (v.state == vibeDiscovery && v.discovery.Refilling)
 }
 
+var vibeThinkFrames = [4]string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ^ᴥ^ʔ"}
+
 func (v *VibeModel) Lines(w, h, step int) []string {
+	if h <= 0 {
+		return nil
+	}
+
+	bearIdx := 0
+	if v.state != vibeDiscoveryPicker && v.state != vibeError {
+		bearIdx = (step / 10) % len(vibeThinkFrames)
+	}
+
+	canCache := v.state != vibeInputting
+	var cacheKey vibeLinesCacheKey
+	if canCache {
+		cacheKey = vibeLinesCacheKey{
+			valid:       true,
+			w:           w,
+			h:           h,
+			bearIdx:     bearIdx,
+			state:       v.state,
+			lastQ:       v.lastQ,
+			added:       v.added,
+			explanation: v.explanation,
+			usage:       v.usage,
+			errStr:      v.errStr,
+			discovery:   v.discovery,
+			pickerIdx:   v.pickerIdx,
+			placeholder: v.input.Placeholder,
+			themeGen:    styles.ThemeGen(),
+		}
+		if v.linesCacheKey == cacheKey && len(v.linesCache) == h {
+			return v.linesCache[:h:h]
+		}
+	}
+
 	accent := styles.NowPlayingArtist
 	keySt := styles.KeyName
 	muted := styles.QueueItemMuted
 	primary := styles.Playing
 	errSt := lipgloss.NewStyle().Foreground(styles.ColorError)
 
-	thinkFrames := []string{"ʕ•ᴥ•ʔ", "ʕ·ᴥ·ʔ", "ʕ˘ᴥ˘ʔ", "ʕ^ᴥ^ʔ"}
-	bear := styles.BearStyle.Render(thinkFrames[(step/10)%len(thinkFrames)])
+	bear := styles.BearStyle.Render(vibeThinkFrames[bearIdx])
 
 	v.input.SetWidth(max(w-4, 10))
 
@@ -565,5 +618,10 @@ func (v *VibeModel) Lines(w, h, step int) []string {
 	for len(lines) < h {
 		lines = append(lines, "")
 	}
-	return lines[:h]
+	out := lines[:h:h]
+	if canCache {
+		v.linesCacheKey = cacheKey
+		v.linesCache = out
+	}
+	return out
 }

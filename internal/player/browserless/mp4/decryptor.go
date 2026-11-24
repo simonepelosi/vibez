@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"sync"
 )
 
 // AudioConfig stores the audio metadata extracted from the init segment (esds box).
@@ -270,7 +271,61 @@ func findChildBox(data []byte, target string) ([]byte, bool) {
 	return nil, false
 }
 
-func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
+type sampleEncSlot struct {
+	iv       []byte
+	subStart int
+	subLen   int
+}
+
+type parseScratch struct {
+	samplesEnc  []sampleEncSlot
+	sampleSizes []int
+	subPool     []Subsample
+	samples     []EncryptedSample
+}
+
+var parseScratchPool = sync.Pool{
+	New: func() any { return &parseScratch{} },
+}
+
+func getParseScratch() *parseScratch {
+	return parseScratchPool.Get().(*parseScratch)
+}
+
+func putParseScratch(sc *parseScratch) {
+	if sc == nil {
+		return
+	}
+	const (
+		maxPooledSamples = 8192
+		maxPooledSubs    = 16384
+	)
+	clear(sc.samplesEnc)
+	clear(sc.samples)
+	if cap(sc.samplesEnc) > maxPooledSamples {
+		sc.samplesEnc = nil
+	} else {
+		sc.samplesEnc = sc.samplesEnc[:0]
+	}
+	if cap(sc.sampleSizes) > maxPooledSamples {
+		sc.sampleSizes = nil
+	} else {
+		sc.sampleSizes = sc.sampleSizes[:0]
+	}
+	if cap(sc.samples) > maxPooledSamples {
+		sc.samples = nil
+	} else {
+		sc.samples = sc.samples[:0]
+	}
+	if cap(sc.subPool) > maxPooledSubs {
+		sc.subPool = nil
+	} else {
+		sc.subPool = sc.subPool[:0]
+	}
+	parseScratchPool.Put(sc)
+}
+
+func parseSegmentSamples(segData []byte, sc *parseScratch) ([]EncryptedSample, int, error) {
 	if len(segData) < 8 {
 		return nil, 0, fmt.Errorf("segment too short")
 	}
@@ -352,23 +407,24 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 		return nil, 0, fmt.Errorf("invalid or excessive sample count %d in senc (available bytes: %d)", sampleCount, len(sencEntries))
 	}
 
-	type sampleEncSlot struct {
-		iv       []byte
-		subStart int
-		subLen   int
+	nSamples := int(sampleCount)
+	if cap(sc.samplesEnc) < nSamples {
+		sc.samplesEnc = make([]sampleEncSlot, nSamples)
+	} else {
+		sc.samplesEnc = sc.samplesEnc[:nSamples]
 	}
-	samplesEnc := make([]sampleEncSlot, sampleCount)
-	var subPool []Subsample
-	if hasSubsamples && sampleCount > 0 {
-		subPool = make([]Subsample, 0, sampleCount)
+	samplesEnc := sc.samplesEnc
+	subPool := sc.subPool[:0]
+	if hasSubsamples && nSamples > 0 && cap(subPool) < nSamples {
+		subPool = make([]Subsample, 0, nSamples)
 	}
 	offset := 0
 	ivSize := 8
 	if !hasSubsamples && sampleCount > 0 {
 		switch len(sencEntries) {
-		case int(sampleCount) * 8:
+		case nSamples * 8:
 			ivSize = 8
-		case int(sampleCount) * 16:
+		case nSamples * 16:
 			ivSize = 16
 		default:
 			return nil, 0, fmt.Errorf("invalid senc length %d for %d samples", len(sencEntries), sampleCount)
@@ -413,6 +469,7 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 			subLen:   subLen,
 		}
 	}
+	sc.subPool = subPool
 	if offset != len(sencEntries) {
 		return nil, 0, fmt.Errorf("trailing bytes in senc box: consumed %d of %d", offset, len(sencEntries))
 	}
@@ -472,7 +529,15 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 	}
 
 	const maxSampleSize = 16 << 20 // 16 MiB defensive cap per audio sample
-	sampleSizes := make([]int, sampleCount)
+	if cap(sc.sampleSizes) < nSamples {
+		sc.sampleSizes = make([]int, nSamples)
+	} else {
+		sc.sampleSizes = sc.sampleSizes[:nSamples]
+	}
+	sampleSizes := sc.sampleSizes
+	if !hasSize {
+		clear(sampleSizes)
+	}
 	var totalSampleBytes int
 	for i := range sampleCount {
 		if hasDuration {
@@ -507,10 +572,15 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 		return nil, 0, fmt.Errorf("invalid dataOffset %d: points to %d (mdat payload [%d, %d])", dataOffset, mdatTarget, mdatPayloadStart, mdatEnd)
 	}
 	mdatData := segData[mdatTarget:mdatEnd]
-	samples := make([]EncryptedSample, sampleCount)
+	if cap(sc.samples) < nSamples {
+		sc.samples = make([]EncryptedSample, nSamples)
+	} else {
+		sc.samples = sc.samples[:nSamples]
+	}
+	samples := sc.samples
 	currMdatOffset := 0
 
-	for i := range int(sampleCount) {
+	for i := range nSamples {
 		sSize := sampleSizes[i]
 		if sSize < 0 || sSize > len(mdatData)-currMdatOffset {
 			return nil, 0, fmt.Errorf("sample %d exceeds mdat data bounds (size %d, remaining %d)", i, sSize, len(mdatData)-currMdatOffset)
@@ -528,7 +598,15 @@ func parseSegmentSamples(segData []byte) ([]EncryptedSample, int, error) {
 		currMdatOffset += sSize
 	}
 
-	return samples, min(totalSampleBytes, len(mdatData)) + int(sampleCount)*7, nil
+	return samples, min(totalSampleBytes, len(mdatData)) + nSamples*7, nil
+}
+
+func growOutputBuf(dst []byte, estBytes int) []byte {
+	out := dst[:0]
+	if cap(out) < estBytes {
+		out = make([]byte, 0, estBytes)
+	}
+	return out
 }
 
 // DecryptSegment parses a fragmented MP4 audio segment (moof + mdat) and uses
@@ -539,11 +617,26 @@ func DecryptSegment(
 	cfg AudioConfig,
 	decryptFn DecryptFunc,
 ) ([]byte, error) {
-	samples, estBytes, err := parseSegmentSamples(segData)
+	return DecryptSegmentInto(nil, segData, kid, cfg, decryptFn)
+}
+
+// DecryptSegmentInto behaves like DecryptSegment but writes the ADTS-framed
+// output into dst (reusing its backing array when capacity permits).
+func DecryptSegmentInto(
+	dst []byte,
+	segData []byte,
+	kid []byte,
+	cfg AudioConfig,
+	decryptFn DecryptFunc,
+) ([]byte, error) {
+	sc := getParseScratch()
+	defer putParseScratch(sc)
+
+	samples, estBytes, err := parseSegmentSamples(segData, sc)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, estBytes)
+	out := growOutputBuf(dst, estBytes)
 	for i, s := range samples {
 		decryptedSample, err := decryptFn(kid, s.IV, s.Data, s.Subsamples)
 		if err != nil {
@@ -565,7 +658,22 @@ func DecryptSegmentBatch(
 	cfg AudioConfig,
 	decryptBatchFn DecryptBatchFunc,
 ) ([]byte, error) {
-	samples, estBytes, err := parseSegmentSamples(segData)
+	return DecryptSegmentBatchInto(nil, segData, kid, cfg, decryptBatchFn)
+}
+
+// DecryptSegmentBatchInto behaves like DecryptSegmentBatch but writes the
+// ADTS-framed output into dst (reusing its backing array when capacity permits).
+func DecryptSegmentBatchInto(
+	dst []byte,
+	segData []byte,
+	kid []byte,
+	cfg AudioConfig,
+	decryptBatchFn DecryptBatchFunc,
+) ([]byte, error) {
+	sc := getParseScratch()
+	defer putParseScratch(sc)
+
+	samples, estBytes, err := parseSegmentSamples(segData, sc)
 	if err != nil {
 		return nil, err
 	}
@@ -576,7 +684,7 @@ func DecryptSegmentBatch(
 	if len(decryptedSamples) != len(samples) {
 		return nil, fmt.Errorf("batch decrypt returned %d samples, want %d", len(decryptedSamples), len(samples))
 	}
-	out := make([]byte, 0, estBytes)
+	out := growOutputBuf(dst, estBytes)
 	for i, decryptedSample := range decryptedSamples {
 		out, err = appendADTSSample(out, decryptedSample, cfg, i)
 		if err != nil {

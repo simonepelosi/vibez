@@ -75,60 +75,6 @@ type cardEdgeCache struct {
 	dim    cardEdgeEntry
 }
 
-type layoutThemeSig struct {
-	heroBorder   color.Color
-	cardBorder   color.Color
-	cardActive   color.Color
-	cardTitle    color.Color
-	cardTitleAct color.Color
-	muted        color.Color
-	navActiveFg  color.Color
-	navActiveBg  color.Color
-	navKey       color.Color
-	navLabel     color.Color
-	navTabs      [styles.NavTabCount]color.Color
-	titleFg      color.Color
-	titlePlayFg  color.Color
-	artistFg     color.Color
-	albumFg      color.Color
-	labelFg      color.Color
-	timeFg       color.Color
-	ctrlActFg    color.Color
-	favFg        color.Color
-	dislikeFg    color.Color
-	fg           color.Color
-	playPillBg   color.Color
-	pausePillBg  color.Color
-}
-
-func currentLayoutThemeSig() layoutThemeSig {
-	return layoutThemeSig{
-		heroBorder:   styles.HeroBorder.GetForeground(),
-		cardBorder:   styles.CardBorder.GetForeground(),
-		cardActive:   styles.CardBorderActive.GetForeground(),
-		cardTitle:    styles.CardTitle.GetForeground(),
-		cardTitleAct: styles.CardTitleActive.GetForeground(),
-		muted:        styles.QueueItemMuted.GetForeground(),
-		navActiveFg:  styles.NavTabActive.GetForeground(),
-		navActiveBg:  styles.NavTabActive.GetBackground(),
-		navKey:       styles.NavTabKey.GetForeground(),
-		navLabel:     styles.NavTabLabel.GetForeground(),
-		navTabs:      styles.NavTabColors,
-		titleFg:      styles.NowPlayingTitle.GetForeground(),
-		titlePlayFg:  styles.NowPlayingTitlePlaying.GetForeground(),
-		artistFg:     styles.NowPlayingTrackArtist.GetForeground(),
-		albumFg:      styles.NowPlayingAlbum.GetForeground(),
-		labelFg:      styles.NowPlayingLabel.GetForeground(),
-		timeFg:       styles.NowPlayingTime.GetForeground(),
-		ctrlActFg:    styles.ControlActive.GetForeground(),
-		favFg:        styles.FavoriteActive.GetForeground(),
-		dislikeFg:    styles.DislikeActive.GetForeground(),
-		fg:           styles.ColorFg,
-		playPillBg:   styles.ControlPillPlaying.GetBackground(),
-		pausePillBg:  styles.ControlPillPaused.GetBackground(),
-	}
-}
-
 type cardTopRuleKey struct {
 	cardW    int
 	title    string
@@ -153,6 +99,18 @@ type cardBotRuleEntry struct {
 	out string
 }
 
+type topBarStaticKey struct {
+	valid     bool
+	w         int
+	active    int
+	mode      viewMode
+	debugView bool
+	volPct    int
+	muted     bool
+	memStats  string
+	themeGen  uint64
+}
+
 type topBarCacheKey struct {
 	w         int
 	active    int
@@ -163,23 +121,23 @@ type topBarCacheKey struct {
 	volPct    int
 	muted     bool
 	memStats  string
-	themeSig  layoutThemeSig
+	themeGen  uint64
 }
 
 type heroCtrlGlyphs struct {
-	theme   layoutThemeSig
-	repOff  string
-	repAll  string
-	repOne  string
-	shufOff string
-	shufOn  string
-	favNone string
-	favLove string
-	favHate string
-	playW   string
-	pauseW  string
-	playN   string
-	pauseN  string
+	themeGen uint64
+	repOff   string
+	repAll   string
+	repOne   string
+	shufOff  string
+	shufOn   string
+	favNone  string
+	favLove  string
+	favHate  string
+	playW    string
+	pauseW   string
+	playN    string
+	pauseN   string
 }
 
 type heroControlsCacheKey struct {
@@ -192,45 +150,104 @@ type heroControlsCacheKey struct {
 	shuffle  bool
 	rating   provider.Rating
 	glowStep int
-	theme    layoutThemeSig
+	themeGen uint64
 }
 
 type heroTrackTitleKey struct {
 	id, title, artist, rating string
 	active                    bool
-	theme                     layoutThemeSig
+	themeGen                  uint64
 }
 
 type heroAlbumMetaKey struct {
 	id, album, year, quality, catalog string
 	master                            bool
 	bitrate, contentW                 int
-	theme                             layoutThemeSig
+	themeGen                          uint64
 }
 
 type heroTotalDurKey struct {
-	dur   time.Duration
-	muted color.Color
+	dur      time.Duration
+	themeGen uint64
 }
 
 type heroWaveProgKey struct {
 	pos, dur                 time.Duration
 	colW, maxWaveW, screenX0 int
 	centered                 bool
-	theme                    layoutThemeSig
+	themeGen                 uint64
+}
+
+type heroCardCacheKey struct {
+	valid         bool
+	contentW      int
+	h             int
+	screenX0      int
+	artActive     bool
+	artURL        string
+	artCellAsp    float64
+	hasTrack      bool
+	trackID       string
+	title         string
+	artist        string
+	album         string
+	year          string
+	contentRating string
+	adm           bool
+	outputBadge   string
+	catalogBadge  string
+	dur           time.Duration
+	pos           time.Duration
+	bitrate       int
+	playing       bool
+	loading       bool
+	repeat        int
+	shuffle       bool
+	userRating    provider.Rating
+	spinStep      int
+	errMsg        string
+	themeGen      uint64
+}
+
+type queueRowSig struct {
+	id     string
+	title  string
+	artist string
+	dur    time.Duration
+}
+
+type queuePanelCacheKey struct {
+	valid      bool
+	w, h       int
+	offset     int
+	total      int
+	playingIdx int
+	themeGen   uint64
 }
 
 type layoutCacheState struct {
-	topRules     [8]cardTopRuleEntry
-	topRuleNext  int
-	botRules     [8]cardBotRuleEntry
-	botRuleNext  int
-	navTheme     layoutThemeSig
-	navFull      [2][8]string // [0=inactive,1=active][tabIdx]
-	navCompact   [2][8]string
-	topBarKey    topBarCacheKey
-	topBarStr    string
-	topBarHits   []topHitZone
+	lastFrameLen int
+
+	topRules    [8]cardTopRuleEntry
+	topRuleNext int
+	botRules    [8]cardBotRuleEntry
+	botRuleNext int
+
+	navThemeGen uint64
+	navFull     [2][8]string // [0=inactive,1=active][tabIdx]
+	navCompact  [2][8]string
+
+	topBarStaticK    topBarStaticKey
+	topBarPrefix     string
+	topBarSuffix     string
+	topBarBrandW     int
+	topBarExactW     bool
+	topBarStaticHits []topHitZone
+
+	topBarKey  topBarCacheKey
+	topBarStr  string
+	topBarHits []topHitZone
+
 	ctrlGlyphs   heroCtrlGlyphs
 	ctrlCacheKey heroControlsCacheKey
 	ctrlLine     string
@@ -246,9 +263,24 @@ type layoutCacheState struct {
 	waveProgV    string
 	waveProgX0   int
 	waveProgX1   int
+
+	heroKey    heroCardCacheKey
+	heroArtRef []string
+	heroRaw    []string
+	heroPadded []string
+	heroMeta   heroHitMeta
+
 	qEmptyW      int
 	qEmptyFg     color.Color
 	qEmptyV      string
+	qCacheKey    queuePanelCacheKey
+	qRowSigs     []queueRowSig
+	qRawLines    []string
+	qPaddedLines []string
+
+	vPaddedW     int
+	vPaddedSrc   []string
+	vPaddedLines []string
 }
 
 func (m *Model) statusWidth() int {
@@ -287,17 +319,39 @@ func (m *Model) borderEdges(slot *cardEdgeEntry, st lipgloss.Style) (string, str
 //	            │ ...                        │ │ ...                           │
 //	            ╰────────────────────────────╯ ╰───────────────────────────────╯
 //	Footer:     NORMAL  : command · / search · l library ...
+func clampLines(s string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	seen := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			seen++
+			if seen == maxLines {
+				return s[:i]
+			}
+		}
+	}
+	return s
+}
+
 func (m *Model) renderModernLayout() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
 
-	status := m.statusLines(m.statusWidth())
+	statusPadded := m.statusLinesPadded(m.statusWidth())
 	npH := m.nowPlayingHeight()
-	panelH := m.panelHeightWithStatus(len(status))
+	panelH := m.panelHeightWithStatus(len(statusPadded))
 
 	var sb strings.Builder
-	sb.Grow(max(1024, m.width*m.height*4))
+	grow := m.layoutCache.lastFrameLen
+	if grow < 1024 {
+		grow = max(1024, m.width*m.height*2)
+	} else {
+		grow += 128
+	}
+	sb.Grow(grow)
 
 	// ── Top Bar & Clickable Tabs ──
 	topBar, _ := m.buildTopBar(m.width)
@@ -305,14 +359,14 @@ func (m *Model) renderModernLayout() string {
 	sb.WriteByte('\n')
 
 	// ── Hero Card: Now Playing ──
-	heroLines, _ := m.buildHeroViewData(m.width)
+	heroPadded, _ := m.buildHeroViewDataPadded(m.width)
 	heroEdgeL, heroEdgeR := m.borderEdges(&m.cardEdges.hero, styles.HeroBorder)
 	heroSuffix := m.heroHeaderSuffix()
 	sb.WriteString(m.renderCardTopRule("Now Playing", heroSuffix, m.width, styles.HeroBorder, styles.CardTitleActive, styles.QueueItemMuted))
 	sb.WriteByte('\n')
 	heroInnerW := max(0, m.width-4)
 	for i := range npH {
-		writeStyledCardRow(&sb, safeIdx(heroLines, i), heroInnerW, heroEdgeL, heroEdgeR)
+		writePrePaddedCardRow(&sb, safeIdx(heroPadded, i), heroInnerW, heroEdgeL, heroEdgeR)
 		sb.WriteByte('\n')
 	}
 	sb.WriteString(m.renderCardBottomRule(m.width, styles.HeroBorder))
@@ -329,23 +383,21 @@ func (m *Model) renderModernLayout() string {
 	sb.WriteByte('\n')
 
 	// ── Status Dock ──
-	for i, line := range status {
+	for i, line := range statusPadded {
 		sb.WriteByte(' ')
-		writePadded(&sb, line, max(0, m.width-2))
+		sb.WriteString(line)
 		if m.width >= 2 {
 			sb.WriteByte(' ')
 		}
-		if i < len(status)-1 {
+		if i < len(statusPadded)-1 {
 			sb.WriteByte('\n')
 		}
 	}
 
 	out := sb.String()
+	m.layoutCache.lastFrameLen = len(out)
 	// Clamp on ultra-short terminals so total rows never exceed m.height.
-	if lines := strings.Split(out, "\n"); len(lines) > m.height {
-		return strings.Join(lines[:m.height], "\n")
-	}
-	return out
+	return clampLines(out, m.height)
 }
 
 func (m *Model) heroHeaderSuffix() string {
@@ -497,14 +549,14 @@ func (m *Model) renderSplitCards(sb *strings.Builder, totalW, panelH int) {
 	sb.WriteString(m.renderCardTopRule(vTitle, vSuffix, rightW, rightBorderSt, rightTitleSt, styles.QueueItemMuted))
 	sb.WriteByte('\n')
 
-	qLines := m.queuePanelLines(leftInnerW, panelH)
-	vLines := m.vibe.Lines(rightInnerW, panelH, m.glowStep)
+	qLines := m.queuePanelLinesPadded(leftInnerW, panelH)
+	vLines := m.vibePanelLinesPadded(rightInnerW, panelH)
 	for i := range panelH {
-		writeStyledCardRow(sb, safeIdx(qLines, i), leftInnerW, leftEdgeL, leftEdgeR)
+		writePrePaddedCardRow(sb, safeIdx(qLines, i), leftInnerW, leftEdgeL, leftEdgeR)
 		if gap > 0 {
 			writeSpaces(sb, gap)
 		}
-		writeStyledCardRow(sb, safeIdx(vLines, i), rightInnerW, rightEdgeL, rightEdgeR)
+		writePrePaddedCardRow(sb, safeIdx(vLines, i), rightInnerW, rightEdgeL, rightEdgeR)
 		sb.WriteByte('\n')
 	}
 
@@ -622,6 +674,44 @@ func writeStyledCardRow(sb *strings.Builder, line string, innerW int, edgeL, edg
 	sb.WriteString(edgeR)
 }
 
+func writePrePaddedCardRow(sb *strings.Builder, paddedLine string, innerW int, edgeL, edgeR string) {
+	if innerW <= 0 {
+		sb.WriteString(strings.TrimRight(edgeL, " "))
+		return
+	}
+	sb.WriteString(edgeL)
+	if paddedLine == "" {
+		writeSpaces(sb, innerW)
+	} else {
+		sb.WriteString(paddedLine)
+	}
+	sb.WriteString(edgeR)
+}
+
+func (m *Model) vibePanelLinesPadded(w, h int) []string {
+	vLines := m.vibe.Lines(w, h, m.glowStep)
+	if w <= 0 || h <= 0 {
+		return nil
+	}
+	c := &m.layoutCache
+	if c.vPaddedW == w &&
+		len(c.vPaddedSrc) == len(vLines) &&
+		len(c.vPaddedLines) == h &&
+		(len(vLines) == 0 || &vLines[0] == &c.vPaddedSrc[0]) {
+		return c.vPaddedLines
+	}
+	padded := make([]string, h)
+	for i := range h {
+		if i < len(vLines) && vLines[i] != "" {
+			padded[i] = padRight(vLines[i], w)
+		}
+	}
+	c.vPaddedW = w
+	c.vPaddedSrc = vLines
+	c.vPaddedLines = padded
+	return padded
+}
+
 func (m *Model) navTabSpecs() [8]navTabDef {
 	panelIdxFor := func(target ContentView) int {
 		for i, p := range m.panels {
@@ -674,9 +764,9 @@ func (m *Model) renderNavTab(idx int, tab navTabDef, active, compact bool) strin
 	return " " + keySt.Render(tab.key) + " " + labelSt.Render(lbl) + " "
 }
 
-func (m *Model) renderNavTabCached(idx int, tab navTabDef, active, compact bool, theme layoutThemeSig) string {
-	if m.layoutCache.navTheme != theme {
-		m.layoutCache.navTheme = theme
+func (m *Model) renderNavTabCached(idx int, tab navTabDef, active, compact bool, themeGen uint64) string {
+	if m.layoutCache.navThemeGen != themeGen {
+		m.layoutCache.navThemeGen = themeGen
 		m.layoutCache.navFull = [2][8]string{}
 		m.layoutCache.navCompact = [2][8]string{}
 	}
@@ -701,7 +791,9 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 		return "", nil
 	}
 
-	theme := currentLayoutThemeSig()
+	themeGen := styles.ThemeGen()
+	volPct := int(m.playerState.Volume * 100)
+	muted := m.preMuteVol >= 0
 	key := topBarCacheKey{
 		w:         w,
 		active:    m.activePanel,
@@ -709,10 +801,10 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 		debugView: m.debugView,
 		glowStep:  m.glowStep,
 		playing:   m.playerState.Playing,
-		volPct:    int(m.playerState.Volume * 100),
-		muted:     m.preMuteVol >= 0,
+		volPct:    volPct,
+		muted:     muted,
 		memStats:  m.memStats,
-		themeSig:  theme,
+		themeGen:  themeGen,
 	}
 	if m.layoutCache.topBarStr != "" && m.layoutCache.topBarKey == key {
 		return m.layoutCache.topBarStr, m.layoutCache.topBarHits
@@ -725,11 +817,30 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 	}
 	brand := bear + " " + views.RenderGlowTitle(brandText, m.glowStep)
 
+	staticKey := topBarStaticKey{
+		valid:     true,
+		w:         w,
+		active:    m.activePanel,
+		mode:      m.mode,
+		debugView: m.debugView,
+		volPct:    volPct,
+		muted:     muted,
+		memStats:  m.memStats,
+		themeGen:  themeGen,
+	}
+	if m.layoutCache.topBarStaticK == staticKey && m.layoutCache.topBarExactW {
+		out := m.layoutCache.topBarPrefix + brand + m.layoutCache.topBarSuffix
+		m.layoutCache.topBarKey = key
+		m.layoutCache.topBarStr = out
+		m.layoutCache.topBarHits = m.layoutCache.topBarStaticHits
+		return out, m.layoutCache.topBarStaticHits
+	}
+
 	var volStr string
-	if m.preMuteVol >= 0 {
+	if muted {
 		volStr = styles.Playing.Render("🔇mute")
 	} else {
-		volStr = styles.NowPlayingTime.Render("♪") + styles.QueueItem.Render(fmt.Sprintf(" %3d%%", key.volPct))
+		volStr = styles.NowPlayingTime.Render("♪") + styles.QueueItem.Render(fmt.Sprintf(" %3d%%", volPct))
 	}
 	volW := lipgloss.Width(volStr)
 
@@ -757,7 +868,7 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 		var items [8]renderedTab
 		tot := 0
 		for i, tab := range tabs {
-			s := m.renderNavTabCached(i, tab, m.isNavTabActive(tab), compact, theme)
+			s := m.renderNavTabCached(i, tab, m.isNavTabActive(tab), compact, themeGen)
 			sw := lipgloss.Width(s)
 			if i > 0 {
 				tot += sepW
@@ -810,16 +921,13 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 	tabItems := tabBuf[:tabCount]
 
 	hits := make([]topHitZone, 0, tabCount+2)
-	var sb strings.Builder
-	sb.Grow(w * 2)
-
+	prefix := ""
 	curX := 0
 	if w >= 40 {
-		sb.WriteByte(' ')
+		prefix = " "
 		curX++
 	}
 
-	sb.WriteString(brand)
 	hits = append(hits, topHitZone{kind: topHitTab, panelIdx: -1, x0: curX, x1: curX + brandW})
 	curX += brandW
 
@@ -850,12 +958,15 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 		gapBeforeRight = max(1, spare-gapAfterBrand)
 	}
 
-	writeSpaces(&sb, gapAfterBrand)
+	var suffixBuf strings.Builder
+	suffixBuf.Grow(w * 2)
+
+	writeSpaces(&suffixBuf, gapAfterBrand)
 	curX += gapAfterBrand
 
 	for i, it := range tabItems {
 		if i > 0 {
-			sb.WriteByte(' ')
+			suffixBuf.WriteByte(' ')
 			curX++
 		}
 		kind := topHitTab
@@ -863,36 +974,44 @@ func (m *Model) buildTopBar(w int) (string, []topHitZone) {
 			kind = topHitSearch
 		}
 		hits = append(hits, topHitZone{kind: kind, panelIdx: it.spec.panelIdx, x0: curX, x1: curX + it.w})
-		sb.WriteString(it.str)
+		suffixBuf.WriteString(it.str)
 		curX += it.w
 	}
 
 	if curX+gapBeforeRight+rightW+rightPadEdge <= w {
-		writeSpaces(&sb, gapBeforeRight)
+		writeSpaces(&suffixBuf, gapBeforeRight)
 		curX += gapBeforeRight
 		metaW := lipgloss.Width(metaPrefix)
-		sb.WriteString(rightStr)
+		suffixBuf.WriteString(rightStr)
 		volStart := curX + metaW
 		hits = append(hits, topHitZone{kind: topHitVolume, x0: volStart, x1: volStart + volW})
 		curX += rightW
 	} else {
 		// Ultra-narrow fallback: ensure volume always remains visible.
 		spaceLeft := max(0, w-curX-volW)
-		writeSpaces(&sb, spaceLeft)
+		writeSpaces(&suffixBuf, spaceLeft)
 		curX += spaceLeft
-		sb.WriteString(volStr)
+		suffixBuf.WriteString(volStr)
 		hits = append(hits, topHitZone{kind: topHitVolume, x0: curX, x1: curX + volW})
 		curX += volW
 	}
 
 	if rem := w - curX; rem > 0 {
-		writeSpaces(&sb, rem)
+		writeSpaces(&suffixBuf, rem)
 	}
 
-	out := sb.String()
-	if lipgloss.Width(out) != w {
+	suffix := suffixBuf.String()
+	out := prefix + brand + suffix
+	exactW := lipgloss.Width(out) == w
+	if !exactW {
 		out = padRight(out, w)
 	}
+	m.layoutCache.topBarStaticK = staticKey
+	m.layoutCache.topBarPrefix = prefix
+	m.layoutCache.topBarSuffix = suffix
+	m.layoutCache.topBarBrandW = brandW
+	m.layoutCache.topBarExactW = exactW
+	m.layoutCache.topBarStaticHits = hits
 	m.layoutCache.topBarKey = key
 	m.layoutCache.topBarStr = out
 	m.layoutCache.topBarHits = hits
@@ -966,30 +1085,129 @@ func (m *Model) nowPlayingTextLines(contentW, h int) []string {
 func (m *Model) buildHeroViewData(cardW int) ([]string, heroHitMeta) {
 	npH := m.nowPlayingHeight()
 	contentW := max(0, cardW-4)
-	lines, meta := m.buildHeroContent(contentW, npH, 2) // "│ " is 2 cols wide
+	raw, _, meta := m.buildHeroContentCached(contentW, npH, 2) // "│ " is 2 cols wide
 	meta.innerH = npH
-	return lines, meta
+	return raw, meta
+}
+
+func (m *Model) buildHeroViewDataPadded(cardW int) ([]string, heroHitMeta) {
+	npH := m.nowPlayingHeight()
+	contentW := max(0, cardW-4)
+	_, padded, meta := m.buildHeroContentCached(contentW, npH, 2) // "│ " is 2 cols wide
+	meta.innerH = npH
+	return padded, meta
 }
 
 func (m *Model) buildHeroContent(contentW, h, screenX0 int) ([]string, heroHitMeta) {
+	raw, _, meta := m.buildHeroContentCached(contentW, h, screenX0)
+	return raw, meta
+}
+
+func (m *Model) buildHeroContentCached(contentW, h, screenX0 int) (raw, padded []string, meta heroHitMeta) {
+	if h <= 0 {
+		return nil, nil, heroHitMeta{innerH: h, progY: -1, ctrlY: -1}
+	}
+
+	useArt := false
+	var artSize art.Size
 	if m.artModeActive() && h >= 5 {
-		if ok, _, _ := m.canFitSideBySideArt(contentW, h); ok {
-			return m.buildHeroArtContent(contentW, h, screenX0)
+		if ok, artRows, artCols := m.canFitSideBySideArt(contentW, h); ok {
+			useArt = true
+			artSize = art.Size{Width: artCols, Height: artRows}
 		}
 	}
-	return m.buildHeroTextContent(contentW, h, screenX0)
+
+	t := m.playerState.Track
+	spinStep := 0
+	if m.playerState.Loading {
+		spinStep = m.glowStep % 10
+	}
+	key := heroCardCacheKey{
+		valid:      true,
+		contentW:   contentW,
+		h:          h,
+		screenX0:   screenX0,
+		artActive:  useArt,
+		artURL:     m.artwork.url,
+		artCellAsp: m.artCellAsp,
+		hasTrack:   t != nil,
+		pos:        m.playerState.Position,
+		bitrate:    m.playerState.Bitrate,
+		playing:    m.playerState.Playing,
+		loading:    m.playerState.Loading,
+		repeat:     m.playerState.RepeatMode,
+		shuffle:    m.playerState.ShuffleMode,
+		spinStep:   spinStep,
+		errMsg:     m.errMsg,
+		themeGen:   styles.ThemeGen(),
+	}
+	if t != nil {
+		outBadge, catBadge := formatBadge(t, m.playerState.Bitrate)
+		key.trackID = t.ID
+		key.title = t.Title
+		key.artist = t.Artist
+		key.album = t.Album
+		key.year = t.ReleaseYear()
+		key.contentRating = t.ContentRating
+		key.adm = t.IsAppleDigitalMaster
+		key.outputBadge = outBadge
+		key.catalogBadge = catBadge
+		key.dur = t.Duration
+		key.userRating = m.trackRating(t)
+	}
+
+	c := &m.layoutCache
+	if c.heroKey == key && len(c.heroRaw) == h && len(c.heroPadded) == h {
+		artMatch := true
+		if useArt {
+			artLines := m.artwork.rendered[artSize]
+			switch {
+			case len(artLines) != len(c.heroArtRef):
+				artMatch = false
+			case len(artLines) > 0:
+				artMatch = &artLines[0] == &c.heroArtRef[0]
+			default:
+				artMatch = m.artwork.img == nil
+			}
+		}
+		if artMatch {
+			return c.heroRaw, c.heroPadded, c.heroMeta
+		}
+	}
+
+	if useArt {
+		raw, meta = m.buildHeroArtContent(contentW, h, screenX0)
+	} else {
+		raw, meta = m.buildHeroTextContent(contentW, h, screenX0)
+	}
+	padded = make([]string, len(raw))
+	for i, line := range raw {
+		if line != "" {
+			padded[i] = padRight(line, contentW)
+		}
+	}
+	c.heroKey = key
+	if useArt {
+		c.heroArtRef = m.artwork.rendered[artSize]
+	} else {
+		c.heroArtRef = nil
+	}
+	c.heroRaw = raw
+	c.heroPadded = padded
+	c.heroMeta = meta
+	return raw, padded, meta
 }
 
 func (m *Model) renderTrackTitleText(t *provider.Track) string {
-	theme := currentLayoutThemeSig()
+	themeGen := styles.ThemeGen()
 	active := m.playerState.Playing || m.playerState.Loading
 	key := heroTrackTitleKey{
-		id:     t.ID,
-		title:  t.Title,
-		artist: t.Artist,
-		rating: t.ContentRating,
-		active: active,
-		theme:  theme,
+		id:       t.ID,
+		title:    t.Title,
+		artist:   t.Artist,
+		rating:   t.ContentRating,
+		active:   active,
+		themeGen: themeGen,
 	}
 	if m.layoutCache.trackTitleV != "" && m.layoutCache.trackTitleK == key {
 		return m.layoutCache.trackTitleV
@@ -1025,11 +1243,9 @@ func (m *Model) renderAlbumMetaText(t *provider.Track, contentW int, truncate, i
 	if output == "" && catalog == "" && m.playerState.Bitrate > 0 {
 		output = qualityLabel(m.playerState.Bitrate)
 	}
-	var theme layoutThemeSig
 	var albumKey heroAlbumMetaKey
 	canCache := !includeTime && truncate
 	if canCache {
-		theme = currentLayoutThemeSig()
 		albumKey = heroAlbumMetaKey{
 			id:       t.ID,
 			album:    t.Album,
@@ -1039,7 +1255,7 @@ func (m *Model) renderAlbumMetaText(t *provider.Track, contentW int, truncate, i
 			master:   t.IsAppleDigitalMaster,
 			bitrate:  m.playerState.Bitrate,
 			contentW: contentW,
-			theme:    theme,
+			themeGen: styles.ThemeGen(),
 		}
 		if m.layoutCache.albumMetaV != "" && m.layoutCache.albumMetaK == albumKey {
 			return m.layoutCache.albumMetaV
@@ -1104,7 +1320,7 @@ func (m *Model) renderAlbumMetaLine(t *provider.Track, contentW int, truncate bo
 }
 
 func (m *Model) cachedTotalDuration(dur time.Duration) string {
-	key := heroTotalDurKey{dur: dur, muted: styles.QueueItemMuted.GetForeground()}
+	key := heroTotalDurKey{dur: dur, themeGen: styles.ThemeGen()}
 	if m.layoutCache.totalDurV != "" && m.layoutCache.totalDurK == key {
 		return m.layoutCache.totalDurV
 	}
@@ -1122,7 +1338,7 @@ func (m *Model) buildWaveProgressRow(t *provider.Track, colW, maxWaveW, screenX0
 		maxWaveW: maxWaveW,
 		screenX0: screenX0,
 		centered: centered,
-		theme:    currentLayoutThemeSig(),
+		themeGen: styles.ThemeGen(),
 	}
 	if m.layoutCache.waveProgV != "" && m.layoutCache.waveProgK == key {
 		return m.layoutCache.waveProgV, m.layoutCache.waveProgX0, m.layoutCache.waveProgX1
@@ -1158,13 +1374,13 @@ func (m *Model) buildWaveProgressRow(t *provider.Track, colW, maxWaveW, screenX0
 	return out, progX0, progX1
 }
 
-func (m *Model) ensureCtrlGlyphs(theme layoutThemeSig) *heroCtrlGlyphs {
+func (m *Model) ensureCtrlGlyphs(themeGen uint64) *heroCtrlGlyphs {
 	g := &m.layoutCache.ctrlGlyphs
-	if g.repOff != "" && g.theme == theme {
+	if g.repOff != "" && g.themeGen == themeGen {
 		return g
 	}
 	muted := styles.QueueItemMuted
-	g.theme = theme
+	g.themeGen = themeGen
 	g.repOff = muted.Render("↺")
 	g.repAll = styles.ControlActive.Render("↺")
 	g.repOne = styles.ControlActive.Render("↻")
@@ -1184,7 +1400,7 @@ func (m *Model) ensureCtrlGlyphs(theme layoutThemeSig) *heroCtrlGlyphs {
 }
 
 func (m *Model) buildHeroControlsRow(t *provider.Track, colW, screenX0 int, centered bool) (string, [4]heroButtonHit, int) {
-	theme := currentLayoutThemeSig()
+	themeGen := styles.ThemeGen()
 	rating := m.trackRating(t)
 	spinStep := 0
 	if m.playerState.Loading {
@@ -1200,13 +1416,13 @@ func (m *Model) buildHeroControlsRow(t *provider.Track, colW, screenX0 int, cent
 		shuffle:  m.playerState.ShuffleMode,
 		rating:   rating,
 		glowStep: spinStep,
-		theme:    theme,
+		themeGen: themeGen,
 	}
 	if m.layoutCache.ctrlLine != "" && m.layoutCache.ctrlCacheKey == key {
 		return m.layoutCache.ctrlLine, m.layoutCache.ctrlBtns, m.layoutCache.ctrlBtnN
 	}
 
-	g := m.ensureCtrlGlyphs(theme)
+	g := m.ensureCtrlGlyphs(themeGen)
 	widePill := colW >= 44
 	var playStr string
 	switch {
@@ -1359,6 +1575,9 @@ func (m *Model) buildHeroArtContent(contentW, h, screenX0 int) ([]string, heroHi
 			}
 		}
 		artLines = m.renderArt(m.artwork.img, size)
+		for i, line := range artLines {
+			artLines[i] = padRight(line, artCols)
+		}
 		m.artwork.rendered[size] = artLines
 		m.artwork.renderedOrder = append(m.artwork.renderedOrder, size)
 	}
@@ -1414,10 +1633,18 @@ func (m *Model) buildHeroArtContent(contentW, h, screenX0 int) ([]string, heroHi
 		}
 		rowBuf.Reset()
 		writeSpaces(&rowBuf, outerPad)
-		writePadded(&rowBuf, leftCol, artCols)
+		if leftCol == "" {
+			writeSpaces(&rowBuf, artCols)
+		} else {
+			rowBuf.WriteString(leftCol)
+		}
 		writeSpaces(&rowBuf, gutter)
 		rowBuf.WriteString(rightCol)
-		lines[y] = ansi.Truncate(rowBuf.String(), contentW, "")
+		if rightCol == "" && outerPad+artCols+gutter <= contentW {
+			lines[y] = rowBuf.String()
+		} else {
+			lines[y] = ansi.Truncate(rowBuf.String(), contentW, "")
+		}
 	}
 	return lines, meta
 }
@@ -1503,25 +1730,50 @@ func (m *Model) buildHeroTextContent(contentW, h, screenX0 int) ([]string, heroH
 
 // queuePanelLines returns the Queue card body rows for the left split.
 func (m *Model) queuePanelLines(w, h int) []string {
+	raw, _ := m.queuePanelLinesCached(w, h)
+	return raw
+}
+
+func (m *Model) queuePanelLinesPadded(w, h int) []string {
+	_, padded := m.queuePanelLinesCached(w, h)
+	return padded
+}
+
+func (m *Model) queuePanelLinesCached(w, h int) (raw, padded []string) {
 	tracks := m.queue.m.Tracks()
 	total := len(tracks)
 	if h <= 0 {
-		return nil
-	}
-	if total == 0 {
-		m.queueMiniOffset = 0
-		res := make([]string, h)
-		fg := styles.QueueItemMuted.GetForeground()
-		if m.layoutCache.qEmptyV == "" || m.layoutCache.qEmptyW != w || m.layoutCache.qEmptyFg != fg {
-			m.layoutCache.qEmptyW = w
-			m.layoutCache.qEmptyFg = fg
-			m.layoutCache.qEmptyV = styles.QueueItemMuted.Render(truncateStr("Queue is empty · / search · l library", max(1, w)))
-		}
-		res[0] = m.layoutCache.qEmptyV
-		return res
+		return nil, nil
 	}
 
-	indexW := len(fmt.Sprintf("%d", total))
+	themeGen := styles.ThemeGen()
+	c := &m.layoutCache
+
+	if total == 0 {
+		m.queueMiniOffset = 0
+		key := queuePanelCacheKey{valid: true, w: w, h: h, offset: 0, total: 0, playingIdx: -1, themeGen: themeGen}
+		if c.qCacheKey == key && len(c.qRawLines) == h && len(c.qPaddedLines) == h {
+			return c.qRawLines, c.qPaddedLines
+		}
+		res := make([]string, h)
+		pad := make([]string, h)
+		fg := styles.QueueItemMuted.GetForeground()
+		if c.qEmptyV == "" || c.qEmptyW != w || c.qEmptyFg != fg {
+			c.qEmptyW = w
+			c.qEmptyFg = fg
+			c.qEmptyV = styles.QueueItemMuted.Render(truncateStr("Queue is empty · / search · l library", max(1, w)))
+		}
+		res[0] = c.qEmptyV
+		if w > 0 {
+			pad[0] = padRight(c.qEmptyV, w)
+		}
+		c.qCacheKey = key
+		c.qRowSigs = c.qRowSigs[:0]
+		c.qRawLines = res
+		c.qPaddedLines = pad
+		return res, pad
+	}
+
 	playingIdx := playingQueueIdx(tracks, m.playerState.Track)
 
 	maxOffset := max(0, total-h)
@@ -1529,11 +1781,48 @@ func (m *Model) queuePanelLines(w, h int) []string {
 		m.queueMiniOffset = maxOffset
 	}
 	end := min(total, m.queueMiniOffset+h)
+	visibleN := end - m.queueMiniOffset
+
+	key := queuePanelCacheKey{
+		valid:      true,
+		w:          w,
+		h:          h,
+		offset:     m.queueMiniOffset,
+		total:      total,
+		playingIdx: playingIdx,
+		themeGen:   themeGen,
+	}
+	if c.qCacheKey == key && len(c.qRowSigs) == visibleN && len(c.qRawLines) == h && len(c.qPaddedLines) == h {
+		match := true
+		for j := range visibleN {
+			t := tracks[m.queueMiniOffset+j]
+			sig := c.qRowSigs[j]
+			if sig.id != t.ID || sig.title != t.Title || sig.artist != t.Artist || sig.dur != t.Duration {
+				match = false
+				break
+			}
+		}
+		if match {
+			return c.qRawLines, c.qPaddedLines
+		}
+	}
+
+	indexW := len(fmt.Sprintf("%d", total))
 	showDur := w >= 36
 
-	result := make([]string, 0, h)
-	for i := m.queueMiniOffset; i < end; i++ {
+	if cap(c.qRowSigs) < visibleN {
+		c.qRowSigs = make([]queueRowSig, visibleN)
+	} else {
+		c.qRowSigs = c.qRowSigs[:visibleN]
+	}
+
+	result := make([]string, h)
+	padded = make([]string, h)
+	for j := range visibleN {
+		i := m.queueMiniOffset + j
 		t := tracks[i]
+		c.qRowSigs[j] = queueRowSig{id: t.ID, title: t.Title, artist: t.Artist, dur: t.Duration}
+
 		idx := fmt.Sprintf("%*d. ", indexW, i+1)
 		durStr := ""
 		durSpace := 0
@@ -1566,12 +1855,16 @@ func (m *Model) queuePanelLines(w, h int) []string {
 			pad := max(1, w-lipgloss.Width(row)-len(durStr))
 			row += strings.Repeat(" ", pad) + styles.QueueItemMuted.Render(durStr)
 		}
-		result = append(result, row)
+		result[j] = row
+		if w > 0 {
+			padded[j] = padRight(row, w)
+		}
 	}
-	for len(result) < h {
-		result = append(result, "")
-	}
-	return result
+
+	c.qCacheKey = key
+	c.qRawLines = result
+	c.qPaddedLines = padded
+	return result, padded
 }
 
 // panelHeight returns the number of content rows available for the bottom card(s).

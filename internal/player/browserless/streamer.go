@@ -69,7 +69,14 @@ const (
 	maxRetainedStreams  = 3
 	maxStreamAge        = 30 * time.Minute
 	streamStallTimeout  = 30 * time.Second
+	maxPooledSegBufSize = 2 << 20 // 2 MiB cap for pooled raw/AAC segment buffers
 )
+
+type cdmBatchScratch struct {
+	cdm   cdm.DecryptScratch
+	subs  []cdm.Subsample
+	batch []cdm.BatchSample
+}
 
 // StreamServer manages local HTTP streaming for decrypted Apple Music tracks.
 type StreamServer struct {
@@ -80,6 +87,10 @@ type StreamServer struct {
 	server     *http.Server
 	port       int
 	authToken  string
+
+	rawSegPool     sync.Pool // *bytes.Buffer
+	aacBufPool     sync.Pool // *[]byte
+	cdmScratchPool sync.Pool // *cdmBatchScratch
 
 	mu            sync.RWMutex
 	closed        bool
@@ -781,16 +792,25 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type segResult struct {
-		aacData []byte
-		stage   string
-		err     error
+		aacData   []byte
+		pooledAAC *[]byte
+		stage     string
+		err       error
 	}
 
 	lookCtx, cancelLook := context.WithCancel(ctx)
 	var lookWg sync.WaitGroup
+	var nextCh <-chan segResult
 	defer func() {
 		cancelLook()
 		lookWg.Wait()
+		if nextCh != nil {
+			select {
+			case r := <-nextCh:
+				s.putAACBuf(r.pooledAAC)
+			default:
+			}
+		}
 	}()
 
 	fetchSeg := func(fetchCtx context.Context, idx int) segResult {
@@ -798,11 +818,20 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			data, stage, err := s.getOrFetchSegment0(fetchCtx, client, st)
 			return segResult{aacData: data, stage: stage, err: err}
 		}
-		data, stage, err := s.fetchAndDecryptSegment(fetchCtx, client, st, st.segments[idx])
-		return segResult{aacData: data, stage: stage, err: err}
+		if st.raw {
+			data, stage, err := s.fetchAndDecryptSegmentInto(fetchCtx, client, st, st.segments[idx], nil)
+			return segResult{aacData: data, stage: stage, err: err}
+		}
+		bufPtr := s.getAACBuf()
+		data, stage, err := s.fetchAndDecryptSegmentInto(fetchCtx, client, st, st.segments[idx], (*bufPtr)[:0])
+		if err != nil {
+			s.putAACBuf(bufPtr)
+			return segResult{stage: stage, err: err}
+		}
+		*bufPtr = data
+		return segResult{aacData: data, pooledAAC: bufPtr, stage: stage}
 	}
 
-	var nextCh <-chan segResult
 	for i := startSeg; i < len(st.segments); i++ {
 		select {
 		case <-ctx.Done():
@@ -818,6 +847,7 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 			res = fetchSeg(ctx, i)
 		}
 		if res.err != nil {
+			s.putAACBuf(res.pooledAAC)
 			if ctx.Err() != nil {
 				return
 			}
@@ -836,16 +866,19 @@ func (s *StreamServer) handleStream(w http.ResponseWriter, r *http.Request) {
 
 		// Write to HTTP client (GStreamer). A failed write means the client
 		// has gone, so there is nobody left to abort for; log it only.
-		if _, err := w.Write(res.aacData); err != nil {
+		_, writeErr := w.Write(res.aacData)
+		s.putAACBuf(res.pooledAAC)
+		res.aacData = nil
+		res.pooledAAC = nil
+		if writeErr != nil {
 			if ctx.Err() == nil && s.onLog != nil {
-				s.onLog(fmt.Sprintf("browserless stream: %s: segment %d/%d: write: %v", st.trackID, i+1, len(st.segments), err))
+				s.onLog(fmt.Sprintf("browserless stream: %s: segment %d/%d: write: %v", st.trackID, i+1, len(st.segments), writeErr))
 			}
 			return
 		}
 		if flusher != nil {
 			flusher.Flush()
 		}
-		res.aacData = nil
 	}
 }
 
@@ -1006,7 +1039,71 @@ func (s *StreamServer) streamRawUpload(
 	return lastStage, lastErr
 }
 
+func (s *StreamServer) getRawSegBuf() *bytes.Buffer {
+	if v := s.rawSegPool.Get(); v != nil {
+		b := v.(*bytes.Buffer)
+		b.Reset()
+		return b
+	}
+	return &bytes.Buffer{}
+}
+
+func (s *StreamServer) putRawSegBuf(b *bytes.Buffer) {
+	if b == nil || b.Cap() > maxPooledSegBufSize {
+		return
+	}
+	b.Reset()
+	s.rawSegPool.Put(b)
+}
+
+func (s *StreamServer) getAACBuf() *[]byte {
+	if v := s.aacBufPool.Get(); v != nil {
+		p := v.(*[]byte)
+		*p = (*p)[:0]
+		return p
+	}
+	b := make([]byte, 0, 256<<10)
+	return &b
+}
+
+func (s *StreamServer) putAACBuf(p *[]byte) {
+	if p == nil || cap(*p) > maxPooledSegBufSize {
+		return
+	}
+	*p = (*p)[:0]
+	s.aacBufPool.Put(p)
+}
+
+func (s *StreamServer) getCDMBatchScratch() *cdmBatchScratch {
+	if v := s.cdmScratchPool.Get(); v != nil {
+		return v.(*cdmBatchScratch)
+	}
+	return &cdmBatchScratch{}
+}
+
+func (s *StreamServer) putCDMBatchScratch(sc *cdmBatchScratch) {
+	if sc == nil {
+		return
+	}
+	clear(sc.batch)
+	if cap(sc.batch) > 16384 {
+		sc.batch = nil
+	} else {
+		sc.batch = sc.batch[:0]
+	}
+	if cap(sc.subs) > 32768 {
+		sc.subs = nil
+	} else {
+		sc.subs = sc.subs[:0]
+	}
+	s.cdmScratchPool.Put(sc)
+}
+
 func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.Client, st *trackStream, seg segmentRef) ([]byte, string, error) {
+	return s.fetchAndDecryptSegmentInto(ctx, client, st, seg, nil)
+}
+
+func (s *StreamServer) fetchAndDecryptSegmentInto(ctx context.Context, client *http.Client, st *trackStream, seg segmentRef, dstAAC []byte) ([]byte, string, error) {
 	segURL, err := resolveUpstreamURL(st.baseURI, seg.uri)
 	if err != nil {
 		return nil, "build request", err
@@ -1017,40 +1114,59 @@ func (s *StreamServer) fetchAndDecryptSegment(ctx context.Context, client *http.
 		maxBytes = min(seg.length, int64(maxMediaSegmentSize))
 	}
 
-	segData, stage, err := fetchSegmentWithRetryMax(ctx, client, segURL, seg.offset, seg.length, maxBytes)
+	if st.raw {
+		segData, stage, err := fetchSegmentWithRetryMax(ctx, client, segURL, seg.offset, seg.length, maxBytes)
+		if err != nil {
+			return nil, stage, err
+		}
+		return segData, "", nil
+	}
+
+	rawBuf := s.getRawSegBuf()
+	defer s.putRawSegBuf(rawBuf)
+
+	segData, stage, err := fetchSegmentWithRetryInto(ctx, client, segURL, seg.offset, seg.length, maxBytes, rawBuf)
 	if err != nil {
 		return nil, stage, err
 	}
-	if st.raw {
-		return segData, "", nil
-	}
-	var cdmScratch cdm.DecryptScratch
-	aacData, err := mp4.DecryptSegmentBatch(segData, st.kid, st.audioCfg, func(kid []byte, samples []mp4.EncryptedSample) ([][]byte, error) {
+
+	sc := s.getCDMBatchScratch()
+	defer s.putCDMBatchScratch(sc)
+
+	aacData, err := mp4.DecryptSegmentBatchInto(dstAAC, segData, st.kid, st.audioCfg, func(kid []byte, samples []mp4.EncryptedSample) ([][]byte, error) {
 		var totalSubs int
 		for _, sample := range samples {
 			totalSubs += len(sample.Subsamples)
 		}
-		cdmSubPool := make([]cdm.Subsample, 0, totalSubs)
-		batch := make([]cdm.BatchSample, len(samples))
+		if cap(sc.subs) < totalSubs {
+			sc.subs = make([]cdm.Subsample, 0, totalSubs)
+		} else {
+			sc.subs = sc.subs[:0]
+		}
+		if cap(sc.batch) < len(samples) {
+			sc.batch = make([]cdm.BatchSample, len(samples))
+		} else {
+			sc.batch = sc.batch[:len(samples)]
+		}
 		for i, sample := range samples {
-			subStart := len(cdmSubPool)
+			subStart := len(sc.subs)
 			for _, sb := range sample.Subsamples {
-				cdmSubPool = append(cdmSubPool, cdm.Subsample{
+				sc.subs = append(sc.subs, cdm.Subsample{
 					ClearBytes:  sb.ClearBytes,
 					CipherBytes: sb.CipherBytes,
 				})
 			}
 			var subs []cdm.Subsample
 			if len(sample.Subsamples) > 0 {
-				subs = cdmSubPool[subStart : subStart+len(sample.Subsamples)]
+				subs = sc.subs[subStart : subStart+len(sample.Subsamples)]
 			}
-			batch[i] = cdm.BatchSample{
+			sc.batch[i] = cdm.BatchSample{
 				IV:         sample.IV,
 				Input:      sample.Data,
 				Subsamples: subs,
 			}
 		}
-		return s.cdmEngine.DecryptBatch(&cdmScratch, kid, batch)
+		return s.cdmEngine.DecryptBatch(&sc.cdm, kid, sc.batch)
 	})
 	if err != nil {
 		return nil, "decrypt", err
@@ -1073,6 +1189,10 @@ func fetchSegmentWithRetry(ctx context.Context, client *http.Client, segURL stri
 }
 
 func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL string, offset, length, maxBytes int64) ([]byte, string, error) {
+	return fetchSegmentWithRetryInto(ctx, client, segURL, offset, length, maxBytes, nil)
+}
+
+func fetchSegmentWithRetryInto(ctx context.Context, client *http.Client, segURL string, offset, length, maxBytes int64, dstBuf *bytes.Buffer) ([]byte, string, error) {
 	if maxBytes <= 0 {
 		maxBytes = maxMediaSegmentSize
 	}
@@ -1124,7 +1244,7 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 			continue
 		}
 
-		segData, err := readBoundedBody(resp.Body, max(resp.ContentLength, length), maxBytes)
+		segData, err := readBoundedBodyInto(resp.Body, max(resp.ContentLength, length), maxBytes, dstBuf)
 		_ = resp.Body.Close()
 		if err != nil {
 			lastStage = "read"
@@ -1143,10 +1263,15 @@ func fetchSegmentWithRetryMax(ctx context.Context, client *http.Client, segURL s
 	return nil, lastStage, lastErr
 }
 
-func readBoundedBody(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
+func readBoundedBodyInto(r io.Reader, sizeHint, maxBytes int64, dstBuf *bytes.Buffer) ([]byte, error) {
 	hint := min(max(sizeHint, 0), min(maxBytes, maxMediaSegmentSize))
-	var buf bytes.Buffer
-	if hint > 0 {
+	buf := dstBuf
+	if buf == nil {
+		buf = &bytes.Buffer{}
+	} else {
+		buf.Reset()
+	}
+	if hint > 0 && buf.Cap() < int(hint) {
 		buf.Grow(int(hint))
 	}
 	_, err := buf.ReadFrom(io.LimitReader(r, maxBytes+1))
