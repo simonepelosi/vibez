@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.4] — 2026-11-24
+
+### Added
+- **Optional `reduced_motion` config setting (#284)** — setting `"reduced_motion": true` in `config.json` disables continuous 10 Hz glow ticks during steady playback to lower CPU wakeups and battery drain while keeping loading and search spinners active.
+
+### Performance
+- **TUI render caching, zero idle wakeups, HLS buffer pooling, and local scan string interning (#284)** — replaces per-frame `currentLayoutThemeSig()` property lookups with a monotonic `styles.ThemeGen()` counter, splits top-bar caching into static tabs vs. animated brand, caches pre-padded rows for the Hero card, Queue/Vibe split panels, and Status dock, replaces `strings.Split` height clamping with zero-alloc `clampLines`, switches the 1s error-expiry poll to an on-demand deadline-tracked `errTick` (0 idle wakeups/s; thanks to `@ianswope` for review feedback on shorter-banner replacement), pools MP4 sample-parsing scratch, raw/AAC segment buffers, and `cdm.DecryptScratch` in `StreamServer`, and interns repeated `Artist`/`Album`/`Genres`/`LocalFormat` strings during local library scans (`BenchmarkModelView`: `40.5 µs` / `79 allocs` → `8.6 µs` / `2 allocs`; `DecryptSegmentBatchInto`: `6.3 µs` / `20 B/op`).
+
 ## [2.3.3] — 2026-11-23
 
 ### Fixed
