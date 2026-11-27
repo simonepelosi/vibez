@@ -68,9 +68,14 @@ const (
 	maxHLSSegments      = 20000    // bounded segment count per playlist (~55h at 10s/segment)
 	maxRetainedStreams  = 3
 	maxStreamAge        = 30 * time.Minute
-	streamStallTimeout  = 30 * time.Second
 	maxPooledSegBufSize = 2 << 20 // 2 MiB cap for pooled raw/AAC segment buffers
 )
+
+// streamStallTimeout bounds how long streamRawUpload waits for upstream
+// response headers or the next body chunk. It is disarmed while writing to the
+// local client so downstream backpressure or pausing cannot abort a healthy
+// download.
+var streamStallTimeout = 30 * time.Second
 
 type cdmBatchScratch struct {
 	cdm   cdm.DecryptScratch
@@ -958,8 +963,8 @@ func (s *StreamServer) streamRawUpload(
 		}
 
 		resp, doErr := streamClient.Do(req)
+		stallTimer.Stop()
 		if doErr != nil {
-			stallTimer.Stop()
 			cancelReq()
 			lastStage = "fetch"
 			lastErr = doErr
@@ -971,7 +976,6 @@ func (s *StreamServer) streamRawUpload(
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 			_ = resp.Body.Close()
-			stallTimer.Stop()
 			cancelReq()
 			lastStage = "fetch"
 			lastErr = fmt.Errorf("status %s", resp.Status)
@@ -988,9 +992,10 @@ func (s *StreamServer) streamRawUpload(
 		var readErr error
 		lr := io.LimitReader(resp.Body, maxBytes+1)
 		for {
+			stallTimer.Reset(streamStallTimeout)
 			n, rErr := lr.Read(buf[:])
+			stallTimer.Stop()
 			if n > 0 {
-				stallTimer.Reset(streamStallTimeout)
 				totalWritten += int64(n)
 				if totalWritten > maxBytes {
 					readErr = fmt.Errorf("segment exceeds maximum size (%d bytes)", maxBytes)

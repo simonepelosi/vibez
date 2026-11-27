@@ -787,3 +787,121 @@ func TestHandleStreamNonSeekableRawStreamsAndDetectsTruncation(t *testing.T) {
 		t.Fatalf("truncated raw upload did not abort/report failure (panicked=%v failErr=%v)", panicked, failErr)
 	}
 }
+
+func TestHandleStreamRawUploadBackpressureDoesNotTriggerStallTimeout(t *testing.T) {
+	origTimeout := streamStallTimeout
+	streamStallTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { streamStallTimeout = origTimeout })
+
+	// Use multiple 32 KiB chunks so the handler blocks on downstream write
+	// between upstream reads.
+	payload := bytes.Repeat([]byte{0x5a}, 96<<10)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(upstream.Close)
+
+	var failErr error
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID:   "i.m4a",
+				baseURI:   upstream.URL + "/",
+				segments:  []segmentRef{{uri: "upload.m4a", length: int64(len(payload))}},
+				raw:       true,
+				rawFormat: rawFormat{ext: ".m4a", contentType: "audio/mp4", seekable: false},
+			},
+		},
+		onFail: func(_ string, err error) { failErr = err },
+	}
+
+	releaseWrite := make(chan struct{})
+	bw := &blockingSegmentWriter{
+		firstWrite: make(chan struct{}),
+		waitFor:    releaseWrite,
+	}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1/stream/s1/tok.m4a", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+
+	var panicked any
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { panicked = recover() }()
+		s.handleStream(bw, req)
+	}()
+
+	select {
+	case <-bw.firstWrite:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first raw upload write")
+	}
+
+	// Hold downstream write blocked well past streamStallTimeout to simulate
+	// GStreamer buffer backpressure or a paused track.
+	time.Sleep(3 * streamStallTimeout)
+	close(releaseWrite)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handleStream to complete after backpressure cleared")
+	}
+
+	if panicked != nil || failErr != nil {
+		t.Fatalf("downstream backpressure triggered stream failure (panicked=%v failErr=%v)", panicked, failErr)
+	}
+	if !bytes.Equal(bw.buf.Bytes(), payload) {
+		t.Fatalf("streamed %d bytes, want %d", bw.buf.Len(), len(payload))
+	}
+}
+
+func TestHandleStreamRawUploadUpstreamStallStillTriggersTimeout(t *testing.T) {
+	origTimeout := streamStallTimeout
+	streamStallTimeout = 40 * time.Millisecond
+	t.Cleanup(func() { streamStallTimeout = origTimeout })
+
+	firstChunk := bytes.Repeat([]byte{0x33}, 32<<10)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(firstChunk)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(upstream.Close)
+
+	var failErr error
+	s := &StreamServer{
+		authToken: "tok",
+		streams: map[string]*trackStream{
+			"s1": {
+				trackID:   "i.stalled",
+				baseURI:   upstream.URL + "/",
+				segments:  []segmentRef{{uri: "upload.m4a", length: int64(len(firstChunk) * 2)}},
+				raw:       true,
+				rawFormat: rawFormat{ext: ".m4a", contentType: "audio/mp4", seekable: false},
+			},
+		},
+		onFail: func(_ string, err error) { failErr = err },
+	}
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://127.0.0.1/stream/s1/tok.m4a", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+
+	var panicked any
+	func() {
+		defer func() { panicked = recover() }()
+		s.handleStream(httptest.NewRecorder(), req)
+	}()
+
+	if e, ok := panicked.(error); !ok || !errors.Is(e, http.ErrAbortHandler) {
+		t.Fatalf("panicked = %v, want http.ErrAbortHandler on upstream stall", panicked)
+	}
+	if !errors.Is(failErr, context.Canceled) {
+		t.Fatalf("failErr = %v, want context.Canceled from stall timer", failErr)
+	}
+}
