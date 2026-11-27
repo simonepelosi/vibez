@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.5] — 2026-11-27
+
+### Fixed
+- **iCloud-uploaded `.m4a` tracks restarting every ~35–40 s (#287)** — stops `streamRawUpload`'s `stallTimer` immediately after upstream response headers and after each `Read`, re-arming it right before the next `Read`, so downstream backpressure (`w.Write` / `Flush` waiting on GStreamer or loopback TCP buffers) and paused playback no longer cancel healthy upstream downloads (fixes #286, thanks to `@Doghouse-Mike` for the root-cause report and `@ianswope` for review).
+
 ## [2.3.4] — 2026-11-24
 
 ### Added
